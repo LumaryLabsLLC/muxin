@@ -19,7 +19,7 @@ And it lets agents **borrow a machine as a work environment**: an [agent workspa
 ## Install
 
 ```sh
-git clone https://github.com/adibhanna/openrunner && cd openrunner
+git clone https://github.com/LumaryLabsLLC/openrunner && cd openrunner
 cargo build --release
 ./target/release/openrunner            # opens the window
 ```

@@ -1,0 +1,44 @@
+[package]
+name = "openrunner"
+version = "0.1.0"
+edition = "2024"
+description = "A fast native dashboard for your fleet of self-hosted GitHub Actions runners, built with GPUI"
+license = "LicenseRef-Proprietary"
+publish = false
+repository = "https://github.com/adibhanna/openrunner"
+readme = "README.md"
+keywords = ["github-actions", "self-hosted", "runners", "ci", "dashboard"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "7"
+futures = "0.3"
+gpui = { version = "0.2.2", optional = true }
+reqwest = { version = "0.13", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+toml = "1"
+toml_edit = "0.25"
+unicode-segmentation = { version = "1", optional = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Already part of GPUI's dependency tree; used to set the Dock icon when running
+# the bare binary (an .app bundle gets it from its Info.plist instead).
+cocoa = { version = "=0.26.0", optional = true }
+
+[features]
+default = ["gui"]
+# The native window. Build with `--no-default-features` for a headless CLI + MCP
+# server that needs no GUI libraries (Linux servers, CI, agent boxes).
+gui = ["dep:gpui", "dep:unicode-segmentation", "dep:cocoa"]
+
+[profile.release]
+lto = "thin"
+strip = true

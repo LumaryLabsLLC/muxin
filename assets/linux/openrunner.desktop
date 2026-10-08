@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=OpenRunner
+Comment=Run and control your self-hosted GitHub Actions runners
+Exec=openrunner
+Icon=openrunner
+Terminal=false
+StartupWMClass=openrunner
+Categories=Development;

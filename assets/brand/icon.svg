@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- OpenRunner app icon: an original cartoon roadrunner sprinting across a sunset. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6f5cff"/>
+      <stop offset="0.55" stop-color="#b373ff"/>
+      <stop offset="1" stop-color="#ff9d63"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3a2fb0"/>
+      <stop offset="1" stop-color="#241b7a"/>
+    </linearGradient>
+    <clipPath id="tile"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#tile)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#sky)"/>
+    <!-- sun and desert -->
+    <circle cx="745" cy="455" r="170" fill="#ffd98c" opacity="0.55"/>
+    <path d="M100 760 C 260 720, 420 745, 560 728 C 700 712, 820 735, 924 720 L 924 924 L 100 924 Z" fill="#ff8a57" opacity="0.65"/>
+    <path d="M100 820 C 300 790, 520 812, 700 796 C 800 788, 870 795, 924 790 L 924 924 L 100 924 Z" fill="#f2703f" opacity="0.7"/>
+    <ellipse cx="520" cy="782" rx="200" ry="18" fill="#3a1d55" opacity="0.25"/>
+
+    <g transform="translate(70 92) scale(0.85)">
+    <!-- speed lines -->
+    <g stroke="#ffffff" stroke-linecap="round" opacity="0.85">
+      <line x1="150" y1="590" x2="285" y2="590" stroke-width="20"/>
+      <line x1="120" y1="650" x2="300" y2="650" stroke-width="20"/>
+      <line x1="175" y1="710" x2="310" y2="710" stroke-width="20"/>
+    </g>
+
+    <!-- dust -->
+    <g fill="#fff6ec">
+      <circle cx="315" cy="792" r="40"/>
+      <circle cx="262" cy="808" r="30"/>
+      <circle cx="368" cy="810" r="27"/>
+      <circle cx="218" cy="818" r="18"/>
+    </g>
+
+    <g stroke="#160f3d" stroke-width="14" stroke-linejoin="round" stroke-linecap="round">
+      <!-- back leg, pushing off -->
+      <path d="M470 640 L 430 728 L 345 772" fill="none" stroke-width="40"/>
+      <path d="M470 640 L 430 728 L 345 772" fill="none" stroke="#ff8a2a" stroke-width="22"/>
+      <path d="M345 772 L 300 760 M345 772 L 306 790 M345 772 L 330 806" fill="none" stroke-width="30"/>
+      <path d="M345 772 L 300 760 M345 772 L 306 790 M345 772 L 330 806" fill="none" stroke="#ff8a2a" stroke-width="14"/>
+
+      <!-- tail -->
+      <path d="M392 548 C 318 520, 250 470, 170 392 C 214 404, 236 420, 252 436 C 238 410, 232 392, 230 370 C 290 430, 350 480, 420 520 Z" fill="url(#body)"/>
+      <path d="M402 600 C 320 590, 250 560, 188 520 C 250 528, 330 540, 410 566 Z" fill="#4b3fd1"/>
+
+      <!-- body -->
+      <ellipse cx="505" cy="565" rx="152" ry="102" transform="rotate(-18 505 565)" fill="url(#body)"/>
+      <ellipse cx="540" cy="612" rx="100" ry="50" transform="rotate(-18 540 612)" fill="#ece7ff" stroke="none"/>
+
+      <!-- front leg, reaching forward -->
+      <path d="M560 640 L 628 718 L 712 742" fill="none" stroke-width="40"/>
+      <path d="M560 640 L 628 718 L 712 742" fill="none" stroke="#ff8a2a" stroke-width="22"/>
+      <path d="M712 742 L 760 730 M712 742 L 762 754 M712 742 L 748 778" fill="none" stroke-width="30"/>
+      <path d="M712 742 L 760 730 M712 742 L 762 754 M712 742 L 748 778" fill="none" stroke="#ff8a2a" stroke-width="14"/>
+
+      <!-- wing, swept back -->
+      <path d="M520 520 C 470 470, 395 438, 318 440 C 352 462, 372 478, 384 494 C 356 494, 336 500, 318 512 C 380 530, 440 560, 490 590 Z" fill="#5a4de6"/>
+
+      <!-- neck -->
+      <path d="M556 532 C 566 456, 606 396, 656 352 L 742 382 C 700 418, 676 470, 668 556 Z" fill="url(#body)"/>
+      <path d="M700 410 C 684 446, 674 488, 668 530" fill="none" stroke="#ece7ff" stroke-width="20" stroke-linecap="round" stroke-opacity="0.9"/>
+
+      <!-- crest -->
+      <path d="M648 268 C 596 214, 552 186, 488 176 C 548 214, 580 252, 616 300 Z" fill="#2a2090"/>
+      <path d="M672 254 C 642 186, 618 146, 572 112 C 636 144, 682 194, 706 248 Z" fill="#3a2fb0"/>
+      <path d="M704 248 C 708 186, 698 144, 676 102 C 732 146, 748 200, 738 256 Z" fill="#5a4de6"/>
+
+      <!-- head -->
+      <circle cx="700" cy="322" r="88" fill="url(#body)"/>
+
+      <!-- beak -->
+      <path d="M770 300 L 930 330 L 770 352 Z" fill="#ffc93c"/>
+      <path d="M766 346 L 900 350 L 762 372 Z" fill="#ffb21e"/>
+
+      <!-- eye and brow -->
+      <ellipse cx="724" cy="300" rx="36" ry="42" fill="#ffffff"/>
+      <circle cx="738" cy="306" r="16" fill="#160f3d" stroke="none"/>
+      <circle cx="744" cy="298" r="5.5" fill="#ffffff" stroke="none"/>
+      <path d="M684 252 Q 720 238 760 258" fill="none" stroke-width="12"/>
+    </g>
+    </g>
+  </g>
+</svg>

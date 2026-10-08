@@ -1,0 +1,868 @@
+//! GitHub REST API: runner status for orgs/repos, plus queued and running jobs
+//! from recently active repos. Requests are conditional (ETag), so polling an
+//! unchanged endpoint returns 304 and doesn't count against the rate limit.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use chrono::{DateTime, TimeZone, Utc};
+use futures::stream::{self, StreamExt};
+use reqwest::header::{ACCEPT, AUTHORIZATION, ETAG, IF_NONE_MATCH, LINK, USER_AGENT};
+use reqwest::StatusCode;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+
+use crate::config::GitHubSettings;
+
+const CONCURRENCY: usize = 6;
+const ORG_REPOS_TTL: Duration = Duration::from_secs(300);
+const RELEASE_TTL: Duration = Duration::from_secs(6 * 3600);
+
+// ---------------------------------------------------------------------------
+// Results handed to the fleet engine
+
+#[derive(Debug, Clone, Default)]
+pub struct GitHubData {
+    pub synced_at: Option<DateTime<Utc>>,
+    pub token_source: String,
+    pub login: Option<String>,
+    /// A problem that stopped the whole sync (e.g. no token).
+    pub error: Option<String>,
+    pub scopes: Vec<ScopeData>,
+    pub jobs: Vec<JobData>,
+    pub scanned_repos: Vec<String>,
+    pub rate: Option<Rate>,
+    pub latest_runner_version: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScopeData {
+    pub kind: ScopeKind,
+    pub name: String,
+    pub runners: Vec<RunnerData>,
+    pub synced_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+    pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeKind {
+    Org,
+    Repo,
+}
+
+impl ScopeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScopeKind::Org => "org",
+            ScopeKind::Repo => "repo",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RunnerData {
+    pub id: u64,
+    pub name: String,
+    pub os: String,
+    pub status: String,
+    pub busy: bool,
+    pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct JobData {
+    pub id: u64,
+    pub run_id: u64,
+    pub name: String,
+    pub workflow: String,
+    pub repo: String,
+    pub branch: Option<String>,
+    pub event: Option<String>,
+    pub actor: Option<String>,
+    pub url: String,
+    pub status: String,
+    pub labels: Vec<String>,
+    pub runner_name: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Rate {
+    pub limit: u32,
+    pub remaining: u32,
+    pub reset_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScopeTest {
+    pub kind: ScopeKind,
+    pub name: String,
+    pub runners: usize,
+    pub error: Option<String>,
+    pub hint: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// API shapes
+
+#[derive(Deserialize)]
+struct ApiRunners {
+    runners: Vec<ApiRunner>,
+}
+
+#[derive(Deserialize)]
+struct ApiRunner {
+    id: u64,
+    name: String,
+    #[serde(default)]
+    os: String,
+    status: String,
+    #[serde(default)]
+    busy: bool,
+    #[serde(default)]
+    labels: Vec<ApiLabel>,
+}
+
+#[derive(Deserialize)]
+struct ApiLabel {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct ApiRuns {
+    workflow_runs: Vec<ApiRun>,
+}
+
+#[derive(Deserialize)]
+struct ApiRun {
+    id: u64,
+    #[serde(default)]
+    event: Option<String>,
+    #[serde(default)]
+    actor: Option<ApiUser>,
+}
+
+#[derive(Deserialize)]
+struct ApiUser {
+    login: String,
+}
+
+#[derive(Deserialize)]
+struct ApiJobs {
+    jobs: Vec<ApiJob>,
+}
+
+#[derive(Deserialize)]
+struct ApiJob {
+    id: u64,
+    run_id: u64,
+    name: String,
+    status: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
+    runner_name: Option<String>,
+    created_at: DateTime<Utc>,
+    #[serde(default)]
+    started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    html_url: Option<String>,
+    #[serde(default)]
+    workflow_name: Option<String>,
+    #[serde(default)]
+    head_branch: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ApiRepo {
+    full_name: String,
+    #[serde(default)]
+    archived: bool,
+    #[serde(default)]
+    disabled: bool,
+}
+
+#[derive(Deserialize)]
+struct ApiRelease {
+    tag_name: String,
+}
+
+#[derive(Deserialize)]
+struct ApiErrorBody {
+    #[serde(default)]
+    message: String,
+}
+
+// ---------------------------------------------------------------------------
+// Client
+
+#[derive(Debug)]
+pub struct ApiError {
+    pub status: Option<StatusCode>,
+    pub message: String,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+#[derive(Clone)]
+struct Token {
+    value: String,
+    source: String,
+}
+
+struct Cached {
+    etag: String,
+    body: std::sync::Arc<[u8]>,
+    next: Option<String>,
+}
+
+pub struct Client {
+    http: reqwest::Client,
+    api_url: Mutex<String>,
+    token: Mutex<Option<Token>>,
+    cache: Mutex<HashMap<String, Cached>>,
+    rate: Mutex<Option<Rate>>,
+    login: Mutex<Option<String>>,
+    org_repos: Mutex<HashMap<String, (Instant, Vec<String>)>>,
+    release: Mutex<Option<(Instant, String)>>,
+}
+
+impl Client {
+    pub fn new() -> Client {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .connect_timeout(Duration::from_secs(8))
+            .build()
+            .expect("building HTTP client");
+        Client {
+            http,
+            api_url: Mutex::new("https://api.github.com".into()),
+            token: Mutex::new(None),
+            cache: Mutex::new(HashMap::new()),
+            rate: Mutex::new(None),
+            login: Mutex::new(None),
+            org_repos: Mutex::new(HashMap::new()),
+            release: Mutex::new(None),
+        }
+    }
+
+    fn set_api_url(&self, url: &str) {
+        let mut current = self.api_url.lock().unwrap();
+        if *current != url {
+            *current = url.to_string();
+            // A different server means different credentials and cached responses.
+            *self.token.lock().unwrap() = None;
+            *self.login.lock().unwrap() = None;
+            self.cache.lock().unwrap().clear();
+        }
+    }
+
+    /// GitHub host for `gh auth token --hostname`.
+    fn gh_hostname(&self) -> String {
+        let api = self.api_url.lock().unwrap().clone();
+        let host = api.split("://").nth(1).unwrap_or(&api).split('/').next().unwrap_or("github.com");
+        if host == "api.github.com" { "github.com".into() } else { host.to_string() }
+    }
+
+    async fn token(&self) -> Option<Token> {
+        if let Some(t) = self.token.lock().unwrap().clone() {
+            return Some(t);
+        }
+        let found = resolve_token(&self.gh_hostname()).await;
+        *self.token.lock().unwrap() = found.clone();
+        found
+    }
+
+    fn forget_token(&self) {
+        *self.token.lock().unwrap() = None;
+    }
+
+    pub fn rate(&self) -> Option<Rate> {
+        *self.rate.lock().unwrap()
+    }
+
+    /// GET a JSON endpoint, following `Link: rel="next"` up to `max_pages`.
+    async fn get_all<T: DeserializeOwned>(&self, path: &str, max_pages: usize) -> Result<Vec<T>, ApiError> {
+        let mut out = Vec::new();
+        let mut url = self.url(path);
+        for _ in 0..max_pages {
+            let (page, next) = self.get_page::<T>(&url, true).await?;
+            out.push(page);
+            match next {
+                Some(n) => url = n,
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
+    async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+        Ok(self.get_page(&self.url(path), true).await?.0)
+    }
+
+    fn url(&self, path: &str) -> String {
+        if path.starts_with("http") { path.to_string() } else { format!("{}{}", self.api_url.lock().unwrap(), path) }
+    }
+
+    fn get_page<'a, T: DeserializeOwned>(
+        &'a self,
+        url: &'a str,
+        retry_auth: bool,
+    ) -> futures::future::BoxFuture<'a, Result<(T, Option<String>), ApiError>> {
+        Box::pin(async move {
+            let Some(token) = self.token().await else {
+                return Err(ApiError { status: None, message: "No GitHub token".into() });
+            };
+            let cached_etag = self.cache.lock().unwrap().get(url).map(|c| c.etag.clone());
+            let mut req = self
+                .http
+                .get(url)
+                .header(AUTHORIZATION, format!("Bearer {}", token.value))
+                .header(ACCEPT, "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .header(USER_AGENT, concat!("openrunner/", env!("CARGO_PKG_VERSION")));
+            if let Some(etag) = &cached_etag {
+                req = req.header(IF_NONE_MATCH, etag);
+            }
+            let resp = req.send().await.map_err(|e| ApiError {
+                status: None,
+                message: format!("Couldn't reach GitHub: {}", root_cause(&e)),
+            })?;
+            self.record_rate(resp.headers());
+            let status = resp.status();
+
+            if status == StatusCode::NOT_MODIFIED {
+                let cache = self.cache.lock().unwrap();
+                if let Some(c) = cache.get(url) {
+                    let value = serde_json::from_slice(&c.body).map_err(|e| decode_error(url, e))?;
+                    return Ok((value, c.next.clone()));
+                }
+            }
+            if status == StatusCode::UNAUTHORIZED && retry_auth {
+                // gh tokens can be rotated by `gh auth refresh`; look it up again once.
+                self.forget_token();
+                return self.get_page(url, false).await;
+            }
+            if !status.is_success() {
+                let rate_limited = resp
+                    .headers()
+                    .get("x-ratelimit-remaining")
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v == "0");
+                let body = resp.bytes().await.unwrap_or_default();
+                let message = serde_json::from_slice::<ApiErrorBody>(&body).map(|b| b.message).unwrap_or_default();
+                let message = if rate_limited {
+                    "GitHub API rate limit reached".to_string()
+                } else if message.is_empty() {
+                    format!("GitHub returned {status}")
+                } else {
+                    message
+                };
+                return Err(ApiError { status: Some(status), message });
+            }
+
+            let etag = resp.headers().get(ETAG).and_then(|v| v.to_str().ok()).map(str::to_string);
+            let next = resp.headers().get(LINK).and_then(|v| v.to_str().ok()).and_then(next_link);
+            let body: std::sync::Arc<[u8]> = resp
+                .bytes()
+                .await
+                .map_err(|e| ApiError { status: None, message: format!("Reading GitHub response: {e}") })?
+                .to_vec()
+                .into();
+            let value = serde_json::from_slice(&body).map_err(|e| decode_error(url, e))?;
+            if let Some(etag) = etag {
+                self.cache.lock().unwrap().insert(url.to_string(), Cached { etag, body, next: next.clone() });
+            }
+            Ok((value, next))
+        })
+    }
+
+    fn record_rate(&self, headers: &reqwest::header::HeaderMap) {
+        let num = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<i64>().ok());
+        if let (Some(limit), Some(remaining), Some(reset)) =
+            (num("x-ratelimit-limit"), num("x-ratelimit-remaining"), num("x-ratelimit-reset"))
+        {
+            // Only the core REST bucket matters here.
+            let resource = headers.get("x-ratelimit-resource").and_then(|v| v.to_str().ok()).unwrap_or("core");
+            if resource == "core" {
+                *self.rate.lock().unwrap() = Some(Rate {
+                    limit: limit as u32,
+                    remaining: remaining as u32,
+                    reset_at: Utc.timestamp_opt(reset, 0).single().unwrap_or_else(Utc::now),
+                });
+            }
+        }
+    }
+
+    async fn login(&self) -> Option<String> {
+        if let Some(l) = self.login.lock().unwrap().clone() {
+            return Some(l);
+        }
+        #[derive(Deserialize)]
+        struct User {
+            login: String,
+        }
+        let user: User = self.get("/user").await.ok()?;
+        *self.login.lock().unwrap() = Some(user.login.clone());
+        Some(user.login)
+    }
+
+    async fn runners(&self, kind: ScopeKind, name: &str) -> Result<Vec<RunnerData>, ApiError> {
+        let path = match kind {
+            ScopeKind::Org => format!("/orgs/{name}/actions/runners?per_page=100"),
+            ScopeKind::Repo => format!("/repos/{name}/actions/runners?per_page=100"),
+        };
+        let pages: Vec<ApiRunners> = self.get_all(&path, 10).await?;
+        Ok(pages
+            .into_iter()
+            .flat_map(|p| p.runners)
+            .map(|r| RunnerData {
+                id: r.id,
+                name: r.name,
+                os: r.os,
+                status: r.status,
+                busy: r.busy,
+                labels: r.labels.into_iter().map(|l| l.name).collect(),
+            })
+            .collect())
+    }
+
+    /// The most recently pushed, non-archived repos of an org (cached for a few minutes).
+    async fn org_repos(&self, org: &str, limit: usize) -> Vec<String> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let key = format!("{org}:{limit}");
+        if let Some((at, repos)) = self.org_repos.lock().unwrap().get(&key) {
+            if at.elapsed() < ORG_REPOS_TTL {
+                return repos.clone();
+            }
+        }
+        let per_page = (limit + 5).min(100);
+        let path = format!("/orgs/{org}/repos?sort=pushed&direction=desc&per_page={per_page}");
+        let repos: Vec<String> = match self.get::<Vec<ApiRepo>>(&path).await {
+            Ok(list) => list.into_iter().filter(|r| !r.archived && !r.disabled).map(|r| r.full_name).take(limit).collect(),
+            Err(e) => {
+                tracing::debug!("listing repos for {org}: {e}");
+                Vec::new()
+            }
+        };
+        self.org_repos.lock().unwrap().insert(key, (Instant::now(), repos.clone()));
+        repos
+    }
+
+    /// Queued and in-progress jobs for one repo.
+    async fn active_jobs(&self, repo: &str) -> Vec<JobData> {
+        let mut runs = Vec::new();
+        for status in ["queued", "in_progress"] {
+            match self.get::<ApiRuns>(&format!("/repos/{repo}/actions/runs?status={status}&per_page=30")).await {
+                Ok(r) => runs.extend(r.workflow_runs),
+                Err(e) => tracing::debug!("listing {status} runs for {repo}: {e}"),
+            }
+        }
+        runs.sort_by_key(|r| r.id);
+        runs.dedup_by_key(|r| r.id);
+
+        let per_run = stream::iter(runs)
+            .map(|run| async move {
+                let jobs = self
+                    .get::<ApiJobs>(&format!("/repos/{repo}/actions/runs/{}/jobs?per_page=100", run.id))
+                    .await
+                    .map(|j| j.jobs)
+                    .unwrap_or_default();
+                jobs.into_iter()
+                    .filter(|j| matches!(j.status.as_str(), "queued" | "in_progress" | "waiting" | "pending"))
+                    .map(|j| JobData {
+                        id: j.id,
+                        run_id: j.run_id,
+                        name: j.name,
+                        workflow: j.workflow_name.unwrap_or_default(),
+                        repo: repo.to_string(),
+                        branch: j.head_branch,
+                        event: run.event.clone(),
+                        actor: run.actor.as_ref().map(|a| a.login.clone()),
+                        url: j.html_url.unwrap_or_else(|| format!("https://github.com/{repo}/actions/runs/{}", j.run_id)),
+                        status: if j.status == "pending" { "queued".into() } else { j.status },
+                        labels: j.labels,
+                        runner_name: j.runner_name.filter(|n| !n.is_empty()),
+                        created_at: j.created_at,
+                        started_at: j.started_at,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .buffer_unordered(CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        per_run.into_iter().flatten().collect()
+    }
+
+    async fn latest_runner_version(&self) -> Option<String> {
+        if let Some((at, v)) = self.release.lock().unwrap().clone() {
+            if at.elapsed() < RELEASE_TTL {
+                return Some(v);
+            }
+        }
+        let rel: ApiRelease = self.get("/repos/actions/runner/releases/latest").await.ok()?;
+        let v = rel.tag_name.trim_start_matches('v').to_string();
+        *self.release.lock().unwrap() = Some((Instant::now(), v.clone()));
+        Some(v)
+    }
+
+    /// One full pass: runners for every configured scope, then active jobs.
+    pub async fn sync(&self, settings: &GitHubSettings) -> GitHubData {
+        self.set_api_url(&settings.api_url);
+        let mut data = GitHubData::default();
+        let Some(token) = self.token().await else {
+            data.error = Some("No GitHub token found. Run `gh auth login` or set GITHUB_TOKEN.".into());
+            return data;
+        };
+        data.token_source = token.source;
+        data.login = self.login().await;
+
+        let scopes: Vec<(ScopeKind, String)> = settings
+            .orgs
+            .iter()
+            .map(|o| (ScopeKind::Org, o.clone()))
+            .chain(settings.repos.iter().map(|r| (ScopeKind::Repo, r.clone())))
+            .collect();
+
+        data.scopes = stream::iter(scopes)
+            .map(|(kind, name)| async move {
+                let result = self.runners(kind, &name).await;
+                let (runners, error, hint) = match result {
+                    Ok(r) => (r, None, None),
+                    Err(e) => {
+                        let (msg, hint) = explain(kind, &name, &e, &data_token_source(self));
+                        (Vec::new(), Some(msg), hint)
+                    }
+                };
+                ScopeData {
+                    kind,
+                    synced_at: error.is_none().then(Utc::now),
+                    name,
+                    runners,
+                    error,
+                    hint,
+                }
+            })
+            .buffered(CONCURRENCY)
+            .collect()
+            .await;
+
+        // Repos to scan for jobs: the configured ones plus each org's most recently pushed repos.
+        let mut repos: Vec<String> = settings.repos.clone();
+        for org in &settings.orgs {
+            for r in self.org_repos(org, settings.scan_repos as usize).await {
+                if !repos.iter().any(|x| x.eq_ignore_ascii_case(&r)) {
+                    repos.push(r);
+                }
+            }
+        }
+        data.jobs = stream::iter(repos.clone())
+            .map(|repo| async move { self.active_jobs(&repo).await })
+            .buffer_unordered(CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        data.scanned_repos = repos;
+        data.latest_runner_version = self.latest_runner_version().await;
+        data.rate = self.rate();
+        data.synced_at = Some(Utc::now());
+        if !data.scopes.is_empty() && data.scopes.iter().all(|s| s.error.is_some()) {
+            data.error = data.scopes.first().and_then(|s| s.error.clone());
+        }
+        data
+    }
+
+    /// Validates an org or repo before it's added in Settings.
+    pub async fn test_scope(&self, settings: &GitHubSettings, scope: &str) -> ScopeTest {
+        self.set_api_url(&settings.api_url);
+        let name = crate::config::strip_github_url(scope);
+        let kind = if name.contains('/') { ScopeKind::Repo } else { ScopeKind::Org };
+        if self.token().await.is_none() {
+            return ScopeTest {
+                kind,
+                name,
+                runners: 0,
+                error: Some("No GitHub token found.".into()),
+                hint: Some("gh auth login".into()),
+            };
+        }
+        match self.runners(kind, &name).await {
+            Ok(r) => ScopeTest { kind, name, runners: r.len(), error: None, hint: None },
+            Err(e) => {
+                let (msg, hint) = explain(kind, &name, &e, &data_token_source(self));
+                ScopeTest { kind, name, runners: 0, error: Some(msg), hint }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Writes, used by runner provisioning. Never cached.
+
+    /// A short-lived token for `config.sh --token` (registering new runners).
+    pub async fn registration_token(&self, settings: &GitHubSettings, scope: &str) -> Result<String, String> {
+        let (kind, name) = parse_scope(scope);
+        let doing = format!("Registering runners with {name}");
+        self.scoped_token(settings, kind, &name, "registration-token", &doing).await
+    }
+
+    /// A short-lived token for `config.sh remove --token` (deregistering a runner).
+    pub async fn remove_token(&self, settings: &GitHubSettings, scope: &str) -> Result<String, String> {
+        let (kind, name) = parse_scope(scope);
+        let doing = format!("Removing runners from {name}");
+        self.scoped_token(settings, kind, &name, "remove-token", &doing).await
+    }
+
+    /// Deletes a runner registration directly, for runners whose machine is gone.
+    pub async fn delete_runner(&self, settings: &GitHubSettings, scope: &str, runner_id: u64) -> Result<(), String> {
+        self.set_api_url(&settings.api_url);
+        let (kind, name) = parse_scope(scope);
+        let path = format!("{}/actions/runners/{runner_id}", scope_path(kind, &name));
+        match self.send(reqwest::Method::DELETE, &path).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(with_hint(explain_doing(kind, &name, &e, &data_token_source(self), &format!("Removing runners from {name}")))),
+        }
+    }
+
+    /// The newest actions/runner release, e.g. "2.329.0".
+    pub async fn latest_runner_release(&self, settings: &GitHubSettings) -> Option<String> {
+        self.set_api_url(&settings.api_url);
+        self.latest_runner_version().await
+    }
+
+    /// The URL runners are registered against, e.g. https://github.com/acme.
+    pub fn web_url(&self, settings: &GitHubSettings, scope: &str) -> String {
+        self.set_api_url(&settings.api_url);
+        let (_, name) = parse_scope(scope);
+        format!("https://{}/{name}", self.gh_hostname())
+    }
+
+    async fn scoped_token(&self, settings: &GitHubSettings, kind: ScopeKind, name: &str, which: &str, doing: &str) -> Result<String, String> {
+        #[derive(Deserialize)]
+        struct TokenBody {
+            token: String,
+        }
+        self.set_api_url(&settings.api_url);
+        if self.token().await.is_none() {
+            return Err("No GitHub token found. Run `gh auth login` or set GITHUB_TOKEN.".into());
+        }
+        let path = format!("{}/actions/runners/{which}", scope_path(kind, name));
+        match self.send(reqwest::Method::POST, &path).await {
+            Ok(body) => serde_json::from_slice::<TokenBody>(&body)
+                .map(|b| b.token)
+                .map_err(|e| format!("Unexpected response from GitHub: {e}")),
+            Err(e) => Err(with_hint(explain_doing(kind, name, &e, &data_token_source(self), doing))),
+        }
+    }
+
+    /// An uncached request; retries once with a fresh token on 401.
+    async fn send(&self, method: reqwest::Method, path: &str) -> Result<Vec<u8>, ApiError> {
+        let url = self.url(path);
+        for attempt in 0..2 {
+            let Some(token) = self.token().await else {
+                return Err(ApiError { status: None, message: "No GitHub token".into() });
+            };
+            let resp = self
+                .http
+                .request(method.clone(), &url)
+                .header(AUTHORIZATION, format!("Bearer {}", token.value))
+                .header(ACCEPT, "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .header(USER_AGENT, concat!("openrunner/", env!("CARGO_PKG_VERSION")))
+                .send()
+                .await
+                .map_err(|e| ApiError { status: None, message: format!("Couldn't reach GitHub: {}", root_cause(&e)) })?;
+            self.record_rate(resp.headers());
+            let status = resp.status();
+            if status == StatusCode::UNAUTHORIZED && attempt == 0 {
+                self.forget_token();
+                continue;
+            }
+            let body = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
+            if status.is_success() {
+                return Ok(body);
+            }
+            let message = serde_json::from_slice::<ApiErrorBody>(&body).map(|b| b.message).unwrap_or_default();
+            let message = if message.is_empty() { format!("GitHub returned {status}") } else { message };
+            return Err(ApiError { status: Some(status), message });
+        }
+        Err(ApiError { status: Some(StatusCode::UNAUTHORIZED), message: "GitHub rejected the token.".into() })
+    }
+
+    pub async fn token_source(&self) -> String {
+        self.token().await.map(|t| t.source).unwrap_or_default()
+    }
+
+    /// The GitHub web host (e.g. "github.com") and the user's token, for cloning
+    /// private repositories into agent workspaces. The caller must keep the token
+    /// out of argv and logs.
+    pub async fn git_credentials(&self, settings: &GitHubSettings) -> Option<(String, String)> {
+        self.set_api_url(&settings.api_url);
+        let token = self.token().await?;
+        Some((self.gh_hostname(), token.value))
+    }
+}
+
+fn data_token_source(client: &Client) -> String {
+    client.token.lock().unwrap().as_ref().map(|t| t.source.clone()).unwrap_or_default()
+}
+
+/// Turns API failures into a sentence and, where possible, the command that fixes it.
+fn explain(kind: ScopeKind, name: &str, e: &ApiError, token_source: &str) -> (String, Option<String>) {
+    explain_doing(kind, name, e, token_source, &format!("Reading {name}'s runners"))
+}
+
+/// Like `explain`, for a specific action ("Registering runners with acme").
+fn explain_doing(kind: ScopeKind, name: &str, e: &ApiError, token_source: &str, doing: &str) -> (String, Option<String>) {
+    let via_gh = token_source == "gh";
+    match (kind, e.status.map(|s| s.as_u16())) {
+        (_, Some(401)) => (
+            "GitHub rejected the token.".into(),
+            Some(if via_gh { "gh auth login".into() } else { "Check GITHUB_TOKEN".into() }),
+        ),
+        (ScopeKind::Org, Some(403)) if !e.message.contains("rate limit") => (
+            format!("{doing} needs an org admin token with the admin:org scope."),
+            via_gh.then(|| "gh auth refresh -h github.com -s admin:org".into()),
+        ),
+        (ScopeKind::Org, Some(404)) => (format!("Organization {name} wasn't found, or you aren't an admin of it."), None),
+        (ScopeKind::Repo, Some(403 | 404)) if !e.message.contains("rate limit") => {
+            (format!("{name} wasn't found, or you don't have admin access to it."), None)
+        }
+        _ => (e.message.clone(), None),
+    }
+}
+
+fn with_hint((msg, hint): (String, Option<String>)) -> String {
+    match hint {
+        Some(h) => format!("{msg} Run `{h}`."),
+        None => msg,
+    }
+}
+
+/// "acme", "org:acme" -> (Org, "acme"); "acme/api", "repo:acme/api" -> (Repo, "acme/api")
+pub fn parse_scope(scope: &str) -> (ScopeKind, String) {
+    let s = scope.trim();
+    let s = s.strip_prefix("org:").or_else(|| s.strip_prefix("repo:")).unwrap_or(s);
+    let name = crate::config::strip_github_url(s);
+    let kind = if name.contains('/') { ScopeKind::Repo } else { ScopeKind::Org };
+    (kind, name)
+}
+
+fn scope_path(kind: ScopeKind, name: &str) -> String {
+    match kind {
+        ScopeKind::Org => format!("/orgs/{name}"),
+        ScopeKind::Repo => format!("/repos/{name}"),
+    }
+}
+
+/// `OPENRUNNER_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, then `gh auth token`.
+async fn resolve_token(hostname: &str) -> Option<Token> {
+    for var in ["OPENRUNNER_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(v) = std::env::var(var) {
+            if !v.trim().is_empty() {
+                return Some(Token { value: v.trim().to_string(), source: var.to_string() });
+            }
+        }
+    }
+    let out = tokio::process::Command::new("gh")
+        .args(["auth", "token", "--hostname", hostname])
+        .output()
+        .await
+        .ok()?;
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !value.is_empty()).then(|| Token { value, source: "gh".into() })
+}
+
+fn next_link(header: &str) -> Option<String> {
+    header.split(',').find_map(|part| {
+        let (url, rel) = part.split_once(';')?;
+        rel.contains("rel=\"next\"").then(|| url.trim().trim_start_matches('<').trim_end_matches('>').to_string())
+    })
+}
+
+fn decode_error(url: &str, e: serde_json::Error) -> ApiError {
+    ApiError { status: None, message: format!("Unexpected response from {url}: {e}") }
+}
+
+fn root_cause(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut cur = e;
+    while let Some(next) = cur.source() {
+        cur = next;
+    }
+    cur.to_string()
+}
+
+/// Labels GitHub uses for its own hosted runners. A job asking only for these
+/// isn't waiting for one of our machines.
+pub fn is_github_hosted_label(label: &str) -> bool {
+    let l = label.to_ascii_lowercase();
+    ["ubuntu-", "windows-", "macos-"].iter().any(|p| l.starts_with(p))
+}
+
+/// "https://github.com/acme" -> "acme", "https://github.com/acme/api" -> "acme/api"
+pub fn scope_from_runner_url(url: &str) -> Option<String> {
+    let rest = url.trim().strip_prefix("https://").or_else(|| url.trim().strip_prefix("http://"))?;
+    let (_, path) = rest.split_once('/')?;
+    let parts: Vec<&str> = path.trim_matches('/').split('/').filter(|p| !p.is_empty()).collect();
+    match parts.as_slice() {
+        ["enterprises", ..] => None,
+        [org] => Some(org.to_string()),
+        [owner, repo] => Some(format!("{owner}/{repo}")),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_link_header() {
+        let h = r#"<https://api.github.com/orgs/acme/actions/runners?page=2>; rel="next", <https://api.github.com/orgs/acme/actions/runners?page=5>; rel="last""#;
+        assert_eq!(next_link(h).as_deref(), Some("https://api.github.com/orgs/acme/actions/runners?page=2"));
+        assert_eq!(next_link(r#"<x>; rel="prev""#), None);
+    }
+
+    #[test]
+    fn scopes_from_urls() {
+        assert_eq!(scope_from_runner_url("https://github.com/acme").as_deref(), Some("acme"));
+        assert_eq!(scope_from_runner_url("https://github.com/acme/api/").as_deref(), Some("acme/api"));
+        assert_eq!(scope_from_runner_url("https://github.com/enterprises/big"), None);
+    }
+
+    #[test]
+    fn parses_scopes() {
+        assert_eq!(parse_scope("org:acme"), (ScopeKind::Org, "acme".into()));
+        assert_eq!(parse_scope("repo:acme/api"), (ScopeKind::Repo, "acme/api".into()));
+        assert_eq!(parse_scope(" https://github.com/acme/api "), (ScopeKind::Repo, "acme/api".into()));
+        assert_eq!(scope_path(ScopeKind::Org, "acme"), "/orgs/acme");
+    }
+
+    #[test]
+    fn explains_registration_errors() {
+        let e = ApiError { status: Some(StatusCode::FORBIDDEN), message: "Resource not accessible".into() };
+        let msg = with_hint(explain_doing(ScopeKind::Org, "acme", &e, "gh", "Registering runners with acme"));
+        assert_eq!(
+            msg,
+            "Registering runners with acme needs an org admin token with the admin:org scope. Run `gh auth refresh -h github.com -s admin:org`."
+        );
+    }
+
+    #[test]
+    fn explains_org_permission_errors() {
+        let e = ApiError { status: Some(StatusCode::FORBIDDEN), message: "Must have admin rights".into() };
+        let (msg, hint) = explain(ScopeKind::Org, "acme", &e, "gh");
+        assert!(msg.contains("admin:org"));
+        assert_eq!(hint.as_deref(), Some("gh auth refresh -h github.com -s admin:org"));
+    }
+}

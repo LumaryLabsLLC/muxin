@@ -1,0 +1,364 @@
+//! Small building blocks in Zed's visual language: flat surfaces, hairline
+//! borders, ghost buttons, monospace numbers.
+
+use std::time::Duration;
+
+use gpui::{
+    Animation, AnimationExt, AnyView, App, ClickEvent, Div, ElementId, FontWeight, Hsla, IntoElement,
+    ParentElement, RenderOnce, SharedString, Styled, Svg, Transformation, Window, div, percentage, prelude::*, px,
+    svg,
+};
+
+use super::theme::{ActiveTheme, mono_font, Theme};
+
+pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
+    svg().path(SharedString::from(format!("icons/{name}.svg"))).size(px(size)).flex_none().text_color(color)
+}
+
+pub fn spinner(id: impl Into<ElementId>, size: f32, color: Hsla) -> impl IntoElement {
+    icon("loader-circle", size, color).with_animation(
+        id,
+        Animation::new(Duration::from_millis(900)).repeat(),
+        |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
+    )
+}
+
+pub fn mono(text: impl Into<SharedString>) -> Div {
+    div().font_family(mono_font()).child(text.into())
+}
+
+pub fn dot(color: Hsla, size: f32) -> Div {
+    div().flex_none().size(px(size)).rounded_full().bg(color)
+}
+
+/// A runner as a small square: filled when connected, dashed outline when not.
+pub fn runner_glyph(theme: &Theme, state: &str, size: f32) -> Div {
+    let base = div().flex_none().size(px(size)).rounded(px(2.5));
+    match state {
+        "working" | "idle" => base.bg(theme.state(state)),
+        _ => base.border_1().border_dashed().border_color(theme.text_placeholder),
+    }
+}
+
+pub fn pill(text: impl Into<SharedString>, color: Hsla) -> Div {
+    div()
+        .flex_none()
+        .px(px(6.))
+        .h(px(18.))
+        .flex()
+        .items_center()
+        .rounded(px(4.))
+        .bg(color.opacity(0.14))
+        .text_color(color)
+        .text_size(px(11.))
+        .font_weight(FontWeight::MEDIUM)
+        .child(text.into())
+}
+
+pub fn chip(theme: &Theme, text: impl Into<SharedString>) -> Div {
+    div()
+        .flex_none()
+        .px(px(5.))
+        .h(px(18.))
+        .flex()
+        .items_center()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(theme.border_variant)
+        .bg(theme.element)
+        .text_color(theme.text_muted)
+        .text_size(px(11.))
+        .font_family(mono_font())
+        .child(text.into())
+}
+
+/// Shortcut labels are written Mac-style ("⇧⌘R"); elsewhere they read "Ctrl+Shift+R".
+pub fn keys(text: &str) -> String {
+    if cfg!(target_os = "macos") {
+        text.to_string()
+    } else {
+        text.replace("⇧⌘", "Ctrl+Shift+").replace('⌘', "Ctrl+")
+    }
+}
+
+pub fn kbd(theme: &Theme, text: impl Into<SharedString>) -> Div {
+    div()
+        .flex_none()
+        .px(px(4.))
+        .h(px(16.))
+        .flex()
+        .items_center()
+        .rounded(px(3.))
+        .border_1()
+        .border_color(theme.border_variant)
+        .text_color(theme.text_placeholder)
+        .text_size(px(10.5))
+        .font_family(mono_font())
+        .child(keys(&text.into()))
+}
+
+/// A thin horizontal meter. `fraction` is clamped to 0..=1.
+pub fn meter(theme: &Theme, fraction: f32, color: Hsla) -> Div {
+    let f = fraction.clamp(0.0, 1.0);
+    div()
+        .w_full()
+        .h(px(3.))
+        .rounded_full()
+        .bg(theme.track)
+        .child(div().h_full().rounded_full().bg(color).w(gpui::relative(f.max(if f > 0.0 { 0.02 } else { 0.0 }))))
+}
+
+/// A bordered surface, the basic container for page sections.
+pub fn card(theme: &Theme) -> Div {
+    div().flex().flex_col().rounded(px(8.)).border_1().border_color(theme.border_variant).bg(theme.surface)
+}
+
+pub fn section_title(theme: &Theme, title: impl Into<SharedString>, count: Option<usize>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .text_size(px(13.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+        .child(title.into())
+        .children(count.map(|n| div().font_family(mono_font()).text_color(theme.text_placeholder).font_weight(FontWeight::NORMAL).child(n.to_string())))
+}
+
+pub fn label(theme: &Theme, text: impl Into<SharedString>) -> Div {
+    div().text_size(px(11.)).text_color(theme.text_placeholder).child(text.into())
+}
+
+pub fn empty_state(theme: &Theme, icon_name: &str, text: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .px(px(12.))
+        .py(px(14.))
+        .text_size(px(12.5))
+        .text_color(theme.text_placeholder)
+        .child(icon(icon_name, 14., theme.text_placeholder))
+        .child(text.into())
+}
+
+/// A two-column key/value line for detail panes.
+pub fn kv(theme: &Theme, key: impl Into<SharedString>, value: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .items_start()
+        .gap(px(12.))
+        .py(px(5.))
+        .text_size(px(12.5))
+        .child(div().w(px(112.)).flex_none().text_color(theme.text_placeholder).child(key.into()))
+        .child(div().flex_1().min_w(px(0.)).text_color(theme.text).child(value))
+}
+
+// ---------------------------------------------------------------------------
+// Buttons
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ButtonStyle {
+    /// Filled with the accent color.
+    Primary,
+    /// Bordered element background.
+    Outlined,
+    /// No background until hovered.
+    Ghost,
+    /// Ghost, tinted with the error color.
+    Danger,
+}
+
+type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+
+#[derive(IntoElement)]
+pub struct Button {
+    id: ElementId,
+    label: Option<SharedString>,
+    icon: Option<&'static str>,
+    style: ButtonStyle,
+    disabled: bool,
+    loading: bool,
+    key_hint: Option<SharedString>,
+    tooltip: Option<SharedString>,
+    on_click: Option<ClickHandler>,
+}
+
+impl Button {
+    pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        Button {
+            id: id.into(),
+            label: Some(label.into()),
+            icon: None,
+            style: ButtonStyle::Outlined,
+            disabled: false,
+            loading: false,
+            key_hint: None,
+            tooltip: None,
+            on_click: None,
+        }
+    }
+
+    pub fn icon_only(id: impl Into<ElementId>, icon: &'static str) -> Self {
+        Button { label: None, icon: Some(icon), style: ButtonStyle::Ghost, ..Button::new(id, "") }
+    }
+
+    pub fn icon(mut self, icon: &'static str) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    pub fn style(mut self, style: ButtonStyle) -> Self {
+        self.style = style;
+        self
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    pub fn loading(mut self, loading: bool) -> Self {
+        self.loading = loading;
+        self
+    }
+
+    pub fn key_hint(mut self, hint: impl Into<SharedString>) -> Self {
+        self.key_hint = Some(keys(&hint.into()).into());
+        self
+    }
+
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
+        self
+    }
+
+    pub fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for Button {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let icon_only = self.label.is_none();
+        let (bg, hover, fg, border) = match self.style {
+            ButtonStyle::Primary => (theme.accent, theme.accent.opacity(0.85), theme.accent_text, None),
+            ButtonStyle::Outlined => (theme.element, theme.element_hover, theme.text, Some(theme.border_variant)),
+            ButtonStyle::Ghost => (gpui::transparent_black(), theme.ghost_hover, theme.text_muted, None),
+            ButtonStyle::Danger => (gpui::transparent_black(), theme.error.opacity(0.14), theme.error, None),
+        };
+        let disabled = self.disabled || self.loading;
+        let mut el = div()
+            .id(self.id.clone())
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .gap(px(5.))
+            .h(px(26.))
+            .when(icon_only, |d| d.w(px(26.)))
+            .when(!icon_only, |d| d.px(px(9.)))
+            .rounded(px(6.))
+            .bg(bg)
+            .text_color(fg)
+            .text_size(px(12.5))
+            .font_weight(FontWeight::MEDIUM)
+            .when_some(border, |d, b| d.border_1().border_color(b))
+            .when(disabled, |d| d.opacity(0.5))
+            .when(!disabled, |d| d.cursor_pointer().hover(move |s| s.bg(hover)));
+        if self.loading {
+            el = el.child(spinner(ElementId::Name(format!("{}-spin", self.id).into()), 13., fg));
+        } else if let Some(i) = self.icon {
+            el = el.child(icon(i, if icon_only { 15. } else { 13. }, fg));
+        }
+        if let Some(label) = self.label {
+            el = el.child(label);
+        }
+        if let Some(hint) = self.key_hint {
+            el = el.child(
+                div()
+                    .text_size(px(10.5))
+                    .font_family(mono_font())
+                    .text_color(if self.style == ButtonStyle::Primary { fg.opacity(0.75) } else { theme.text_placeholder })
+                    .child(hint),
+            );
+        }
+        if let Some(tip) = self.tooltip {
+            el = el.tooltip(move |window, cx| Tooltip::view(tip.clone(), window, cx));
+        }
+        if let (Some(handler), false) = (self.on_click, disabled) {
+            el = el.on_click(move |e, w, cx| {
+                cx.stop_propagation();
+                handler(e, w, cx)
+            });
+        }
+        el
+    }
+}
+
+pub struct Tooltip {
+    text: SharedString,
+}
+
+impl Tooltip {
+    pub fn view(text: SharedString, _: &mut Window, cx: &mut App) -> AnyView {
+        let text = keys(&text).into();
+        cx.new(|_| Tooltip { text }).into()
+    }
+}
+
+impl Render for Tooltip {
+    fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .pl(px(8.))
+            .pt(px(10.))
+            .child(
+                div()
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(6.))
+                    .bg(theme.elevated)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_md()
+                    .text_size(px(12.))
+                    .text_color(theme.text)
+                    .child(self.text.clone()),
+            )
+    }
+}
+
+/// A checkbox row; `on_toggle` receives the new value.
+pub fn checkbox(
+    theme: &Theme,
+    id: impl Into<ElementId>,
+    checked: bool,
+    text: impl Into<SharedString>,
+    on_toggle: impl Fn(&bool, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .cursor_pointer()
+        .text_size(px(12.5))
+        .text_color(theme.text)
+        .child(
+            div()
+                .size(px(15.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.))
+                .border_1()
+                .border_color(if checked { theme.accent } else { theme.border })
+                .bg(if checked { theme.accent } else { theme.canvas })
+                .when(checked, |d| d.child(icon("check", 11., theme.accent_text))),
+        )
+        .child(text.into())
+        .on_click(move |_, w, cx| on_toggle(&!checked, w, cx))
+}

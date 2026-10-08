@@ -1076,7 +1076,7 @@ impl Render for NewSessionDialog {
                 .border_color(if selected { theme.accent } else { theme.border_variant })
                 .bg(if selected { theme.accent.opacity(0.12) } else { theme.element })
                 .text_size(px(12.5))
-                .child(div().size(px(7.)).rounded_full().bg(theme.machine_status(&m.status)))
+                .child(div().size(px(7.)).rounded_full().bg(theme.machine_status(&m)))
                 .child(m.name.clone())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.machine = Some(id.clone());

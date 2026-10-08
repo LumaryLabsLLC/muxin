@@ -59,7 +59,7 @@ pub fn runner_summary(m: &Machine) -> String {
     if s.total == 0 {
         return match m.status.as_str() {
             "online" => "connected".into(),
-            "offline" => "unreachable".into(),
+            "offline" => unreachable_word(m).to_ascii_lowercase(),
             _ => "not checked".into(),
         };
     }
@@ -82,7 +82,7 @@ pub fn diagnostics_summary(m: &Machine) -> (String, &'static str) {
         return ("Checking…".into(), "muted");
     }
     match m.status.as_str() {
-        "offline" => return ("Unreachable".into(), "error"),
+        "offline" => return (unreachable_word(m).into(), if is_just_offline(m) { "muted" } else { "error" }),
         "unchecked" | "manual" => return ("Not checked".into(), "muted"),
         _ => {}
     }
@@ -118,7 +118,12 @@ pub fn machine_subtitle(m: &Machine) -> (String, &'static str) {
         return ("Checking…".into(), "muted");
     }
     if m.status == "offline" {
-        return ("Unreachable".into(), "error");
+        let seen = m.unreachable.as_ref().and_then(|u| u.last_seen_at);
+        return match (is_just_offline(m), seen) {
+            (true, Some(t)) => (format!("Offline · seen {}", ago(Some(t))), "muted"),
+            (true, None) => ("Offline".into(), "muted"),
+            (false, _) => (unreachable_reason(m).into(), "error"),
+        };
     }
     let arch = m.platform.split_once('-').map(|(_, a)| a).unwrap_or("");
     let os = os_label(m);
@@ -183,5 +188,28 @@ mod tests {
         assert_eq!(short_os("Microsoft Windows 11 Pro"), "Windows 11");
         assert_eq!(short_os("Debian GNU/Linux 12 (bookworm)"), "Debian GNU/Linux 12");
         assert_eq!(short_os("Arch Linux"), "Arch Linux");
+    }
+}
+
+/// Offline in the everyday sense (shut down, asleep, off the network), as
+/// opposed to on but refusing us: nothing for the user to fix.
+pub fn is_just_offline(m: &Machine) -> bool {
+    m.status == "offline" && m.unreachable.as_ref().is_some_and(|u| u.kind == "offline")
+}
+
+/// A machine that can't be reached, in a word or two: "Offline", "Can't connect".
+pub fn unreachable_word(m: &Machine) -> &'static str {
+    if is_just_offline(m) { "Offline" } else { "Can't connect" }
+}
+
+/// Why it can't be reached, short enough for the sidebar.
+pub fn unreachable_reason(m: &Machine) -> &'static str {
+    match m.unreachable.as_ref().map(|u| u.kind.as_str()) {
+        Some("offline") => "Offline",
+        Some("refused") => "Not accepting ssh",
+        Some("auth") => "ssh key not accepted",
+        Some("unknown-host") => "Host not found",
+        Some("host-key") => "Host key changed",
+        _ => "Can't connect",
     }
 }

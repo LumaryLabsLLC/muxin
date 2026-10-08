@@ -243,13 +243,18 @@ impl Root {
             }
             return ended(&theme, id, cx);
         };
-        if !self.terminals.contains_key(id) {
+        // Attaching to a machine that's offline only waits for ssh to give up.
+        let reachable = s.machines.iter().any(|m| m.id == info.machine_id && m.status != "offline");
+        if !self.terminals.contains_key(id) && reachable {
             self.open_terminal(id, window, cx);
         }
         if info.attention.is_some() && window.is_window_active() {
             self.engine.ack_session(id);
         }
-        let machine = s.machines.iter().find(|m| m.id == info.machine_id).map(|m| m.name.clone()).unwrap_or_else(|| info.machine_id.clone());
+        let host = s.machines.iter().find(|m| m.id == info.machine_id).cloned();
+        // Can't reach the machine: what we show is from before, and nothing runs we can see.
+        let offline = host.as_ref().filter(|m| m.status == "offline").cloned();
+        let machine = host.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| info.machine_id.clone());
         let machine_id = info.machine_id.clone();
         // Desktops: Linux (X11) machines so far.
         let desktop_capable = info.persistent && s.machines.iter().any(|m| m.id == info.machine_id && m.platform.starts_with("linux"));
@@ -261,6 +266,8 @@ impl Root {
 
         let status = if exited {
             kit::pill(format!("Exited{}", info.exit_code.map(|c| format!(" ({c})")).unwrap_or_default()), theme.text_placeholder).into_any_element()
+        } else if let Some(m) = &offline {
+            kit::pill(format::unreachable_word(m), theme.machine_status(m)).into_any_element()
         } else if info.busy {
             div()
                 .flex()
@@ -340,7 +347,7 @@ impl Root {
                         .on_click(cx.listener(move |this, _, window, cx| this.toggle_split(&sid, window, cx))),
                 )
             })
-            .child(Button::new("session-end", "End").icon("power").style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, window, cx| {
+            .child(Button::new("session-end", "End").icon("power").style(ButtonStyle::Ghost).disabled(offline.is_some()).on_click(cx.listener(move |this, _, window, cx| {
                 if let Some(s) = this.snapshot.sessions.iter().find(|x| x.id == sid2).cloned() {
                     this.confirm_end_session(&s, window, cx);
                 }
@@ -352,7 +359,32 @@ impl Root {
             .flex_1()
             .min_h(px(0.))
             .children(terminal.map(|t| t.into_any_element()))
-            .when(detached && !exited && info.persistent, |d| {
+            .when_some(offline.clone().filter(|_| !exited && info.persistent), |d, m| {
+                let title = m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("Can't reach {}", m.name));
+                let mid = m.id.clone();
+                d.child(
+                    div().absolute().inset_0().bg(theme.scrim).flex().items_center().justify_center().child(
+                        card(&theme)
+                            .items_center()
+                            .gap(px(10.))
+                            .p(px(20.))
+                            .max_w(px(420.))
+                            .bg(theme.elevated)
+                            .child(icon(if format::is_just_offline(&m) { "power" } else { "unplug" }, 22., theme.text_muted))
+                            .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(title))
+                            .child(div().text_size(px(12.5)).text_color(theme.text_muted).text_center().child(
+                                "If it was shut down or restarted, this session ended with it. If it's only asleep or off the network, the session is still there when it's back.",
+                            ))
+                            .child(
+                                Button::new("session-offline-check", "Check again")
+                                    .icon("refresh-cw")
+                                    .loading(m.checking)
+                                    .on_click(cx.listener(move |this, _, _, _| this.engine.trigger_check(Some(mid.clone())))),
+                            ),
+                    ),
+                )
+            })
+            .when(detached && !exited && info.persistent && offline.is_none(), |d| {
                 d.child(
                     div().absolute().inset_0().bg(theme.scrim).flex().items_center().justify_center().child(
                         card(&theme)
@@ -452,6 +484,7 @@ impl Root {
         let id = s.id.clone();
         let (icon_name, (from, to)) = kit::agent_look(&s.agent);
         let exited = s.status == "exited";
+        let offline = self.snapshot.machines.iter().any(|m| m.id == s.machine_id && m.status == "offline");
         // Explicit width: GPUI 0.2 only ellipsizes text whose width it knows up front.
         let trailing = if exited { 40. } else if s.busy || s.attention.is_some() { 20. } else { 0. };
         let trailing = trailing + if exited && s.attention.is_some() { 14. } else { 0. };
@@ -475,7 +508,7 @@ impl Root {
                     .w(px(text_w))
                     .truncate()
                     .text_size(px(12.5))
-                    .text_color(if exited { theme.text_placeholder } else if selected { theme.text } else { theme.text_muted })
+                    .text_color(if exited || offline { theme.text_placeholder } else if selected { theme.text } else { theme.text_muted })
                     .child(s.title.clone()),
             )
             .child(div().flex_1())
@@ -509,6 +542,7 @@ impl Root {
 
         let content = if sessions.is_empty() {
             let text = match (runs_in_app(m), m.platform.starts_with("windows")) {
+                _ if m.status == "offline" => format!("Start Claude Code, Codex or a shell here once {} is back.", m.name),
                 (true, true) => "Run Claude Code, Codex or a shell here. On Windows, sessions run while Muxen is open.".to_string(),
                 (true, false) => format!("Run Claude Code, Codex or a shell here. {} so sessions run while Muxen is open.", m.sessions_error.clone().unwrap_or_default().trim_end_matches('.')),
                 _ => "Run Claude Code, Codex, OpenCode or a shell here. Sessions keep working on the machine after you close Muxen.".to_string(),
@@ -523,6 +557,7 @@ impl Root {
                 .child(
                     Button::new("m-session-empty", "New session")
                         .icon("plus")
+                        .disabled(m.status == "offline")
                         .on_click(cx.listener(move |this, _, window, cx| this.show_new_session(Some(mid.clone()), window, cx))),
                 )
                 .into_any_element()
@@ -536,8 +571,11 @@ impl Root {
     pub(super) fn machine_session_row(&self, theme: &Theme, x: &SessionInfo, i: usize, cx: &mut Context<Self>) -> AnyElement {
         let id = x.id.clone();
         let (icon_name, (from, to)) = kit::agent_look(&x.agent);
+        let offline = self.snapshot.machines.iter().any(|m| m.id == x.machine_id && m.status == "offline");
         let state = if x.status == "exited" {
             div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!("Exited{}", x.exit_code.map(|c| format!(" ({c})")).unwrap_or_default())).into_any_element()
+        } else if offline {
+            div().text_size(px(12.)).text_color(theme.text_placeholder).child("Machine offline").into_any_element()
         } else if x.busy {
             div()
                 .flex()

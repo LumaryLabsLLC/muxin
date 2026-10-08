@@ -253,7 +253,14 @@ impl Root {
             }
             None => {
                 let text = match m.status.as_str() {
-                    "offline" => m.probe.as_ref().and_then(|p| p.error.clone()).unwrap_or_else(|| "Unreachable".into()),
+                    "offline" => match &m.unreachable {
+                        Some(u) if u.kind == "offline" => match u.last_seen_at {
+                            Some(t) => format!("Offline. Last seen {}.", format::ago(Some(t))),
+                            None => "Offline.".into(),
+                        },
+                        Some(u) => u.title.clone(),
+                        None => "Can't connect.".into(),
+                    },
                     "manual" => "No host configured, so it isn't checked.".into(),
                     _ if m.checking => "Checking…".into(),
                     _ => "Not checked yet.".into(),
@@ -263,7 +270,7 @@ impl Root {
                     .flex()
                     .items_center()
                     .text_size(px(12.))
-                    .text_color(if m.status == "offline" { theme.error } else { theme.text_placeholder })
+                    .text_color(if m.status == "offline" && !format::is_just_offline(m) { theme.error } else { theme.text_placeholder })
                     .child(div().line_clamp(3).child(text))
                     .into_any_element()
             }
@@ -305,7 +312,7 @@ impl Root {
                     .child(if m.checking {
                         kit::spinner(SharedString::from(format!("mcard-spin-{}", m.id)), 12., theme.text_muted).into_any_element()
                     } else {
-                        kit::pill(status_word(m), theme.machine_status(&m.status)).into_any_element()
+                        kit::pill(status_word(m), theme.machine_status(&m)).into_any_element()
                     }),
             )
             .when(m.kind == "runner", |d| {
@@ -596,7 +603,8 @@ fn meter_row(theme: &Theme, label: &'static str, value: Option<String>, fraction
 fn status_word(m: &Machine) -> &'static str {
     match m.status.as_str() {
         "online" => "online",
-        "offline" => "unreachable",
+        "offline" if format::is_just_offline(m) => "offline",
+        "offline" => "can't connect",
         "manual" => "no host",
         _ => "unchecked",
     }

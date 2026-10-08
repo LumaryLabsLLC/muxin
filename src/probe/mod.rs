@@ -53,6 +53,28 @@ pub struct ProbeResult {
     pub docker_error: Option<String>,
     /// Linux only: "root" | "passwordless" | "password" — whether services can be installed.
     pub sudo: Option<String>,
+    /// The last time a check reached the machine (this one, when it did).
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
+impl ProbeResult {
+    /// A failed check keeps what describes the machine itself (its shell, OS,
+    /// name) and when it was last reached, from the check before.
+    pub fn after(mut self, previous: Option<&ProbeResult>) -> ProbeResult {
+        if self.ok {
+            self.last_seen_at = Some(self.checked_at);
+            return self;
+        }
+        if let Some(p) = previous {
+            self.last_seen_at = if p.ok { Some(p.checked_at) } else { p.last_seen_at };
+            self.shell = self.shell.or(p.shell);
+            self.hostname = self.hostname.take().or_else(|| p.hostname.clone());
+            self.os = self.os.take().or_else(|| p.os.clone());
+            self.arch = self.arch.take().or_else(|| p.arch.clone());
+            self.os_version = self.os_version.take().or_else(|| p.os_version.clone());
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -430,6 +452,17 @@ fn parse_runner_config(raw: &str) -> Option<(String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_check_remembers_the_machine() {
+        let ok = ProbeResult { ok: true, checked_at: Utc::now(), shell: Some(Shell::Sh), os: Some("linux".into()), ..Default::default() }.after(None);
+        assert_eq!(ok.last_seen_at, Some(ok.checked_at));
+        let failed = ProbeResult { ok: false, error: Some("Host is down".into()), ..Default::default() }.after(Some(&ok));
+        assert_eq!((failed.last_seen_at, failed.shell, failed.os.as_deref()), (Some(ok.checked_at), Some(Shell::Sh), Some("linux")));
+        // Still down: still the last time it answered.
+        let again = ProbeResult { ok: false, ..Default::default() }.after(Some(&failed));
+        assert_eq!(again.last_seen_at, Some(ok.checked_at));
+    }
 
     #[test]
     fn parses_probe_output() {

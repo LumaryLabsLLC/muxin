@@ -42,7 +42,7 @@ Use the MCP tools when they're connected: start the server with `muxen mcp`, and
 
 **"Why is runner X offline?"**
 
-1. Call `get_machine` on its machine. Check the machine's `status` first: an unreachable machine explains everything on it. Then check the runner's `state`, `source`, `service_state`, and the diagnostics with its `runner_id`.
+1. Call `get_machine` on its machine. Check the machine's `status` first: an unreachable machine explains everything on it. When it's `offline`, `unreachable` says why in plain words. `kind: "offline"` means it didn't answer (shut down, asleep, off the network): there's nothing to fix, so tell the user it's off and when it was `last_seen_at`. Other kinds (`refused`, `auth`, `unknown-host`, `host-key`) come with a `hint` to pass on. Then check the runner's `state`, `source`, `service_state`, and the diagnostics with its `runner_id`.
 2. Call `runner_action(X, "logs")` to read its newest `_diag` log.
 3. Explain the cause and propose a fix, such as `runner_action(X, "start")`. Do it only if the user agrees or already asked.
 

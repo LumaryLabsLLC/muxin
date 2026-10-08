@@ -245,6 +245,10 @@ impl World {
                 duration_ms: 8000,
                 ok: false,
                 error: Some(format!("ssh: connect to host {} port 22: Operation timed out", spec.host)),
+                os: Some(hw.os.into()),
+                arch: Some(hw.arch.into()),
+                os_version: Some(hw.os_version.into()),
+                last_seen_at: Some(Utc::now() - chrono::Duration::minutes(47)),
                 ..Default::default()
             };
         }
@@ -328,6 +332,7 @@ impl World {
             docker: hw.docker.map(String::from),
             docker_error: None,
             sudo: hw.sudo.map(String::from),
+            last_seen_at: Some(now),
         }
     }
 

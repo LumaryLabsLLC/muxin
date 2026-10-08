@@ -24,6 +24,8 @@ const DEMO_POLL: Duration = Duration::from_secs(3);
 const MAX_OPERATIONS: usize = 30;
 const MAX_OP_LOG_LINES: usize = 2000;
 const MAX_NOTICES: usize = 50;
+/// How often to look for an offline machine coming back.
+const OFFLINE_RECHECK: Duration = Duration::from_secs(30);
 /// Operation output can be chatty; coalesce snapshot publishes to this rate.
 const OP_PUBLISH_INTERVAL: Duration = Duration::from_millis(120);
 
@@ -202,6 +204,8 @@ impl Engine {
         self.rt.spawn(async move { me.check_loop().await });
         let me = self.clone();
         self.rt.spawn(async move { me.sessions_loop().await });
+        let me = self.clone();
+        self.rt.spawn(async move { me.offline_loop().await });
     }
 
     pub fn subscribe(&self) -> watch::Receiver<Arc<Snapshot>> {
@@ -617,19 +621,29 @@ impl Engine {
             }
         }
         let mut events = link.subscribe();
-        if link.request(serde_json::json!({ "op": "watch" }), Duration::from_secs(10)).await.is_err() {
-            return;
-        }
-        loop {
-            match events.recv().await {
-                Ok(e) if e["event"] == "sessions" => {
-                    // A burst of changes is one refresh.
-                    while events.try_recv().is_ok() {}
-                    let _ = self.refresh_sessions(&link.machine).await;
+        if link.request(serde_json::json!({ "op": "watch" }), Duration::from_secs(10)).await.is_ok() {
+            loop {
+                tokio::select! {
+                    e = events.recv() => match e {
+                        Ok(e) if e["event"] == "sessions" => {
+                            // A burst of changes is one refresh.
+                            while events.try_recv().is_ok() {}
+                            let _ = self.refresh_sessions(&link.machine).await;
+                        }
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(_) => break,
+                    },
+                    _ = link.closed() => break,
                 }
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                Err(_) => break,
             }
+        }
+        link.closed().await;
+        // Lost, not dropped on purpose: the machine may have been shut down,
+        // gone to sleep or left the network. Look now instead of at the next
+        // scheduled check, so the app says so within seconds.
+        if !link.retired() {
+            tracing::debug!("lost the link to {}; checking it", link.machine);
+            self.run_check(Some(vec![link.machine.clone()])).await;
         }
     }
 
@@ -649,6 +663,38 @@ impl Engine {
             let ids = self.machines_with_sessions();
             let mut pending: FuturesUnordered<_> = ids.iter().map(|id| self.refresh_sessions(id)).collect();
             while pending.next().await.is_some() {}
+        }
+    }
+
+    /// Checks machines that went offline (or are still starting up) every
+    /// little while, so one that's turned back on shows up again by itself.
+    /// Off along with automatic checks.
+    async fn offline_loop(self: Arc<Self>) {
+        if self.demo.is_some() {
+            return;
+        }
+        loop {
+            tokio::time::sleep(OFFLINE_RECHECK).await;
+            let ids: Vec<String> = {
+                let st = self.state.lock().unwrap();
+                if st.settings.check_interval_minutes == 0 || st.check_running {
+                    continue;
+                }
+                st.inventory
+                    .machines
+                    .iter()
+                    .filter(|m| m.is_checkable() && !m.is_local() && !st.checking.contains(&m.id))
+                    .filter(|m| {
+                        st.probes.get(&m.id).is_some_and(|p| {
+                            !p.ok && super::build::comes_back_by_itself(super::build::unreachable_kind(p.error.as_deref().unwrap_or("")))
+                        })
+                    })
+                    .map(|m| m.id.clone())
+                    .collect()
+            };
+            if !ids.is_empty() {
+                self.run_check(Some(ids)).await;
+            }
         }
     }
 
@@ -731,6 +777,7 @@ impl Engine {
             let reachable = result.ok;
             let mut st = self.state.lock().unwrap();
             st.checking.remove(&id);
+            let result = result.after(st.probes.get(&id));
             st.probes.insert(id.clone(), result);
             self.publish(&mut st);
             drop(st);
@@ -880,8 +927,11 @@ impl Engine {
                 m.agent_version = found.agent_version.clone();
                 m.gh = found.gh.clone();
                 m.sessions_error = found.error.clone();
+                // What we last saw there; nothing is working while it's offline.
+                let offline = m.status == "offline";
                 snapshot.sessions.extend(found.sessions.iter().cloned().map(|mut s| {
                     s.attention = st.attention.get(&s.id).cloned().or(s.attention);
+                    s.busy &= !offline;
                     s
                 }));
             }

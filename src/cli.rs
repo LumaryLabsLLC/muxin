@@ -86,8 +86,21 @@ pub fn machine(m: &MachineDetail) -> String {
         dash(&s.platform),
         m.os_version.as_ref().map(|v| format!("  ·  {v}")).unwrap_or_default()
     );
-    if let Some(e) = &s.error {
-        let _ = writeln!(out, "error: {e}");
+    match (&s.unreachable, &s.error) {
+        (Some(u), _) => {
+            let _ = writeln!(out, "\n{}. {}", u.title, u.detail);
+            if let Some(t) = s.last_seen_at {
+                let _ = writeln!(out, "Last reached {}.", ago(t));
+            }
+            if let Some(h) = &u.hint {
+                let _ = writeln!(out, "Try: {h}");
+            }
+            let _ = writeln!(out, "ssh said: {}", u.error);
+        }
+        (None, Some(e)) => {
+            let _ = writeln!(out, "error: {e}");
+        }
+        _ => {}
     }
     if s.status == "online" {
         let _ = writeln!(
@@ -101,9 +114,11 @@ pub fn machine(m: &MachineDetail) -> String {
     }
     out.push('\n');
     out.push_str(&runners(&m.runners));
-    if !m.diagnostics.is_empty() {
+    // Being unreachable is explained above.
+    let diags: Vec<_> = m.diagnostics.iter().filter(|d| d.code != "unreachable" || s.unreachable.is_none()).collect();
+    if !diags.is_empty() {
         let _ = writeln!(out, "\nDiagnostics:");
-        for d in &m.diagnostics {
+        for d in diags {
             let _ = writeln!(out, "  [{}] {}", d.level, d.message);
             if let Some(h) = &d.hint {
                 let _ = writeln!(out, "      {h}");
@@ -117,8 +132,17 @@ pub fn added_machine(r: &AddMachineResponse) -> String {
     let mut out = format!("Added {}", r.machine_id);
     if let Some(m) = &r.machine {
         let _ = write!(out, ": {}  {}  {}", m.summary.status, dash(&m.summary.platform), m.summary.runners);
-        if let Some(e) = &m.summary.error {
-            let _ = write!(out, "\n  {e}");
+        match (&m.summary.unreachable, &m.summary.error) {
+            (Some(u), _) => {
+                let _ = write!(out, "\n  {}. {}", u.title, u.detail);
+                if let Some(h) = &u.hint {
+                    let _ = write!(out, "\n  Try: {h}");
+                }
+            }
+            (None, Some(e)) => {
+                let _ = write!(out, "\n  {e}");
+            }
+            _ => {}
         }
     }
     let _ = writeln!(out, "\n{}", r.next);

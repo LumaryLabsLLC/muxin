@@ -83,10 +83,14 @@ impl Theme {
         }
     }
 
-    pub fn machine_status(&self, status: &str) -> Hsla {
-        match status {
-            "online" => self.success,
-            "offline" => self.error,
+    /// A machine's status dot: green online; gray when it's just offline (shut
+    /// down, asleep) or unchecked; amber or red when something needs fixing.
+    pub fn machine_status(&self, m: &crate::fleet::model::Machine) -> Hsla {
+        match (m.status.as_str(), m.unreachable.as_ref().map(|u| u.kind.as_str())) {
+            ("online", _) => self.success,
+            ("offline", Some("offline")) => self.text_placeholder,
+            ("offline", Some("refused")) => self.warning,
+            ("offline", _) => self.error,
             _ => self.text_placeholder,
         }
     }

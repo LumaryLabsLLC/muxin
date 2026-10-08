@@ -78,6 +78,7 @@ fn machine(id: &str, platform: &str, cpu: f64, working: usize, disk_free: u64, a
             load: Vec::new(),
             docker: None,
             sudo: None,
+            last_seen_at: None,
         }),
         diagnostics: Vec::new(),
         workspaces_allowed: allowed,
@@ -85,6 +86,7 @@ fn machine(id: &str, platform: &str, cpu: f64, working: usize, disk_free: u64, a
         agent_version: None,
         sessions_error: None,
         gh: None,
+        unreachable: None,
     }
 }
 

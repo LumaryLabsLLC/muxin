@@ -54,6 +54,10 @@ pub struct Link {
     #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     next_channel: AtomicU32,
     alive: AtomicBool,
+    /// Flips to true when the link goes down, for whoever waits on it.
+    down: tokio::sync::watch::Sender<bool>,
+    /// Dropped on purpose (`reset`), not lost.
+    retired: AtomicBool,
     events: broadcast::Sender<Value>,
     /// What keeps the connection open.
     holder: Mutex<Option<Holder>>,
@@ -152,8 +156,20 @@ impl Link {
         self.events.subscribe()
     }
 
+    /// Waits until the link goes down.
+    pub async fn closed(&self) {
+        let mut rx = self.down.subscribe();
+        let _ = rx.wait_for(|down| *down).await;
+    }
+
+    /// Whether Muxen dropped it on purpose, rather than losing the machine.
+    pub fn retired(&self) -> bool {
+        self.retired.load(Ordering::Relaxed)
+    }
+
     fn shut(&self) {
         self.alive.store(false, Ordering::Relaxed);
+        self.down.send_replace(true);
         self.pending.lock().unwrap().clear();
         self.channels.lock().unwrap().clear();
         match self.holder.lock().unwrap().take() {
@@ -241,6 +257,7 @@ pub async fn get(spec: &MachineSpec) -> Option<Arc<Link>> {
 /// removed); the next use connects afresh, right away.
 pub fn reset(machine_id: &str) {
     if let Some(Slot::Up(l)) = slots().lock().unwrap().remove(machine_id) {
+        l.retired.store(true, Ordering::Relaxed);
         l.shut();
     }
 }
@@ -377,6 +394,8 @@ async fn start(
         next_id: AtomicU64::new(1),
         next_channel: AtomicU32::new(1),
         alive: AtomicBool::new(true),
+        down: tokio::sync::watch::channel(false).0,
+        retired: AtomicBool::new(false),
         events,
         holder: Mutex::new(Some(holder)),
         transport,

@@ -116,10 +116,12 @@ pub fn build(input: &Inputs) -> Snapshot {
             Some(p) if p.ok => "online",
             Some(_) => "offline",
         };
-        machine_diagnostics(&mut diagnostics, spec, probe);
+        let unreachable = probe.filter(|p| !p.ok && spec.is_checkable()).map(|p| explain_unreachable(spec, p, input.settings.check_interval_minutes > 0));
+        machine_diagnostics(&mut diagnostics, spec, probe, unreachable.as_ref());
         diagnostics.sort_by_key(|d| level_rank(&d.level));
 
-        let platform = probe_ok
+        // A failed check keeps the OS the last one found.
+        let platform = probe
             .map(|p| util::platform(p.os.as_deref().unwrap_or(""), p.arch.as_deref().unwrap_or("")))
             .filter(|p| !p.is_empty())
             .or_else(|| spec.platform.clone())
@@ -145,6 +147,7 @@ pub fn build(input: &Inputs) -> Snapshot {
             agent_version: None,
             sessions_error: None,
             gh: None,
+            unreachable,
         });
     }
 
@@ -308,7 +311,80 @@ fn to_probe(p: &ProbeResult) -> Probe {
         load: p.load.clone(),
         docker: p.docker.clone(),
         sudo: p.sudo.clone(),
+        last_seen_at: p.last_seen_at,
     }
+}
+
+/// Kinds of unreachable a later check may well fix by itself (the machine
+/// comes back on, finishes starting up), so it's worth checking again soon.
+pub fn comes_back_by_itself(kind: &str) -> bool {
+    matches!(kind, "offline" | "refused")
+}
+
+/// What kind of failure a check's error is: see [`Unreachable::kind`].
+pub fn unreachable_kind(error: &str) -> &'static str {
+    let e = error.to_ascii_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| e.contains(w));
+    if has(&["host key verification failed", "remote host identification has changed"]) {
+        "host-key"
+    } else if has(&["could not resolve hostname", "name or service not known", "nodename nor servname", "temporary failure in name resolution"]) {
+        "unknown-host"
+    } else if has(&["permission denied", "too many authentication failures", "no supported authentication methods"]) {
+        "auth"
+    } else if e.starts_with("timed out after") {
+        // Ours: ssh got in, but the whole check took too long.
+        "error"
+    } else if has(&["timed out", "no route to host", "host is down", "network is unreachable", "host unreachable"]) {
+        "offline"
+    } else if has(&["connection refused", "connection reset", "connection closed by", "kex_exchange_identification"]) {
+        "refused"
+    } else {
+        "error"
+    }
+}
+
+/// Why a machine can't be reached, in words for people: what probably
+/// happened, and what to do about it when there's something to do.
+pub fn explain_unreachable(spec: &MachineSpec, p: &ProbeResult, retrying: bool) -> Unreachable {
+    let error = p.error.clone().unwrap_or_else(|| "The check failed.".into());
+    let (name, host) = (spec.name.as_str(), spec.host.trim());
+    let kind = if spec.is_local() { "error" } else { unreachable_kind(&error) };
+    let again = if retrying { "Muxen keeps checking and reconnects when it's back." } else { "Check again once it's back." };
+    let (title, detail, hint) = match kind {
+        "offline" => (
+            format!("{name} is offline"),
+            format!("It isn't answering: it may be shut down, asleep, or on a network this computer can't reach. {again}"),
+            None,
+        ),
+        "refused" => (
+            format!("{name} isn't accepting connections"),
+            format!("It's on the network, but its ssh server turned the connection away. It may still be starting up, or Remote Login (ssh) is off there. {again}"),
+            None,
+        ),
+        "auth" => (
+            format!("{name} didn't accept your ssh key"),
+            "It's on, but ssh wanted a password or refused the key. Muxen needs ssh to work without a password prompt.".to_string(),
+            Some(format!("ssh-copy-id {host}")),
+        ),
+        "unknown-host" => (
+            format!("Can't find {name}"),
+            format!("This computer can't look up \"{host}\". Check the name (or your ssh config), or join the network or VPN it's on."),
+            None,
+        ),
+        "host-key" => (
+            format!("{name}'s ssh identity changed"),
+            "Its host key isn't the one this computer saved. That's expected after reinstalling its system; otherwise something may be in the way. Remove the old key from known_hosts (ssh shows the line), then connect once to accept the new one.".to_string(),
+            Some(format!("ssh {host}")),
+        ),
+        _ if spec.is_local() => (format!("Couldn't check {name}"), error.clone(), None),
+        _ if error.to_ascii_lowercase().starts_with("timed out after") => (
+            format!("{name} didn't finish the check"),
+            "ssh connected, but the check took too long. The machine may be very busy, or the connection is poor.".to_string(),
+            Some(format!("ssh {host}")),
+        ),
+        _ => (format!("Can't reach {name}"), "The check over ssh failed; trying it in a terminal shows what ssh says.".to_string(), Some(format!("ssh {host}"))),
+    };
+    Unreachable { kind: kind.into(), title, detail, hint, last_seen_at: p.last_seen_at, error }
 }
 
 fn summarize<'a>(runners: impl Iterator<Item = &'a Runner>) -> RunnerSummary {
@@ -426,7 +502,7 @@ fn runner_diagnostics(
     }
 }
 
-fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Option<&ProbeResult>) {
+fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Option<&ProbeResult>, unreachable: Option<&Unreachable>) {
     if !spec.is_checkable() {
         out.push(diag(
             "info",
@@ -439,9 +515,10 @@ fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Opt
     }
     let Some(p) = probe else { return };
     if !p.ok {
-        let reason = p.error.clone().unwrap_or_else(|| "The check failed.".into());
-        let hint = (!spec.is_local()).then(|| format!("ssh {}  # must work without a password prompt", spec.host.trim()));
-        out.push(diag("error", "unreachable", format!("Unreachable: {reason}"), hint, None));
+        if let Some(u) = unreachable {
+            let level = if comes_back_by_itself(&u.kind) { "warning" } else { "error" };
+            out.push(diag(level, "unreachable", format!("{}. {}", u.title, u.detail), u.hint.clone(), None));
+        }
         return;
     }
     if let (Some(total), Some(free)) = (p.disk_total, p.disk_free) {
@@ -624,14 +701,18 @@ fn attention(
         [m] => out.push(Attention {
             id: "unreachable".into(),
             level: "warning".into(),
-            title: format!("{} is unreachable", m.name),
-            detail: m.probe.as_ref().and_then(|p| p.error.clone()).unwrap_or_default(),
+            title: m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("{} is unreachable", m.name)),
+            detail: m.unreachable.as_ref().map(|u| u.detail.clone()).unwrap_or_default(),
             action: action("View machine", "machine", Some(m.id.clone())),
         }),
         many => out.push(Attention {
             id: "unreachable".into(),
             level: "warning".into(),
-            title: format!("{} machines are unreachable", many.len()),
+            title: if many.iter().all(|m| m.unreachable.as_ref().is_some_and(|u| u.kind == "offline")) {
+                format!("{} machines are offline", many.len())
+            } else {
+                format!("{} machines can't be reached", many.len())
+            },
             detail: many.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "),
             action: action("Check again", "check", None),
         }),
@@ -920,18 +1001,50 @@ mod tests {
     }
 
     #[test]
-    fn unreachable_machine_is_an_error_diagnostic() {
+    fn a_machine_that_was_shut_down_is_offline_in_plain_words() {
         let inv = inventory("[[machine]]\nname = \"Mini\"\nhost = \"mini\"\nrunners = [\"m-01\"]\n");
         let mut probes = HashMap::new();
+        let seen = Utc::now() - chrono::Duration::minutes(5);
         probes.insert(
             "mini".to_string(),
-            ProbeResult { ok: false, error: Some("ssh: connect timed out".into()), ..Default::default() },
+            ProbeResult {
+                ok: false,
+                error: Some("ssh: connect to host 192.168.1.20 port 22: Operation timed out".into()),
+                os: Some("linux".into()),
+                arch: Some("x86_64".into()),
+                last_seen_at: Some(seen),
+                ..Default::default()
+            },
         );
         let snap = run(&inv, &Settings::default(), &probes, None);
-        assert_eq!(snap.machines[0].status, "offline");
-        assert_eq!(snap.machines[0].diagnostics[0].code, "unreachable");
+        let m = &snap.machines[0];
+        assert_eq!(m.status, "offline");
+        assert_eq!(m.platform, "linux-x64", "keeps the OS the last check found");
+        let u = m.unreachable.as_ref().unwrap();
+        assert_eq!((u.kind.as_str(), u.title.as_str()), ("offline", "Mini is offline"));
+        assert_eq!(u.hint, None, "nothing to fix when it's just off");
+        assert_eq!(u.last_seen_at, Some(seen));
+        assert_eq!((m.diagnostics[0].code.as_str(), m.diagnostics[0].level.as_str()), ("unreachable", "warning"));
         assert_eq!(snap.runners[0].state, "unknown");
-        assert!(snap.attention.iter().any(|a| a.id == "unreachable"));
+        assert!(snap.attention.iter().any(|a| a.id == "unreachable" && a.title == "Mini is offline"));
+    }
+
+    #[test]
+    fn names_why_a_machine_cant_be_reached() {
+        for (error, kind) in [
+            ("ssh: connect to host beelink port 22: Operation timed out", "offline"),
+            ("ssh: connect to host 10.0.0.4 port 22: No route to host", "offline"),
+            ("ssh: connect to host 10.0.0.4 port 22: Host is down", "offline"),
+            ("ssh: connect to host 10.0.0.4 port 22: Connection refused", "refused"),
+            ("kex_exchange_identification: Connection closed by remote host", "refused"),
+            ("adib@beelink: Permission denied (publickey,password).", "auth"),
+            ("ssh: Could not resolve hostname beelnk: nodename nor servname provided, or not known", "unknown-host"),
+            ("@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key verification failed.", "host-key"),
+            ("Timed out after 30s", "error"),
+            ("bash: sh: command not found", "error"),
+        ] {
+            assert_eq!(unreachable_kind(error), kind, "{error}");
+        }
     }
 
     #[test]

@@ -170,6 +170,8 @@ pub struct Machine {
     pub sessions_error: Option<String>,
     /// The GitHub CLI there, once looked up.
     pub gh: Option<GhCli>,
+    /// Why it can't be reached, when `status` is "offline".
+    pub unreachable: Option<Unreachable>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -206,6 +208,26 @@ pub struct Probe {
     pub docker: Option<String>,
     /// Linux: "root" | "passwordless" | "password" — whether Muxen can install systemd services.
     pub sudo: Option<String>,
+    /// The last time a check reached the machine.
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
+/// Why a machine can't be reached, in plain words.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Unreachable {
+    /// "offline" (no answer: shut down, asleep, off the network) | "refused" |
+    /// "auth" | "unknown-host" | "host-key" | "error"
+    pub kind: String,
+    /// e.g. "Beelink is offline".
+    pub title: String,
+    pub detail: String,
+    /// A command to try, when there's a fix on this side.
+    pub hint: Option<String>,
+    /// The last time a check reached it.
+    pub last_seen_at: Option<DateTime<Utc>>,
+    /// What the check said, word for word.
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

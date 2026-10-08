@@ -7,7 +7,7 @@ use super::kit::{self, Button, ButtonStyle, card, chip, icon, kv, meter, pill, s
 use super::overview::page;
 use super::theme::{ActiveTheme, mono_font, Theme};
 use super::root::{Route, Root};
-use crate::fleet::model::{Diagnostic, Machine, Operation, Runner, Snapshot};
+use crate::fleet::model::{Diagnostic, Machine, Operation, Runner, Snapshot, Unreachable};
 use crate::ops::RunnerAction;
 
 impl Root {
@@ -24,8 +24,16 @@ impl Root {
         if !m.platform.is_empty() {
             meta.push(m.platform.clone());
         }
-        if let Some(v) = p.and_then(|p| p.os_version.clone()) {
+        // The last check that reached it found this (an offline one keeps it).
+        if let Some(v) = m.probe.as_ref().and_then(|p| p.os_version.clone()) {
             meta.push(v);
+        }
+        let offline = m.status == "offline";
+        if offline {
+            // Whatever we knew about its connection and git is stale now;
+            // look again when it's back.
+            self.machine_conn.remove(&m.id);
+            self.machine_git.remove(&m.id);
         }
         let checked = match &m.probe {
             Some(p) => format!("Checked {} in {:.1}s", format::ago(Some(p.checked_at)), p.duration_ms as f64 / 1000.0),
@@ -57,7 +65,7 @@ impl Root {
                                     .items_center()
                                     .gap(px(10.))
                                     .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(m.name.clone()))
-                                    .child(pill(status_label(&m), theme.machine_status(&m.status))),
+                                    .child(pill(status_label(&m), theme.machine_status(&m))),
                             )
                             .child(div().font_family(mono_font()).text_size(px(12.)).text_color(theme.text_muted).child(meta.join("  ·  ")))
                             .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(checked)),
@@ -72,14 +80,14 @@ impl Root {
                         Button::new("m-install", "Install runner")
                             .icon("plus")
                             .style(ButtonStyle::Primary)
-                            .disabled(m.host.is_empty() || busy)
+                            .disabled(m.host.is_empty() || busy || offline)
                             .on_click(cx.listener(move |this, _, window, cx| this.show_install_dialog(&mid, window, cx)))
                     })
                     .child({
                         let mid = m.id.clone();
                         Button::new("m-session", "New session")
                             .icon("square-terminal")
-                            .disabled(m.host.is_empty())
+                            .disabled(m.host.is_empty() || offline)
                             .on_click(cx.listener(move |this, _, window, cx| this.show_new_session(Some(mid.clone()), window, cx)))
                     })
                     .child({
@@ -101,8 +109,8 @@ impl Root {
 
         let mut body = page("machine-page", &self.page_scroll).child(header);
 
-        if let Some(err) = m.probe.as_ref().and_then(|p| p.error.clone()).filter(|_| m.status == "offline") {
-            body = body.child(error_box(&theme, &err));
+        if let Some(u) = m.unreachable.as_ref().filter(|_| offline) {
+            body = body.child(self.unreachable_card(&theme, &m, u, cx));
         }
 
         if let Some(p) = p {
@@ -149,7 +157,8 @@ impl Root {
 
         if !m.host.is_empty() {
             body = body.child(self.machine_sessions(&theme, &s, &m, cx));
-            if !m.platform.starts_with("windows") {
+            // Connection and git are about a machine we can reach.
+            if !m.platform.starts_with("windows") && !offline {
                 if m.host != "local" {
                     body = body.child(self.machine_connection(&theme, &m, cx));
                 }
@@ -168,7 +177,7 @@ impl Root {
                     .child(section_title(&theme, "Runners", Some(runners.len())))
                     .child(card(&theme).children(rows)),
             );
-        } else if !m.host.is_empty() {
+        } else if !m.host.is_empty() && !offline {
             let mid = m.id.clone();
             body = body.child(
                 card(&theme)
@@ -183,12 +192,15 @@ impl Root {
                     .child(
                         Button::new("m-install-empty", "Install runner")
                             .icon("plus")
+                            .disabled(offline)
                             .on_click(cx.listener(move |this, _, window, cx| this.show_install_dialog(&mid, window, cx))),
                     ),
             );
         }
 
-        body = body.child(diagnostics_section(&theme, &m.diagnostics, &s));
+        // Being unreachable has its own card above.
+        let diags: Vec<Diagnostic> = m.diagnostics.iter().filter(|d| d.code != "unreachable").cloned().collect();
+        body = body.child(diagnostics_section(&theme, &diags, &s));
         if !m.host.is_empty() {
             body = body.child(self.machine_workspaces(&theme, &s, &m, cx));
         }
@@ -522,7 +534,7 @@ fn diagnostics_section(theme: &Theme, diags: &[Diagnostic], _s: &Snapshot) -> An
 
 /// A hint line; commands get a copy button.
 fn copyable(theme: &Theme, i: usize, text: String) -> impl IntoElement {
-    let looks_like_command = ["gh ", "ssh ", "sudo ", "cd ", "Start-Service", "systemctl", "launchctl"].iter().any(|p| text.starts_with(p));
+    let looks_like_command = ["gh ", "ssh ", "ssh-", "sudo ", "cd ", "Start-Service", "systemctl", "launchctl"].iter().any(|p| text.starts_with(p));
     let copy = text.clone();
     div()
         .flex()
@@ -555,18 +567,108 @@ fn metric_card(theme: &Theme, title: &'static str, value: Option<String>, sub: O
         .children(sub.map(|s| div().truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(s)))
 }
 
-fn error_box(theme: &Theme, err: &str) -> impl IntoElement {
-    div()
-        .flex()
-        .items_start()
-        .gap(px(10.))
-        .p(px(12.))
-        .rounded(px(8.))
-        .border_1()
-        .border_color(theme.error.opacity(0.5))
-        .bg(theme.error.opacity(0.08))
-        .child(icon("circle-x", 14., theme.error))
-        .child(div().flex_1().font_family(mono_font()).text_size(px(12.)).child(err.to_string()))
+impl Root {
+    /// Why the machine can't be reached, calmly: what probably happened, when
+    /// it was last reached, a way to check again, and what ssh said (folded).
+    fn unreachable_card(&self, theme: &Theme, m: &Machine, u: &Unreachable, cx: &mut Context<Self>) -> AnyElement {
+        let just_offline = u.kind == "offline";
+        let (glyph, color) = match u.kind.as_str() {
+            "offline" => ("power", theme.text_muted),
+            "refused" => ("unplug", theme.warning),
+            "auth" | "host-key" => ("lock", theme.error),
+            _ => ("circle-alert", theme.error),
+        };
+        let open = self.offline_details.contains(&m.id);
+        // "Last reached 12m ago · checked just now"
+        let when = [
+            u.last_seen_at.map(|t| format!("Last reached {}", format::ago(Some(t)))),
+            m.probe.as_ref().map(|p| format!("checked {}", format::ago(Some(p.checked_at)))),
+        ];
+        let mut when: Vec<String> = when.into_iter().flatten().collect();
+        if let Some(first) = when.first_mut() {
+            first[..1].make_ascii_uppercase();
+        }
+        let when = when.join(" · ");
+        let mid = m.id.clone();
+        card(theme)
+            .p(px(16.))
+            .flex_row()
+            .items_start()
+            .gap(px(14.))
+            .when(!just_offline, |d| d.border_color(color.opacity(0.45)))
+            .child(
+                div()
+                    .size(px(34.))
+                    .flex_none()
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(color.opacity(0.12))
+                    .child(icon(glyph, 16., color)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .gap(px(6.))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(u.title.clone()))
+                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(u.detail.clone()))
+                    .children(u.hint.clone().map(|h| copyable(theme, 1000, h)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .pt(px(2.))
+                            .text_size(px(11.5))
+                            .text_color(theme.text_placeholder)
+                            .child(when)
+                            .child("·")
+                            .child(
+                                div()
+                                    .id("m-offline-details")
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(3.))
+                                    .cursor_pointer()
+                                    .hover(|st| st.text_color(theme.text_muted))
+                                    .child(icon(if open { "chevron-down" } else { "chevron-right" }, 11., theme.text_placeholder))
+                                    .child("What ssh said")
+                                    .on_click(cx.listener({
+                                        let mid = mid.clone();
+                                        move |this, _, _, cx| {
+                                            if !this.offline_details.remove(&mid) {
+                                                this.offline_details.insert(mid.clone());
+                                            }
+                                            cx.notify();
+                                        }
+                                    })),
+                            ),
+                    )
+                    .when(open, |d| {
+                        d.child(
+                            div()
+                                .p(px(8.))
+                                .rounded(px(6.))
+                                .bg(theme.element)
+                                .font_family(mono_font())
+                                .text_size(px(11.5))
+                                .text_color(theme.text_muted)
+                                .child(u.error.clone()),
+                        )
+                    }),
+            )
+            .child(
+                Button::new("m-offline-check", "Check again")
+                    .icon("refresh-cw")
+                    .loading(m.checking)
+                    .on_click(cx.listener(move |this, _, _, _| this.engine.trigger_check(Some(mid.clone())))),
+            )
+            .into_any_element()
+    }
 }
 
 fn gone(theme: &Theme, text: &'static str) -> impl IntoElement {
@@ -580,7 +682,7 @@ fn status_dot_text(_theme: &Theme, text: &str, color: gpui::Hsla) -> impl IntoEl
 fn status_label(m: &Machine) -> &'static str {
     match m.status.as_str() {
         "online" => "Online",
-        "offline" => "Unreachable",
+        "offline" => format::unreachable_word(m),
         "manual" => "No host",
         _ => "Not checked",
     }

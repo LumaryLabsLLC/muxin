@@ -219,6 +219,8 @@ pub struct Root {
     /// How each machine is reached (the machine page's Connection card), and changes in flight.
     pub(super) machine_conn: std::collections::HashMap<String, super::github::Load<crate::fleet::connection::Connection>>,
     pub(super) conn_changing: std::collections::HashSet<String>,
+    /// Machines whose "can't reach it" card shows what ssh said.
+    pub(super) offline_details: std::collections::HashSet<String>,
     /// The open right-click menu.
     pub(super) context_menu: Option<super::menu::ContextMenu>,
     /// Focus the root on the next render (the focused terminal went away).
@@ -314,6 +316,7 @@ impl Root {
             git_fixing: Default::default(),
             machine_conn: Default::default(),
             conn_changing: Default::default(),
+            offline_details: Default::default(),
             last_notice: None,
             refocus: false,
             context_menu: None,
@@ -1205,7 +1208,7 @@ impl Root {
                         .child(if m.checking {
                             spinner(SharedString::from(format!("side-spin-{}", m.id)), 10., theme.text_muted).into_any_element()
                         } else {
-                            kit::dot(theme.machine_status(&m.status), 8.).into_any_element()
+                            kit::dot(theme.machine_status(&m), 8.).into_any_element()
                         }),
                 ),
             )

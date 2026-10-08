@@ -105,6 +105,8 @@ pub struct DesktopView {
     last_move: Instant,
     scroll_rest: f32,
     frames: u64,
+    /// Why the machine can't be reached ("Beelink is offline"), while it can't.
+    offline: Option<String>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -135,10 +137,45 @@ impl DesktopView {
             last_move: Instant::now(),
             scroll_rest: 0.,
             frames: 0,
+            offline: None,
             _tasks: Vec::new(),
         };
         view.start(window, cx);
+        // Follow the machine: say so when it goes offline, and pick the stream
+        // back up when it returns.
+        let mut rx = view.engine.subscribe();
+        let id = view.machine.clone();
+        let follow = cx.spawn_in(window, async move |this, cx| {
+            let mut last: Option<Option<String>> = None;
+            loop {
+                let offline = {
+                    let snap = rx.borrow_and_update();
+                    snap.machines.iter().find(|m| m.id == id).and_then(|m| {
+                        (m.status == "offline").then(|| m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("Can't reach {}", m.name)))
+                    })
+                };
+                if last.as_ref() != Some(&offline) {
+                    last = Some(offline.clone());
+                    if this.update_in(cx, |this, window, cx| this.set_offline(offline, window, cx)).is_err() {
+                        break;
+                    }
+                }
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
+        view._tasks.push(follow);
         view
+    }
+
+    fn set_offline(&mut self, offline: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let back = self.offline.is_some() && offline.is_none();
+        self.offline = offline;
+        if back && !matches!(self.state, State::Live) {
+            self.start(window, cx);
+        }
+        cx.notify();
     }
 
     /// The frame width in use, for the resolution picker.
@@ -269,6 +306,9 @@ impl DesktopView {
 
     /// "Live", "Connecting…" or why it ended, for the page header.
     pub fn status(&self) -> String {
+        if let (Some(why), false) = (&self.offline, matches!(self.state, State::Live)) {
+            return why.clone();
+        }
         match &self.state {
             State::Connecting => "Connecting…".into(),
             State::Live if self.frame.is_none() => "Waiting for the first frame…".into(),
@@ -447,10 +487,31 @@ impl Render for DesktopView {
             },
         )
         .size_full();
-        let waiting = match &self.state {
-            State::Ended(why) => Some(div().flex().flex_col().items_center().gap(px(10.)).child(icon("monitor", 28., theme.text_placeholder)).child(
-                div().max_w(px(460.)).text_center().text_size(px(13.)).text_color(theme.text_muted).child(why.clone()),
-            )),
+        let offline = self.offline.clone().filter(|_| !matches!(self.state, State::Live));
+        let waiting = match (&self.state, offline) {
+            (_, Some(why)) => Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(icon("power", 28., theme.text_placeholder))
+                    .child(div().text_size(px(14.)).text_color(theme.text).child(why))
+                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child("The desktop comes back here when the machine does.")),
+            ),
+            (State::Ended(why), None) => Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(icon("monitor", 28., theme.text_placeholder))
+                    .child(div().max_w(px(460.)).text_center().text_size(px(13.)).text_color(theme.text_muted).child(why.clone()))
+                    .child(Button::new("desktop-retry", "Try again").icon("refresh-cw").on_click(cx.listener(|this, _, window, cx| {
+                        this.start(window, cx);
+                        cx.notify();
+                    }))),
+            ),
             _ if self.frame.is_none() => Some(
                 div().flex().items_center().gap(px(10.)).child(spinner("desktop-wait", 16., theme.text_muted)).child(
                     div().text_size(px(13.)).text_color(theme.text_muted).child(self.status()),
@@ -467,7 +528,8 @@ impl Render for DesktopView {
             .bg(gpui::black())
             .cursor_default()
             .child(picture)
-            .children(waiting.map(|w| div().absolute().inset_0().flex().items_center().justify_center().child(w)))
+            // Over the last picture, dimmed: it's no longer live.
+            .children(waiting.map(|w| div().absolute().inset_0().flex().items_center().justify_center().when(self.frame.is_some(), |d| d.bg(gpui::black().opacity(0.72))).child(w)))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, w, cx| this.mouse_button(e.button, e.position, true, w, cx)))
             .on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, w, cx| this.mouse_button(e.button, e.position, true, w, cx)))

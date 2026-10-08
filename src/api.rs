@@ -378,8 +378,16 @@ pub struct MachineSummary {
     /// Worst diagnostic level: "error" | "warning" | "unknown" | "info" | null
     pub worst: Option<String>,
     pub checked_at: Option<DateTime<Utc>>,
+    /// The last time a check reached it.
+    pub last_seen_at: Option<DateTime<Utc>>,
+    /// What the last check said, word for word, when it failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Why it can't be reached, in plain words: `kind` is "offline" (shut
+    /// down, asleep, off the network: nothing to fix), "refused", "auth",
+    /// "unknown-host", "host-key" or "error"; `hint` is a command to try.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreachable: Option<crate::fleet::model::Unreachable>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -583,7 +591,9 @@ pub fn machine_summary(m: &Machine) -> MachineSummary {
         problems,
         worst,
         checked_at: m.probe.as_ref().map(|p| p.checked_at),
+        last_seen_at: m.probe.as_ref().and_then(|p| p.last_seen_at),
         error: m.probe.as_ref().filter(|p| !p.ok).and_then(|p| p.error.clone()),
+        unreachable: m.unreachable.clone(),
     }
 }
 
@@ -591,7 +601,8 @@ fn machine_detail(s: &Snapshot, m: &Machine) -> MachineDetail {
     let p = m.probe.as_ref().filter(|p| p.ok);
     MachineDetail {
         summary: machine_summary(m),
-        os_version: p.and_then(|p| p.os_version.clone()),
+        // An offline machine keeps what the last check that reached it found.
+        os_version: m.probe.as_ref().and_then(|p| p.os_version.clone()),
         cores: p.and_then(|p| p.cores),
         load: p.map(|p| p.load.clone()).unwrap_or_default(),
         mem_used_bytes: p.and_then(|p| p.mem_used),

@@ -87,9 +87,13 @@ impl Root {
             .or_else(|| entries.first().map(|e| e.item()))
     }
 
-    pub(super) fn render_activity(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_activity(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let s = self.snapshot.clone();
+        // Nothing has ever happened: show how to make something happen instead of empty panes.
+        if s.operations.is_empty() && s.workspaces.iter().all(|w| w.history.is_empty()) {
+            return self.activity_welcome(&theme, &s, cx);
+        }
         let entries = feed(&s, self.activity_filter);
         let selected = self.selected_activity(&s);
         let running = s.operations.iter().filter(|o| o.status == "running").count();
@@ -175,7 +179,9 @@ impl Root {
                             .on_click(cx.listener(|this, _, _, _| this.engine.clear_operations())),
                     ),
             )
-            .child(
+            .child(if empty {
+                filtered_empty(&theme, self.activity_filter)
+            } else {
                 div()
                     .flex()
                     .flex_1()
@@ -185,19 +191,7 @@ impl Root {
                     .pb(px(24.))
                     .child(
                         card(&theme).w(px((self.content_width * 0.36).clamp(260., 380.))).flex_none().overflow_hidden().child(
-                            div()
-                                .id("activity-feed")
-                                .size_full()
-                                .overflow_y_scroll()
-                                .p(px(6.))
-                                .children(list)
-                                .when(empty, |d| {
-                                    d.child(kit::empty_state(
-                                        &theme,
-                                        "activity",
-                                        "Nothing yet. Installs, restarts, log requests and the commands agents run in workspaces show up here.",
-                                    ))
-                                }),
+                            div().id("activity-feed").size_full().overflow_y_scroll().p(px(6.)).children(list),
                         ),
                     )
                     .child(div().flex().flex_col().flex_1().min_w(px(0.)).children(detail).when(!has_detail, |d| {
@@ -210,8 +204,96 @@ impl Root {
                                 .text_color(theme.text_placeholder)
                                 .child("Select an entry to see its output."),
                         )
-                    })),
+                    }))
+                    .into_any_element()
+            })
+            .into_any_element()
+    }
+
+    /// First run: what shows up here, and three ways to make something happen.
+    fn activity_welcome(&self, theme: &Theme, s: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+        let width = self.content_width.min(480.);
+        let target = s.machines.iter().find(|m| m.status == "online").or(s.machines.first()).map(|m| (m.id.clone(), m.name.clone()));
+        let install_detail = match &target {
+            Some((_, name)) => format!("Register a GitHub Actions runner on {name}."),
+            None => "Add a machine first, then put a runner on it.".into(),
+        };
+        let mcp = mcp_add_command();
+
+        div()
+            .id("activity-welcome")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .items_center()
+            .px(px(28.))
+            .pt(px(72.))
+            .pb(px(40.))
+            .child(kit::tile("activity", kit::tiles::ACTIVITY.0, kit::tiles::ACTIVITY.1, 56.))
+            .child(div().mt(px(18.)).text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("No activity yet"))
+            .child(
+                div().mt(px(8.)).w(px(width)).text_center().text_size(px(13.)).text_color(theme.text_muted).child(
+                    "Everything Muxen does on your machines lands here with its full output: runner installs and restarts, log requests, workspace setup, and the commands agents run.",
+                ),
             )
+            .child(
+                card(theme)
+                    .mt(px(28.))
+                    .w(px(width))
+                    .overflow_hidden()
+                    .child(start_row(theme, "start-install", "box", kit::tiles::OVERVIEW, "Install a runner", install_detail, "chevron-right", width).on_click(
+                        cx.listener(move |this, _, window, cx| match &target {
+                            Some((id, _)) => this.show_install_dialog(id, window, cx),
+                            None => this.show_add_machine(window, cx),
+                        }),
+                    ))
+                    .child(
+                        start_row(
+                            theme,
+                            "start-workspace",
+                            "terminal",
+                            kit::tiles::WORKSPACES,
+                            "Start an agent workspace",
+                            "A persistent work environment for agents, on the host or in Docker.".into(),
+                            "chevron-right",
+                            width,
+                        )
+                        .border_t_1()
+                        .border_color(theme.border_variant)
+                        .on_click(cx.listener(|this, _, window, cx| this.show_new_workspace(None, window, cx))),
+                    )
+                    .child(
+                        start_row(
+                            theme,
+                            "start-agent",
+                            "zap",
+                            kit::tiles::JOBS,
+                            "Connect an agent",
+                            "Copy the command that adds Muxen to Claude Code over MCP.".into(),
+                            "copy",
+                            width,
+                        )
+                        .border_t_1()
+                        .border_color(theme.border_variant)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(mcp.clone()));
+                            this.notify_user("Copied the Claude Code command", false, cx);
+                        })),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(18.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(12.))
+                    .text_color(theme.text_placeholder)
+                    .child("Open Activity from anywhere with")
+                    .child(kit::kbd(theme, "⌘J")),
+            )
+            .into_any_element()
     }
 
     fn feed_row(&self, theme: &Theme, e: &Entry, selected: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -430,7 +512,7 @@ fn kind_label(kind: &str) -> &'static str {
     }
 }
 
-/// Colors OpenRunner's own lines (see the conventions in crate::ops).
+/// Colors Muxen's own lines (see the conventions in crate::ops).
 fn log_line(theme: &Theme, line: &str) -> AnyElement {
     let color = if line.starts_with("▸ ") {
         theme.text_accent
@@ -444,4 +526,73 @@ fn log_line(theme: &Theme, line: &str) -> AnyElement {
         theme.text_muted
     };
     div().text_color(color).child(line.to_string()).into_any_element()
+}
+
+/// A row on the first-run card: tile, title, one line of detail, trailing icon.
+#[allow(clippy::too_many_arguments)]
+fn start_row(
+    theme: &Theme,
+    id: &'static str,
+    icon_name: &'static str,
+    colors: (u32, u32),
+    title: &'static str,
+    detail: String,
+    trailing: &'static str,
+    width: f32,
+) -> gpui::Stateful<gpui::Div> {
+    // Card width minus padding, tile, gaps and the trailing icon; the detail wraps within it.
+    let text_w = (width - 28. - 32. - 24. - 16.).max(80.);
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(12.))
+        .px(px(14.))
+        .py(px(12.))
+        .cursor_pointer()
+        .hover(|st| st.bg(theme.ghost_hover))
+        .child(kit::tile(icon_name, colors.0, colors.1, 32.))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .w(px(text_w))
+                .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child(title))
+                .child(div().w(px(text_w)).text_size(px(12.)).text_color(theme.text_muted).child(detail)),
+        )
+        .child(div().flex_1())
+        .child(icon(trailing, 14., theme.text_placeholder))
+}
+
+/// The filter matched nothing (but there is other activity).
+fn filtered_empty(theme: &Theme, filter: ActivityFilter) -> AnyElement {
+    let (icon_name, color, title, body) = match filter {
+        ActivityFilter::Failed => ("circle-check", theme.success, "Nothing failed", "Failed operations and agent commands that exit non-zero show up here."),
+        ActivityFilter::Operations => {
+            ("activity", theme.text_muted, "No operations yet", "Runner installs, restarts, log requests and workspace setup show up here.")
+        }
+        ActivityFilter::Agents => ("terminal", theme.text_muted, "No agent commands yet", "Commands agents run in workspaces show up here with their output."),
+        ActivityFilter::All => ("activity", theme.text_muted, "Nothing here", "Activity shows up here as it happens."),
+    };
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(8.))
+        .px(px(28.))
+        .pb(px(80.))
+        .child(div().size(px(44.)).mb(px(4.)).rounded_full().bg(theme.element).flex().items_center().justify_center().child(icon(icon_name, 20., color)))
+        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title))
+        .child(div().w(px(340.)).text_center().text_size(px(12.5)).text_color(theme.text_muted).child(body))
+        .into_any_element()
+}
+
+/// `claude mcp add` for this binary, quoted when its path has spaces.
+fn mcp_add_command() -> String {
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "muxen".into());
+    let exe = if exe.contains(' ') { format!("'{exe}'") } else { exe };
+    format!("claude mcp add muxen -- {exe} mcp")
 }

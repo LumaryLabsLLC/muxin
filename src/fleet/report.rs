@@ -1,4 +1,4 @@
-//! Plain-text fleet report for `openrunner check`.
+//! Plain-text fleet report for `muxen check`.
 
 use std::fmt::Write;
 

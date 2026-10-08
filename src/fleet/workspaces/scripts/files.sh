@@ -29,9 +29,9 @@ list)
   cd "$or_target" || exit 3
   # Lines: kind<TAB>size<TAB>path, kind f (file), d (folder) or l (link).
   if find . -maxdepth 0 -printf '' >/dev/null 2>&1; then
-    find . -mindepth 1 -maxdepth "$OR_DEPTH" \( -name .git -o -name .openrunner \) -prune -o -printf '%y\t%s\t%P\n' | head -n 2001
+    find . -mindepth 1 -maxdepth "$OR_DEPTH" \( -name .git -o -name .muxen \) -prune -o -printf '%y\t%s\t%P\n' | head -n 2001
   else
-    find . -mindepth 1 -maxdepth "$OR_DEPTH" \( -name .git -o -name .openrunner \) -prune -o -print | head -n 2001 | while IFS= read -r or_p; do
+    find . -mindepth 1 -maxdepth "$OR_DEPTH" \( -name .git -o -name .muxen \) -prune -o -print | head -n 2001 | while IFS= read -r or_p; do
       if [ -L "$or_p" ]; then or_k=l; elif [ -d "$or_p" ]; then or_k=d; else or_k=f; fi
       printf '%s\t%s\t%s\n' "$or_k" "$(or_size "$or_p")" "${or_p#./}"
     done

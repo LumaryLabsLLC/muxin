@@ -8,14 +8,14 @@ or_setup_failed() { printf '%s:exit=97\n' "$OR_MARK" >&2; exit 0; }
 if [ -n "$OR_CWD" ] && [ ! -d "$OR_DIR/$OR_CWD" ]; then or_fail "there's no folder $OR_CWD in the workspace"; fi
 or_docker_check || or_setup_failed
 or_docker_up "$OR_DIR" quiet || or_setup_failed
-mkdir -p "$OR_DIR/.openrunner/run" "$OR_DIR/.openrunner/logs"
+mkdir -p "$OR_DIR/.muxen/run" "$OR_DIR/.muxen/logs"
 
-export OPENRUNNER_WORKSPACE="$OR_ID" NO_COLOR=1 GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat PAGER=cat
-or_envs="-e OPENRUNNER_WORKSPACE -e NO_COLOR -e GIT_TERMINAL_PROMPT -e GIT_PAGER -e PAGER"
+export MUXEN_WORKSPACE="$OR_ID" NO_COLOR=1 GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat PAGER=cat
+or_envs="-e MUXEN_WORKSPACE -e NO_COLOR -e GIT_TERMINAL_PROMPT -e GIT_PAGER -e PAGER"
 for or_n in $OR_ENV; do or_envs="$or_envs -e $or_n"; done
 or_wd=/workspace${OR_CWD:+/$OR_CWD}
 # The command's pid (inside the container) is written here, so a timeout can kill it.
-or_pidfile=".openrunner/run/$OR_MARK.pid"
+or_pidfile=".muxen/run/$OR_MARK.pid"
 
 if [ "$OR_BG" = 1 ]; then
   # shellcheck disable=SC2086

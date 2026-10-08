@@ -1,0 +1,445 @@
+//! The machine's screen, for Muxen's desktop view: frames out, mouse and
+//! keyboard in. X11 for now (Linux desktops on Xorg).
+//!
+//! A link starts `muxen-agent screen` with the desktop session's DISPLAY
+//! and XAUTHORITY, and relays between it and a link channel:
+//!
+//! ```text
+//! screen → app   HELLO  JSON {"width", "height", "screen_width", "screen_height"} (or {"error"})
+//!                FRAME  [width: u16 BE][height: u16 BE][JPEG]  (only when the screen changed)
+//! app → screen   INPUT  JSON {"t": "move" | "button" | "scroll" | "key", ...}
+//! ```
+//!
+//! Coordinates are in frame pixels; the screen may be scaled down to fit
+//! `max_width`, and input is scaled back up.
+
+use std::path::PathBuf;
+
+use serde_json::Value;
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub const FRAME: u8 = 20;
+pub const INPUT: u8 = 21;
+pub const HELLO: u8 = 22;
+/// screen → app: only what changed, as JPEG patches (see `x11::run`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub const TILES: u8 = 23;
+
+/// DISPLAY and XAUTHORITY of this user's graphical session: our own when set,
+/// else borrowed from a process in that session.
+pub fn session_env() -> Option<Vec<(String, String)>> {
+    let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    if let Some(display) = get("DISPLAY") {
+        let mut env = vec![("DISPLAY".to_string(), display)];
+        if let Some(auth) = get("XAUTHORITY") {
+            env.push(("XAUTHORITY".to_string(), auth));
+        }
+        return Some(env);
+    }
+    let uid = unsafe { libc::getuid() };
+    let entries = std::fs::read_dir("/proc").ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.chars().all(|c| c.is_ascii_digit())) {
+            continue;
+        }
+        use std::os::unix::fs::MetadataExt;
+        if std::fs::metadata(&path).map(|m| m.uid()).ok() != Some(uid) {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(path.join("environ")) else { continue };
+        let vars: Vec<(String, String)> = raw
+            .split(|b| *b == 0)
+            .filter_map(|kv| std::str::from_utf8(kv).ok()?.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+            .filter(|(k, _)| k == "DISPLAY" || k == "XAUTHORITY")
+            .collect();
+        if vars.iter().any(|(k, v)| k == "DISPLAY" && !v.is_empty()) {
+            return Some(vars);
+        }
+    }
+    let home = std::env::var("HOME").map(PathBuf::from).ok()?;
+    let auth = home.join(".Xauthority");
+    auth.exists().then(|| vec![("DISPLAY".into(), ":0".into()), ("XAUTHORITY".into(), auth.display().to_string())])
+}
+
+/// `muxen-agent screen [fps] [quality] [max_width]`: streams the screen on
+/// stdout and applies input from stdin until either closes.
+pub fn run(args: &[String]) -> i32 {
+    let num = |i: usize, default: u32| args.get(i).and_then(|a| a.parse::<u32>().ok()).unwrap_or(default);
+    let (fps, quality, max_width) = (num(0, 30).clamp(1, 60), num(1, 75).clamp(20, 95), num(2, 1920).max(320));
+    let tiles = args.get(3).map(String::as_str) == Some("tiles");
+    #[cfg(target_os = "linux")]
+    {
+        x11::run(fps, quality as u8, max_width, tiles)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (fps, quality, max_width, tiles);
+        hello(&serde_json::json!({ "error": "Showing the desktop works on Linux (X11) machines so far." }));
+        1
+    }
+}
+
+fn hello(value: &Value) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = crate::proto::write_frame(&mut out, HELLO, &serde_json::to_vec(value).unwrap_or_default());
+    let _ = out.flush();
+}
+
+#[cfg(target_os = "linux")]
+mod x11 {
+    use std::collections::HashMap;
+    use std::io::Write;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use serde_json::{Value, json};
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{
+        BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConnectionExt as _, ImageFormat, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT,
+    };
+    use x11rb::protocol::xtest::ConnectionExt as _;
+
+    use super::{FRAME, INPUT, TILES, hello};
+    use crate::proto;
+
+    /// Where frames come from: shared memory with the X server when it
+    /// allows (no copying the screen through the socket), else GetImage.
+    struct Capture {
+        shm: std::cell::Cell<Option<(u32, *mut u8, usize)>>,
+    }
+
+    impl Capture {
+        fn new(conn: &impl Connection, size: usize) -> Capture {
+            use x11rb::protocol::shm::ConnectionExt as _;
+            let shm = (|| {
+                conn.shm_query_version().ok()?.reply().ok()?;
+                let id = unsafe { libc::shmget(libc::IPC_PRIVATE, size, libc::IPC_CREAT | 0o600) };
+                if id < 0 {
+                    return None;
+                }
+                let addr = unsafe { libc::shmat(id, std::ptr::null(), 0) };
+                // Freed once both sides let go.
+                let attached = (addr as isize != -1)
+                    .then(|| conn.generate_id().ok())
+                    .flatten()
+                    .filter(|seg| conn.shm_attach(*seg, id as u32, false).ok().and_then(|c| c.check().ok()).is_some());
+                unsafe { libc::shmctl(id, libc::IPC_RMID, std::ptr::null_mut()) };
+                attached.map(|seg| (seg, addr as *mut u8, size))
+            })();
+            Capture { shm: std::cell::Cell::new(shm) }
+        }
+
+        /// The whole screen, BGRX, `w * 4` bytes a row.
+        fn grab<'a>(&'a self, conn: &impl Connection, root: u32, w: u16, h: u16, scratch: &'a mut Vec<u8>) -> Option<&'a [u8]> {
+            use x11rb::protocol::shm::ConnectionExt as _;
+            if let Some((seg, addr, size)) = self.shm.get() {
+                if conn.shm_get_image(root, 0, 0, w, h, !0, ImageFormat::Z_PIXMAP.into(), seg, 0).ok().and_then(|c| c.reply().ok()).is_some() {
+                    return Some(unsafe { std::slice::from_raw_parts(addr, size) });
+                }
+                // Shared memory stopped working: copy through the socket from now on.
+                eprintln!("screen: shared-memory capture failed; using GetImage");
+                self.shm.set(None);
+            }
+            *scratch = conn.get_image(ImageFormat::Z_PIXMAP, root, 0, 0, w, h, !0).ok()?.reply().ok()?.data;
+            Some(scratch.as_slice())
+        }
+    }
+
+    /// How the screen maps onto the frame: frame pixel x covers source columns
+    /// `xs[x]..xs[x + 1]` (and the same for rows).
+    struct Scaler {
+        sw: usize,
+        fw: usize,
+        xs: Vec<usize>,
+        ys: Vec<usize>,
+    }
+
+    impl Scaler {
+        fn new(sw: usize, sh: usize, fw: usize, fh: usize) -> Scaler {
+            let edges = |src: usize, out: usize| (0..=out).map(|i| (i * src / out).min(src)).collect::<Vec<_>>();
+            Scaler { sw, fw, xs: edges(sw, fw), ys: edges(sh, fh) }
+        }
+
+        /// Frame rows `y0..y1` from the screen into `out` (BGRA, `fw * 4` a row).
+        fn rows(&self, src: &[u8], y0: usize, y1: usize, out: &mut [u8]) {
+            let (sw, fw) = (self.sw, self.fw);
+            if sw == fw {
+                for y in y0..y1 {
+                    let o = (y - y0) * fw * 4;
+                    out[o..o + fw * 4].copy_from_slice(&src[y * sw * 4..(y + 1) * sw * 4]);
+                }
+                return;
+            }
+            // Average each frame pixel's block of screen pixels.
+            for y in y0..y1 {
+                let (sy0, sy1) = (self.ys[y], self.ys[y + 1].max(self.ys[y] + 1));
+                for x in 0..fw {
+                    let (sx0, sx1) = (self.xs[x], self.xs[x + 1].max(self.xs[x] + 1));
+                    let mut sum = [0u32; 3];
+                    for sy in sy0..sy1 {
+                        let row = sy * sw * 4;
+                        for sx in sx0..sx1 {
+                            let p = row + sx * 4;
+                            sum[0] += src[p] as u32;
+                            sum[1] += src[p + 1] as u32;
+                            sum[2] += src[p + 2] as u32;
+                        }
+                    }
+                    let n = ((sy1 - sy0) * (sx1 - sx0)) as u32;
+                    let o = (y - y0) * fw * 4 + x * 4;
+                    out[o] = (sum[0] / n) as u8;
+                    out[o + 1] = (sum[1] / n) as u8;
+                    out[o + 2] = (sum[2] / n) as u8;
+                    out[o + 3] = 255;
+                }
+            }
+        }
+    }
+
+    /// A changed area and its JPEG.
+    struct Patch {
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+        jpeg: Vec<u8>,
+    }
+
+    fn encode(buf: &[u8], stride: usize, x: usize, y: usize, w: usize, h: usize, quality: u8) -> Option<Vec<u8>> {
+        let mut rect = Vec::with_capacity(w * h * 4);
+        for row in y..y + h {
+            let o = row * stride + x * 4;
+            rect.extend_from_slice(&buf[o..o + w * 4]);
+        }
+        let mut jpeg = Vec::with_capacity(w * h / 4);
+        jpeg_encoder::Encoder::new(&mut jpeg, quality).encode(&rect, w as u16, h as u16, jpeg_encoder::ColorType::Bgra).ok()?;
+        Some(jpeg)
+    }
+
+    const TILE: usize = 64;
+
+    /// `tiles`: only what changed, as JPEG strips (the live view). Otherwise
+    /// the whole frame as one JPEG whenever anything changed (screenshots).
+    pub fn run(fps: u32, quality: u8, max_width: u32, tiles: bool) -> i32 {
+        let (conn, screen_num) = match x11rb::connect(None) {
+            Ok(c) => c,
+            Err(e) => {
+                hello(&json!({ "error": format!("Can't reach the desktop ({e}). Is someone logged in to a graphical session?") }));
+                return 1;
+            }
+        };
+        let screen = &conn.setup().roots[screen_num];
+        let (root, sw, sh) = (screen.root, screen.width_in_pixels as usize, screen.height_in_pixels as usize);
+        let fw = (max_width as usize).min(sw);
+        let fh = (sh * fw / sw).max(1);
+        hello(&json!({ "width": fw, "height": fh, "screen_width": sw, "screen_height": sh }));
+        let scale = (sw as f64 / fw as f64, sh as f64 / fh as f64);
+        let scaler = Scaler::new(sw, sh, fw, fh);
+        let capture = Capture::new(&conn, sw * sh * 4);
+        let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 16);
+
+        // keysym → (keycode, needs shift)
+        let mut keys: HashMap<u32, (u8, bool)> = HashMap::new();
+        let (min, max) = (conn.setup().min_keycode, conn.setup().max_keycode);
+        if let Ok(Ok(map)) = conn.get_keyboard_mapping(min, max - min + 1).map(|c| c.reply()) {
+            let per = map.keysyms_per_keycode.max(1) as usize;
+            for (i, syms) in map.keysyms.chunks(per).enumerate() {
+                for (level, sym) in syms.iter().take(2).enumerate() {
+                    if *sym != 0 {
+                        keys.entry(*sym).or_insert((min + i as u8, level == 1));
+                    }
+                }
+            }
+        }
+
+        // Input arrives on stdin as frames.
+        let (tx, rx) = mpsc::channel::<Value>();
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin().lock();
+            while let Ok((kind, payload)) = proto::read_frame(&mut stdin) {
+                if kind == INPUT {
+                    if let Ok(v) = serde_json::from_slice::<Value>(&payload) {
+                        if tx.send(v).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let tick = Duration::from_millis(1000 / fps as u64);
+        let mut next = Instant::now();
+        let mut scratch = Vec::new();
+        let mut cur = vec![0u8; fw * fh * 4];
+        let mut prev: Option<Vec<u8>> = None;
+        let mut stdout = std::io::stdout().lock();
+        loop {
+            // Input first, until it's time for a frame; a frame soon after input
+            // shows its effect without waiting a whole tick.
+            match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
+                Ok(event) => {
+                    apply(&conn, root, scale, &keys, &event);
+                    while let Ok(more) = rx.try_recv() {
+                        apply(&conn, root, scale, &keys, &more);
+                    }
+                    let _ = conn.flush();
+                    next = next.min(Instant::now() + Duration::from_millis(12));
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return 0,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            next = Instant::now() + tick;
+            let Some(src) = capture.grab(&conn, root, sw as u16, sh as u16, &mut scratch) else { return 1 };
+            if src.len() < sw * sh * 4 {
+                return 1;
+            }
+
+            // Bands of tile rows, one per worker: scale, compare, encode what changed.
+            let band_rows = fh.div_ceil(TILE).div_ceil(workers) * TILE;
+            let previous = prev.as_deref();
+            let patches: Vec<Patch> = std::thread::scope(|s| {
+                let mut handles = Vec::new();
+                for (band, out) in cur.chunks_mut(band_rows * fw * 4).enumerate() {
+                    let (scaler, previous) = (&scaler, previous);
+                    handles.push(s.spawn(move || {
+                        let y0 = band * band_rows;
+                        let y1 = (y0 + band_rows).min(fh);
+                        scaler.rows(src, y0, y1, out);
+                        let mut found = Vec::new();
+                        let mut ty = y0;
+                        while ty < y1 {
+                            let th = TILE.min(y1 - ty);
+                            // Changed tiles in this row, merged into runs.
+                            let changed = |tx: usize| {
+                                let Some(p) = previous else { return true };
+                                let tw = TILE.min(fw - tx);
+                                (ty..ty + th).any(|y| {
+                                    let o = y * fw * 4 + tx * 4;
+                                    let l = (y - y0) * fw * 4 + tx * 4;
+                                    out[l..l + tw * 4] != p[o..o + tw * 4]
+                                })
+                            };
+                            let mut tx = 0;
+                            while tx < fw {
+                                if !changed(tx) {
+                                    tx += TILE;
+                                    continue;
+                                }
+                                let start = tx;
+                                while tx < fw && changed(tx) {
+                                    tx += TILE;
+                                }
+                                let w = tx.min(fw) - start;
+                                if let Some(jpeg) = encode(out, fw * 4, start, ty - y0, w, th, quality) {
+                                    found.push(Patch { x: start as u16, y: ty as u16, w: w as u16, h: th as u16, jpeg });
+                                }
+                            }
+                            ty += th;
+                        }
+                        found
+                    }));
+                }
+                handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+            });
+            if patches.is_empty() {
+                continue;
+            }
+            let sent = if tiles {
+                // [width][height][count] then each [x][y][w][h][len: u32][jpeg]
+                let mut msg = Vec::with_capacity(6 + patches.iter().map(|p| 12 + p.jpeg.len()).sum::<usize>());
+                for v in [fw as u16, fh as u16, patches.len() as u16] {
+                    msg.extend(v.to_be_bytes());
+                }
+                for p in &patches {
+                    for v in [p.x, p.y, p.w, p.h] {
+                        msg.extend(v.to_be_bytes());
+                    }
+                    msg.extend((p.jpeg.len() as u32).to_be_bytes());
+                    msg.extend(&p.jpeg);
+                }
+                proto::write_frame(&mut stdout, TILES, &msg)
+            } else {
+                let Some(jpeg) = encode(&cur, fw * 4, 0, 0, fw, fh, quality) else { continue };
+                let mut msg = Vec::with_capacity(4 + jpeg.len());
+                msg.extend((fw as u16).to_be_bytes());
+                msg.extend((fh as u16).to_be_bytes());
+                msg.extend(jpeg);
+                proto::write_frame(&mut stdout, FRAME, &msg)
+            };
+            if sent.and_then(|_| stdout.flush()).is_err() {
+                return 0;
+            }
+            // What the app has now, to compare the next frame with.
+            match &mut prev {
+                Some(p) => std::mem::swap(p, &mut cur),
+                None => prev = Some(cur.clone()),
+            }
+        }
+    }
+
+    fn apply(conn: &impl Connection, root: u32, scale: (f64, f64), keys: &HashMap<u32, (u8, bool)>, e: &Value) {
+        let at = |e: &Value| ((e["x"].as_f64().unwrap_or(0.) * scale.0) as i16, (e["y"].as_f64().unwrap_or(0.) * scale.1) as i16);
+        let fake = |kind: u8, detail: u8, x: i16, y: i16| {
+            let _ = conn.xtest_fake_input(kind, detail, 0, root, x, y, 0);
+        };
+        match e["t"].as_str().unwrap_or("") {
+            "move" => {
+                let (x, y) = at(e);
+                fake(MOTION_NOTIFY_EVENT, 0, x, y);
+            }
+            "button" => {
+                let (x, y) = at(e);
+                fake(MOTION_NOTIFY_EVENT, 0, x, y);
+                let b = e["b"].as_u64().unwrap_or(1).clamp(1, 9) as u8;
+                fake(if e["down"].as_bool().unwrap_or(false) { BUTTON_PRESS_EVENT } else { BUTTON_RELEASE_EVENT }, b, 0, 0);
+            }
+            "scroll" => {
+                let (x, y) = at(e);
+                fake(MOTION_NOTIFY_EVENT, 0, x, y);
+                // Wheel buttons: 4 up, 5 down, 6 left, 7 right; one click per notch.
+                for (amount, less, more) in [(e["dy"].as_i64().unwrap_or(0), 4u8, 5u8), (e["dx"].as_i64().unwrap_or(0), 6, 7)] {
+                    let button = if amount < 0 { less } else { more };
+                    for _ in 0..amount.unsigned_abs().min(20) {
+                        fake(BUTTON_PRESS_EVENT, button, 0, 0);
+                        fake(BUTTON_RELEASE_EVENT, button, 0, 0);
+                    }
+                }
+            }
+            "text" => {
+                // Typing, for agents: each character's key, with Shift when it needs it.
+                let shift = keys.get(&0xffe1).map(|(c, _)| *c);
+                for ch in e["s"].as_str().unwrap_or("").chars() {
+                    let sym = match ch {
+                        '\n' => 0xff0d,
+                        '\t' => 0xff09,
+                        c => c as u32,
+                    };
+                    let Some((code, needs_shift)) = keys.get(&sym).copied() else { continue };
+                    let shifted = needs_shift.then_some(shift).flatten();
+                    if let Some(s) = shifted {
+                        fake(KEY_PRESS_EVENT, s, 0, 0);
+                    }
+                    fake(KEY_PRESS_EVENT, code, 0, 0);
+                    fake(KEY_RELEASE_EVENT, code, 0, 0);
+                    if let Some(s) = shifted {
+                        fake(KEY_RELEASE_EVENT, s, 0, 0);
+                    }
+                    let _ = conn.flush();
+                }
+            }
+            "key" => {
+                let sym = e["keysym"].as_u64().unwrap_or(0) as u32;
+                // Letters arrive lowercase; shift comes as its own key.
+                let found = keys.get(&sym).or_else(|| char::from_u32(sym).map(|c| c.to_ascii_lowercase() as u32).and_then(|s| keys.get(&s)));
+                if let Some((code, _)) = found {
+                    let down = e["down"].as_bool().unwrap_or(false);
+                    fake(if down { KEY_PRESS_EVENT } else { KEY_RELEASE_EVENT }, *code, 0, 0);
+                }
+            }
+            _ => {}
+        }
+    }
+}

@@ -119,6 +119,18 @@ pub struct Appearance {
     pub mode: Mode,
     pub light: String,
     pub dark: String,
+    /// Sidebar width in pixels, as last dragged, and whether it's hidden.
+    pub sidebar_width: f32,
+    pub sidebar_hidden: bool,
+    /// Terminal text size in points, and line height as a multiple of it.
+    pub terminal_font_size: f32,
+    pub terminal_line_height: f32,
+    /// The GitHub page's repository list: grouped by owner, and the groups
+    /// toggled from how they start (owners start open, "shared with you" folded).
+    pub github_group_by_owner: bool,
+    pub github_folded_owners: Vec<String>,
+    /// A session page split with a desktop: the terminal's share of the width.
+    pub split_ratio: f32,
     /// Where to save; None in demo mode.
     #[serde(skip)]
     pub path: Option<PathBuf>,
@@ -126,7 +138,19 @@ pub struct Appearance {
 
 impl Default for Appearance {
     fn default() -> Self {
-        Appearance { mode: Mode::System, light: DEFAULT_LIGHT.into(), dark: DEFAULT_DARK.into(), path: None }
+        Appearance {
+            mode: Mode::System,
+            light: DEFAULT_LIGHT.into(),
+            dark: DEFAULT_DARK.into(),
+            sidebar_width: super::root::SIDEBAR_DEFAULT,
+            sidebar_hidden: false,
+            terminal_font_size: TERMINAL_FONT_SIZE,
+            terminal_line_height: TERMINAL_LINE_HEIGHT,
+            github_group_by_owner: false,
+            github_folded_owners: Vec::new(),
+            split_ratio: 0.5,
+            path: None,
+        }
     }
 }
 
@@ -183,6 +207,39 @@ pub fn apply(window: &Window, cx: &mut App) {
         *f = fonts;
     }
     cx.set_global(theme);
+}
+
+pub const TERMINAL_FONT_SIZE: f32 = 13.;
+pub const TERMINAL_LINE_HEIGHT: f32 = 1.3;
+
+/// Changes the terminal's font size or line height (kept in sensible
+/// ranges), saves it, and redraws.
+pub fn update_terminal(cx: &mut App, f: impl FnOnce(&mut Appearance)) {
+    let mut appearance = cx.global::<Appearance>().clone();
+    f(&mut appearance);
+    appearance.terminal_font_size = appearance.terminal_font_size.round().clamp(8., 32.);
+    appearance.terminal_line_height = ((appearance.terminal_line_height * 20.).round() / 20.).clamp(1., 2.);
+    appearance.save();
+    cx.set_global(appearance);
+    cx.refresh_windows();
+}
+
+/// Changes and saves a view preference; nothing needs re-theming.
+pub fn remember(cx: &mut App, f: impl FnOnce(&mut Appearance)) {
+    let mut appearance = cx.global::<Appearance>().clone();
+    f(&mut appearance);
+    appearance.save();
+    cx.set_global(appearance);
+}
+
+/// Remembers the sidebar width; nothing needs re-theming.
+pub fn save_sidebar_width(cx: &mut App, width: f32) {
+    let mut appearance = cx.global::<Appearance>().clone();
+    if appearance.sidebar_width != width {
+        appearance.sidebar_width = width;
+        appearance.save();
+        cx.set_global(appearance);
+    }
 }
 
 /// Changes the appearance preference, saves it, and re-themes the window.

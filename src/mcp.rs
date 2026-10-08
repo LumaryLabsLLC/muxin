@@ -1,4 +1,4 @@
-//! `openrunner mcp`: a Model Context Protocol server over stdio, so agents
+//! `muxen mcp`: a Model Context Protocol server over stdio, so agents
 //! (Claude Code, Codex, any MCP client) can inspect and run the fleet.
 //!
 //! Transport: newline-delimited JSON-RPC 2.0 on stdin/stdout. Stdout carries
@@ -19,7 +19,7 @@ use crate::fleet::Engine;
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 const INSTRUCTIONS: &str = "\
-OpenRunner manages a fleet of self-hosted GitHub Actions runners: the machines that host them \
+Muxen manages a fleet of self-hosted GitHub Actions runners: the machines that host them \
 (reached with the system ssh, or directly for host \"local\") and the runners on each.
 
 Start with fleet_status and read its `attention` list first; it names the problems worth fixing \
@@ -45,7 +45,20 @@ workspace_write_file and workspace_list_files work with its files; workspace_cha
 status and diff; workspace_sync moves code between the user's local checkout and the workspace. \
 Prefer one workspace per task, reuse it across steps, and call workspace_destroy when the task is \
 done: nothing is deleted automatically. Commands run as the user on a real machine, so don't do \
-anything there you wouldn't do in their own terminal without asking.";
+anything there you wouldn't do in their own terminal without asking.
+
+Agent sessions: long-running terminals on fleet machines, each running an AI agent CLI (Claude \
+Code, Codex, OpenCode, Gemini CLI, Amp) or a plain shell, kept alive by Muxen's agent on \
+the machine so they survive disconnects. The user watches and types into them in the Muxen app. session_list shows them \
+(and which agents each machine has); session_start starts one, optionally with a first prompt; \
+session_read returns its screen as text; session_send types into it; session_stop ends it. \
+Sessions belong to the user: only start, type into or stop one when they asked you to.
+
+GitHub: github_inbox (review requests, assigned issues, the user's PRs), github_repos (favorites first), github_repo \
+(open issues and PRs, Actions runs, and where it's checked out on the machines), github_item (an \
+issue or PR in full, by URL or owner/name#123). local_checkouts lists git checkouts on the machines; \
+git_sync fetches, pulls or pushes one. To fix an issue, start a session in a checkout of its repo \
+with the issue as the prompt.";
 
 /// Per-connection state: who the client is, so workspaces and commands record their owner.
 #[derive(Default)]
@@ -146,7 +159,7 @@ async fn handle(engine: &Arc<Engine>, session: &Session, method: &str, params: V
             Ok(json!({
                 "protocolVersion": version,
                 "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "openrunner", "title": "OpenRunner", "version": env!("CARGO_PKG_VERSION") },
+                "serverInfo": { "name": "muxen", "title": "Muxen", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": INSTRUCTIONS,
             }))
         }
@@ -169,6 +182,28 @@ async fn handle(engine: &Arc<Engine>, session: &Session, method: &str, params: V
 /// Runs a tool and wraps the outcome as an MCP tool result. Failures are
 /// results with `isError: true`, not protocol errors, so the model sees them.
 pub async fn call_tool(engine: &Arc<Engine>, session: &Session, name: &str, args: Value) -> Value {
+    // A screenshot comes back as an image the model can look at.
+    if name == "desktop_screenshot" {
+        let machine = args["machine_id"].as_str().unwrap_or("").to_string();
+        return match api::desktop_screenshot(engine, &machine).await {
+            Ok(shot) => {
+                use base64::Engine as _;
+                let about = format!(
+                    "{}×{} screenshot of {machine} (screen {}×{}). desktop_input coordinates are in these pixels.",
+                    shot.width, shot.height, shot.screen_width, shot.screen_height
+                );
+                json!({
+                    "content": [
+                        { "type": "image", "data": base64::engine::general_purpose::STANDARD.encode(&shot.jpeg), "mimeType": "image/jpeg" },
+                        { "type": "text", "text": about },
+                    ],
+                    "structuredContent": serde_json::to_value(&shot).unwrap_or_default(),
+                    "isError": false,
+                })
+            }
+            Err(err) => tool_result(json!({ "error": err }), None, true),
+        };
+    }
     let outcome = dispatch(engine, session, name, args).await;
     match outcome {
         Ok(value) => {
@@ -216,6 +251,14 @@ fn readable_text(tool: &str, v: &Value) -> Option<String> {
             Some(out)
         }
         "workspace_changes" => Some(str_of("changes").to_string()),
+        "session_read" => {
+            let state = match (str_of("status"), v.get("busy").and_then(Value::as_bool)) {
+                ("exited", _) => format!("exited (code {})", v.get("exit_code").map(|c| c.to_string()).unwrap_or_else(|| "?".into())),
+                (_, Some(true)) => "running, working".into(),
+                _ => "running, idle".into(),
+            };
+            Some(format!("{} — {state}\n```\n{}\n```\n", str_of("session_id"), str_of("text")))
+        }
         _ => None,
     }
 }
@@ -265,6 +308,26 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "workspace_sync" => ok(api::workspace_sync(engine, args(a)?, Surface::Mcp).await?),
         "workspace_destroy" => ok(api::workspace_destroy(engine, args(a)?, Surface::Mcp).await?),
         "workspace_allow" => ok(api::workspace_allow(engine, args(a)?, Surface::Mcp)?),
+        "session_list" => ok(api::sessions_list(engine, args(a)?).await?),
+        "session_start" => ok(api::session_start(engine, args(a)?).await?),
+        "session_send" => ok(api::session_send(engine, args(a)?).await?),
+        "session_read" => ok(api::session_read(engine, args(a)?).await?),
+        "session_stop" => ok(api::session_stop(engine, args(a)?).await?),
+        "session_restart" => ok(api::session_restart(engine, args(a)?).await?),
+        "github_inbox" => ok(api::github_inbox(engine).await?),
+        "github_repos" => ok(json!({ "repos": api::github_repos(engine).await? })),
+        "github_favorite" => ok(api::github_favorite(engine, args(a)?)?),
+        "github_accounts" => ok(api::github_accounts(engine).await?),
+        "github_use_account" => ok(api::github_use_account(engine, args(a)?).await?),
+        "github_repo" => ok(api::github_repo(engine, args(a)?).await?),
+        "github_item" => ok(api::github_item(engine, args(a)?).await?),
+        "local_checkouts" => ok(json!({ "checkouts": api::checkouts(engine, args(a)?).await? })),
+        "git_sync" => ok(api::checkout_git(engine, args(a)?).await?),
+        "git_status" => ok(api::git_status(engine, &args::<api::GitStatusRequest>(a)?.machine_id).await?),
+        "machine_connection" => ok(api::machine_connection(engine, &args::<api::GitStatusRequest>(a)?.machine_id).await?),
+        "desktop_input" => ok(api::desktop_input(engine, args(a)?).await?),
+        "direct_connection" => ok(api::set_direct(engine, args(a)?).await?),
+        "git_setup" => ok(api::git_setup(engine, args(a)?).await?),
         other => Err(ApiError::not_found(format!("Unknown tool: {other}"))),
     }
 }
@@ -286,6 +349,7 @@ fn schema(properties: Value, required: &[&str]) -> Value {
 const MACHINE_ID: &str = "Machine id (a slug like \"mac-studio\"; the display name also works).";
 const WORKSPACE_ID: &str = "Workspace id from workspace_create or workspace_list, e.g. \"ws-7f3a2c\".";
 const WS_PATH: &str = "Path relative to the workspace folder, e.g. \"src/main.rs\". Absolute paths and \"..\" escapes are rejected.";
+const SESSION_ID: &str = "Session id from session_list or session_start: \"<machine-id>/<name>\", e.g. \"beelink/claude-3f9a\". A bare name works when unique.";
 const RUNNER_ID: &str = "Runner id: \"<machine-id>/<runner-name>\", or \"github/<name>\" for a runner no machine lists. A bare runner name works when unique.";
 
 /// The tool catalog. Descriptions are written for a model deciding what to call.
@@ -375,7 +439,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_operation",
-            "description": "Status and output of an install or runner action started by this server (use after wait=false or a timeout). Lines starting with \"▸ \" are OpenRunner's steps, \"✓ \" successes, \"error: \" problems.",
+            "description": "Status and output of an install or runner action started by this server (use after wait=false or a timeout). Lines starting with \"▸ \" are Muxen's steps, \"✓ \" successes, \"error: \" problems.",
             "inputSchema": schema(json!({
                 "operation_id": { "type": "integer" },
                 "tail": { "type": "integer", "minimum": 0, "description": "Log lines from the end. Default 80." }
@@ -424,11 +488,11 @@ pub fn tools() -> Vec<Value> {
             "name": "workspace_create",
             "description": "Check out one of the user's own machines as your work environment, like a remote dev box: creates a persistent folder there (optionally cloning a git repo at a ref, or creating a new branch) and returns a workspace_id for the other workspace_* tools. Omit machine_id to get the least-loaded online machine that allows workspaces, filtered by `platform` (e.g. \"linux\" to run tests on Linux). Use one workspace per task and reuse it across steps. Nothing is deleted automatically: call workspace_destroy when done. Private GitHub repos are cloned with the user's gh login.",
             "inputSchema": schema(json!({
-                "machine_id": { "type": "string", "description": "Machine to use; omit to let OpenRunner pick." },
+                "machine_id": { "type": "string", "description": "Machine to use; omit to let Muxen pick." },
                 "platform": { "type": "string", "description": "When picking: platform prefix such as \"linux\", \"linux-x64\", \"darwin-arm64\", \"windows\"." },
                 "name": { "type": "string", "description": "Short label, e.g. \"api-tests\". Defaults to the repo name." },
                 "repo": { "type": "string", "description": "Git URL, or \"owner/repo\" for GitHub, to clone into the workspace." },
-                "ref": { "type": "string", "description": "Branch, tag or commit to check out." },
+                "ref": { "type": "string", "description": "Branch, tag or commit to check out; \"pull/123/head\" checks out pull request #123 (forks too)." },
                 "branch": { "type": "string", "description": "New branch to create and switch to after checkout." },
                 "isolation": { "type": "string", "enum": ["host", "docker"], "description": "\"host\" (default): commands run directly on the machine with its tools and login environment. \"docker\": a fresh, isolated container per workspace (folder mounted at /workspace); pick the toolchain with `image`. Prefer docker for untrusted code or when you need a clean environment." },
                 "image": { "type": "string", "description": "Docker image for isolation \"docker\", e.g. \"node:22\", \"python:3.13\", \"rust:1\", \"golang:1.25\". Defaults to buildpack-deps:bookworm. Choose an image that already has your tools: the container runs as the ssh user, so apt-get install won't work." },
@@ -527,6 +591,170 @@ pub fn tools() -> Vec<Value> {
             }), &["machine_id", "allowed"]),
             "annotations": annotations("Allow workspaces", false, false, true, false),
         }),
+        json!({
+            "name": "session_list",
+            "description": "Agent sessions on the user's machines: terminals running Claude Code, Codex, OpenCode, Gemini CLI, Amp or a shell, kept alive by Muxen's agent on the machine. Each has an id (<machine-id>/<name>), agent, title, folder, status (running/exited), busy (printed output in the last few seconds, i.e. the agent is working) and the command a human can paste to attach. Also lists, per machine, the agent CLIs installed. Reads the machines over ssh, so it's always current (and sets up Muxen's agent on a machine the first time).",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &[]),
+            "annotations": annotations("List agent sessions", true, false, true, true),
+        }),
+        json!({
+            "name": "session_start",
+            "description": "Start an agent CLI (or a shell) in a new session on a machine, in a folder there, optionally with a first prompt. It keeps running until stopped; the user can watch and type into it from the Muxen app. Returns the session. Only start sessions the user asked for.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "agent": { "type": "string", "enum": ["claude", "codex", "opencode", "gemini", "amp", "shell"], "description": "Which CLI to run. session_list shows which are installed on each machine." },
+                "cwd": { "type": "string", "description": "Folder on the machine, e.g. \"~/code/api\". Default: the home folder." },
+                "title": { "type": "string", "description": "Shown in the app's sidebar. Default: agent and folder name." },
+                "prompt": { "type": "string", "description": "First message for the agent." }
+            }), &["machine_id", "agent"]),
+            "annotations": annotations("Start agent session", false, false, false, true),
+        }),
+        json!({
+            "name": "session_read",
+            "description": "The session's screen plus recent scrollback as plain text, with its status and whether it's busy. Use it to see what an agent is doing or waiting for.",
+            "inputSchema": schema(json!({
+                "session_id": { "type": "string", "description": SESSION_ID },
+                "lines": { "type": "integer", "minimum": 1, "maximum": 50000, "description": "Scrollback lines above the screen to include. Default 200." }
+            }), &["session_id"]),
+            "annotations": annotations("Read session screen", true, false, true, false),
+        }),
+        json!({
+            "name": "session_send",
+            "description": "Type text into a session, then press Enter (unless enter=false). Answers an agent's question or gives it a new instruction. Only send what the user asked you to.",
+            "inputSchema": schema(json!({
+                "session_id": { "type": "string", "description": SESSION_ID },
+                "text": { "type": "string", "description": "Text to type." },
+                "enter": { "type": "boolean", "description": "Press Enter afterwards. Default true." }
+            }), &["session_id", "text"]),
+            "annotations": annotations("Type into session", false, false, false, false),
+        }),
+        json!({
+            "name": "session_stop",
+            "description": "End a session: closes it and whatever runs in it. Unsaved agent state is lost. Ask the user first unless they asked for exactly this.",
+            "inputSchema": schema(json!({ "session_id": { "type": "string", "description": SESSION_ID } }), &["session_id"]),
+            "annotations": annotations("Stop session", false, true, true, false),
+        }),
+        json!({
+            "name": "session_restart",
+            "description": "Run a session's agent again in the same session (for one that exited, or is stuck). Kills what's running in it first.",
+            "inputSchema": schema(json!({ "session_id": { "type": "string", "description": SESSION_ID } }), &["session_id"]),
+            "annotations": annotations("Restart session", false, true, false, false),
+        }),
+        json!({
+            "name": "github_inbox",
+            "description": "What needs the user on GitHub: pull requests waiting for their review, open issues and PRs assigned to them, and their own open pull requests (repo, number, title, labels, updated time, URL). Uses their GitHub login.",
+            "inputSchema": schema(json!({}), &[]),
+            "annotations": annotations("GitHub inbox", true, false, true, true),
+        }),
+        json!({
+            "name": "github_repos",
+            "description": "The user's GitHub repositories (owned, collaborator, and through their orgs): their favorites first (`favorite: true`, the ones they work on most), then most recently pushed, with visibility, default branch, language and open issue count.",
+            "inputSchema": schema(json!({}), &[]),
+            "annotations": annotations("GitHub repositories", true, false, true, true),
+        }),
+        json!({
+            "name": "github_accounts",
+            "description": "The GitHub accounts Muxen can use: the ones the GitHub CLI (gh) here is signed in to, plus each other machine's gh login (`machines`, e.g. a work laptop's work account). `using` (and `machine_id` when it's a machine's login) says which one Muxen uses for GitHub data, managing runners, and cloning into workspaces.",
+            "inputSchema": schema(json!({}), &[]),
+            "annotations": annotations("GitHub accounts", true, false, true, false),
+        }),
+        json!({
+            "name": "github_use_account",
+            "description": "Switch which GitHub account Muxen uses: one the GitHub CLI here is signed in to (login), or another machine's gh login (machine_id). Changes whose repositories, inbox and runners Muxen sees and manages; doesn't change the account gh uses in the user's terminal. Only when asked. To add an account the user runs `gh auth login`.",
+            "inputSchema": schema(json!({
+                "login": { "type": "string", "description": "A login from github_accounts (optional with machine_id)." },
+                "machine_id": { "type": "string", "description": "Use this machine's gh login (from github_accounts.machines)." }
+            }), &[]),
+            "annotations": annotations("Switch GitHub account", false, false, true, false),
+        }),
+        json!({
+            "name": "github_favorite",
+            "description": "Add a repository to the user's favorites in Muxen (listed first in the app and in github_repos), or remove it with favorite: false. Only when asked.",
+            "inputSchema": schema(json!({
+                "repo": { "type": "string", "description": "\"owner/name\" or a GitHub URL." },
+                "favorite": { "type": "boolean", "description": "false removes it. Default true." }
+            }), &["repo"]),
+            "annotations": annotations("Favorite repository", false, false, true, false),
+        }),
+        json!({
+            "name": "github_repo",
+            "description": "One repository: its open issues and pull requests, recent GitHub Actions runs, and where it's checked out on the user's machines (machine, folder, branch, ahead/behind, uncommitted changes). Use the checkouts to pick where to work on it.",
+            "inputSchema": schema(json!({ "repo": { "type": "string", "description": "\"owner/name\" or a GitHub URL." } }), &["repo"]),
+            "annotations": annotations("GitHub repository", true, false, true, true),
+        }),
+        json!({
+            "name": "github_item",
+            "description": "An issue or pull request with its full description and comments; for pull requests also branches, size, check results (with failing check names) and reviews. Pass its URL or owner/name#123.",
+            "inputSchema": schema(json!({ "reference": { "type": "string", "description": "Issue or PR URL, or \"owner/name#123\"." } }), &["reference"]),
+            "annotations": annotations("GitHub issue or PR", true, false, true, true),
+        }),
+        json!({
+            "name": "local_checkouts",
+            "description": "Git checkouts on the user's machines (found in their code folders), each with the GitHub repo it tracks, branch, upstream, commits ahead/behind, and count of uncommitted files. Filter by machine or repo.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "repo": { "type": "string", "description": "Only checkouts of this repository (owner/name)." }
+            }), &[]),
+            "annotations": annotations("Local checkouts", true, false, true, true),
+        }),
+        json!({
+            "name": "machine_connection",
+            "description": "How Muxen reaches a machine right now: directly over QUIC (once paired), over a live ssh link, or not at all; with a measured round trip to its agent.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
+            "annotations": annotations("Machine connection", true, false, true, false),
+        }),
+        json!({
+            "name": "direct_connection",
+            "description": "Turn direct (QUIC) connections to a machine on or off. On: pairs with its agent over ssh (each side trusts only the other's certificate) and runs the agent's listener as a user service there (systemd or launchd), on UDP port 47821. Off: removes that service. Changes the machine; only when asked.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "enabled": { "type": "boolean" }
+            }), &["machine_id", "enabled"]),
+            "annotations": annotations("Direct connection", false, false, true, false),
+        }),
+        json!({
+            "name": "desktop_screenshot",
+            "description": "A picture of a machine's screen (Linux machines with an X11 desktop, so far). Coordinates for desktop_input are in its pixels.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
+            "annotations": annotations("Desktop screenshot", true, false, false, false),
+        }),
+        json!({
+            "name": "desktop_input",
+            "description": "Use a machine's desktop like a person: events run in order. {type: move|click|scroll|key|text|wait}: click {x, y, button?: left|right|middle, double?}; move {x, y}; scroll {x, y, dy} (positive scrolls down); key {key: \"enter\" | \"ctrl+c\" | \"alt+tab\" ...}; text {text}; wait {ms}. Coordinates in desktop_screenshot pixels; take a screenshot after to see what happened. It acts on the user's real screen: only when asked.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "events": { "type": "array", "items": { "type": "object" } }
+            }), &["machine_id", "events"]),
+            "annotations": annotations("Desktop input", false, true, false, false),
+        }),
+        json!({
+            "name": "git_status",
+            "description": "Whether git on one of the user's machines can commit and push to GitHub: its name and email (can_commit), how a push gets a GitHub login (push: gh, other, none), the machine's GitHub CLI account, and the identity git_setup would use.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
+            "annotations": annotations("Git setup status", true, false, true, false),
+        }),
+        json!({
+            "name": "git_setup",
+            "description": "Set up git on a machine so commits and pushes work (for agents working there too). identity: true sets git's global name and email to the user's GitHub name and private noreply address (or pass name and email). credentials: true runs `gh auth setup-git`, so git uses the machine's GitHub CLI login for github.com. Changes the machine's global git config; only when asked.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "identity": { "type": "boolean" },
+                "name": { "type": "string" },
+                "email": { "type": "string" },
+                "credentials": { "type": "boolean" }
+            }), &["machine_id"]),
+            "annotations": annotations("Set up git", false, false, true, false),
+        }),
+        json!({
+            "name": "git_sync",
+            "description": "Run git fetch, pull (fast-forward only) or push in a checkout on one of the user's machines. Changes their checkout or the remote; only when asked.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "path": { "type": "string", "description": "The checkout's folder on that machine (from local_checkouts)." },
+                "action": { "type": "string", "enum": ["fetch", "pull", "push"] }
+            }), &["machine_id", "path", "action"]),
+            "annotations": annotations("Git fetch/pull/push", false, false, false, true),
+        }),
     ]
 }
 
@@ -536,14 +764,14 @@ pub fn print_config() -> String {
         .ok()
         .and_then(|p| p.canonicalize().ok())
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "openrunner".into());
+        .unwrap_or_else(|| "muxen".into());
     let json_block = serde_json::to_string_pretty(&json!({
-        "mcpServers": { "openrunner": { "command": exe, "args": ["mcp"] } }
+        "mcpServers": { "muxen": { "command": exe, "args": ["mcp"] } }
     }))
     .unwrap_or_default();
     format!(
-        "# Claude Code\nclaude mcp add openrunner -- {exe} mcp\n\n\
-         # Codex (~/.codex/config.toml)\n[mcp_servers.openrunner]\ncommand = \"{exe}\"\nargs = [\"mcp\"]\n\n\
+        "# Claude Code\nclaude mcp add muxen -- {exe} mcp\n\n\
+         # Codex (~/.codex/config.toml)\n[mcp_servers.muxen]\ncommand = \"{exe}\"\nargs = [\"mcp\"]\n\n\
          # Other MCP clients (Claude Desktop, Cursor, ...)\n{json_block}\n\n\
          # Try it safely first with a simulated fleet: add \"--demo\" after \"mcp\".\n"
     )
@@ -556,13 +784,13 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     fn demo() -> Arc<Engine> {
-        Engine::new(Paths::resolve(Some(std::env::temp_dir().join("openrunner-mcp-test")), None), true)
+        Engine::new(Paths::resolve(Some(std::env::temp_dir().join("muxen-mcp-test")), None), true)
     }
 
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 26);
+        assert_eq!(tools.len(), 47);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();
@@ -607,8 +835,8 @@ mod tests {
         .unwrap();
         assert!(text.starts_with("exit code: 1 (1200 ms)"), "{text}");
         assert!(text.contains("stdout:\n```\nok\n```") && text.contains("stderr:\n```\nboom\n```"), "{text}");
-        let bg = readable_text("workspace_exec", &json!({ "background_pid": 42, "log_path": ".openrunner/logs/1.log", "duration_ms": 5 })).unwrap();
-        assert!(bg.contains("pid 42") && bg.contains(".openrunner/logs/1.log"));
+        let bg = readable_text("workspace_exec", &json!({ "background_pid": 42, "log_path": ".muxen/logs/1.log", "duration_ms": 5 })).unwrap();
+        assert!(bg.contains("pid 42") && bg.contains(".muxen/logs/1.log"));
         assert!(readable_text("fleet_status", &json!({})).is_none());
     }
 
@@ -662,7 +890,7 @@ mod tests {
         let init: Value = recv().await;
         assert_eq!(init["id"], 1);
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
-        assert_eq!(init["result"]["serverInfo"]["name"], "openrunner");
+        assert_eq!(init["result"]["serverInfo"]["name"], "muxen");
         assert!(init["result"]["instructions"].as_str().unwrap().contains("fleet_status"));
 
         send(json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await;

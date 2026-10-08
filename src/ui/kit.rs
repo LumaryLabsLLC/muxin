@@ -15,6 +15,46 @@ pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
     svg().path(SharedString::from(format!("icons/{name}.svg"))).size(px(size)).flex_none().text_color(color)
 }
 
+/// A colorful rounded tile with a white glyph, in the spirit of the app icon
+/// (and macOS System Settings). `from`/`to` are 0xRRGGBB gradient stops.
+pub fn tile(icon_name: &str, from: u32, to: u32, size: f32) -> Div {
+    div()
+        .flex_none()
+        .size(px(size))
+        .rounded(px(size * 0.27))
+        .bg(gpui::linear_gradient(160., gpui::linear_color_stop(gpui::rgb(from), 0.), gpui::linear_color_stop(gpui::rgb(to), 1.)))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon(icon_name, size * 0.6, gpui::white()))
+}
+
+/// Tile colors per navigation destination.
+pub mod tiles {
+    pub const OVERVIEW: (u32, u32) = (0x9d8cff, 0x5b47e0);
+    pub const JOBS: (u32, u32) = (0xffbf55, 0xff7a3d);
+    pub const WORKSPACES: (u32, u32) = (0x4be3b9, 0x14a083);
+    pub const ACTIVITY: (u32, u32) = (0xff7aa8, 0xe0457b);
+    pub const MACOS: (u32, u32) = (0x6cb6ff, 0x2f6fe4);
+    pub const LINUX: (u32, u32) = (0xffb35c, 0xf0703f);
+    pub const WINDOWS: (u32, u32) = (0x5ad2f4, 0x1f8fd6);
+    pub const OTHER: (u32, u32) = (0xa7aebb, 0x5f6673);
+}
+
+/// Logo and tile colors for an agent CLI (see fleet::sessions::AGENTS): the
+/// product's own mark, white on its brand color.
+pub fn agent_look(agent: &str) -> (&'static str, (u32, u32)) {
+    match agent {
+        "claude" => ("agent-claude", (0xe58b6d, 0xc4603c)),
+        "codex" => ("agent-codex", (0x3d3d42, 0x111114)),
+        "opencode" => ("agent-opencode", (0x34363c, 0x16171a)),
+        "gemini" => ("agent-gemini", (0x4796e3, 0x9a6fd0)),
+        "amp" => ("agent-amp", (0xf2704f, 0xc9352b)),
+        "shell" => ("terminal", (0xa7aebb, 0x5f6673)),
+        _ => ("bot", (0xa7aebb, 0x5f6673)),
+    }
+}
+
 pub fn spinner(id: impl Into<ElementId>, size: f32, color: Hsla) -> impl IntoElement {
     icon("loader-circle", size, color).with_animation(
         id,
@@ -132,14 +172,15 @@ pub fn label(theme: &Theme, text: impl Into<SharedString>) -> Div {
 pub fn empty_state(theme: &Theme, icon_name: &str, text: impl Into<SharedString>) -> Div {
     div()
         .flex()
-        .items_center()
+        .items_start()
         .gap(px(8.))
         .px(px(12.))
         .py(px(14.))
         .text_size(px(12.5))
         .text_color(theme.text_placeholder)
-        .child(icon(icon_name, 14., theme.text_placeholder))
-        .child(text.into())
+        // Icon box matches the first line's height so long text wraps under itself.
+        .child(div().flex_none().h(px(20.)).flex().items_center().child(icon(icon_name, 14., theme.text_placeholder)))
+        .child(div().flex_1().min_w(px(0.)).child(text.into()))
 }
 
 /// A two-column key/value line for detail panes.
@@ -288,6 +329,8 @@ impl RenderOnce for Button {
         if let Some(tip) = self.tooltip {
             el = el.tooltip(move |window, cx| Tooltip::view(tip.clone(), window, cx));
         }
+        // A press is the button's alone: it doesn't drag the window or select a row behind it.
+        el = el.on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
         if let (Some(handler), false) = (self.on_click, disabled) {
             el = el.on_click(move |e, w, cx| {
                 cx.stop_propagation();

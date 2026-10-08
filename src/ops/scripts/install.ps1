@@ -1,5 +1,5 @@
-# OpenRunner: install GitHub Actions runners (Windows).
-# OpenRunner prepends: $OR_VERSION, $OR_URL, $OR_TOKEN, $OR_NAMES (array),
+# Muxen: install GitHub Actions runners (Windows).
+# Muxen prepends: $OR_VERSION, $OR_URL, $OR_TOKEN, $OR_NAMES (array),
 # $OR_LABELS, $OR_GROUP, $OR_SERVICE (bool), $OR_BASE (empty: C:\actions-runner).
 
 $ErrorActionPreference = 'Stop'

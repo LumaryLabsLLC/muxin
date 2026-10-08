@@ -42,18 +42,10 @@ impl Root {
                     .flex()
                     .items_start()
                     .gap(px(12.))
-                    .child(
-                        div()
-                            .size(px(40.))
-                            .rounded(px(8.))
-                            .bg(theme.element)
-                            .border_1()
-                            .border_color(theme.border_variant)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon(format::machine_icon(&m), 20., theme.text_muted)),
-                    )
+                    .child({
+                        let (from, to) = format::machine_tile(&m);
+                        kit::tile(format::machine_icon(&m), from, to, 40.)
+                    })
                     .child(
                         div()
                             .flex()
@@ -82,6 +74,13 @@ impl Root {
                             .style(ButtonStyle::Primary)
                             .disabled(m.host.is_empty() || busy)
                             .on_click(cx.listener(move |this, _, window, cx| this.show_install_dialog(&mid, window, cx)))
+                    })
+                    .child({
+                        let mid = m.id.clone();
+                        Button::new("m-session", "New session")
+                            .icon("square-terminal")
+                            .disabled(m.host.is_empty())
+                            .on_click(cx.listener(move |this, _, window, cx| this.show_new_session(Some(mid.clone()), window, cx)))
                     })
                     .child({
                         let mid = m.id.clone();
@@ -146,6 +145,16 @@ impl Root {
                         theme.accent,
                     )),
             );
+        }
+
+        if !m.host.is_empty() {
+            body = body.child(self.machine_sessions(&theme, &s, &m, cx));
+            if !m.platform.starts_with("windows") {
+                if m.host != "local" {
+                    body = body.child(self.machine_connection(&theme, &m, cx));
+                }
+                body = body.child(self.machine_git(&theme, &m, cx));
+            }
         }
 
         let runners: Vec<&Runner> = m.runner_ids.iter().filter_map(|id| s.runners.iter().find(|r| &r.id == id)).collect();

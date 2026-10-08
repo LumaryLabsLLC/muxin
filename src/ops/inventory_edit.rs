@@ -1,5 +1,5 @@
 //! Edits fleet.toml in place with `toml_edit`, so the user's comments, ordering
-//! and formatting survive when OpenRunner adds or removes machines and runners.
+//! and formatting survive when Muxen adds or removes machines and runners.
 //! Every function works on text, which lets demo mode reuse them on its
 //! in-memory inventory.
 
@@ -174,7 +174,7 @@ fn machines_mut(doc: &mut DocumentMut) -> Result<&mut ArrayOfTables, String> {
     }
     doc.get_mut("machine")
         .and_then(Item::as_array_of_tables_mut)
-        .ok_or_else(|| "fleet.toml defines `machine` in a form OpenRunner can't edit. Use [[machine]] tables.".to_string())
+        .ok_or_else(|| "fleet.toml defines `machine` in a form Muxen can't edit. Use [[machine]] tables.".to_string())
 }
 
 fn table_name(t: &Table) -> &str {

@@ -13,6 +13,7 @@ use tokio::sync::{watch, Notify};
 
 use super::build::{build, Inputs};
 use super::model::{CheckInfo, InventoryInfo, Operation, Snapshot};
+use super::sessions::{self, DirectSession, MachineSessions, SessionNotice};
 use super::workspaces::{self as workspaces, WorkspaceRecord};
 use crate::config::{default_inventory, display_path, write_atomic, Inventory, MachineSpec, Paths, PersistedState, Settings};
 use crate::demo::World;
@@ -22,6 +23,7 @@ use crate::probe::{self, ProbeResult};
 const DEMO_POLL: Duration = Duration::from_secs(3);
 const MAX_OPERATIONS: usize = 30;
 const MAX_OP_LOG_LINES: usize = 2000;
+const MAX_NOTICES: usize = 50;
 /// Operation output can be chatty; coalesce snapshot publishes to this rate.
 const OP_PUBLISH_INTERVAL: Duration = Duration::from_millis(120);
 
@@ -44,13 +46,25 @@ struct State {
     last_publish: Option<Instant>,
     publish_scheduled: bool,
     /// Modification times of the files we last read or wrote, so changes made
-    /// by another OpenRunner process (the window, the CLI, an agent's MCP
+    /// by another Muxen process (the window, the CLI, an agent's MCP
     /// server) are noticed. See `sync_from_disk`.
     settings_mtime: Option<SystemTime>,
     state_mtime: Option<SystemTime>,
     /// Agent workspaces (see fleet::workspaces), shared through workspaces.json.
     workspaces: Vec<WorkspaceRecord>,
     workspaces_mtime: Option<SystemTime>,
+    /// Agent sessions per machine, from the last discovery (see fleet::sessions).
+    sessions: HashMap<String, MachineSessions>,
+    /// Newest machine event seen per machine; older ones never notify again.
+    event_marks: HashMap<String, i64>,
+    /// Session notices, newest first, and the unread one per session.
+    notices: VecDeque<SessionNotice>,
+    next_notice: u64,
+    attention: HashMap<String, String>,
+    /// Sessions running without the agent, in this process's terminals.
+    direct: Vec<DirectSession>,
+    /// Git checkouts per machine, from the last look (see fleet::code).
+    checkouts: HashMap<String, Vec<super::model::Checkout>>,
 }
 
 pub struct Engine {
@@ -110,8 +124,16 @@ impl Engine {
                 None => workspaces::load_registry(&paths.workspaces),
             },
             workspaces_mtime: mtime(&paths.workspaces),
+            sessions: HashMap::new(),
+            event_marks: HashMap::new(),
+            notices: VecDeque::new(),
+            next_notice: 1,
+            attention: HashMap::new(),
+            direct: Vec::new(),
+            checkouts: HashMap::new(),
         };
         let (tx, _) = watch::channel(Arc::new(Snapshot::default()));
+        super::direct::init(paths.dir.clone());
         let engine = Arc::new(Engine {
             paths,
             demo: world,
@@ -122,6 +144,22 @@ impl Engine {
             sync_now: Notify::new(),
             settings_changed: Notify::new(),
         });
+        // Each machine's live link tells us when its sessions change.
+        let weak = Arc::downgrade(&engine);
+        super::link::set_on_connect(move |link| {
+            if let Some(engine) = weak.upgrade() {
+                let rt = engine.rt.clone();
+                rt.spawn(engine.follow_link(link));
+            }
+        });
+        let weak = Arc::downgrade(&engine);
+        engine.github.set_token_fetcher(Arc::new(move |machine: String, host: String| {
+            let weak = weak.clone();
+            Box::pin(async move {
+                let engine = weak.upgrade()?;
+                engine.machine_gh_token(&machine, &host).await.map_err(|e| tracing::warn!("GitHub login on {machine}: {e}")).ok()
+            })
+        }));
         {
             let mut st = engine.state.lock().unwrap();
             if engine.demo.is_none() {
@@ -130,6 +168,12 @@ impl Engine {
                 let stale: Vec<String> = st.probes.keys().filter(|id| !known.contains(id)).cloned().collect();
                 for id in stale {
                     st.probes.remove(&id);
+                }
+            }
+            if let Some(w) = &engine.demo {
+                let ids: Vec<String> = st.inventory.machines.iter().map(|m| m.id.clone()).collect();
+                for id in ids {
+                    st.sessions.insert(id.clone(), w.sessions(&id));
                 }
             }
             engine.publish(&mut st);
@@ -156,6 +200,8 @@ impl Engine {
         self.rt.spawn(async move { me.github_loop().await });
         let me = self.clone();
         self.rt.spawn(async move { me.check_loop().await });
+        let me = self.clone();
+        self.rt.spawn(async move { me.sessions_loop().await });
     }
 
     pub fn subscribe(&self) -> watch::Receiver<Arc<Snapshot>> {
@@ -175,18 +221,23 @@ impl Engine {
         if self.demo.is_none() {
             new.save(&self.paths.settings).map_err(|e| format!("Couldn't save settings: {e:#}"))?;
         }
-        {
+        let favorites_only = {
             let mut st = self.state.lock().unwrap();
             st.settings_mtime = mtime(&self.paths.settings);
             let scopes_changed = st.settings.github != new.github;
+            let favorites_only = Settings { favorite_repos: new.favorite_repos.clone(), ..st.settings.clone() } == new;
             st.settings = new.clone();
             if scopes_changed && new.github.orgs.is_empty() && new.github.repos.is_empty() {
                 st.github = None;
             }
             self.publish(&mut st);
+            favorites_only
+        };
+        // Starring a repository needn't re-poll GitHub or reschedule checks.
+        if !favorites_only {
+            self.settings_changed.notify_waiters();
+            self.sync_now.notify_one();
         }
-        self.settings_changed.notify_waiters();
-        self.sync_now.notify_one();
         Ok(new)
     }
 
@@ -219,7 +270,7 @@ impl Engine {
         (*self.current()).clone()
     }
 
-    /// Picks up what other OpenRunner processes wrote to the shared config
+    /// Picks up what other Muxen processes wrote to the shared config
     /// directory: fleet.toml edits, settings.json changes, and newer machine
     /// checks in state.json. Cheap when nothing changed (three `stat` calls).
     pub fn refresh_from_disk(&self) {
@@ -265,7 +316,7 @@ impl Engine {
         Some((spec, st.probes.get(id).cloned()))
     }
 
-    /// Re-reads fleet.toml right away (after OpenRunner edited it) and publishes.
+    /// Re-reads fleet.toml right away (after Muxen edited it) and publishes.
     pub(crate) fn reload_inventory_now(&self) {
         let mut st = self.state.lock().unwrap();
         match &self.demo {
@@ -361,6 +412,88 @@ impl Engine {
 
     /// Forgets finished operations (the activity panel's "Clear").
     /// The stored workspaces (see fleet::workspaces).
+    pub(crate) fn sessions_of(&self, machine_id: &str) -> Option<MachineSessions> {
+        self.state.lock().unwrap().sessions.get(machine_id).cloned()
+    }
+
+    pub(crate) fn all_sessions(&self) -> Vec<(String, MachineSessions)> {
+        self.state.lock().unwrap().sessions.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    pub(crate) fn set_sessions(&self, machine_id: &str, found: MachineSessions) {
+        let mut st = self.state.lock().unwrap();
+        let newest = found.events.iter().map(|e| e.at).max().unwrap_or(0);
+        // The first look at a machine sets the baseline: old events don't notify.
+        if let (Some(before), Some(&since)) = (st.sessions.get(machine_id), st.event_marks.get(machine_id)) {
+            let name = st.inventory.machines.iter().find(|m| m.id == machine_id).map(|m| m.name.clone()).unwrap_or_else(|| machine_id.to_string());
+            for (session_id, kind, title, message) in sessions::new_notices(before, &found, since, &name) {
+                let id = st.next_notice;
+                st.next_notice += 1;
+                st.attention.insert(session_id.clone(), kind.clone());
+                st.notices.push_front(SessionNotice { id, session_id, machine_id: machine_id.to_string(), kind, title, message, at: Utc::now() });
+            }
+            st.notices.truncate(MAX_NOTICES);
+        }
+        let mark = st.event_marks.entry(machine_id.to_string()).or_insert(0);
+        *mark = (*mark).max(newest);
+        // Forget unread marks for sessions that are gone.
+        let gone: Vec<String> = st
+            .attention
+            .keys()
+            .filter(|id| id.starts_with(&format!("{machine_id}/")) && !found.sessions.iter().any(|s| &&s.id == id))
+            .cloned()
+            .collect();
+        for id in gone {
+            st.attention.remove(&id);
+        }
+        st.sessions.insert(machine_id.to_string(), found);
+        self.publish(&mut st);
+    }
+
+    pub(crate) fn checkouts_of(&self, machine_id: &str) -> Vec<super::model::Checkout> {
+        self.state.lock().unwrap().checkouts.get(machine_id).cloned().unwrap_or_default()
+    }
+
+    pub(crate) fn set_checkouts(&self, machine_id: &str, found: Vec<super::model::Checkout>) {
+        let mut st = self.state.lock().unwrap();
+        st.checkouts.insert(machine_id.to_string(), found);
+        self.publish(&mut st);
+    }
+
+    pub(crate) fn direct_session(&self, id: &str) -> Option<DirectSession> {
+        self.state.lock().unwrap().direct.iter().find(|d| d.info.id == id).cloned()
+    }
+
+    pub(crate) fn add_direct(&self, d: DirectSession) {
+        let mut st = self.state.lock().unwrap();
+        st.direct.insert(0, d);
+        self.publish(&mut st);
+    }
+
+    pub fn remove_direct(&self, id: &str) {
+        let mut st = self.state.lock().unwrap();
+        st.direct.retain(|d| d.info.id != id);
+        self.publish(&mut st);
+    }
+
+    /// A direct session's terminal exited ("exited") or was reopened ("running").
+    pub fn set_direct_status(&self, id: &str, status: &str) {
+        let mut st = self.state.lock().unwrap();
+        if let Some(d) = st.direct.iter_mut().find(|d| d.info.id == id) {
+            d.info.status = status.to_string();
+            self.publish(&mut st);
+        }
+    }
+
+    /// The user looked at the session: clear its unread notice.
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub fn ack_session(&self, session_id: &str) {
+        let mut st = self.state.lock().unwrap();
+        if st.attention.remove(session_id).is_some() {
+            self.publish(&mut st);
+        }
+    }
+
     pub(crate) fn workspace_records(&self) -> Vec<WorkspaceRecord> {
         self.state.lock().unwrap().workspaces.clone()
     }
@@ -417,7 +550,7 @@ impl Engine {
                 _ = tokio::time::sleep(poll) => {}
                 _ = self.sync_now.notified() => {}
             }
-            // Pick up fleet.toml edits (and settings/checks from other OpenRunner
+            // Pick up fleet.toml edits (and settings/checks from other Muxen
             // processes) without waiting for the next full check.
             let before = self.state.lock().unwrap().inventory.machines.len();
             self.refresh_from_disk();
@@ -461,6 +594,62 @@ impl Engine {
         st.token_source = token_source;
         st.github_syncing = false;
         self.publish(&mut st);
+    }
+
+    /// Keeps session lists fresh on machines that have sessions, so the sidebar
+    /// shows which agents are working.
+    /// Refreshes a machine's sessions whenever its agent says they changed
+    /// (one started or ended, started or stopped printing, rang the bell).
+    async fn follow_link(self: Arc<Self>, link: Arc<super::link::Link>) {
+        // A paired machine's local addresses change (DHCP, another network):
+        // keep them current, so the next direct connection takes the short way.
+        if let Some(mut paired) = super::direct::paired(&link.machine) {
+            if let Ok(r) = link.request(serde_json::json!({ "op": "addresses" }), Duration::from_secs(10)).await {
+                let lan: Vec<String> = r["addresses"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                if r["ok"].as_bool() == Some(true) && lan != paired.lan {
+                    paired.lan = lan;
+                    let _ = super::direct::save(&link.machine, Some(paired));
+                    // Reconnect the short way, unless this link already is.
+                    if link.transport() != "direct" || link.network() != Some("Local network") {
+                        super::link::reset(&link.machine);
+                    }
+                }
+            }
+        }
+        let mut events = link.subscribe();
+        if link.request(serde_json::json!({ "op": "watch" }), Duration::from_secs(10)).await.is_err() {
+            return;
+        }
+        loop {
+            match events.recv().await {
+                Ok(e) if e["event"] == "sessions" => {
+                    // A burst of changes is one refresh.
+                    while events.try_recv().is_ok() {}
+                    let _ = self.refresh_sessions(&link.machine).await;
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => break,
+            }
+        }
+    }
+
+    async fn sessions_loop(self: Arc<Self>) {
+        if self.demo.is_some() {
+            return;
+        }
+        // At startup, look everywhere the last check reached.
+        let reachable: Vec<String> = {
+            let st = self.state.lock().unwrap();
+            st.inventory.machines.iter().filter(|m| m.is_checkable() && st.probes.get(&m.id).is_some_and(|p| p.ok)).map(|m| m.id.clone()).collect()
+        };
+        let mut first: FuturesUnordered<_> = reachable.iter().map(|id| self.refresh_sessions(id)).collect();
+        while first.next().await.is_some() {}
+        loop {
+            tokio::time::sleep(sessions::REFRESH_EVERY).await;
+            let ids = self.machines_with_sessions();
+            let mut pending: FuturesUnordered<_> = ids.iter().map(|id| self.refresh_sessions(id)).collect();
+            while pending.next().await.is_some() {}
+        }
     }
 
     async fn check_loop(self: Arc<Self>) {
@@ -539,10 +728,19 @@ impl Engine {
             .collect();
 
         while let Some((id, result)) = pending.next().await {
+            let reachable = result.ok;
             let mut st = self.state.lock().unwrap();
             st.checking.remove(&id);
-            st.probes.insert(id, result);
+            st.probes.insert(id.clone(), result);
             self.publish(&mut st);
+            drop(st);
+            // Sessions and installed agents come along with every machine check.
+            if reachable && self.demo.is_none() {
+                let me = self.clone();
+                self.rt.spawn(async move {
+                    let _ = me.refresh_sessions(&id).await;
+                });
+            }
         }
 
         let mut st = self.state.lock().unwrap();
@@ -676,6 +874,27 @@ impl Engine {
         snapshot.version = st.version;
         snapshot.operations = st.operations.iter().cloned().collect();
         snapshot.workspaces = workspaces::snapshot_infos(&st.workspaces, &snapshot.machines, &st.inventory.machines);
+        for m in &mut snapshot.machines {
+            if let Some(found) = st.sessions.get(&m.id) {
+                m.agents = found.agents.clone();
+                m.agent_version = found.agent_version.clone();
+                m.gh = found.gh.clone();
+                m.sessions_error = found.error.clone();
+                snapshot.sessions.extend(found.sessions.iter().cloned().map(|mut s| {
+                    s.attention = st.attention.get(&s.id).cloned().or(s.attention);
+                    s
+                }));
+            }
+        }
+        // Sessions without the agent come after the machine's agent ones.
+        for d in &st.direct {
+            let at = snapshot.sessions.iter().rposition(|s| s.machine_id == d.info.machine_id).map(|i| i + 1).unwrap_or(snapshot.sessions.len());
+            snapshot.sessions.insert(at, d.info.clone());
+        }
+        snapshot.notifications = st.notices.iter().cloned().collect();
+        let known: Vec<&String> = st.inventory.machines.iter().map(|m| &m.id).collect();
+        snapshot.checkouts = st.checkouts.iter().filter(|(id, _)| known.contains(id)).flat_map(|(_, c)| c.iter().cloned()).collect();
+        snapshot.checkouts.sort_by(|a, b| a.repo.cmp(&b.repo).then(a.machine_id.cmp(&b.machine_id)).then(a.path.cmp(&b.path)));
         self.tx.send_replace(Arc::new(snapshot));
     }
 }
@@ -684,7 +903,7 @@ fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// Writes a starter fleet.toml (this computer only) the first time OpenRunner runs.
+/// Writes a starter fleet.toml (this computer only) the first time Muxen runs.
 pub fn ensure_inventory(paths: &Paths) {
     if paths.inventory.exists() {
         return;
@@ -699,10 +918,10 @@ pub fn ensure_inventory(paths: &Paths) {
 mod tests {
     use super::*;
 
-    /// Two OpenRunner processes (say, the window and an agent's MCP server) share one config dir.
+    /// Two Muxen processes (say, the window and an agent's MCP server) share one config dir.
     #[tokio::test(flavor = "multi_thread")]
     async fn picks_up_changes_from_other_processes() {
-        let dir = std::env::temp_dir().join(format!("openrunner-xproc-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("muxen-xproc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("fleet.toml"), "[[machine]]\nname = \"Box\"\nhost = \"box.invalid\"\n").unwrap();

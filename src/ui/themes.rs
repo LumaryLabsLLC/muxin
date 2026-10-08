@@ -63,7 +63,7 @@ pub const DEFAULT_LIGHT: &str = "paper";
 
 pub static PALETTES: &[Palette] = &[
     // --- Dark ---------------------------------------------------------------
-    palette!("graphite", "OpenRunner Graphite", true,
+    palette!("graphite", "Muxen Graphite", true,
         sidebar 0x0f1013, canvas 0x15161a, surface 0x1b1c21, elevated 0x202127, border 0x2b2d35, 0x24262d,
         text 0xececf1, 0xa2a4ae, 0x6c6f7b,
         accent 0x8b7cff, success 0x4ad6a7, warning 0xf2b347, error 0xff6b6b, info 0x6cb8ff),
@@ -137,7 +137,7 @@ pub static PALETTES: &[Palette] = &[
         text 0xe6edf3, 0x9198a1, 0x6e7681,
         accent 0x4493f8, success 0x3fb950, warning 0xd29922, error 0xf85149, info 0x58a6ff),
     // --- Light --------------------------------------------------------------
-    palette!("paper", "OpenRunner Paper", false,
+    palette!("paper", "Muxen Paper", false,
         sidebar 0xf0f0f3, canvas 0xfafafb, surface 0xffffff, elevated 0xffffff, border 0xe2e2e8, 0xebebf0,
         text 0x16171c, 0x5c5f6a, 0x8c8f9a,
         accent 0x6d5cf6, success 0x12a27a, warning 0xc8870e, error 0xe5484d, info 0x2f80ed),

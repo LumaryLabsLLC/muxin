@@ -1,5 +1,5 @@
-# OpenRunner: control one installed runner (macOS / Linux).
-# OpenRunner prepends these variables:
+# Muxen: control one installed runner (macOS / Linux).
+# Muxen prepends these variables:
 #   OR_ACTION  start | stop | restart | logs | remove
 #   OR_DIR     the runner folder (contains config.sh and .runner)
 #   OR_TOKEN   remove token (remove only)

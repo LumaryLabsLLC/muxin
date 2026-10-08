@@ -75,7 +75,7 @@ impl Output {
 }
 
 pub fn new_marker() -> String {
-    format!("__openrunner_{}__", super::random_id(12))
+    format!("__muxen_{}__", super::random_id(12))
 }
 
 /// Prepends the marker preamble for `windows` (PowerShell) or sh scripts.
@@ -126,6 +126,18 @@ pub async fn run(
     secrets: &[String],
     on_line: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) -> Result<Output, String> {
+    // Over the machine's live link when there is one: no ssh handshake. Scripts
+    // that stream their output (operation logs) and big uploads still use ssh.
+    if !windows && !spec.is_local() && on_line.is_none() && script.len() < 8 << 20 {
+        if let Some(link) = crate::fleet::link::get(spec).await {
+            let req = serde_json::json!({ "op": "sh", "script": script, "timeout": timeout.as_secs() });
+            if let Ok(reply) = link.request(req, timeout + Duration::from_secs(10)).await {
+                if reply["ok"].as_bool() == Some(true) {
+                    return Ok(from_link(marker, limits, secrets, &reply));
+                }
+            }
+        }
+    }
     let mut cmd = command(spec, windows);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| {
@@ -206,6 +218,29 @@ pub async fn run(
         started,
         preamble: err.preamble.join("\n"),
     })
+}
+
+/// A script's result from the agent's link, read the same way as ssh output.
+fn from_link(marker: &str, limits: Limits, secrets: &[String], reply: &serde_json::Value) -> Output {
+    let mut out = Collector::new(marker, limits, secrets, false);
+    let mut err = Collector::new(marker, Limits::OUTPUT, secrets, true);
+    out.push(reply["stdout"].as_str().unwrap_or("").as_bytes(), None);
+    err.push(reply["stderr"].as_str().unwrap_or("").as_bytes(), None);
+    out.finish(None);
+    err.finish(None);
+    let started = out.started || err.started;
+    let (stdout, out_trunc) = out.text();
+    let (stderr, err_trunc) = err.text();
+    Output {
+        stdout,
+        stderr,
+        status: reply["status"].as_i64().map(|s| s as i32),
+        exit: err.exit,
+        timed_out: err.timed_out || reply["timed_out"].as_bool().unwrap_or(false),
+        truncated: out_trunc || err_trunc,
+        started,
+        preamble: err.preamble.join("\n"),
+    }
 }
 
 async fn read(r: &mut (impl AsyncRead + Unpin), buf: &mut [u8]) -> Option<usize> {
@@ -382,7 +417,7 @@ mod tests {
 
     #[test]
     fn drops_profile_noise_and_reads_markers() {
-        let m = "__openrunner_test__";
+        let m = "__muxen_test__";
         let (c, text, _) = collect(m, Limits::OUTPUT, &format!("Welcome!{m}\nreal error\nlast{m}:exit=3\n"), true);
         assert!(c.started);
         assert_eq!(c.preamble, Vec::<String>::new(), "noise on the marker's line is dropped");
@@ -397,7 +432,7 @@ mod tests {
 
     #[test]
     fn caps_long_output_keeping_head_and_tail() {
-        let m = "__openrunner_cap__";
+        let m = "__muxen_cap__";
         let limits = Limits { head: 20, tail: 20, line: 1000 };
         let body: String = (0..100).map(|i| format!("line {i:03}\n")).collect();
         let (_, text, truncated) = collect(m, limits, &format!("{m}\n{body}"), false);
@@ -409,7 +444,7 @@ mod tests {
 
     #[test]
     fn cuts_huge_lines() {
-        let m = "__openrunner_line__";
+        let m = "__muxen_line__";
         let limits = Limits { head: 1 << 20, tail: 0, line: 10 };
         let (_, text, truncated) = collect(m, limits, &format!("{m}\n{}\nok\n", "x".repeat(50)), false);
         assert!(truncated);

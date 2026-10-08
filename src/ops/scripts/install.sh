@@ -1,5 +1,5 @@
-# OpenRunner: install GitHub Actions runners (macOS / Linux).
-# OpenRunner prepends these variables:
+# Muxen: install GitHub Actions runners (macOS / Linux).
+# Muxen prepends these variables:
 #   OR_VERSION  runner release, e.g. 2.329.0
 #   OR_URL      https://github.com/<org> or https://github.com/<owner>/<repo>
 #   OR_TOKEN    registration token (short-lived)

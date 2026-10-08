@@ -1,5 +1,5 @@
-//! The agent-facing API: one layer behind both the MCP server (`openrunner mcp`)
-//! and the scriptable CLI (`openrunner status --json`, `openrunner install`, ...).
+//! The agent-facing API: one layer behind both the MCP server (`muxen mcp`)
+//! and the scriptable CLI (`muxen status --json`, `muxen install`, ...).
 //!
 //! Responses are compact and explicit on purpose: stable ids, plain state
 //! strings, a one-line `summary` where it helps, and operation logs capped to a
@@ -482,7 +482,7 @@ pub struct OperationOut {
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub error: Option<String>,
-    /// The last lines of output. "▸ " lines are OpenRunner's steps, "✓ " successes,
+    /// The last lines of output. "▸ " lines are Muxen's steps, "✓ " successes,
     /// "error: "/"warning: " problems; anything else is output from the machine.
     pub log_tail: Vec<String>,
     pub log_lines: usize,
@@ -722,7 +722,9 @@ async fn freshen(engine: &Arc<Engine>) -> Arc<Snapshot> {
     engine.refresh_from_disk();
     let s = engine.current();
     let stale = s.github.last_sync_at.is_none_or(|t| (Utc::now() - t).num_seconds() > GITHUB_MAX_AGE_SECS);
-    if (s.github.configured || s.demo) && stale {
+    // Unwatched GitHub still needs the token looked up once, or status reports it missing.
+    let token_unknown = !s.github.configured && s.github.token_source.is_empty();
+    if ((s.github.configured || s.demo) && stale) || token_unknown {
         engine.sync_github().await;
     }
     engine.current()
@@ -793,11 +795,11 @@ pub fn status_from(s: &Snapshot, surface: Surface) -> StatusResponse {
         Some(match g.detected.first() {
             Some(d) => surface.say(
                 format!("Not watching GitHub yet. Runner configs mention \"{d}\": call github_scopes with add=[\"{d}\"]."),
-                format!("Not watching GitHub yet. Runner configs mention \"{d}\": run `openrunner watch {d}`."),
+                format!("Not watching GitHub yet. Runner configs mention \"{d}\": run `muxen watch {d}`."),
             ),
             None => surface.say(
                 "Not watching GitHub yet: call github_scopes with add=[\"<org>\"] or [\"owner/repo\"].",
-                "Not watching GitHub yet: run `openrunner watch <org>` (or owner/repo).",
+                "Not watching GitHub yet: run `muxen watch <org>` (or owner/repo).",
             ),
         })
     } else {
@@ -870,7 +872,7 @@ pub fn status_from(s: &Snapshot, surface: Surface) -> StatusResponse {
         hint: never_checked.then(|| {
             surface.say(
                 "No machine has been checked yet; call check_machines (or fleet_status with refresh=true).",
-                "No machine has been checked yet; run `openrunner status --refresh` (or `openrunner check`).",
+                "No machine has been checked yet; run `muxen status --refresh` (or `muxen check`).",
             )
         }),
         demo: s.demo,
@@ -929,7 +931,7 @@ pub async fn jobs(engine: &Arc<Engine>, surface: Surface) -> ApiResult<JobsRespo
         hint: (!s.github.configured && !s.demo).then(|| {
             surface.say(
                 "Jobs come from GitHub: call github_scopes with add=[\"<org>\"] first.",
-                "Jobs come from GitHub: run `openrunner watch <org>` first.",
+                "Jobs come from GitHub: run `muxen watch <org>` first.",
             )
         }),
     })
@@ -942,7 +944,7 @@ pub fn operations(engine: &Arc<Engine>) -> Vec<OperationOut> {
 pub fn operation(engine: &Arc<Engine>, req: OperationRequest) -> ApiResult<OperationOut> {
     let s = engine.current();
     let o = s.operations.iter().find(|o| o.id == req.operation_id).ok_or_else(|| {
-        ApiError::not_found(format!("No operation {} in this OpenRunner process.", req.operation_id))
+        ApiError::not_found(format!("No operation {} in this Muxen process.", req.operation_id))
             .with_hint("Operation ids are per process; list_operations shows the ones this server started.")
     })?;
     Ok(operation_out(o, req.tail.unwrap_or(DEFAULT_TAIL)))
@@ -1010,13 +1012,13 @@ pub async fn add_machine(engine: &Arc<Engine>, req: AddMachineRequest, surface: 
     let next = match machine.as_ref().map(|m| m.summary.status.as_str()) {
         Some("online") => surface.say(
             format!("Machine is reachable. Install runners with install_runners(machine_id=\"{id}\", count=N)."),
-            format!("Machine is reachable. Install runners with `openrunner install {id} --count N`."),
+            format!("Machine is reachable. Install runners with `muxen install {id} --count N`."),
         ),
         Some("offline") => surface.say(
             "The machine didn't answer over ssh. Make sure key-based `ssh <host>` works without a password prompt, then call check_machines.",
-            "The machine didn't answer over ssh. Make sure key-based `ssh <host>` works without a password prompt, then run `openrunner check`.",
+            "The machine didn't answer over ssh. Make sure key-based `ssh <host>` works without a password prompt, then run `muxen check`.",
         ),
-        _ => surface.say(format!("Call check_machines(machine_id=\"{id}\") to check it."), "Run `openrunner check` to check it.".to_string()),
+        _ => surface.say(format!("Call check_machines(machine_id=\"{id}\") to check it."), "Run `muxen check` to check it.".to_string()),
     };
     Ok(AddMachineResponse { machine_id: id, machine, next })
 }
@@ -1043,7 +1045,7 @@ pub async fn install_runners(engine: &Arc<Engine>, req: InstallRunnersRequest, s
                 [] => {
                     return Err(ApiError::invalid("Say which GitHub org or repo to register the runners with (scope).").with_hint(surface.say(
                         "Watch it first with github_scopes(add=[\"<org>\"]), or pass scope=\"<org>\" / \"owner/repo\".",
-                        "Watch it first with `openrunner watch <org>`, or pass --scope <org> / owner/repo.",
+                        "Watch it first with `muxen watch <org>`, or pass --scope <org> / owner/repo.",
                     )));
                 }
                 many => return Err(ApiError::invalid(format!("Several orgs/repos are watched ({}); pass scope.", many.join(", ")))),
@@ -1131,7 +1133,7 @@ async fn finish_action(
         next: (!finished).then(|| {
             surface.say(
                 format!("Still running. Poll get_operation(operation_id={op}) until status isn't \"running\"."),
-                "Still running in the background; this command stopped waiting. Check the result with `openrunner status`.",
+                "Still running in the background; this command stopped waiting. Check the result with `muxen status`.",
             )
         }),
         operation: operation_out(&operation, tail),
@@ -1251,7 +1253,7 @@ const HISTORY_IN_GET: usize = 20;
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkspaceCreateRequest {
-    /// Machine id to use. Omit to let OpenRunner pick the least-loaded online machine that allows workspaces.
+    /// Machine id to use. Omit to let Muxen pick the least-loaded online machine that allows workspaces.
     pub machine_id: Option<String>,
     /// When picking a machine: platform prefix it must match, e.g. "linux", "linux-x64", "darwin-arm64", "windows".
     pub platform: Option<String>,
@@ -1259,7 +1261,7 @@ pub struct WorkspaceCreateRequest {
     pub name: Option<String>,
     /// Git URL, or "owner/repo" for GitHub, to clone into the workspace.
     pub repo: Option<String>,
-    /// Branch, tag or commit to check out.
+    /// Branch, tag or commit to check out; "pull/123/head" for a pull request's code.
     #[serde(rename = "ref")]
     pub git_ref: Option<String>,
     /// New branch to create and switch to after checkout.
@@ -1581,7 +1583,7 @@ fn ws_error(message: String, surface: Surface) -> ApiError {
     } else if m.contains("doesn't allow") || m.contains("not allowed") || m.contains("disabled") {
         err = err.with_hint(surface.say(
             "Turn workspaces on for that machine (workspace_allow, the toggle in the app, or `workspaces = true` in fleet.toml), or pick another machine.",
-            "Turn workspaces on for that machine (`openrunner workspace allow <machine-id>`, the toggle in the app, or `workspaces = true` in fleet.toml), or pick another machine.",
+            "Turn workspaces on for that machine (`muxen workspace allow <machine-id>`, the toggle in the app, or `workspaces = true` in fleet.toml), or pick another machine.",
         ));
     } else if m.contains("rsync") {
         err = err.with_hint("Install rsync on both this computer and the machine.");
@@ -1591,7 +1593,7 @@ fn ws_error(message: String, surface: Surface) -> ApiError {
     err
 }
 
-/// The current workspaces, including ones other OpenRunner processes created.
+/// The current workspaces, including ones other Muxen processes created.
 fn current_workspaces(engine: &Arc<Engine>) -> Vec<WorkspaceInfo> {
     engine.refresh_from_disk();
     engine.workspaces()
@@ -1609,12 +1611,12 @@ fn find_workspace(engine: &Arc<Engine>, id: &str, surface: Surface) -> ApiResult
         return Ok((*one).clone());
     }
     Err(ApiError::not_found(format!("No workspace \"{id}\".")).with_hint(if all.is_empty() {
-        surface.say("There are no workspaces; create one with workspace_create.", "There are no workspaces; create one with `openrunner workspace create`.")
+        surface.say("There are no workspaces; create one with workspace_create.", "There are no workspaces; create one with `muxen workspace create`.")
     } else {
         let known = all.iter().map(|w| w.id.as_str()).collect::<Vec<_>>().join(", ");
         surface.say(
             &format!("Known workspaces: {known}. Or create one with workspace_create."),
-            &format!("Known workspaces: {known}. Or create one with `openrunner workspace create`."),
+            &format!("Known workspaces: {known}. Or create one with `muxen workspace create`."),
         )
     }))
 }
@@ -1675,7 +1677,7 @@ pub async fn workspace_create(engine: &Arc<Engine>, req: WorkspaceCreateRequest,
                 return Err(ApiError::invalid(format!("{} doesn't allow workspaces.", m.name))
                     .with_hint(surface.say(
                         format!("Turn them on with workspace_allow(machine_id=\"{}\", allowed=true) if the user agrees, or pick another machine.", m.id),
-                        format!("Turn them on with `openrunner workspace allow {}`, or pick another machine.", m.id),
+                        format!("Turn them on with `muxen workspace allow {}`, or pick another machine.", m.id),
                     )));
             }
             Some(m.id.clone())
@@ -1706,7 +1708,7 @@ pub async fn workspace_create(engine: &Arc<Engine>, req: WorkspaceCreateRequest,
     let id = &created.id;
     let next = surface.say(
         format!("Run commands with workspace_exec(workspace_id=\"{id}\", command=...). Review edits with workspace_changes. Call workspace_destroy(workspace_id=\"{id}\") when the task is done."),
-        format!("Run commands with `openrunner workspace exec {id} -- <command>`; review edits with `openrunner workspace changes {id}`; destroy it with `openrunner workspace rm {id}` when done."),
+        format!("Run commands with `muxen workspace exec {id} -- <command>`; review edits with `muxen workspace changes {id}`; destroy it with `muxen workspace rm {id}` when done."),
     );
     Ok(WorkspaceCreated { workspace: workspace_out(&created, 0), next })
 }
@@ -1747,7 +1749,7 @@ pub async fn workspace_exec(engine: &Arc<Engine>, req: WorkspaceExecRequest, by:
     let next = if let Some(log) = &result.log_path {
         Some(surface.say(
             format!("Running in the background (pid {pid}). Read its output with workspace_read_file(path=\"{log}\") or workspace_exec(command=\"tail -n 50 {log}\")."),
-            format!("Running in the background (pid {pid}). Read its output with `openrunner workspace cat {} {log}`.", w.id),
+            format!("Running in the background (pid {pid}). Read its output with `muxen workspace cat {} {log}`.", w.id),
         ))
     } else if result.timed_out {
         Some(surface.say(
@@ -1864,7 +1866,7 @@ mod tests {
     use crate::config::Paths;
 
     fn demo() -> Arc<Engine> {
-        Engine::new(Paths::resolve(Some(std::env::temp_dir().join("openrunner-api-test")), None), true)
+        Engine::new(Paths::resolve(Some(std::env::temp_dir().join("muxen-api-test")), None), true)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1973,7 +1975,7 @@ mod tests {
         let s = engine.current();
         assert!(status_from(&s, Surface::Mcp).hint.unwrap().contains("check_machines"));
         let cli = status_from(&s, Surface::Cli).hint.unwrap();
-        assert!(cli.contains("openrunner status --refresh") && !cli.contains("check_machines"), "{cli}");
+        assert!(cli.contains("muxen status --refresh") && !cli.contains("check_machines"), "{cli}");
     }
 
     #[test]
@@ -1991,7 +1993,7 @@ mod tests {
         assert_eq!(ws_error("No workspace \"ws-x\".".into(), Surface::Mcp).code, "not_found");
         assert_eq!(ws_error("ssh: connect to host x port 22: Operation timed out".into(), Surface::Mcp).code, "unreachable");
         assert_eq!(ws_error("Workspaces aren't implemented yet.".into(), Surface::Mcp).code, "internal");
-        assert!(ws_error("Mac Studio doesn't allow workspaces.".into(), Surface::Cli).hint.unwrap().contains("openrunner workspace allow"));
+        assert!(ws_error("Mac Studio doesn't allow workspaces.".into(), Surface::Cli).hint.unwrap().contains("muxen workspace allow"));
         let e = ws_error("Mac Studio doesn't allow workspaces.".into(), Surface::Mcp);
         assert_eq!(e.code, "invalid");
         assert!(e.hint.unwrap().contains("workspace_allow"));
@@ -2017,7 +2019,7 @@ mod tests {
         assert_eq!(workspace_exec(&engine, bad_env, "test", Surface::Mcp).await.unwrap_err().code, "invalid");
         // Valid input, unknown workspace.
         let missing = workspace_exec(&engine, exec("ls", None, Some("src")), "test", Surface::Cli).await.unwrap_err();
-        assert!(missing.hint.as_deref().unwrap_or_default().contains("openrunner workspace create"), "{missing:?}");
+        assert!(missing.hint.as_deref().unwrap_or_default().contains("muxen workspace create"), "{missing:?}");
         assert_eq!(missing.code, "not_found");
 
         let read = WorkspaceReadRequest { workspace_id: "ws-nope".into(), path: "/etc/hosts".into(), max_bytes: None };
@@ -2082,4 +2084,670 @@ mod tests {
         workspace_destroy(&engine, WorkspaceDestroyRequest { workspace_id: id.clone(), keep_files: false }, Surface::Mcp).await.unwrap();
         assert_eq!(workspace_get(&engine, WorkspaceRequest { workspace_id: id }, Surface::Mcp).unwrap_err().code, "not_found");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Agent sessions: terminals running Claude Code, Codex, ... on fleet machines
+
+use crate::fleet::sessions::{self, Control, SessionInfo, StartSession};
+
+/// Session size for sessions started without a terminal attached.
+const HEADLESS_COLS: u16 = 160;
+const HEADLESS_ROWS: u16 = 48;
+const READ_DEFAULT_LINES: u32 = 200;
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionListRequest {
+    /// Only this machine.
+    #[serde(default)]
+    pub machine_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionStartRequest {
+    pub machine_id: String,
+    /// "claude", "codex", "opencode", "gemini", "amp" or "shell".
+    pub agent: String,
+    /// Folder on the machine to start in. Default: the home folder.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// First message for the agent.
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRequest {
+    /// "<machine-id>/<name>", e.g. "beelink/claude-3f9a". A bare name works when unique.
+    pub session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSendRequest {
+    pub session_id: String,
+    /// Text to type into the session.
+    pub text: String,
+    /// Press Enter after the text. Default true.
+    #[serde(default = "default_true")]
+    pub enter: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionReadRequest {
+    pub session_id: String,
+    /// Lines of scrollback above the screen to include. Default 200.
+    #[serde(default)]
+    pub lines: Option<u32>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionHostOut {
+    pub machine_id: String,
+    pub machine: String,
+    /// The Muxen agent's version there, once it's set up.
+    pub agent: Option<String>,
+    /// Agent CLIs found on the machine.
+    pub agents: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionsOut {
+    pub sessions: Vec<SessionInfo>,
+    pub machines: Vec<SessionHostOut>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionReadOut {
+    pub session_id: String,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub busy: bool,
+    /// The screen and recent scrollback as plain text.
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionDoneOut {
+    pub session_id: String,
+    pub done: String,
+}
+
+fn session_error(message: String) -> ApiError {
+    let m = message.to_ascii_lowercase();
+    let code = if m.contains("no machine") || m.contains("no session") {
+        "not_found"
+    } else if m.contains("unreachable") || m.contains("timed out") || m.contains("connection refused") || m.contains("no route to host") {
+        "unreachable"
+    } else if m.contains("isn't a session id") || m.contains("unknown agent") || m.contains("isn't a folder") {
+        "invalid"
+    } else {
+        "operation_failed"
+    };
+    let mut err = ApiError::new(code, message);
+    if code == "unreachable" {
+        err = err.with_hint("The machine didn't answer over ssh. Check that `ssh <host>` works without a password prompt.");
+    }
+    err
+}
+
+/// Machines to look at: one, or every machine that can be reached.
+fn session_machines(engine: &Arc<Engine>, only: Option<&str>) -> ApiResult<Vec<Machine>> {
+    let s = engine.current();
+    match only {
+        Some(id) => Ok(vec![find_machine(&s, id)?.clone()]),
+        None => Ok(s.machines.iter().filter(|m| !m.host.is_empty() && m.status != "offline").cloned().collect()),
+    }
+}
+
+/// Lists agent sessions, re-reading the machines first.
+pub async fn sessions_list(engine: &Arc<Engine>, req: SessionListRequest) -> ApiResult<SessionsOut> {
+    let machines = session_machines(engine, req.machine_id.as_deref())?;
+    let found = futures::future::join_all(machines.iter().map(|m| engine.refresh_sessions(&m.id))).await;
+    let mut out = SessionsOut { sessions: Vec::new(), machines: Vec::new() };
+    for (m, f) in machines.iter().zip(found) {
+        match f {
+            Ok(f) => {
+                out.sessions.extend(f.sessions);
+                out.machines.push(SessionHostOut { machine_id: m.id.clone(), machine: m.name.clone(), agent: f.agent_version, agents: f.agents, error: f.error });
+            }
+            Err(e) => out.machines.push(SessionHostOut { machine_id: m.id.clone(), machine: m.name.clone(), agent: None, agents: Vec::new(), error: Some(e) }),
+        }
+    }
+    Ok(out)
+}
+
+/// Resolves "<machine>/<name>", or a bare name that's unique across the fleet.
+async fn resolve_session(engine: &Arc<Engine>, id: &str) -> ApiResult<SessionInfo> {
+    let id = id.trim();
+    if let Some((machine, name)) = id.split_once('/') {
+        let m = find_machine(&engine.current(), machine)?.clone();
+        let found = engine.refresh_sessions(&m.id).await.map_err(session_error)?;
+        return found.sessions.into_iter().find(|s| s.name == name).ok_or_else(|| {
+            ApiError::not_found(format!("No session \"{name}\" on {}.", m.name)).with_hint("List sessions with session_list (`muxen session ls`).")
+        });
+    }
+    let all = sessions_list(engine, SessionListRequest::default()).await?;
+    let matches: Vec<SessionInfo> = all.sessions.into_iter().filter(|s| s.name == id).collect();
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().unwrap()),
+        0 => Err(ApiError::not_found(format!("No session \"{id}\".")).with_hint("Session ids look like <machine-id>/<name>; list them with session_list (`muxen session ls`).")),
+        _ => Err(ApiError::invalid(format!("\"{id}\" is on more than one machine; use <machine-id>/{id}."))),
+    }
+}
+
+pub async fn session_start(engine: &Arc<Engine>, req: SessionStartRequest) -> ApiResult<SessionInfo> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    if sessions::agent(&req.agent).is_none() {
+        let ids: Vec<&str> = sessions::AGENTS.iter().map(|a| a.id).collect();
+        return Err(ApiError::invalid(format!("Unknown agent \"{}\".", req.agent)).with_hint(format!("Use one of: {}.", ids.join(", "))));
+    }
+    engine
+        .start_session(StartSession {
+            machine_id: m.id,
+            agent: req.agent.to_ascii_lowercase(),
+            cwd: req.cwd.unwrap_or_default(),
+            title: req.title,
+            prompt: req.prompt,
+            cols: HEADLESS_COLS,
+            rows: HEADLESS_ROWS,
+            // Only the app hosts terminals for sessions without the agent.
+            direct: false,
+            command: None,
+        })
+        .await
+        .map_err(session_error)
+}
+
+pub async fn session_send(engine: &Arc<Engine>, req: SessionSendRequest) -> ApiResult<SessionDoneOut> {
+    if req.text.is_empty() && !req.enter {
+        return Err(ApiError::invalid("Nothing to send: text is empty and enter is false."));
+    }
+    let s = resolve_session(engine, &req.session_id).await?;
+    if s.status != "running" {
+        return Err(ApiError::invalid(format!("{} has exited.", s.id)).with_hint("Restart it with session_restart (`muxen session restart`)."));
+    }
+    engine.control_session(&s.id, Control::Send { text: &req.text, enter: req.enter }).await.map_err(session_error)?;
+    Ok(SessionDoneOut { session_id: s.id, done: "sent".into() })
+}
+
+pub async fn session_read(engine: &Arc<Engine>, req: SessionReadRequest) -> ApiResult<SessionReadOut> {
+    let s = resolve_session(engine, &req.session_id).await?;
+    let lines = req.lines.unwrap_or(READ_DEFAULT_LINES);
+    let text = engine.control_session(&s.id, Control::Read { lines }).await.map_err(session_error)?;
+    Ok(SessionReadOut { session_id: s.id, status: s.status, exit_code: s.exit_code, busy: s.busy, text })
+}
+
+pub async fn session_stop(engine: &Arc<Engine>, req: SessionRequest) -> ApiResult<SessionDoneOut> {
+    let s = resolve_session(engine, &req.session_id).await?;
+    engine.control_session(&s.id, Control::Stop).await.map_err(session_error)?;
+    Ok(SessionDoneOut { session_id: s.id, done: "stopped".into() })
+}
+
+pub async fn session_restart(engine: &Arc<Engine>, req: SessionRequest) -> ApiResult<SessionDoneOut> {
+    let s = resolve_session(engine, &req.session_id).await?;
+    engine.control_session(&s.id, Control::Restart).await.map_err(session_error)?;
+    Ok(SessionDoneOut { session_id: s.id, done: "restarted".into() })
+}
+
+/// The program and arguments that attach this terminal to a session.
+pub async fn session_attach(engine: &Arc<Engine>, req: SessionRequest) -> ApiResult<sessions::AttachCommand> {
+    let s = resolve_session(engine, &req.session_id).await?;
+    engine.attach_command(&s.id).map_err(session_error)
+}
+
+// ---------------------------------------------------------------------------
+// GitHub: your repositories, issues and pull requests; code on your machines
+
+use crate::fleet::model::Checkout;
+use crate::github::hub;
+
+fn github_error(message: String) -> ApiError {
+    let lower = message.to_ascii_lowercase();
+    let mut err = ApiError::new("github", message);
+    if lower.contains("no github token") || lower.contains("rejected the token") || lower.contains("bad credentials") {
+        err = err.with_hint("Sign in to GitHub: `gh auth login` (Muxen uses the GitHub CLI's login), or set GITHUB_TOKEN.");
+    }
+    err
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepoRequest {
+    /// "owner/name" or a GitHub URL.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemRequest {
+    /// An issue or pull request: its URL, or "owner/name#123".
+    pub reference: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckoutsRequest {
+    /// Only this machine.
+    #[serde(default)]
+    pub machine_id: Option<String>,
+    /// Only checkouts of this repository ("owner/name").
+    #[serde(default)]
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitRequest {
+    pub machine_id: String,
+    /// The checkout's folder on that machine.
+    pub path: String,
+    /// "fetch", "pull" (fast-forward only) or "push".
+    pub action: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RepoOut {
+    pub repo: hub::Repo,
+    pub issues: Vec<hub::Item>,
+    pub pulls: Vec<hub::Item>,
+    pub runs: Vec<hub::Run>,
+    /// Where it's checked out on your machines.
+    pub checkouts: Vec<Checkout>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FavoriteRequest {
+    /// "owner/name" or a GitHub URL.
+    pub repo: String,
+    /// false removes it from the favorites.
+    #[serde(default = "yes")]
+    pub favorite: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AccountsOut {
+    /// The account Muxen uses now: for the GitHub page, managing runners,
+    /// and cloning into workspaces.
+    pub using: Option<String>,
+    /// "gh", or the environment variable the token came from (then switching
+    /// between the GitHub CLI's accounts isn't possible); "" when none was found.
+    pub token_source: String,
+    /// When Muxen uses another machine's GitHub CLI login: that machine's id.
+    pub machine_id: Option<String>,
+    /// The accounts the GitHub CLI here is signed in to.
+    pub accounts: Vec<crate::github::Account>,
+    /// Other machines' GitHub CLI logins, usable instead.
+    pub machines: Vec<MachineAccount>,
+    /// The permissions (OAuth scopes) of the login in use; null when GitHub doesn't say.
+    /// Watching an organization's runners needs "admin:org".
+    pub scopes: Option<Vec<String>>,
+    /// The organizations the login in use belongs to (candidates for github_scopes).
+    pub orgs: Vec<String>,
+    /// What to run to give the login the permission to read organization runners, when it lacks it.
+    pub grant_command: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MachineAccount {
+    pub machine_id: String,
+    pub machine: String,
+    pub login: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UseAccountRequest {
+    /// A login the GitHub CLI here is signed in to; with machine_id, optional.
+    #[serde(default)]
+    pub login: String,
+    /// Use this machine's GitHub CLI login instead of this computer's.
+    #[serde(default)]
+    pub machine_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FavoritesOut {
+    pub favorites: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitOut {
+    pub output: String,
+}
+
+pub async fn github_inbox(engine: &Arc<Engine>) -> ApiResult<hub::Inbox> {
+    let settings = engine.settings().github;
+    engine.github().inbox(&settings).await.map_err(github_error)
+}
+
+/// Your repositories, favorites first, then most recently pushed.
+pub async fn github_repos(engine: &Arc<Engine>) -> ApiResult<Vec<hub::Repo>> {
+    let settings = engine.settings();
+    let mut repos = engine.github().my_repos(&settings.github).await.map_err(github_error)?;
+    for r in &mut repos {
+        r.favorite = settings.favorite_repos.iter().any(|f| f.eq_ignore_ascii_case(&r.full_name));
+    }
+    repos.sort_by_key(|r| !r.favorite);
+    Ok(repos)
+}
+
+/// The GitHub CLI's accounts, and which one Muxen uses (read fresh, so a
+/// permission granted a moment ago shows).
+pub async fn github_accounts(engine: &Arc<Engine>) -> ApiResult<AccountsOut> {
+    let settings = engine.settings().github;
+    let gh = engine.github();
+    gh.reload_login();
+    // Machines whose GitHub CLI login isn't known yet (a fresh CLI run) are asked.
+    let unknown: Vec<String> = engine
+        .current()
+        .machines
+        .iter()
+        .filter(|m| m.host != "local" && m.gh.is_none() && m.status == "online" && !m.platform.starts_with("windows"))
+        .map(|m| m.id.clone())
+        .collect();
+    let (accounts, viewer, orgs, _) = futures::join!(
+        gh.accounts(&settings),
+        gh.viewer(&settings),
+        gh.my_orgs(&settings),
+        futures::future::join_all(unknown.iter().map(|id| engine.refresh_sessions(id)))
+    );
+    let scopes = gh.scopes();
+    let grant_command = scopes
+        .as_ref()
+        .filter(|s| !s.iter().any(|x| x == "admin:org"))
+        .map(|_| format!("gh auth refresh -h {} -s admin:org", crate::fleet::workspaces::github_web_host(&settings.api_url)));
+    let token_source = gh.token_source().await;
+    let snapshot = engine.current();
+    let machines: Vec<MachineAccount> = snapshot
+        .machines
+        .iter()
+        .filter(|m| m.host != "local")
+        .filter_map(|m| {
+            let g = m.gh.as_ref().filter(|g| g.logged_in)?;
+            Some(MachineAccount { machine_id: m.id.clone(), machine: m.name.clone(), login: g.account.clone()? })
+        })
+        .collect();
+    let accounts = match accounts {
+        Ok(a) => a,
+        // A token from the environment, or a machine's login, works without the CLI here.
+        Err(_) if (!token_source.is_empty() && token_source != "gh") || !machines.is_empty() => Vec::new(),
+        Err(e) => return Err(ApiError::new("github", e).with_hint("gh auth login")),
+    };
+    let machine_id = Some(settings.account_machine).filter(|m| !m.is_empty());
+    Ok(AccountsOut { using: viewer.ok().map(|v| v.login), token_source, machine_id, accounts, machines, scopes, orgs: orgs.unwrap_or_default(), grant_command })
+}
+
+/// Switches Muxen to another of the GitHub CLI's accounts (not the CLI's own active account).
+pub async fn github_use_account(engine: &Arc<Engine>, req: UseAccountRequest) -> ApiResult<AccountsOut> {
+    let login = req.login.trim().trim_start_matches('@').to_string();
+    let mut settings = engine.settings();
+    let source = engine.github().token_source().await;
+    if !source.is_empty() && source != "gh" {
+        return Err(ApiError::invalid(format!("Muxen is using the token in ${source}. Unset it to switch between the GitHub CLI's accounts.")));
+    }
+    let previous = settings.clone();
+    if let Some(id) = req.machine_id.as_deref().filter(|m| !m.is_empty()) {
+        let m = find_machine(&engine.current(), id)?.clone();
+        if m.gh.is_none() && m.host != "local" {
+            let _ = engine.refresh_sessions(&m.id).await;
+        }
+    }
+    let snapshot = engine.current();
+    let machine = match req.machine_id.as_deref().filter(|m| !m.is_empty()) {
+        Some(id) => Some(find_machine(&snapshot, id)?).filter(|m| m.host != "local"),
+        None => None,
+    };
+    match machine {
+        Some(m) => {
+            let Some(account) = m.gh.as_ref().filter(|g| g.logged_in).and_then(|g| g.account.clone()) else {
+                return Err(ApiError::not_found(format!("The GitHub CLI on {} isn't signed in.", m.name)).with_hint("Sign it in from the machine's page, or run `gh auth login` there."));
+            };
+            if !login.is_empty() && !account.eq_ignore_ascii_case(&login) {
+                return Err(ApiError::invalid(format!("{} is signed in to GitHub as {account}, not {login}.", m.name)));
+            }
+            settings.github.account = account;
+            settings.github.account_machine = m.id.clone();
+        }
+        None => {
+            let accounts = engine.github().accounts(&settings.github).await.map_err(|e| ApiError::new("github", e).with_hint("gh auth login"))?;
+            let Some(account) = accounts.iter().find(|a| a.login.eq_ignore_ascii_case(&login)) else {
+                let known: Vec<&str> = accounts.iter().map(|a| a.login.as_str()).collect();
+                return Err(ApiError::not_found(format!("The GitHub CLI isn't signed in to \"{login}\" (it has: {}).", known.join(", "))).with_hint("gh auth login"));
+            };
+            settings.github.account = account.login.clone();
+            settings.github.account_machine = String::new();
+        }
+    }
+    engine.update_settings(settings).map_err(ApiError::invalid)?;
+    // Make sure GitHub takes it; otherwise stay on the previous login.
+    let wanted = engine.settings().github.account;
+    let out = github_accounts(engine).await?;
+    match out.using.as_deref() {
+        Some(u) if u.eq_ignore_ascii_case(&wanted) => Ok(out),
+        Some(u) => {
+            let _ = engine.update_settings(previous);
+            Err(ApiError::invalid(format!("That login turned out to be {u}, not {wanted}, so Muxen kept the previous one. Check which account gh is signed in to there.")))
+        }
+        None => {
+            let _ = engine.update_settings(previous);
+            Err(ApiError::new("github", "GitHub didn't accept that login, so Muxen kept the previous one.").with_hint("gh auth login"))
+        }
+    }
+}
+
+/// Adds a repository to the favorites, or removes it.
+pub fn github_favorite(engine: &Arc<Engine>, req: FavoriteRequest) -> ApiResult<FavoritesOut> {
+    let name = hub::repo_name(&req.repo).ok_or_else(|| ApiError::invalid(format!("\"{}\" isn't a GitHub repository; use owner/name.", req.repo)))?;
+    let mut settings = engine.settings();
+    settings.favorite_repos.retain(|f| !f.eq_ignore_ascii_case(&name));
+    if req.favorite {
+        settings.favorite_repos.push(name);
+    }
+    let saved = engine.update_settings(settings).map_err(ApiError::invalid)?;
+    Ok(FavoritesOut { favorites: saved.favorite_repos })
+}
+
+pub async fn github_repo(engine: &Arc<Engine>, req: RepoRequest) -> ApiResult<RepoOut> {
+    let name = hub::repo_name(&req.repo).ok_or_else(|| ApiError::invalid(format!("\"{}\" isn't a GitHub repository; use owner/name.", req.repo)))?;
+    let settings = engine.settings().github;
+    let gh = engine.github();
+    let (repo, items, runs) = futures::join!(gh.repo(&settings, &name), gh.repo_items(&settings, &name), gh.repo_runs(&settings, &name));
+    let mut repo = repo.map_err(github_error)?;
+    repo.favorite = engine.settings().favorite_repos.iter().any(|f| f.eq_ignore_ascii_case(&repo.full_name));
+    let items = items.map_err(github_error)?;
+    let checkouts = engine.current().checkouts.iter().filter(|c| c.repo.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(&name))).cloned().collect();
+    Ok(RepoOut { repo, issues: items.issues, pulls: items.pulls, runs: runs.unwrap_or_default(), checkouts })
+}
+
+pub async fn github_item(engine: &Arc<Engine>, req: ItemRequest) -> ApiResult<hub::Detail> {
+    let (repo, number) = hub::issue_ref(&req.reference)
+        .ok_or_else(|| ApiError::invalid(format!("\"{}\" isn't an issue or pull request; use its URL or owner/name#123.", req.reference)))?;
+    let settings = engine.settings().github;
+    engine.github().detail(&settings, &repo, number).await.map_err(github_error)
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitSetupOut {
+    pub machine_id: String,
+    #[serde(flatten)]
+    pub setup: crate::fleet::code::GitSetup,
+    /// git has a name and email to commit with.
+    pub can_commit: bool,
+    /// How a push over HTTPS gets a GitHub login: "gh" (the machine's GitHub CLI),
+    /// "other" (another credential helper or SSH keys; may work), or "none".
+    pub push: String,
+    /// The machine's GitHub CLI account, when it's signed in.
+    pub gh_account: Option<String>,
+    /// What `identity: true` sets: the GitHub account's name and its private noreply email.
+    pub suggested_name: Option<String>,
+    pub suggested_email: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitStatusRequest {
+    pub machine_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitSetupRequest {
+    pub machine_id: String,
+    /// Set git's name and email (globally on the machine): the ones given, else the GitHub account's.
+    #[serde(default)]
+    pub identity: bool,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    /// Make git use the machine's GitHub CLI login for github.com (`gh auth setup-git`).
+    #[serde(default)]
+    pub credentials: bool,
+}
+
+/// The machine, with its GitHub CLI state known (asked for when it isn't yet).
+async fn machine_with_gh(engine: &Arc<Engine>, machine_id: &str) -> ApiResult<crate::fleet::model::Machine> {
+    let m = find_machine(&engine.current(), machine_id)?.clone();
+    if m.gh.is_some() {
+        return Ok(m);
+    }
+    let _ = engine.refresh_sessions(&m.id).await;
+    Ok(find_machine(&engine.current(), &m.id)?.clone())
+}
+
+async fn git_out(engine: &Arc<Engine>, m: &crate::fleet::model::Machine, setup: crate::fleet::code::GitSetup) -> GitSetupOut {
+    let gh_account = m.gh.as_ref().filter(|g| g.logged_in).and_then(|g| g.account.clone());
+    let settings = engine.settings().github;
+    let login = match gh_account.clone() {
+        Some(l) => Some(l),
+        None => engine.github().viewer(&settings).await.ok().map(|v| v.login),
+    };
+    let suggested = match login {
+        Some(l) => engine.github().commit_identity(&settings, &l).await.ok(),
+        None => None,
+    };
+    let push = if setup.uses_gh && gh_account.is_some() {
+        "gh"
+    } else if !setup.helpers.is_empty() || !setup.ssh_keys.is_empty() {
+        "other"
+    } else {
+        "none"
+    };
+    GitSetupOut {
+        machine_id: m.id.clone(),
+        can_commit: setup.name.is_some() && setup.email.is_some(),
+        push: push.into(),
+        gh_account,
+        suggested_name: suggested.as_ref().map(|s| s.0.clone()),
+        suggested_email: suggested.map(|s| s.1),
+        setup,
+    }
+}
+
+/// Whether git on a machine can commit and push to GitHub.
+pub async fn git_status(engine: &Arc<Engine>, machine_id: &str) -> ApiResult<GitSetupOut> {
+    let m = machine_with_gh(engine, machine_id).await?;
+    let setup = engine.git_setup_status(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    Ok(git_out(engine, &m, setup).await)
+}
+
+/// Sets up git on a machine: identity and/or GitHub credentials through the GitHub CLI.
+pub async fn git_setup(engine: &Arc<Engine>, req: GitSetupRequest) -> ApiResult<GitSetupOut> {
+    if !req.identity && !req.credentials {
+        return Err(ApiError::invalid("Nothing to set up: pass identity and/or credentials."));
+    }
+    let m = machine_with_gh(engine, &req.machine_id).await?;
+    let identity = if req.identity {
+        let (name, email) = match (req.name.clone(), req.email.clone()) {
+            (Some(n), Some(e)) => (n, e),
+            (n, e) => {
+                let current = git_out(engine, &m, Default::default()).await;
+                match (n.or(current.suggested_name), e.or(current.suggested_email)) {
+                    (Some(n), Some(e)) => (n, e),
+                    _ => return Err(ApiError::invalid("Couldn't find a GitHub name and email to use; pass name and email.")),
+                }
+            }
+        };
+        Some((name, email))
+    } else {
+        None
+    };
+    let setup = engine.git_setup_apply(&m.id, identity, req.credentials).await.map_err(|e| {
+        let err = ApiError::new("operation_failed", e.clone());
+        if e.contains("Sign in to the GitHub CLI") { err.with_hint("gh auth login") } else { err }
+    })?;
+    Ok(git_out(engine, &m, setup).await)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectRequest {
+    pub machine_id: String,
+    /// true pairs and connects directly; false goes back to ssh only.
+    pub enabled: bool,
+}
+
+/// How Muxen reaches a machine: directly (QUIC), a live ssh link, or none.
+pub async fn machine_connection(engine: &Arc<Engine>, machine_id: &str) -> ApiResult<crate::fleet::connection::Connection> {
+    let m = find_machine(&engine.current(), machine_id)?.clone();
+    engine.connection(&m.id).await.map_err(|e| ApiError::new("unreachable", e))
+}
+
+/// Turns direct (QUIC) connections to a machine on or off.
+pub async fn set_direct(engine: &Arc<Engine>, req: DirectRequest) -> ApiResult<crate::fleet::connection::Connection> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    engine.set_direct(&m.id, req.enabled).await.map_err(|e| ApiError::new("operation_failed", e))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopInputRequest {
+    pub machine_id: String,
+    pub events: Vec<crate::fleet::desktop::DesktopEvent>,
+}
+
+/// What's on a machine's screen (a JPEG, plus its size).
+pub async fn desktop_screenshot(engine: &Arc<Engine>, machine_id: &str) -> ApiResult<crate::fleet::desktop::Screenshot> {
+    let m = find_machine(&engine.current(), machine_id)?.clone();
+    engine.desktop_screenshot(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))
+}
+
+/// Moves, clicks, scrolls and types on a machine's desktop.
+pub async fn desktop_input(engine: &Arc<Engine>, req: DesktopInputRequest) -> ApiResult<serde_json::Value> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    let n = engine.desktop_input(&m.id, &req.events).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    Ok(serde_json::json!({ "machine_id": m.id, "events": n, "next": "Take a desktop_screenshot to see the result." }))
+}
+
+/// Git checkouts on the machines, re-read first.
+pub async fn checkouts(engine: &Arc<Engine>, req: CheckoutsRequest) -> ApiResult<Vec<Checkout>> {
+    let machines = session_machines(engine, req.machine_id.as_deref())?;
+    let _ = futures::future::join_all(machines.iter().map(|m| engine.refresh_checkouts(&m.id))).await;
+    let want = req.repo.as_deref().and_then(hub::repo_name);
+    Ok(engine
+        .current()
+        .checkouts
+        .iter()
+        .filter(|c| machines.iter().any(|m| m.id == c.machine_id))
+        .filter(|c| want.as_deref().is_none_or(|w| c.repo.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(w))))
+        .cloned()
+        .collect())
+}
+
+pub async fn checkout_git(engine: &Arc<Engine>, req: GitRequest) -> ApiResult<GitOut> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    engine.checkout_git(&m.id, &req.path, &req.action).await.map(|output| GitOut { output }).map_err(|e| ApiError::new("operation_failed", e))
 }

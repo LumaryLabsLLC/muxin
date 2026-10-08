@@ -50,7 +50,7 @@ pub fn status(s: &StatusResponse) -> String {
 
 pub fn machines(list: &[MachineSummary]) -> String {
     if list.is_empty() {
-        return "No machines. Add one with `openrunner add-machine --name <name> --host <ssh-host>`.\n".into();
+        return "No machines. Add one with `muxen add-machine --name <name> --host <ssh-host>`.\n".into();
     }
     let rows: Vec<Vec<String>> = list
         .iter()
@@ -247,7 +247,7 @@ pub fn settings(s: &SettingsOut) -> String {
 pub fn workspaces(r: &WorkspacesResponse) -> String {
     let mut out = format!("{}\n", r.summary);
     if r.workspaces.is_empty() {
-        out.push_str("Create one with `openrunner workspace create [--machine <id>] [--repo owner/repo]`.\n");
+        out.push_str("Create one with `muxen workspace create [--machine <id>] [--repo owner/repo]`.\n");
         return out;
     }
     out.push('\n');
@@ -277,7 +277,7 @@ pub fn workspaces(r: &WorkspacesResponse) -> String {
 pub fn workspace_created(r: &WorkspaceCreated) -> String {
     let w = &r.workspace;
     format!(
-        "✓ {} ({}) on {} · {}\n  shell: {}\nRun commands with `openrunner workspace exec {} -- <command>`; destroy it with `openrunner workspace rm {}`.\n",
+        "✓ {} ({}) on {} · {}\n  shell: {}\nRun commands with `muxen workspace exec {} -- <command>`; destroy it with `muxen workspace rm {}`.\n",
         w.id, w.name, w.machine_name, w.path, w.shell, w.id, w.id
     )
 }
@@ -380,4 +380,243 @@ fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
         out.push_str(&fmt(r.clone()));
     }
     out
+}
+
+pub fn sessions(r: &crate::api::SessionsOut) -> String {
+    let mut out = String::new();
+    if r.sessions.is_empty() {
+        out.push_str("No agent sessions. Start one with `muxen session start <machine> claude [--cwd ~/code/app]`.\n");
+    } else {
+        let rows: Vec<Vec<String>> = r
+            .sessions
+            .iter()
+            .map(|s| {
+                let state = match (s.status.as_str(), s.busy) {
+                    ("exited", _) => format!("exited ({})", s.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into())),
+                    (_, true) => "working".into(),
+                    _ => "idle".into(),
+                };
+                vec![s.id.clone(), s.agent_name.clone(), state, s.cwd.clone(), s.created_at.map(ago).unwrap_or_else(|| "—".into())]
+            })
+            .collect();
+        out.push_str(&table(&["SESSION", "AGENT", "STATE", "FOLDER", "STARTED"], &rows));
+    }
+    out.push('\n');
+    for m in &r.machines {
+        let detail = match (&m.error, &m.agent) {
+            (Some(e), _) => e.clone(),
+            (None, None) => "not set up yet".into(),
+            (None, Some(_)) if m.agents.is_empty() => "no agent CLIs found".into(),
+            (None, Some(_)) => m.agents.join(", "),
+        };
+        out.push_str(&format!("{}: {detail}\n", m.machine_id));
+    }
+    out
+}
+
+pub fn session_started(s: &crate::fleet::sessions::SessionInfo) -> String {
+    format!(
+        "Started {} ({}) in {}.\nWatch it in the Muxen app, or attach here: {}\n",
+        s.id, s.agent_name, s.cwd, s.attach_command
+    )
+}
+
+fn item_rows(items: &[crate::github::hub::Item]) -> Vec<Vec<String>> {
+    items
+        .iter()
+        .map(|i| {
+            let kind = if i.pull_request { if i.draft { "draft PR" } else { "PR" } } else { "issue" };
+            vec![format!("{}#{}", i.repo, i.number), kind.into(), i.title.clone(), ago(i.updated_at)]
+        })
+        .collect()
+}
+
+pub fn github_inbox(r: &crate::github::hub::Inbox) -> String {
+    let mut out = format!("Signed in as {}\n", r.viewer.login);
+    for (title, items) in [("Waiting for your review", &r.review_requests), ("Assigned to you", &r.assigned), ("Your pull requests", &r.authored)] {
+        out.push_str(&format!("\n{title} ({})\n", items.len()));
+        if !items.is_empty() {
+            out.push_str(&table(&["ITEM", "KIND", "TITLE", "UPDATED"], &item_rows(items)));
+        }
+    }
+    out
+}
+
+pub fn github_repos(r: &[crate::github::hub::Repo]) -> String {
+    let rows: Vec<Vec<String>> = r
+        .iter()
+        .map(|x| {
+            vec![
+                if x.favorite { format!("★ {}", x.full_name) } else { x.full_name.clone() },
+                if x.private { "private".into() } else { "public".into() },
+                x.open_issues.to_string(),
+                x.pushed_at.map(ago).unwrap_or_else(|| "—".into()),
+            ]
+        })
+        .collect();
+    table(&["REPOSITORY", "VISIBILITY", "OPEN", "PUSHED"], &rows)
+}
+
+pub fn github_accounts(a: &crate::api::AccountsOut) -> String {
+    let mut out = match (&a.using, a.token_source.as_str()) {
+        (Some(l), "gh") => match a.machines.iter().find(|m| Some(&m.machine_id) == a.machine_id.as_ref()) {
+            Some(m) => format!("Muxen uses {l} (the GitHub CLI login on {}).\n", m.machine),
+            None => format!("Muxen uses {l}.\n"),
+        },
+        (Some(l), var) => format!("Muxen uses {l} (the token in ${var}).\n"),
+        (None, _) => "Not signed in to GitHub. Run `gh auth login`.\n".into(),
+    };
+    if !a.accounts.is_empty() {
+        let rows: Vec<Vec<String>> = a
+            .accounts
+            .iter()
+            .map(|x| {
+                let using = a.machine_id.is_none() && a.using.as_deref().is_some_and(|u| u.eq_ignore_ascii_case(&x.login));
+                vec![
+                    format!("{} {}", if using { "*" } else { " " }, x.login),
+                    if x.gh_active { "yes".into() } else { "".into() },
+                    if x.ok { "ok".into() } else { "needs `gh auth login`".into() },
+                ]
+            })
+            .collect();
+        out.push('\n');
+        out.push_str(&table(&["ACCOUNT", "GH ACTIVE", "LOGIN"], &rows));
+    }
+    if !a.machines.is_empty() {
+        let rows: Vec<Vec<String>> = a
+            .machines
+            .iter()
+            .map(|m| {
+                let using = a.machine_id.as_deref() == Some(m.machine_id.as_str());
+                vec![format!("{} {}", if using { "*" } else { " " }, m.login), m.machine.clone(), m.machine_id.clone()]
+            })
+            .collect();
+        out.push_str("\nOn your machines\n");
+        out.push_str(&table(&["ACCOUNT", "MACHINE", "ID"], &rows));
+    }
+    if !a.accounts.is_empty() || !a.machines.is_empty() {
+        out.push_str("\nSwitch with `muxen github use <login>` or `--machine <id>`; add an account with `gh auth login`.\n");
+    }
+    out
+}
+
+pub fn github_favorites(f: &crate::api::FavoritesOut) -> String {
+    if f.favorites.is_empty() {
+        return "No favorite repositories.\n".into();
+    }
+    format!("Favorites:\n{}", f.favorites.iter().map(|r| format!("  ★ {r}\n")).collect::<String>())
+}
+
+pub fn github_repo(r: &crate::api::RepoOut) -> String {
+    let mut out = format!("{} · {}\n", r.repo.full_name, r.repo.description.clone().unwrap_or_default());
+    out.push_str(&format!("\nIssues ({})\n", r.issues.len()));
+    out.push_str(&table(&["ITEM", "KIND", "TITLE", "UPDATED"], &item_rows(&r.issues)));
+    out.push_str(&format!("\nPull requests ({})\n", r.pulls.len()));
+    out.push_str(&table(&["ITEM", "KIND", "TITLE", "UPDATED"], &item_rows(&r.pulls)));
+    if !r.checkouts.is_empty() {
+        out.push_str("\nOn your machines\n");
+        out.push_str(&checkouts(&r.checkouts));
+    }
+    out
+}
+
+pub fn github_item(d: &crate::github::hub::Detail) -> String {
+    let i = &d.item;
+    let mut out = format!("{}#{} {}\n{} · {} · by {}\n{}\n\n{}\n", i.repo, i.number, i.title, if i.pull_request { "pull request" } else { "issue" }, i.state, i.author, i.html_url, d.body.trim());
+    if let Some(p) = &d.pull {
+        out.push_str(&format!(
+            "\n{} → {} · +{} −{} in {} files · checks: {} passed, {} failed, {} pending\n",
+            p.head, p.base, p.additions, p.deletions, p.changed_files, p.checks.passed, p.checks.failed, p.checks.pending
+        ));
+    }
+    for c in &d.comments {
+        out.push_str(&format!("\n— {} ({}):\n{}\n", c.author, ago(c.created_at), c.body.trim()));
+    }
+    out
+}
+
+pub fn connection(c: &crate::fleet::connection::Connection) -> String {
+    let how = match c.via.as_str() {
+        "direct" => "directly (QUIC)".to_string(),
+        "ssh" => "over a live ssh link".to_string(),
+        _ => "not connected right now".to_string(),
+    };
+    let mut out = format!("{}: {how}", c.machine_id);
+    if let Some(n) = &c.network {
+        out.push_str(&format!(", {n}"));
+    }
+    if let Some(ms) = c.latency_ms {
+        out.push_str(&format!(", {ms} ms round trip"));
+    }
+    out.push('\n');
+    if let Some(a) = &c.address {
+        out.push_str(&format!("  direct address  {a}\n"));
+    }
+    if let Some(s) = &c.service {
+        out.push_str(&format!("  listener runs   as a {s} service\n"));
+    }
+    if let Some(n) = &c.note {
+        out.push_str(&format!("  note            {n}\n"));
+    }
+    if !c.direct {
+        out.push_str(&format!("\nConnect directly with `muxen connection {} --direct on`.\n", c.machine_id));
+    }
+    out
+}
+
+pub fn git_setup(g: &crate::api::GitSetupOut) -> String {
+    let Some(version) = &g.setup.git else {
+        return format!("git isn't installed on {}.\n", g.machine_id);
+    };
+    let identity = match (&g.setup.name, &g.setup.email) {
+        (Some(n), Some(e)) => format!("{n} <{e}>"),
+        _ => "not set: commits will fail".into(),
+    };
+    let push = match g.push.as_str() {
+        "gh" => format!("through the GitHub CLI (@{})", g.gh_account.clone().unwrap_or_default()),
+        "other" => format!("through {} (may or may not have a GitHub login)", g.setup.helpers.iter().chain(g.setup.ssh_keys.iter()).cloned().collect::<Vec<_>>().join(", ")),
+        _ => "no GitHub login: pushes will fail".into(),
+    };
+    let mut out = format!("git {version} on {}\n  commits as  {identity}\n  pushes      {push}\n", g.machine_id);
+    let mut fixes = Vec::new();
+    if !g.can_commit {
+        let who = match (&g.suggested_name, &g.suggested_email) {
+            (Some(n), Some(e)) => format!(" (sets {n} <{e}>)"),
+            _ => String::new(),
+        };
+        fixes.push(format!("muxen git setup {} --identity{who}", g.machine_id));
+    }
+    if g.push != "gh" {
+        fixes.push(match &g.gh_account {
+            Some(_) => format!("muxen git setup {} --credentials", g.machine_id),
+            None => format!("sign in to gh on {} (gh auth login), then: muxen git setup {} --credentials", g.machine_id, g.machine_id),
+        });
+    }
+    if !fixes.is_empty() {
+        out.push_str(&format!("\nTo fix:\n{}", fixes.iter().map(|f| format!("  {f}\n")).collect::<String>()));
+    }
+    out
+}
+
+pub fn checkouts(r: &[crate::fleet::model::Checkout]) -> String {
+    let rows: Vec<Vec<String>> = r
+        .iter()
+        .map(|c| {
+            let sync = match (c.ahead, c.behind) {
+                (0, 0) => "up to date".to_string(),
+                (a, 0) => format!("{a} ahead"),
+                (0, b) => format!("{b} behind"),
+                (a, b) => format!("{a} ahead, {b} behind"),
+            };
+            vec![
+                c.machine_id.clone(),
+                c.path.clone(),
+                c.repo.clone().unwrap_or_else(|| "—".into()),
+                c.branch.clone(),
+                if c.upstream.is_some() { sync } else { "no upstream".into() },
+                if c.dirty == 0 { "clean".into() } else { format!("{} changed", c.dirty) },
+            ]
+        })
+        .collect();
+    table(&["MACHINE", "FOLDER", "REPOSITORY", "BRANCH", "SYNC", "CHANGES"], &rows)
 }

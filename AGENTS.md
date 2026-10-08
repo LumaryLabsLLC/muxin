@@ -1,12 +1,12 @@
-# Working with OpenRunner as an agent
+# Working with Muxen as an agent
 
-OpenRunner manages a fleet of self-hosted GitHub Actions runners. The fleet is made up of machines (reached over `ssh`, or directly for `host = "local"`) and the runners installed on them.
+Muxen manages a fleet of self-hosted GitHub Actions runners. The fleet is made up of machines (reached over `ssh`, or directly for `host = "local"`) and the runners installed on them.
 
-Use the MCP tools when they're connected: start the server with `openrunner mcp`, and see the README for setup. Otherwise use the CLI with `--json`. Both front the same API and return the same shapes.
+Use the MCP tools when they're connected: start the server with `muxen mcp`, and see the README for setup. Otherwise use the CLI with `--json`. Both front the same API and return the same shapes.
 
 ## Ground rules
 
-1. **Start with `fleet_status`** (`openrunner status --json`) and read `attention` first. It lists what's wrong, most severe first, with the `machine_id` or `runner_id` each item is about.
+1. **Start with `fleet_status`** (`muxen status --json`) and read `attention` first. It lists what's wrong, most severe first, with the `machine_id` or `runner_id` each item is about.
 2. **The state may be stale.** `fleet_status` uses the last machine check. Look at `last_check_at` and each machine's `checked_at`. Call `check_machines` (or `fleet_status` with `refresh: true`) when you need it fresh. Checks are read-only.
 3. **Confirm before changing real things.** `install_runners` and `runner_action` with `stop`, `restart` or `remove` run commands on the user's machines and register or deregister runners on GitHub. Do them when the user asked for exactly that; otherwise say what you'd do and ask. `add_machine` and `remove_machine` only edit `fleet.toml`.
 4. **Use the hints.** Errors have a `code`:
@@ -85,11 +85,37 @@ A workspace is a persistent folder on one of the user's machines, optionally a g
 2. Run the tests with `workspace_exec`. Fix things with `workspace_write_file` or `workspace_exec`, and review with `workspace_changes`.
 3. Confirm with the user, then `workspace_sync(direction: "pull")`. Only pass `delete: true` when they want deletions mirrored into their checkout.
 
-The CLI equivalents are `openrunner workspace create|ls|show|exec|cat|write|files|changes|sync|rm|allow`, aliased as `openrunner ws`. `ws exec` exits with the command's own exit code.
+The CLI equivalents are `muxen workspace create|ls|show|exec|cat|write|files|changes|sync|rm|allow`, aliased as `muxen ws`. `ws exec` exits with the command's own exit code.
+
+## Agent sessions: other agents running on the user's machines
+
+The user runs AI agent CLIs (Claude Code, Codex, OpenCode, Gemini CLI, Amp) or shells in persistent sessions on their machines (held by Muxen's agent there) and watches them in the app. Ids look like `beelink/claude-3f9a`.
+
+- `session_list` shows every session (agent, folder, `status`, `busy` = printed output in the last few seconds) and which agent CLIs each machine has.
+- `session_read` returns the screen and recent scrollback as text: use it to see what an agent is doing or asking.
+- `session_send` types text and presses Enter. `session_start` starts one (optionally with a `prompt`); `session_stop` ends it.
+- These are the user's sessions. Start, type into or stop one only when they asked; reading is fine.
+
+The CLI equivalents are `muxen session ls|start|read|send|attach|restart|stop`.
+
+## GitHub and the user's code
+
+- `github_inbox` shows what needs the user: review requests, assigned issues, their open PRs. `github_repos` lists their repositories, favorites first (`favorite: true`: the ones they work on most). `github_favorite` stars or unstars one; only when asked.
+- Muxen uses one GitHub account at a time. `github_accounts` shows which (`using`) and the alternatives: accounts the GitHub CLI here is signed in to, and other machines' `gh` logins. `github_use_account` switches (only when asked); it changes whose repositories and runners Muxen sees.
+- `github_repo` gives a repository's open issues, PRs, recent Actions runs, and its checkouts on the user's machines. `github_item` gives an issue or PR in full (description, comments; for PRs also checks and reviews), from its URL or `owner/name#123`.
+- `local_checkouts` lists git checkouts on the machines (branch, ahead/behind, uncommitted files). `git_sync` runs fetch, pull (fast-forward only) or push in one; only when asked.
+- To work on an issue: find a checkout with `local_checkouts`, or create a workspace with the repo (`workspace_create(repo, branch: "issue-123-short-name")`; for a pull request `ref: "pull/123/head"` checks out its code, forks included). Then `session_start` an agent in that folder with the issue's URL and text as the prompt, or work there yourself with `workspace_exec`.
+- Before an agent commits or pushes on a machine, `git_status(machine_id)` says whether that works (`can_commit`, `push`). `git_setup` fixes it (identity from the user's GitHub account, credentials through the machine's GitHub CLI); only when asked, since it changes the machine's global git config.
+- `github_accounts` also says which permissions the login has (`scopes`), the user's organizations (`orgs`), and `grant_command` when watching organizations needs more: pass that to the user verbatim.
+
+## Connections and desktops
+
+- `machine_connection` says how Muxen reaches a machine: `direct` (QUIC), `ssh` (one live ssh connection) or `none`, with a measured round trip. `direct_connection(machine_id, enabled)` pairs for direct connections (it installs a user service on the machine; only when asked).
+- `desktop_screenshot(machine_id)` returns a picture of the machine's screen (Linux with X11 so far). `desktop_input(machine_id, events)` clicks, types, scrolls and presses keys there, in that picture's pixels: look first, act, then look again. It's the user's real screen: only when asked, and never type passwords.
 
 ## Don'ts
 
 - Don't edit `fleet.toml`, `settings.json` or `state.json` by hand while the tools can do it.
-- Don't pass tokens around. OpenRunner gets registration tokens itself from the user's `gh` login.
+- Don't pass tokens around. Muxen gets registration tokens itself from the user's `gh` login.
 - Don't use `delete_files: true` unless the user wants the runner's folder gone.
 - Don't leave workspaces behind, and don't turn workspaces on for a machine (`workspace_allow`) unless the user asks.

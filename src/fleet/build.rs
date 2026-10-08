@@ -141,6 +141,10 @@ pub fn build(input: &Inputs) -> Snapshot {
             probe: probe.map(to_probe),
             diagnostics,
             workspaces_allowed: spec.workspaces && spec.is_checkable(),
+            agents: Vec::new(),
+            agent_version: None,
+            sessions_error: None,
+            gh: None,
         });
     }
 
@@ -232,6 +236,9 @@ pub fn build(input: &Inputs) -> Snapshot {
         attention,
         operations: Vec::new(),
         workspaces: Vec::new(),
+        sessions: Vec::new(),
+        notifications: Vec::new(),
+        checkouts: Vec::new(),
     }
 }
 
@@ -580,7 +587,7 @@ fn attention(
             level: "warning".into(),
             title: "Connect GitHub".into(),
             detail: "Sign in with `gh auth login` (or set GITHUB_TOKEN) to see live runner status and queued jobs.".into(),
-            action: action("Settings", "settings", None),
+            action: action("Sign in with GitHub", "gh-sign-in", None),
         });
     } else if !github.configured {
         let who = github.detected.first().cloned().unwrap_or_else(|| "your runners".into());
@@ -589,7 +596,7 @@ fn attention(
             level: "warning".into(),
             title: format!("Watch {who} on GitHub live"),
             detail: "Runner state now comes from the last check. Add the organization in Settings (it uses your gh login) for live status and jobs.".into(),
-            action: action("Add organization", "settings", None),
+            action: action("Add organization", "settings", Some("github".into())),
         });
     }
 
@@ -603,7 +610,11 @@ fn attention(
             level: "error".into(),
             title: format!("Can't read runners for {}", s.name),
             detail,
-            action: action("Settings", "settings", None),
+            // A `gh auth ...` fix runs with one click; anything else is in Settings.
+            action: match s.hint.as_deref().and_then(|h| h.strip_prefix("gh ")).filter(|a| a.starts_with("auth ")) {
+                Some(args) => action("Grant access", "gh-command", Some(args.to_string())),
+                None => action("Settings", "settings", Some("github".into())),
+            },
         });
     }
 

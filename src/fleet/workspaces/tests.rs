@@ -81,6 +81,10 @@ fn machine(id: &str, platform: &str, cpu: f64, working: usize, disk_free: u64, a
         }),
         diagnostics: Vec::new(),
         workspaces_allowed: allowed,
+        agents: Vec::new(),
+        agent_version: None,
+        sessions_error: None,
+        gh: None,
     }
 }
 
@@ -116,13 +120,13 @@ fn quotes_env_and_builds_commands() {
     assert_eq!(env_exports(Shell::Powershell, &env), "$env:MSG = 'it''s \"fine\" $HOME'\n");
 
     let spec: MachineSpec = toml::from_str("name = \"Box\"\nhost = \"ci@box\"\nport = 2222\nssh_options = [\"-i\", \"~/.ssh/ci key\"]").unwrap();
-    let shell = shell_command(&spec, "/home/ci/openrunner/workspaces/ws-abc123", false);
-    assert_eq!(shell, "ssh -t -p 2222 -i '~/.ssh/ci key' ci@box \"cd '/home/ci/openrunner/workspaces/ws-abc123' && exec \\$SHELL -l\"");
+    let shell = shell_command(&spec, "/home/ci/muxen/workspaces/ws-abc123", false);
+    assert_eq!(shell, "ssh -t -p 2222 -i '~/.ssh/ci key' ci@box \"cd '/home/ci/muxen/workspaces/ws-abc123' && exec \\$SHELL -l\"");
     let local: MachineSpec = toml::from_str("name = \"Here\"\nhost = \"local\"").unwrap();
     assert_eq!(shell_command(&local, "/tmp/w/ws-1", false), "cd '/tmp/w/ws-1' && exec \"$SHELL\" -l");
 
     let args = rsync_args(&spec, "/w/ws-1", "/src/app/", SyncDirection::Push, true);
-    assert!(args.contains(&"--delete".to_string()) && args.contains(&"--exclude=/.openrunner/".to_string()));
+    assert!(args.contains(&"--delete".to_string()) && args.contains(&"--exclude=/.muxen/".to_string()));
     assert_eq!(&args[args.len() - 2..], &["/src/app/".to_string(), "ci@box:/w/ws-1/".to_string()]);
     let e = args.iter().position(|a| a == "-e").unwrap();
     assert!(args[e + 1].starts_with("ssh -T -o BatchMode=yes") && args[e + 1].ends_with("-i '~/.ssh/ci key'"), "{}", args[e + 1]);
@@ -154,7 +158,7 @@ fn parses_script_output() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn demo_flow() {
-    let dir = std::env::temp_dir().join(format!("openrunner-ws-demo-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("muxen-ws-demo-{}", std::process::id()));
     let engine = Engine::new(Paths::resolve(Some(dir.clone()), None), true);
     engine.run_check(None).await;
     assert_eq!(engine.workspaces().len(), 3, "demo seeds three workspaces");
@@ -188,7 +192,7 @@ async fn demo_flow() {
     let changes = engine.workspace_changes(&info.id).await.unwrap();
     assert!(changes.contains("?? notes/plan.md"), "{changes}");
     let bg = engine.workspace_exec(&info.id, "npm run dev", ExecOptions { background: true, ..Default::default() }).await.unwrap();
-    assert!(bg.background_pid.is_some() && bg.log_path.as_deref() == Some(".openrunner/logs/1.log"));
+    assert!(bg.background_pid.is_some() && bg.log_path.as_deref() == Some(".muxen/logs/1.log"));
 
     let ws = engine.workspaces().into_iter().find(|w| w.id == info.id).unwrap();
     assert_eq!(ws.commands, 2);
@@ -242,7 +246,7 @@ fn alive(pid: u32) -> bool {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn local_end_to_end() {
-    let tmp = std::env::temp_dir().join(format!("openrunner-ws-local-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("muxen-ws-local-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let tmp = tmp.canonicalize().unwrap();
@@ -290,9 +294,9 @@ async fn local_end_to_end() {
     assert_eq!(r.stdout, "hi it's me\nagent/work");
     assert_eq!(r.stderr, "oops");
 
-    // cwd and OPENRUNNER_WORKSPACE.
+    // cwd and MUXEN_WORKSPACE.
     std::fs::create_dir_all(root.join(&info.id).join("sub")).unwrap();
-    let r = other.workspace_exec(&info.id, "basename \"$PWD\"; echo $OPENRUNNER_WORKSPACE", ExecOptions { cwd: Some("sub".into()), ..Default::default() }).await.unwrap();
+    let r = other.workspace_exec(&info.id, "basename \"$PWD\"; echo $MUXEN_WORKSPACE", ExecOptions { cwd: Some("sub".into()), ..Default::default() }).await.unwrap();
     assert_eq!(r.stdout, format!("sub\n{}", info.id));
 
     // A timeout kills the whole tree, not just the shell.
@@ -325,7 +329,7 @@ async fn local_end_to_end() {
     let list = engine.workspace_list_files(&info.id, "", 2).await.unwrap();
     assert!(list.iter().any(|e| e.path == "src/a.txt" && e.kind == "file" && e.size == 14), "{list:?}");
     assert!(list.iter().any(|e| e.path == "src" && e.kind == "dir"));
-    assert!(!list.iter().any(|e| e.path.starts_with(".git") || e.path.starts_with(".openrunner")), "{list:?}");
+    assert!(!list.iter().any(|e| e.path.starts_with(".git") || e.path.starts_with(".muxen")), "{list:?}");
 
     // Changes.
     std::fs::write(root.join(&info.id).join("README.md"), "# tool\nedited\n").unwrap();
@@ -337,7 +341,7 @@ async fn local_end_to_end() {
         let local = tmp.join("local-copy");
         let summary = engine.workspace_sync(&info.id, local.to_str().unwrap(), SyncDirection::Pull, false).await.unwrap();
         assert!(local.join("README.md").exists(), "{summary}");
-        assert!(!local.join(".openrunner").exists(), "OpenRunner's own folder isn't synced");
+        assert!(!local.join(".muxen").exists(), "Muxen's own folder isn't synced");
         std::fs::write(local.join("pushed.txt"), "from local\n").unwrap();
         engine.workspace_sync(&info.id, local.to_str().unwrap(), SyncDirection::Push, false).await.unwrap();
         assert!(root.join(&info.id).join("pushed.txt").exists());
@@ -380,7 +384,7 @@ async fn local_end_to_end() {
 
 #[test]
 fn docker_names_images_and_commands() {
-    assert_eq!(container_name("ws-7f3a2c"), "openrunner-ws-7f3a2c");
+    assert_eq!(container_name("ws-7f3a2c"), "muxen-ws-7f3a2c");
     for ok in ["node:22", "rust:1", "python:3.13-slim", "ghcr.io/acme/dev:latest", "busybox@sha256:abc123"] {
         assert_eq!(validate_image(ok).unwrap(), ok);
     }
@@ -395,16 +399,16 @@ fn docker_names_images_and_commands() {
     assert!(!create_script(false).contains("or_docker"));
 
     let spec: MachineSpec = toml::from_str("name = \"Box\"\nhost = \"beelink\"\nport = 2222").unwrap();
-    let shell = docker_shell_command(&spec, "openrunner-ws-abc");
-    assert!(shell.starts_with("ssh -t -p 2222 beelink \"docker start openrunner-ws-abc"), "{shell}");
-    assert!(shell.contains("docker exec -it -w /workspace openrunner-ws-abc"), "{shell}");
+    let shell = docker_shell_command(&spec, "muxen-ws-abc");
+    assert!(shell.starts_with("ssh -t -p 2222 beelink \"docker start muxen-ws-abc"), "{shell}");
+    assert!(shell.contains("docker exec -it -w /workspace muxen-ws-abc"), "{shell}");
     let local: MachineSpec = toml::from_str("name = \"Here\"\nhost = \"local\"").unwrap();
-    assert!(docker_shell_command(&local, "openrunner-ws-abc").starts_with("docker start"));
+    assert!(docker_shell_command(&local, "muxen-ws-abc").starts_with("docker start"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn demo_docker_flow() {
-    let dir = std::env::temp_dir().join(format!("openrunner-ws-demo-docker-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("muxen-ws-demo-docker-{}", std::process::id()));
     let engine = Engine::new(Paths::resolve(Some(dir), None), true);
     engine.run_check(None).await;
     let docker = |image: Option<&str>| WorkspaceIsolation { isolation: Some("docker".into()), image: image.map(str::to_string), docker_socket: false };
@@ -452,7 +456,7 @@ async fn local_docker_end_to_end() {
         eprintln!("skipping: docker isn't available here");
         return;
     }
-    let tmp = std::env::temp_dir().join(format!("openrunner-ws-docker-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("muxen-ws-docker-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let tmp = tmp.canonicalize().unwrap();
@@ -496,26 +500,26 @@ async fn local_docker_end_to_end() {
 }
 
 /// The full docker flow on a real remote machine over ssh. Set
-/// OPENRUNNER_TEST_DOCKER_HOST to an ssh destination with docker (it pulls
+/// MUXEN_TEST_DOCKER_HOST to an ssh destination with docker (it pulls
 /// node:22) and run `cargo test -- --ignored remote_docker`.
 #[cfg(unix)]
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_docker_end_to_end() {
-    let Ok(host) = std::env::var("OPENRUNNER_TEST_DOCKER_HOST") else {
-        eprintln!("skipping: set OPENRUNNER_TEST_DOCKER_HOST");
+    let Ok(host) = std::env::var("MUXEN_TEST_DOCKER_HOST") else {
+        eprintln!("skipping: set MUXEN_TEST_DOCKER_HOST");
         return;
     };
     let ssh = |cmd: &str| {
         let out = std::process::Command::new("ssh").args(["-o", "BatchMode=yes", &host, cmd]).output().unwrap();
         (out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
-    let tmp = std::env::temp_dir().join(format!("openrunner-ws-remote-docker-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("muxen-ws-remote-docker-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     std::fs::write(
         tmp.join("fleet.toml"),
-        format!("[[machine]]\nname = \"Remote\"\nhost = \"{host}\"\nworkspace_root = \"~/openrunner-test/workspaces\"\n"),
+        format!("[[machine]]\nname = \"Remote\"\nhost = \"{host}\"\nworkspace_root = \"~/muxen-test/workspaces\"\n"),
     )
     .unwrap();
     let engine = Engine::new(Paths::resolve(Some(tmp.clone()), None), false);
@@ -605,6 +609,6 @@ async fn remote_docker_end_to_end() {
     assert_eq!(r.stdout, "writable", "{r:?}");
     engine.destroy_workspace(&dind.id, false).await.unwrap();
 
-    ssh("rmdir ~/openrunner-test/workspaces ~/openrunner-test 2>/dev/null");
+    ssh("rmdir ~/muxen-test/workspaces ~/muxen-test 2>/dev/null");
     let _ = std::fs::remove_dir_all(&tmp);
 }

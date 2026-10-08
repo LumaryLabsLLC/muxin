@@ -20,18 +20,28 @@ pub struct Paths {
     pub inventory: PathBuf,
     pub settings: PathBuf,
     pub state: PathBuf,
-    /// Agent workspaces, shared by every OpenRunner process (see fleet::workspaces).
+    /// Agent workspaces, shared by every Muxen process (see fleet::workspaces).
     pub workspaces: PathBuf,
 }
 
 impl Paths {
-    /// `$OPENRUNNER_HOME`, else `$XDG_CONFIG_HOME/openrunner`, else `~/.config/openrunner`.
+    /// `$MUXEN_HOME`, else `$XDG_CONFIG_HOME/muxen`, else `~/.config/muxen`.
     pub fn resolve(dir: Option<PathBuf>, inventory: Option<PathBuf>) -> Paths {
-        let dir = dir
-            .or_else(|| std::env::var_os("OPENRUNNER_HOME").map(PathBuf::from))
-            .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(|d| PathBuf::from(d).join("openrunner")))
-            .or_else(|| dirs::home_dir().map(|h| h.join(".config").join("openrunner")))
-            .unwrap_or_else(|| PathBuf::from(".openrunner"));
+        let dir = dir.or_else(|| std::env::var_os("MUXEN_HOME").map(PathBuf::from)).unwrap_or_else(|| {
+            let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| dirs::home_dir().map(|h| h.join(".config")));
+            match base {
+                Some(base) => {
+                    let dir = base.join("muxen");
+                    // Muxen was called OpenRunner: bring its folder along, once.
+                    let old = base.join("openrunner");
+                    if !dir.exists() && old.is_dir() && std::fs::rename(&old, &dir).is_ok() {
+                        tracing::info!("moved {} to {}", display_path(&old), display_path(&dir));
+                    }
+                    dir
+                }
+                None => PathBuf::from(".muxen"),
+            }
+        });
         Paths {
             inventory: inventory.unwrap_or_else(|| dir.join("fleet.toml")),
             settings: dir.join("settings.json"),
@@ -94,7 +104,7 @@ pub struct MachineSpec {
     /// Let AI agents create workspaces on this machine.
     #[serde(default = "yes")]
     pub workspaces: bool,
-    /// Where workspaces live on the machine. Default `~/openrunner/workspaces`.
+    /// Where workspaces live on the machine. Default `~/muxen/workspaces`.
     #[serde(default)]
     pub workspace_root: Option<String>,
     /// Extra arguments for `ssh`, e.g. ["-i", "~/.ssh/ci"].
@@ -182,10 +192,10 @@ pub fn assign_machine_id(name: &str, explicit_id: &str, taken: &mut HashSet<Stri
 pub fn default_inventory() -> String {
     let host = local_hostname();
     format!(
-        r#"# OpenRunner fleet inventory
+        r#"# Muxen fleet inventory
 #
 # Each [[machine]] is a computer that hosts self-hosted GitHub Actions runners,
-# or one you just want to keep an eye on. OpenRunner checks machines over SSH
+# or one you just want to keep an eye on. Muxen checks machines over SSH
 # (or directly when host = "local") and reads CPU, memory, disk, uptime and
 # which runners are installed and running. Checks are read-only.
 #
@@ -239,6 +249,19 @@ pub struct Settings {
     pub github_poll_seconds: u32,
     /// 0 turns automatic machine checks off.
     pub check_interval_minutes: u32,
+    /// Where to look for git checkouts on every machine: "dir" or "dir:depth".
+    pub code_folders: Vec<String>,
+    /// Repositories the user starred in Muxen ("owner/name"), in the order added.
+    pub favorite_repos: Vec<String>,
+}
+
+/// Common places people keep code, a few levels deep, plus repos sitting right in the home folder.
+pub fn default_code_folders() -> Vec<String> {
+    ["~/Developer", "~/code", "~/Code", "~/src", "~/projects", "~/Projects", "~/repos", "~/git", "~/dev", "~/work", "~/workspace"]
+        .iter()
+        .map(|d| format!("{d}:4"))
+        .chain(["~/muxen/workspaces:2".to_string(), "~:1".to_string()])
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -249,17 +272,21 @@ pub struct GitHubSettings {
     /// Recently pushed repos per org to scan for queued and running jobs.
     pub scan_repos: u32,
     pub api_url: String,
+    /// Which of the GitHub CLI's accounts to use; empty follows its active account.
+    pub account: String,
+    /// Use the GitHub CLI login on this machine (by id) instead of this computer's.
+    pub account_machine: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { github: GitHubSettings::default(), github_poll_seconds: 20, check_interval_minutes: 15 }
+        Settings { github: GitHubSettings::default(), github_poll_seconds: 20, check_interval_minutes: 15, code_folders: default_code_folders(), favorite_repos: Vec::new() }
     }
 }
 
 impl Default for GitHubSettings {
     fn default() -> Self {
-        GitHubSettings { orgs: Vec::new(), repos: Vec::new(), scan_repos: 10, api_url: "https://api.github.com".into() }
+        GitHubSettings { orgs: Vec::new(), repos: Vec::new(), scan_repos: 10, api_url: "https://api.github.com".into(), account: String::new(), account_machine: String::new() }
     }
 }
 
@@ -313,7 +340,15 @@ impl Settings {
         }
         self.github.orgs = orgs;
         self.github.repos = repos;
+        let mut seen = HashSet::new();
+        self.favorite_repos = std::mem::take(&mut self.favorite_repos)
+            .iter()
+            .map(|r| strip_github_url(r))
+            .filter(|r| r.split_once('/').is_some_and(|(o, n)| valid_name(o) && valid_name(n) && !n.contains('/')))
+            .filter(|r| seen.insert(r.to_ascii_lowercase()))
+            .collect();
         self.github.scan_repos = self.github.scan_repos.min(50);
+        self.github.account = self.github.account.trim().trim_start_matches('@').to_string();
         let api = self.github.api_url.trim().trim_end_matches('/');
         self.github.api_url = if api.is_empty() { "https://api.github.com".into() } else { api.into() };
         if !self.github.api_url.starts_with("https://") && !self.github.api_url.starts_with("http://") {

@@ -1,6 +1,6 @@
-# OpenRunner machine probe (macOS / Linux). Read-only.
+# Muxen machine probe (macOS / Linux). Read-only.
 # Prints key=value lines; runner N is reported as rN.<key>=<value>.
-# OR_DIRS (newline-separated glob patterns) is prepended by OpenRunner.
+# OR_DIRS (newline-separated glob patterns) is prepended by Muxen.
 
 LC_ALL=C
 export LC_ALL
@@ -82,13 +82,19 @@ candidates() {
   printf '%s\n' "$procs" | awk '{
     for (i = 2; i <= NF; i++) if ($i ~ /^\/.*\/bin\/Runner\.(Listener|Worker)$/) { sub(/\/bin\/Runner\.[A-Za-z]*$/, "", $i); print $i; break }
   }'
+  # Other users' homes: /Users on macOS. Never touch /home there: it's an
+  # automount point, and looking inside asks for network-volume access.
+  case "$(uname -s)" in
+    Darwin) homes='/Users/*/actions-runner*' ;;
+    *) homes='/home/*/actions-runner*' ;;
+  esac
   old_ifs=$IFS
   IFS='
 '
   for pattern in $OR_DIRS \
     "$HOME"/actions-runner/* "$HOME"/actions-runner* "$HOME"/runners/* "$HOME"/actions-runners/* "$HOME"/actions/* \
     /opt/actions-runner* /opt/runners/* /opt/actions-runners/* /srv/actions-runner* /srv/runners/* \
-    /var/lib/actions-runner* /Users/*/actions-runner* /home/*/actions-runner*; do
+    /var/lib/actions-runner* $homes; do
     case "$pattern" in "~"|"~/"*) pattern="$HOME${pattern#\~}" ;; esac
     for d in $pattern; do
       [ -f "$d/.runner" ] && printf '%s\n' "${d%/}"
@@ -144,13 +150,14 @@ if [ "$os" = linux ]; then
 fi
 
 # --- Docker -------------------------------------------------------------------
-# Runner containers: the ones OpenRunner made (label openrunner.runner) and any
-# other container running GitHub's actions-runner image.
+# Runner containers: the ones Muxen made (label muxen.runner, or
+# openrunner.runner from before the rename) and any other container running
+# GitHub's actions-runner image.
 if command -v docker >/dev/null 2>&1; then
   dv=$(docker version --format '{{.Server.Version}}' 2>/dev/null)
   if [ -n "$dv" ]; then
     kv docker "$dv"
-    docker ps -a --no-trunc --format '{{.Names}}|{{.State}}|{{.Image}}|{{.Label "openrunner.runner"}}|{{.Label "openrunner.scope"}}' 2>/dev/null | {
+    docker ps -a --no-trunc --format '{{.Names}}|{{.State}}|{{.Image}}|{{.Label "muxen.runner"}}{{.Label "openrunner.runner"}}|{{.Label "muxen.scope"}}{{.Label "openrunner.scope"}}' 2>/dev/null | {
       j=0
       while IFS='|' read -r cname cstate cimage rname rscope; do
         case "$cimage" in

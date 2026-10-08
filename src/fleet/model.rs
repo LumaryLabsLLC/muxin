@@ -25,6 +25,43 @@ pub struct Snapshot {
     pub operations: Vec<Operation>,
     /// Agent workspaces on fleet machines, most recently used first.
     pub workspaces: Vec<WorkspaceInfo>,
+    /// Agent sessions (terminals running Claude Code, Codex, ...), by machine, newest first.
+    pub sessions: Vec<super::sessions::SessionInfo>,
+    /// What sessions asked for your attention, newest first.
+    pub notifications: Vec<super::sessions::SessionNotice>,
+    /// Git checkouts found on the machines, by repository then machine.
+    pub checkouts: Vec<Checkout>,
+}
+
+/// A git checkout on one of the machines.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Checkout {
+    pub machine_id: String,
+    pub path: String,
+    /// "owner/name" when its origin is on GitHub.
+    pub repo: Option<String>,
+    pub remote: Option<String>,
+    pub branch: String,
+    pub upstream: Option<String>,
+    pub ahead: i64,
+    pub behind: i64,
+    /// Files with uncommitted changes (including untracked).
+    pub dirty: u32,
+    pub last_commit_at: Option<DateTime<Utc>>,
+    pub last_commit: String,
+}
+
+/// The GitHub CLI on a machine (agents there use it for issues and pull requests).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GhCli {
+    pub installed: bool,
+    pub logged_in: bool,
+    pub account: Option<String>,
+    /// Where gh is on that machine.
+    #[serde(skip)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -55,7 +92,7 @@ pub struct GitHubInfo {
     /// The last sync reached GitHub for at least one scope.
     pub live: bool,
     pub syncing: bool,
-    /// "GITHUB_TOKEN", "GH_TOKEN", "OPENRUNNER_GITHUB_TOKEN", "gh" or "" when no token was found.
+    /// "GITHUB_TOKEN", "GH_TOKEN", "MUXEN_GITHUB_TOKEN", "gh" or "" when no token was found.
     pub token_source: String,
     pub login: Option<String>,
     pub last_sync_at: Option<DateTime<Utc>>,
@@ -125,6 +162,14 @@ pub struct Machine {
     pub diagnostics: Vec<Diagnostic>,
     /// Agents may create workspaces here (fleet.toml `workspaces`, default true).
     pub workspaces_allowed: bool,
+    /// Agent CLIs found on the machine ("claude", "codex", ...), from the last session check.
+    pub agents: Vec<String>,
+    /// The Muxen agent's version there (it runs agent sessions), once set up.
+    pub agent_version: Option<String>,
+    /// Why sessions aren't available here, when they aren't.
+    pub sessions_error: Option<String>,
+    /// The GitHub CLI there, once looked up.
+    pub gh: Option<GhCli>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -159,7 +204,7 @@ pub struct Probe {
     pub load: Vec<f64>,
     /// Docker server version, when the machine's user can use Docker.
     pub docker: Option<String>,
-    /// Linux: "root" | "passwordless" | "password" — whether OpenRunner can install systemd services.
+    /// Linux: "root" | "passwordless" | "password" — whether Muxen can install systemd services.
     pub sudo: Option<String>,
 }
 
@@ -333,7 +378,7 @@ pub struct WorkspaceInfo {
     pub commands: usize,
     /// Recent commands, oldest first (capped).
     pub history: Vec<WorkspaceCommand>,
-    /// For a human: opens a shell in the workspace, e.g. `ssh -t studio 'cd ~/openrunner/workspaces/ws-7f3a2c && exec $SHELL -l'`.
+    /// For a human: opens a shell in the workspace, e.g. `ssh -t studio 'cd ~/muxen/workspaces/ws-7f3a2c && exec $SHELL -l'`.
     pub shell: String,
     /// "host" (commands run directly on the machine) or "docker" (inside a container).
     #[serde(default = "host_isolation")]
@@ -341,7 +386,7 @@ pub struct WorkspaceInfo {
     /// Docker workspaces: the image the container runs, e.g. "node:22".
     #[serde(default)]
     pub image: Option<String>,
-    /// Docker workspaces: the container's name, e.g. "openrunner-ws-7f3a2c".
+    /// Docker workspaces: the container's name, e.g. "muxen-ws-7f3a2c".
     #[serde(default)]
     pub container: Option<String>,
 }

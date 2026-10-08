@@ -11,6 +11,7 @@ use super::input::{InputEvent, TextInput};
 use super::kit::{Button, ButtonStyle, checkbox, icon, label};
 use super::theme::{ActiveTheme, mono_font, Theme};
 use crate::fleet::Engine;
+use crate::fleet::sessions::{AGENTS, StartSession};
 use crate::fleet::workspaces::{CreateWorkspace, DEFAULT_IMAGE, WorkspaceIsolation};
 use crate::fleet::model::Snapshot;
 use crate::ops::{InstallRequest, NewMachine, ssh_hosts};
@@ -22,6 +23,10 @@ pub enum DialogEvent {
     OpenSettings,
     /// The root view runs it, so it can open the workspace when it's ready.
     CreateWorkspace(CreateWorkspace, WorkspaceIsolation),
+    /// The root view starts it, sized to the page, and opens its terminal.
+    StartSession(StartSession),
+    /// Set up the workspace first, then start the session in its folder.
+    StartInWorkspace(CreateWorkspace, StartSession),
 }
 
 fn frame(theme: &Theme, title: impl Into<SharedString>, intro: Option<SharedString>) -> gpui::Div {
@@ -142,7 +147,7 @@ impl Render for AddMachineDialog {
         frame(
             &theme,
             "Add a machine",
-            Some("OpenRunner reaches machines with your system ssh, keys and ~/.ssh/config. Checks are read-only; nothing is installed until you ask.".into()),
+            Some("Muxen reaches machines with your system ssh, keys and ~/.ssh/config. Checks are read-only; nothing is installed until you ask.".into()),
         )
         .child(field(&theme, "Name", self.name.clone(), None))
         .child(field(&theme, "SSH host", self.host.clone(), Some("Key-based login must work without a password prompt.")))
@@ -582,7 +587,7 @@ impl Render for ConfirmDialog {
 
 pub struct NewWorkspaceDialog {
     engine: Arc<Engine>,
-    /// None = let OpenRunner pick the least busy machine.
+    /// None = let Muxen pick the least busy machine.
     machine: Option<String>,
     name: Entity<TextInput>,
     repo: Entity<TextInput>,
@@ -772,6 +777,473 @@ impl Render for NewWorkspaceDialog {
             Button::new("nw-create", "Create workspace")
                 .style(ButtonStyle::Primary)
                 .icon("terminal")
+                .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
+                .into_any_element(),
+        ]))
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+/// Start an agent CLI (or a shell) on a machine.
+pub struct NewSessionDialog {
+    engine: Arc<Engine>,
+    machine: Option<String>,
+    agent: &'static str,
+    /// Chosen by hand; until then the default follows what's installed.
+    agent_picked: bool,
+    cwd: Entity<TextInput>,
+    prompt: Entity<TextInput>,
+    /// Set by whatever opened the dialog (an issue to fix, a workspace).
+    prefill: Prefill,
+    /// Start in a new workspace (`prefill.workspace`) rather than a folder.
+    in_workspace: bool,
+    branch: Entity<TextInput>,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// What a caller already knows about the session to start.
+#[derive(Clone, Default)]
+pub struct Prefill {
+    pub title: Option<String>,
+    /// A first message prepared for the agent (the user can add to it).
+    pub message: Option<String>,
+    /// Where it came from, shown with the message ("ZenNotes/zennotes#632").
+    pub source: Option<String>,
+    /// The GitHub repository it's about: its checkouts are suggested as folders.
+    pub repo: Option<String>,
+    /// A command to run instead of an agent (a Docker workspace's shell).
+    pub command: Option<(String, String)>,
+    /// Offer a fresh workspace (a clone of the repository) as the place to work.
+    pub workspace: Option<WorkspacePlan>,
+}
+
+/// A fresh workspace to start the session in: the repository cloned on the
+/// chosen machine, on its own branch.
+#[derive(Clone)]
+pub struct WorkspacePlan {
+    pub repo: String,
+    /// What to check out ("pull/123/head" for a pull request from a fork).
+    pub git_ref: Option<String>,
+    /// A new branch to make; None works on `git_ref` itself (a pull request's branch).
+    pub branch: Option<String>,
+    pub name: String,
+    /// Start with the workspace chosen, rather than a folder.
+    pub preferred: bool,
+}
+
+impl EventEmitter<DialogEvent> for NewSessionDialog {}
+
+impl NewSessionDialog {
+    pub fn new(engine: Arc<Engine>, machine: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let cwd = cx.new(|cx| TextInput::new(cx, "~ (home folder)").mono());
+        let prompt = cx.new(|cx| TextInput::new(cx, "What should it work on? (optional)"));
+        let branch = cx.new(|cx| TextInput::new(cx, "new branch (optional)").mono());
+        let on_input = |this: &mut Self, _: &Entity<TextInput>, e: &InputEvent, _: &mut Window, cx: &mut Context<Self>| match e {
+            InputEvent::Submit => this.submit(cx),
+            InputEvent::Cancel => cx.emit(DialogEvent::Dismissed),
+            InputEvent::Changed => cx.notify(),
+        };
+        let subs = vec![cx.subscribe_in(&cwd, window, on_input), cx.subscribe_in(&prompt, window, on_input), cx.subscribe_in(&branch, window, on_input)];
+        let snapshot = engine.current();
+        let machine = machine.or_else(|| session_machines(&snapshot).into_iter().find(|m| m.status == "online").map(|m| m.id.clone()));
+        let mut dialog = NewSessionDialog {
+            engine,
+            machine,
+            agent: "shell",
+            agent_picked: false,
+            cwd,
+            prompt,
+            prefill: Prefill::default(),
+            in_workspace: false,
+            branch,
+            _subscriptions: subs,
+        };
+        dialog.agent = dialog.default_agent(&snapshot);
+        dialog
+    }
+
+    pub fn first_focus(&self, cx: &App) -> FocusHandle {
+        self.cwd.focus_handle(cx)
+    }
+
+    pub fn with_agent(mut self, agent: &'static str) -> Self {
+        self.agent = agent;
+        self.agent_picked = true;
+        self
+    }
+
+    /// Starts from a folder and what the caller prepared (title, first message, command).
+    pub fn prefill(&mut self, cwd: Option<String>, prefill: Prefill, cx: &mut Context<Self>) {
+        if let Some(cwd) = cwd {
+            self.cwd.update(cx, |i, cx| i.set_text(cwd, cx));
+        }
+        if prefill.message.is_some() {
+            self.prompt.update(cx, |i, cx| i.set_placeholder("Anything to add? (optional)", cx));
+        }
+        if prefill.command.is_some() {
+            self.agent = "shell";
+            self.agent_picked = true;
+        }
+        if let Some(plan) = &prefill.workspace {
+            self.in_workspace = plan.preferred;
+            let (text, hint) = match &plan.branch {
+                Some(b) => (b.clone(), "new branch (optional)".to_string()),
+                None => (String::new(), format!("stay on {}", plan.git_ref.clone().unwrap_or_else(|| "the default branch".into()))),
+            };
+            self.branch.update(cx, |i, cx| {
+                i.set_text(text, cx);
+                i.set_placeholder(hint, cx);
+            });
+        }
+        self.prefill = prefill;
+        cx.notify();
+    }
+
+    /// The first agent CLI the machine has, else a shell.
+    fn default_agent(&self, s: &Snapshot) -> &'static str {
+        let installed = self.machine.as_ref().and_then(|id| s.machines.iter().find(|m| &m.id == id)).map(|m| m.agents.clone()).unwrap_or_default();
+        AGENTS.iter().find(|a| installed.iter().any(|i| i == a.id)).map(|a| a.id).unwrap_or("shell")
+    }
+
+    /// The chosen machine can't keep sessions in Muxen's agent (Windows, for now).
+    fn without_agent(&self, s: &Snapshot) -> bool {
+        self.machine.as_ref().and_then(|id| s.machines.iter().find(|m| &m.id == id)).is_some_and(super::sessions::runs_in_app)
+    }
+
+    fn submit(&mut self, cx: &mut Context<Self>) {
+        let Some(machine_id) = self.machine.clone() else { return };
+        let direct = self.without_agent(&self.engine.current());
+        let text = |e: &Entity<TextInput>, cx: &Context<Self>| Some(e.read(cx).text().trim().to_string()).filter(|t| !t.is_empty());
+        // The prepared message, then whatever the user added.
+        let message = match (self.prefill.message.clone(), text(&self.prompt, cx)) {
+            (Some(m), Some(extra)) => Some(format!("{m}\n\n{extra}")),
+            (m, extra) => m.or(extra),
+        };
+        let title = self.prefill.title.clone().map(|t| match (&self.prefill.command, crate::fleet::sessions::agent(self.agent)) {
+            (None, Some(kind)) if kind.id != "shell" => format!("{} · {t}", kind.name),
+            _ => t,
+        });
+        let session = StartSession {
+            machine_id: machine_id.clone(),
+            agent: self.agent.to_string(),
+            cwd: text(&self.cwd, cx).unwrap_or_else(|| "~".into()),
+            title,
+            prompt: if self.agent == "shell" { None } else { message },
+            cols: 0,
+            rows: 0,
+            direct,
+            command: self.prefill.command.as_ref().map(|(c, _)| c.clone()),
+        };
+        match self.prefill.workspace.clone().filter(|_| self.in_workspace) {
+            Some(plan) => {
+                if !self.workspaces_allowed(&self.engine.current()) {
+                    return;
+                }
+                let workspace = CreateWorkspace {
+                    machine: Some(machine_id),
+                    platform: None,
+                    name: Some(plan.name),
+                    repo: Some(plan.repo),
+                    git_ref: plan.git_ref,
+                    branch: text(&self.branch, cx),
+                    owner: Some("app".into()),
+                };
+                cx.emit(DialogEvent::StartInWorkspace(workspace, session))
+            }
+            None => cx.emit(DialogEvent::StartSession(session)),
+        }
+    }
+
+    fn workspaces_allowed(&self, s: &Snapshot) -> bool {
+        self.machine.as_ref().and_then(|id| s.machines.iter().find(|m| &m.id == id)).is_some_and(|m| m.workspaces_allowed)
+    }
+}
+
+impl NewSessionDialog {
+    /// New workspace, or a folder that's already there.
+    fn where_choice(&self, theme: &Theme, plan: &WorkspacePlan, cx: &mut Context<Self>) -> AnyElement {
+        let fresh = if plan.branch.is_some() { "A fresh clone, on its own branch" } else { "A fresh clone of the pull request" };
+        let option = |id: &'static str, glyph: &'static str, title: &'static str, note: &'static str, value: bool, cx: &mut Context<Self>| {
+            let selected = self.in_workspace == value;
+            div()
+                .id(id)
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .p(px(10.))
+                .rounded(px(8.))
+                .border_1()
+                .cursor_pointer()
+                .border_color(if selected { theme.accent } else { theme.border_variant })
+                .bg(if selected { theme.accent.opacity(0.10) } else { theme.element })
+                .child(icon(glyph, 16., if selected { theme.text_accent } else { theme.text_muted }))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w(px(0.))
+                        .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).child(title))
+                        .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(note)),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.in_workspace = value;
+                    cx.notify()
+                }))
+                .into_any_element()
+        };
+        div()
+            .flex()
+            .gap(px(8.))
+            .child(option("ns-where-ws", "layers", "New workspace", fresh, true, cx))
+            .child(option("ns-where-folder", "folder-open", "A folder", "A checkout already on the machine", false, cx))
+            .into_any_element()
+    }
+
+    /// The branch to work on, and whether the machine takes workspaces.
+    fn workspace_fields(&self, theme: &Theme, plan: &WorkspacePlan, machine: Option<&crate::fleet::model::Machine>, cx: &mut Context<Self>) -> AnyElement {
+        let name = machine.map(|m| m.name.clone()).unwrap_or_else(|| "the machine".into());
+        let what = match &plan.git_ref {
+            Some(r) if r.starts_with("pull/") => format!("Clones {} on {name} and checks out the pull request.", plan.repo),
+            Some(r) => format!("Clones {} on {name} at {r}.", plan.repo),
+            None => format!("Clones {} on {name}.", plan.repo),
+        };
+        let off = machine.filter(|m| !m.workspaces_allowed).map(|m| {
+            let id = m.id.clone();
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .p(px(10.))
+                .rounded(px(6.))
+                .bg(theme.warning.opacity(0.10))
+                .text_size(px(12.5))
+                .child(icon("info", 14., theme.warning))
+                .child(div().flex_1().min_w(px(0.)).child(format!("Workspaces are off on {}.", m.name)))
+                .child(Button::new("ns-allow-ws", "Turn them on").on_click(cx.listener(move |this, _, _, cx| {
+                    if let Err(e) = this.engine.set_workspaces_allowed(&id, true) {
+                        tracing::warn!("turning on workspaces: {e}");
+                    }
+                    cx.notify()
+                })))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(field(theme, "Branch", self.branch.clone(), None))
+            .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(what))
+            .children(off)
+            .into_any_element()
+    }
+}
+
+/// The window height a dialog's title, intro, buttons and margins take.
+const MODAL_CHROME: f32 = 300.;
+
+/// Machines that can run sessions: any with a host (or this computer).
+fn session_machines(s: &Snapshot) -> Vec<&crate::fleet::model::Machine> {
+    s.machines.iter().filter(|m| !m.host.is_empty()).collect()
+}
+
+impl Render for NewSessionDialog {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let snapshot = self.engine.current();
+        if !self.agent_picked {
+            // What's installed often arrives after the dialog opens.
+            self.agent = self.default_agent(&snapshot);
+        }
+        let machine = self.machine.as_ref().and_then(|id| snapshot.machines.iter().find(|m| &m.id == id)).cloned();
+        let checked = machine.as_ref().is_some_and(|m| m.agent_version.is_some() || m.sessions_error.is_some());
+        let installed: Vec<String> = machine.as_ref().map(|m| m.agents.clone()).unwrap_or_default();
+
+        let picker = div().flex().flex_wrap().gap(px(6.)).children(session_machines(&snapshot).into_iter().enumerate().map(|(i, m)| {
+            let selected = self.machine.as_deref() == Some(m.id.as_str());
+            let id = m.id.clone();
+            div()
+                .id(("ns-machine", i))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .h(px(26.))
+                .px(px(10.))
+                .rounded(px(6.))
+                .border_1()
+                .cursor_pointer()
+                .border_color(if selected { theme.accent } else { theme.border_variant })
+                .bg(if selected { theme.accent.opacity(0.12) } else { theme.element })
+                .text_size(px(12.5))
+                .child(div().size(px(7.)).rounded_full().bg(theme.machine_status(&m.status)))
+                .child(m.name.clone())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.machine = Some(id.clone());
+                    this.agent_picked = false;
+                    // Find out what's installed there if we don't know yet.
+                    let engine = this.engine.clone();
+                    let id = id.clone();
+                    engine.runtime().clone().spawn(async move {
+                        let _ = engine.refresh_sessions(&id).await;
+                    });
+                    cx.notify()
+                }))
+        }));
+
+        // Agents, three to a row.
+        let card = |i: usize, kind: &'static crate::fleet::sessions::AgentKind, cx: &mut Context<Self>| {
+            let selected = self.agent == kind.id;
+            let found = kind.id == "shell" || installed.iter().any(|a| a == kind.id);
+            let (icon_name, (from, to)) = super::kit::agent_look(kind.id);
+            let note = match (kind.id, found, checked) {
+                ("shell", _, _) => "Your login shell",
+                (_, true, _) => "Installed",
+                (_, false, true) => "Not installed",
+                (_, false, false) => "Checking…",
+            };
+            div()
+                .id(("ns-agent", i))
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .p(px(10.))
+                .rounded(px(8.))
+                .border_1()
+                .cursor_pointer()
+                .border_color(if selected { theme.accent } else { theme.border_variant })
+                .bg(if selected { theme.accent.opacity(0.10) } else { theme.element })
+                .when(!found && checked, |d| d.opacity(0.55))
+                .child(super::kit::tile(icon_name, from, to, 28.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w(px(0.))
+                        .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).child(kind.name))
+                        .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(note)),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.agent = kind.id;
+                    this.agent_picked = true;
+                    cx.notify()
+                }))
+        };
+        let mut rows = Vec::new();
+        for (r, chunk) in AGENTS.chunks(3).enumerate() {
+            let cards: Vec<AnyElement> = chunk.iter().enumerate().map(|(c, k)| card(r * 3 + c, k, cx).into_any_element()).collect();
+            rows.push(div().flex().gap(px(8.)).children(cards).into_any_element());
+        }
+
+        // Checkouts of the repository at hand, then workspace folders on this machine.
+        let on_machine = |id: &str| self.machine.as_deref() == Some(id);
+        let folders: Vec<String> = snapshot
+            .checkouts
+            .iter()
+            .filter(|c| on_machine(&c.machine_id) && self.prefill.repo.is_some() && c.repo.as_deref().map(str::to_lowercase) == self.prefill.repo.as_deref().map(str::to_lowercase))
+            .map(|c| c.path.clone())
+            .chain(snapshot.workspaces.iter().filter(|w| on_machine(&w.machine_id)).map(|w| w.path.clone()))
+            .take(4)
+            .collect();
+        let folder_chips = div().flex().flex_wrap().gap(px(6.)).children(folders.into_iter().enumerate().map(|(i, path)| {
+            let value = path.clone();
+            div()
+                .id(("ns-folder", i))
+                .h(px(22.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border_variant)
+                .bg(theme.element)
+                .cursor_pointer()
+                .hover(|st| st.bg(theme.element_hover))
+                .font_family(mono_font())
+                .text_size(px(11.5))
+                .text_color(theme.text_muted)
+                .child(path)
+                .on_click(cx.listener(move |this, _, _, cx| this.cwd.update(cx, |i, cx| i.set_text(value.clone(), cx))))
+        }));
+
+        // Without the agent the session lives in this window only; say so.
+        let in_app = self.without_agent(&snapshot);
+        let machine_name = machine.as_ref().map(|m| m.name.clone()).unwrap_or_default();
+        let in_app_note = in_app.then(|| {
+            div()
+                .flex()
+                .items_start()
+                .gap(px(10.))
+                .p(px(10.))
+                .rounded(px(6.))
+                .bg(theme.warning.opacity(0.10))
+                .text_size(px(12.5))
+                .text_color(theme.text)
+                .child(div().pt(px(1.)).child(icon("info", 14., theme.warning)))
+                .child(div().flex_1().min_w(px(0.)).child(format!(
+                    "Sessions on {machine_name} run while Muxen is open; they can't keep running in the background there yet."
+                )))
+        });
+        let into_workspace = self.in_workspace && self.prefill.workspace.is_some();
+        let can_start = self.machine.is_some() && (!into_workspace || self.workspaces_allowed(&snapshot));
+
+        // The buttons stay in view; what's between them and the title scrolls.
+        let body_max = (f32::from(window.viewport_size().height) - MODAL_CHROME).max(220.);
+        let fields = div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(field(&theme, "Machine", picker, None))
+        .map(|d| match &self.prefill.command {
+            // A prepared command (a Docker workspace's shell) instead of an agent.
+            Some((_, what)) => d.child(field(&theme, "Runs", div().text_size(px(12.5)).text_color(theme.text_muted).child(what.clone()), None)),
+            None => d.child(field(&theme, "Agent", div().flex().flex_col().gap(px(8.)).children(rows), None)),
+        })
+        .children(self.prefill.workspace.clone().map(|plan| field(&theme, "Where", self.where_choice(&theme, &plan, cx), None)))
+        .map(|d| match self.prefill.workspace.clone().filter(|_| self.in_workspace) {
+            Some(plan) => d.child(self.workspace_fields(&theme, &plan, machine.as_ref(), cx)),
+            None => d.child(field(&theme, "Folder", div().flex().flex_col().gap(px(8.)).child(self.cwd.clone()).child(folder_chips), None)),
+        })
+        .when(self.agent != "shell", |d| {
+            let prepared = self.prefill.message.clone().map(|m| {
+                // An excerpt (the agent gets all of it). No scroll box of its own:
+                // one inside the dialog's makes the wheel stick.
+                let lines: Vec<&str> = m.lines().filter(|l| !l.trim().is_empty()).collect();
+                let mut shown: String = lines.iter().take(5).copied().collect::<Vec<_>>().join("\n").chars().take(480).collect();
+                if lines.len() > 5 || shown.chars().count() >= 480 {
+                    shown.push_str(" …");
+                }
+                div()
+                    .p(px(10.))
+                    .rounded(px(6.))
+                    .bg(theme.element)
+                    .border_1()
+                    .border_color(theme.border_variant)
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .children(self.prefill.source.clone().map(|s| div().text_size(px(11.)).text_color(theme.text_placeholder).child(format!("From {s}"))))
+                    .child(div().w_full().text_size(px(12.)).text_color(theme.text_muted).child(shown))
+            });
+            d.child(field(&theme, "First message", div().flex().flex_col().gap(px(8.)).children(prepared).child(self.prompt.clone()), None))
+        })
+        .children(in_app_note);
+        // A scroll area around one column (as a column itself it squeezes its children).
+        let body = div().id("ns-body").max_h(px(body_max)).overflow_y_scroll().child(fields);
+        frame(
+            &theme,
+            "New session",
+            Some("Runs an agent (or a shell) in a terminal on one of your machines. It keeps running when you close Muxen; come back to it from the sidebar.".into()),
+        )
+        .child(body)
+        .child(footer(vec![
+            Button::new("ns-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+            Button::new("ns-start", if into_workspace { "Create workspace and start" } else { "Start session" })
+                .style(ButtonStyle::Primary)
+                .icon(if into_workspace { "layers" } else { "square-terminal" })
+                .disabled(!can_start)
                 .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
                 .into_any_element(),
         ]))

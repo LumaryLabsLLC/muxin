@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-use crate::fleet::model::{Machine, Snapshot};
+use crate::fleet::model::Machine;
 use crate::util;
 
 pub fn ago(t: Option<DateTime<Utc>>) -> String {
@@ -97,9 +97,71 @@ pub fn diagnostics_summary(m: &Machine) -> (String, &'static str) {
     }
 }
 
+/// Gradient for a machine's icon tile, by OS.
+pub fn machine_tile(m: &Machine) -> (u32, u32) {
+    use super::kit::tiles;
+    if m.platform.starts_with("darwin") {
+        tiles::MACOS
+    } else if m.platform.starts_with("linux") {
+        tiles::LINUX
+    } else if m.platform.starts_with("windows") {
+        tiles::WINDOWS
+    } else {
+        tiles::OTHER
+    }
+}
+
+/// The line under a machine's name in the sidebar ("Ubuntu 26.04 · x64"),
+/// with a color role: "muted" or "error".
+pub fn machine_subtitle(m: &Machine) -> (String, &'static str) {
+    if m.checking && m.probe.is_none() {
+        return ("Checking…".into(), "muted");
+    }
+    if m.status == "offline" {
+        return ("Unreachable".into(), "error");
+    }
+    let arch = m.platform.split_once('-').map(|(_, a)| a).unwrap_or("");
+    let os = os_label(m);
+    let line = match (os.is_empty(), arch.is_empty()) {
+        (false, false) => format!("{os} · {arch}"),
+        (false, true) => os,
+        (true, false) => arch.to_string(),
+        (true, true) if m.host.is_empty() || m.local => "Not checked".into(),
+        (true, true) => m.host.clone(),
+    };
+    (line, "muted")
+}
+
+/// "Ubuntu 26.04", "macOS 27", "Windows 11", else the OS family from the platform.
+fn os_label(m: &Machine) -> String {
+    match m.probe.as_ref().and_then(|p| p.os_version.as_deref()).filter(|v| !v.is_empty()) {
+        Some(v) => short_os(v),
+        None if m.platform.starts_with("darwin") => "macOS".into(),
+        None if m.platform.starts_with("linux") => "Linux".into(),
+        None if m.platform.starts_with("windows") => "Windows".into(),
+        None => String::new(),
+    }
+}
+
+/// Keeps the name and a short version: "Ubuntu 26.04.1 LTS" -> "Ubuntu 26.04",
+/// "macOS 27.0.1" -> "macOS 27", "Microsoft Windows 11 Pro" -> "Windows 11".
+fn short_os(v: &str) -> String {
+    let v = v.trim().trim_start_matches("Microsoft ");
+    let keep = if v.starts_with("macOS") { 1 } else { 2 };
+    let mut words = Vec::new();
+    for word in v.split_whitespace() {
+        if word.starts_with(|c: char| c.is_ascii_digit()) {
+            words.push(word.split('.').take(keep).collect::<Vec<_>>().join("."));
+            break;
+        }
+        words.push(word.to_string());
+    }
+    words.join(" ")
+}
+
 pub fn machine_icon(m: &Machine) -> &'static str {
     let name = m.name.to_ascii_lowercase();
-    if m.kind == "other" {
+    if name.contains("nas") || name.contains("storage") {
         "hard-drive"
     } else if name.contains("laptop") || name.contains("macbook") || name.contains("book") {
         "laptop"
@@ -110,7 +172,16 @@ pub fn machine_icon(m: &Machine) -> &'static str {
     }
 }
 
-/// The org/repo shown next to the app name.
-pub fn scope_label(s: &Snapshot) -> Option<String> {
-    s.github.scopes.first().map(|sc| sc.name.clone()).or_else(|| s.github.detected.first().cloned())
+#[cfg(test)]
+mod tests {
+    use super::short_os;
+
+    #[test]
+    fn short_os_names() {
+        assert_eq!(short_os("Ubuntu 26.04.1 LTS"), "Ubuntu 26.04");
+        assert_eq!(short_os("macOS 27.0.1"), "macOS 27");
+        assert_eq!(short_os("Microsoft Windows 11 Pro"), "Windows 11");
+        assert_eq!(short_os("Debian GNU/Linux 12 (bookworm)"), "Debian GNU/Linux 12");
+        assert_eq!(short_os("Arch Linux"), "Arch Linux");
+    }
 }

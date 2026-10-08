@@ -14,7 +14,7 @@
 
 mod demo;
 mod registry;
-mod transport;
+pub(crate) mod transport;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -51,12 +51,12 @@ const EXEC_DOCKER_SH: &str = include_str!("scripts/exec_docker.sh");
 /// a compiler toolchain (what the official language images build on).
 pub const DEFAULT_IMAGE: &str = "buildpack-deps:bookworm";
 
-const DEFAULT_ROOT: &str = "~/openrunner/workspaces";
-const DEFAULT_ROOT_WINDOWS: &str = "~\\openrunner\\workspaces";
+const DEFAULT_ROOT: &str = "~/muxen/workspaces";
+const DEFAULT_ROOT_WINDOWS: &str = "~\\muxen\\workspaces";
 
 pub const EXEC_TIMEOUT_DEFAULT: u64 = 600;
 pub const EXEC_TIMEOUT_MAX: u64 = 3600;
-/// Extra time OpenRunner waits beyond the command's own timeout before hanging up.
+/// Extra time Muxen waits beyond the command's own timeout before hanging up.
 const EXEC_GRACE: u64 = 30;
 const FILE_TIMEOUT: Duration = Duration::from_secs(60);
 const CREATE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -182,7 +182,7 @@ impl Engine {
         let docker = match clean_opt(iso.isolation).map(|s| s.to_ascii_lowercase()).as_deref() {
             None | Some("host") | Some("none") => false,
             Some("docker") | Some("container") => true,
-            Some(other) => return Err(format!("\"{other}\" isn't an isolation OpenRunner knows. Use \"host\" or \"docker\".")),
+            Some(other) => return Err(format!("\"{other}\" isn't an isolation Muxen knows. Use \"host\" or \"docker\".")),
         };
         let image_req = clean_opt(iso.image);
         if !docker && image_req.is_some() {
@@ -217,11 +217,11 @@ impl Engine {
                     .find(|x| x.id == m || x.name.eq_ignore_ascii_case(&m))
                     .ok_or_else(|| format!("Machine \"{m}\" not found in the fleet. Known machines: {}.", machine_names(&snap.machines)))?;
                 if found.host.is_empty() {
-                    return Err(format!("{} has no host in fleet.toml, so OpenRunner can't reach it.", found.name));
+                    return Err(format!("{} has no host in fleet.toml, so Muxen can't reach it.", found.name));
                 }
                 if !found.workspaces_allowed {
                     return Err(format!(
-                        "Workspaces are turned off for {}. Turn them on from its page in OpenRunner, or remove `workspaces = false` from its entry in fleet.toml.",
+                        "Workspaces are turned off for {}. Turn them on from its page in Muxen, or remove `workspaces = false` from its entry in fleet.toml.",
                         found.name
                     ));
                 }
@@ -352,7 +352,7 @@ impl Engine {
                             n
                         })
                     })?;
-                    Some(format!(".openrunner/logs/{}.log", n.unwrap_or(1)))
+                    Some(format!(".muxen/logs/{}.log", n.unwrap_or(1)))
                 } else {
                     None
                 };
@@ -491,7 +491,7 @@ impl Engine {
             return Ok(summary);
         }
         if rec.windows {
-            return Err("Sync uses rsync, which OpenRunner doesn't support for Windows machines. Use workspace_write_file or git instead.".into());
+            return Err("Sync uses rsync, which Muxen doesn't support for Windows machines. Use workspace_write_file or git instead.".into());
         }
         let spec = self.workspace_machine(&rec)?;
         let have_rsync = tokio::process::Command::new("rsync")
@@ -502,7 +502,7 @@ impl Engine {
             .await
             .is_ok_and(|s| s.success());
         if !have_rsync {
-            return Err("rsync isn't installed on this computer, so OpenRunner can't sync folders.".into());
+            return Err("rsync isn't installed on this computer, so Muxen can't sync folders.".into());
         }
         match direction {
             SyncDirection::Push if !local.is_dir() => return Err(format!("{} isn't a folder on this computer.", local.display())),
@@ -628,7 +628,7 @@ impl Engine {
     fn workspace_machine(&self, rec: &WorkspaceRecord) -> Result<MachineSpec, String> {
         let (spec, _) = self.machine(&rec.info.machine_id).ok_or_else(|| {
             format!(
-                "Machine {} not found in fleet.toml anymore, so OpenRunner can't reach workspace {}. Destroy it with keepFiles to forget it.",
+                "Machine {} not found in fleet.toml anymore, so Muxen can't reach workspace {}. Destroy it with keepFiles to forget it.",
                 rec.info.machine_name, rec.info.id
             )
         })?;
@@ -1103,11 +1103,11 @@ struct Repo {
     /// "api" for acme/api.
     short_name: String,
     host: String,
-    /// https on the GitHub host OpenRunner has a token for.
+    /// https on the GitHub host Muxen has a token for.
     on_github: bool,
 }
 
-fn github_web_host(api_url: &str) -> String {
+pub(crate) fn github_web_host(api_url: &str) -> String {
     let host = api_url.split("://").nth(1).unwrap_or(api_url).split('/').next().unwrap_or("api.github.com");
     if host == "api.github.com" { "github.com".into() } else { host.to_string() }
 }
@@ -1116,7 +1116,7 @@ fn github_web_host(api_url: &str) -> String {
 fn normalize_repo(raw: &str, gh_host: &str) -> Result<Repo, String> {
     let raw = raw.trim();
     if raw.starts_with('-') || raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(format!("\"{raw}\" isn't a repository OpenRunner can clone."));
+        return Err(format!("\"{raw}\" isn't a repository Muxen can clone."));
     }
     let short = |s: &str| {
         s.trim_end_matches('/').rsplit(['/', ':']).next().unwrap_or(s).trim_end_matches(".git").to_string()
@@ -1259,9 +1259,9 @@ pub(crate) fn shell_command(spec: &MachineSpec, path: &str, windows: bool) -> St
     parts.join(" ")
 }
 
-/// `openrunner-ws-<id>`.
+/// `muxen-ws-<id>`.
 pub(crate) fn container_name(id: &str) -> String {
-    format!("openrunner-ws-{}", id.trim_start_matches("ws-"))
+    format!("muxen-ws-{}", id.trim_start_matches("ws-"))
 }
 
 /// A docker image reference: registry/name:tag or name@sha256:..., nothing that
@@ -1310,7 +1310,7 @@ fn display_arg(a: &str) -> String {
 }
 
 fn rsync_args(spec: &MachineSpec, remote_path: &str, local: &str, direction: SyncDirection, delete: bool) -> Vec<String> {
-    let mut args = vec!["-az".to_string(), "--stats".to_string(), "--exclude=/.openrunner/".to_string()];
+    let mut args = vec!["-az".to_string(), "--stats".to_string(), "--exclude=/.muxen/".to_string()];
     if delete {
         args.push("--delete".into());
     }

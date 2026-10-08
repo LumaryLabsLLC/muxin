@@ -1,4 +1,4 @@
-//! `openrunner serve --demo`: a simulated fleet with jobs arriving, running and
+//! `muxen serve --demo`: a simulated fleet with jobs arriving, running and
 //! finishing, so the dashboard can be explored without any real machines.
 
 use std::sync::Mutex;
@@ -123,7 +123,7 @@ struct SimRunner {
     online: bool,
     job: Option<u64>,
     version: &'static str,
-    /// Installed as a Docker container (openrunner-<name>).
+    /// Installed as a Docker container (muxen-<name>).
     docker: bool,
 }
 
@@ -268,7 +268,7 @@ impl World {
             .map(|(name, online, working, version, docker)| {
                 pid += 37;
                 if *docker {
-                    let container = format!("openrunner-{name}");
+                    let container = format!("muxen-{name}");
                     return ProbedRunner {
                         dir: crate::probe::container_dir(&container),
                         name: name.clone(),
@@ -680,5 +680,98 @@ fn os_for(labels: &[String]) -> &'static str {
         "Windows"
     } else {
         "Linux"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Agent sessions (see fleet::sessions)
+
+use crate::fleet::sessions::{AgentKind, Control, MachineSessions, SessionInfo};
+
+impl World {
+    /// Seeded sessions: a busy Claude and an idle Codex on the Mac Studio, OpenCode on the NUC.
+    pub fn sessions(&self, machine_id: &str) -> MachineSessions {
+        let now = Utc::now();
+        let session = |name: &str, agent: &str, agent_name: &str, title: &str, cwd: &str, busy: bool, mins: i64, clients: u32| SessionInfo {
+            id: format!("{machine_id}/{name}"),
+            machine_id: machine_id.into(),
+            name: name.into(),
+            agent: agent.into(),
+            agent_name: agent_name.into(),
+            title: title.into(),
+            cwd: cwd.into(),
+            status: "running".into(),
+            exit_code: None,
+            busy,
+            attention: (name == "codex-19be").then(|| "waiting".to_string()),
+            clients,
+            created_at: Some(now - chrono::Duration::minutes(mins)),
+            last_output_at: Some(now - chrono::Duration::seconds(if busy { 1 } else { 140 })),
+            attach_command: format!("ssh -t {machine_id} ~/.muxen/bin/muxen-agent attach {name}"),
+            persistent: true,
+        };
+        let (agents, sessions): (Vec<&str>, Vec<SessionInfo>) = match machine_id {
+            "mac-studio" => (
+                vec!["claude", "codex", "opencode"],
+                vec![
+                    session("claude-7f3a", "claude", "Claude Code", "Claude Code · checkout", "/Users/ci/code/checkout", true, 12, 1),
+                    session("codex-19be", "codex", "Codex", "Codex · ios-app", "/Users/ci/code/ios-app", false, 48, 0),
+                ],
+            ),
+            "ubuntu-nuc" => (
+                vec!["claude", "opencode"],
+                vec![session("opencode-c40d", "opencode", "OpenCode", "OpenCode · api", "/home/ci/api", true, 5, 0)],
+            ),
+            "mac-mini" | "omarchy-laptop" | "tahoe-macbook" => (vec!["claude", "codex"], Vec::new()),
+            _ => (Vec::new(), Vec::new()),
+        };
+        let windows = hardware(machine_id).os == "windows";
+        MachineSessions {
+            checked_at: Some(now),
+            agent_version: (!windows).then(|| "0.1.0".into()),
+            agents: agents.into_iter().map(String::from).collect(),
+            agents_checked_at: Some(now),
+            gh: (!windows).then(|| crate::fleet::model::GhCli { installed: true, logged_in: machine_id != "ubuntu-nuc", account: (machine_id != "ubuntu-nuc").then(|| "octocat".into()), path: None }),
+            sessions,
+            events: Vec::new(),
+            error: windows.then(|| "Sessions on Windows run while Muxen is open; they can't keep running in the background yet.".into()),
+        }
+    }
+
+    pub fn start_session(&self, spec: &MachineSpec, kind: &AgentKind, name: &str, cwd: &str, title: &str) -> SessionInfo {
+        SessionInfo {
+            id: format!("{}/{name}", spec.id),
+            machine_id: spec.id.clone(),
+            name: name.into(),
+            agent: kind.id.into(),
+            agent_name: kind.name.into(),
+            title: title.into(),
+            cwd: cwd.into(),
+            status: "running".into(),
+            exit_code: None,
+            busy: true,
+            attention: None,
+            clients: 0,
+            created_at: Some(Utc::now()),
+            last_output_at: Some(Utc::now()),
+            attach_command: format!("ssh -t {} ~/.muxen/bin/muxen-agent attach {name}", spec.host),
+            persistent: true,
+        }
+    }
+
+    pub fn control_session(&self, _machine_id: &str, name: &str, action: &Control) -> Result<String, String> {
+        Ok(match action {
+            Control::Read { .. } => demo_screen_text(name),
+            _ => String::new(),
+        })
+    }
+}
+
+/// What a demo session's screen says, for `session read`.
+pub fn demo_screen_text(name: &str) -> String {
+    match name.split('-').next().unwrap_or("") {
+        "claude" => "> Fix the flaky checkout test\n\n⏺ Reading e2e/checkout.spec.ts\n⏺ The discount is applied after tax; moving it before.\n⏺ Running npm test -- e2e/checkout.spec.ts\n  ✓ 12 passed\n\n✻ Thinking…".into(),
+        "codex" => "› Add a dark mode toggle to Settings\n\n• Updated SettingsView.swift (+42 -3)\n• Build succeeded\n\n› ".into(),
+        _ => "$ ".into(),
     }
 }

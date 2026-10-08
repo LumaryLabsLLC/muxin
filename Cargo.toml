@@ -1,5 +1,5 @@
 [package]
-name = "openrunner"
+name = "muxen"
 version = "0.1.0"
 edition = "2024"
 description = "A fast native dashboard for your fleet of self-hosted GitHub Actions runners, built with GPUI"
@@ -25,19 +25,35 @@ tokio = { version = "1", features = ["full"] }
 toml = "1"
 toml_edit = "0.25"
 unicode-segmentation = { version = "1", optional = true }
+# Terminal emulation for embedded agent sessions (Apache-2.0).
+alacritty_terminal = { version = "0.26", optional = true }
+# The desktop view: JPEG frames from machines' agents (both already in GPUI's tree).
+image = { version = "0.25", default-features = false, features = ["jpeg"], optional = true }
+smallvec = { version = "1", optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Direct connections to machines' agents: QUIC with mutually pinned certificates.
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
+ring = "0.17"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Already part of GPUI's dependency tree; used to set the Dock icon when running
 # the bare binary (an .app bundle gets it from its Info.plist instead).
 cocoa = { version = "=0.26.0", optional = true }
+# Also already in GPUI's tree: to start a native window drag from our own title bar.
+objc = { version = "0.2", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+
+[workspace]
+members = [".", "agent"]
 
 [features]
 default = ["gui"]
 # The native window. Build with `--no-default-features` for a headless CLI + MCP
 # server that needs no GUI libraries (Linux servers, CI, agent boxes).
-gui = ["dep:gpui", "dep:unicode-segmentation", "dep:cocoa"]
+gui = ["dep:gpui", "dep:unicode-segmentation", "dep:cocoa", "dep:objc", "dep:raw-window-handle", "dep:alacritty_terminal", "dep:image", "dep:smallvec"]
 
 [profile.release]
 lto = "thin"

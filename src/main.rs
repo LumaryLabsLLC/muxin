@@ -25,9 +25,9 @@ use crate::config::{Paths, display_path};
 use crate::fleet::Engine;
 
 /// A fast native dashboard for your fleet of self-hosted GitHub Actions runners,
-/// built to be driven by AI agents too (`openrunner mcp`, or any command with --json).
+/// built to be driven by AI agents too (`muxen mcp`, or any command with --json).
 #[derive(Parser)]
-#[command(name = "openrunner", version, about, args_conflicts_with_subcommands = true)]
+#[command(name = "muxen", version, about, args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -69,19 +69,35 @@ enum Command {
     /// Agent workspaces: persistent work environments on your machines
     #[command(alias = "ws", subcommand)]
     Workspace(WorkspaceCommand),
+    /// Your GitHub: what needs you, repositories, issues and pull requests
+    #[command(alias = "gh", subcommand)]
+    Github(GithubCommand),
+    /// Git checkouts on your machines, and fetch/pull/push in them
+    Checkouts(CheckoutsArgs),
+    /// Whether git on a machine can commit and push, and setting that up
+    #[command(subcommand)]
+    Git(GitCommand),
+    /// How Muxen reaches a machine (direct, ssh link); --direct on|off to change it
+    Connection(ConnectionArgs),
+    /// A machine's desktop: a screenshot, or mouse and keyboard input
+    #[command(subcommand)]
+    Desktop(DesktopCommand),
+    /// Agent sessions: Claude Code, Codex, OpenCode, ... kept running on your machines
+    #[command(alias = "sessions", subcommand)]
+    Session(SessionCommand),
     /// Run the MCP server on stdio for AI agents (Claude Code, Codex, ...)
     Mcp(McpArgs),
     /// Check every machine once and print a fleet report
     Check(CheckArgs),
     /// Write a starter fleet.toml
     Init(InitArgs),
-    /// Print where OpenRunner keeps its files
+    /// Print where Muxen keeps its files
     Paths(CommonArgs),
 }
 
 #[derive(Args, Clone)]
 struct CommonArgs {
-    /// Config directory [default: ~/.config/openrunner, or $OPENRUNNER_HOME]
+    /// Config directory [default: ~/.config/muxen, or $MUXEN_HOME]
     #[arg(long, value_name = "DIR")]
     config_dir: Option<PathBuf>,
 
@@ -106,7 +122,8 @@ struct OpenArgs {
     demo: bool,
 
     /// Open a specific view at launch (for screenshots and debugging), e.g.
-    /// "jobs", "settings", "machine:<id>", "runner:<id>", "install:<machine-id>", "add-machine", "logs:<runner-id>"
+    /// "jobs", "settings", "machine:<id>", "runner:<id>", "install:<machine-id>", "add-machine", "logs:<runner-id>",
+    /// "sidebar:<width>", "activity-filter:<failed|operations|agents>"; comma-separated
     #[arg(long, hide = true, value_name = "VIEW")]
     view: Option<String>,
 }
@@ -285,6 +302,235 @@ struct SettingsArgs {
     /// GitHub REST API base (GitHub Enterprise Server)
     #[arg(long, value_name = "URL")]
     api_url: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum GithubCommand {
+    /// Review requests, issues assigned to you, your open pull requests
+    Inbox(AgentArgs),
+    /// Your repositories, most recently pushed first
+    Repos(AgentArgs),
+    /// A repository's open issues and PRs, recent runs, and local checkouts
+    Repo(GhRepoArgs),
+    /// The GitHub CLI accounts you're signed in to, and which one Muxen uses
+    Accounts(AgentArgs),
+    /// Switch Muxen to another of the GitHub CLI's accounts
+    Use(GhUseArgs),
+    /// Add a repository to your favorites (listed first), or remove it with --remove
+    #[command(alias = "fav")]
+    Favorite(GhFavoriteArgs),
+    /// An issue or pull request with its conversation (URL or owner/name#123)
+    #[command(alias = "pr")]
+    Issue(GhItemArgs),
+}
+
+#[derive(Args)]
+struct GhRepoArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// owner/name or a GitHub URL
+    repo: String,
+}
+
+#[derive(Subcommand)]
+enum DesktopCommand {
+    /// Save a screenshot of the machine's screen (JPEG)
+    Shot(DesktopShotArgs),
+    /// Send input: a JSON list like '[{"type":"click","x":100,"y":200},{"type":"text","text":"hi"}]'
+    Input(DesktopInputArgs),
+}
+
+#[derive(Args)]
+struct DesktopShotArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// Where to save it (default: <machine>-desktop.jpg)
+    #[arg(short, long)]
+    output: Option<std::path::PathBuf>,
+}
+
+#[derive(Args)]
+struct DesktopInputArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// The events, as JSON
+    events: String,
+}
+
+#[derive(Args)]
+struct ConnectionArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// Connect directly over QUIC (on) or only through ssh (off)
+    #[arg(long, value_name = "on|off")]
+    direct: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum GitCommand {
+    /// git's name and email, and how it logs in to GitHub, on a machine
+    Status(GitMachineArgs),
+    /// Set git's name and email (from your GitHub account) and/or its GitHub login (via gh)
+    Setup(GitSetupArgs),
+}
+
+#[derive(Args)]
+struct GitMachineArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+}
+
+#[derive(Args)]
+struct GitSetupArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// Set git's name and email: your GitHub name and private noreply address, unless given
+    #[arg(long)]
+    identity: bool,
+    #[arg(long, requires = "identity")]
+    name: Option<String>,
+    #[arg(long, requires = "identity")]
+    email: Option<String>,
+    /// Make git use the machine's GitHub CLI login for github.com (gh auth setup-git)
+    #[arg(long)]
+    credentials: bool,
+}
+
+#[derive(Args)]
+struct GhUseArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// A GitHub login (see `muxen github accounts`)
+    #[arg(required_unless_present = "machine")]
+    login: Option<String>,
+    /// Use this machine's GitHub CLI login instead
+    #[arg(long, value_name = "MACHINE")]
+    machine: Option<String>,
+}
+
+#[derive(Args)]
+struct GhFavoriteArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// owner/name or a GitHub URL
+    repo: String,
+    /// Remove it from the favorites
+    #[arg(long)]
+    remove: bool,
+}
+
+#[derive(Args)]
+struct GhItemArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Issue or PR URL, or owner/name#123
+    reference: String,
+}
+
+#[derive(Args)]
+struct CheckoutsArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Only this machine
+    #[arg(long, value_name = "MACHINE")]
+    machine: Option<String>,
+    /// Only checkouts of this repository (owner/name)
+    #[arg(long)]
+    repo: Option<String>,
+    /// Run git fetch, pull or push in --path on --machine
+    #[arg(long, value_name = "ACTION", requires_all = ["machine", "path"])]
+    git: Option<String>,
+    /// The checkout's folder (with --git)
+    #[arg(long)]
+    path: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// List sessions (and which agents each machine has)
+    #[command(alias = "list")]
+    Ls(SessionLsArgs),
+    /// Start an agent (claude, codex, opencode, gemini, amp) or a shell on a machine
+    Start(SessionStartArgs),
+    /// Print a session's screen and recent scrollback
+    Read(SessionReadArgs),
+    /// Type text into a session (and press Enter)
+    Send(SessionSendArgs),
+    /// Open a session in this terminal (detach with the window's close, or kill the ssh)
+    Attach(SessionIdArgs),
+    /// Run a session's agent again
+    Restart(SessionIdArgs),
+    /// End a session
+    #[command(alias = "rm")]
+    Stop(SessionIdArgs),
+}
+
+#[derive(Args)]
+struct SessionLsArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Only this machine
+    #[arg(long, value_name = "MACHINE")]
+    machine: Option<String>,
+}
+
+#[derive(Args)]
+struct SessionStartArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// claude, codex, opencode, gemini, amp or shell
+    #[arg(value_name = "AGENT")]
+    kind: String,
+    /// Folder on the machine (default: home)
+    #[arg(long)]
+    cwd: Option<String>,
+    #[arg(long)]
+    title: Option<String>,
+    /// First message for the agent
+    #[arg(long)]
+    prompt: Option<String>,
+}
+
+#[derive(Args)]
+struct SessionIdArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Session id (<machine-id>/<name>) or unique name
+    session_id: String,
+}
+
+#[derive(Args)]
+struct SessionReadArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    session_id: String,
+    /// Scrollback lines above the screen
+    #[arg(long, default_value_t = 200)]
+    lines: u32,
+}
+
+#[derive(Args)]
+struct SessionSendArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    session_id: String,
+    /// Text to type
+    text: String,
+    /// Don't press Enter afterwards
+    #[arg(long)]
+    no_enter: bool,
 }
 
 #[derive(Subcommand)]
@@ -553,7 +799,7 @@ fn main() -> ExitCode {
     // Logs always go to stderr: stdout is reserved for --json output and MCP messages.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("OPENRUNNER_LOG").unwrap_or_else(|_| "openrunner=info".into()),
+            tracing_subscriber::EnvFilter::try_from_env("MUXEN_LOG").unwrap_or_else(|_| "muxen=info".into()),
         )
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
@@ -657,6 +903,25 @@ fn main() -> ExitCode {
             if h.hosts.is_empty() { "No hosts in ~/.ssh/config.\n".into() } else { format!("{}\n", h.hosts.join("\n")) }
         }),
         Some(Command::Workspace(cmd)) => workspace(cmd, &runtime),
+        Some(Command::Session(cmd)) => session(cmd, &runtime),
+        Some(Command::Github(cmd)) => github(cmd, &runtime),
+        Some(Command::Checkouts(a)) => checkouts(a, &runtime),
+        Some(Command::Git(cmd)) => git(cmd, &runtime),
+        Some(Command::Desktop(cmd)) => desktop(cmd, &runtime),
+        Some(Command::Connection(a)) => {
+            let machine = a.machine.clone();
+            match a.direct.as_deref() {
+                Some(v @ ("on" | "off")) => {
+                    let req = api::DirectRequest { machine_id: machine, enabled: v == "on" };
+                    run(&runtime, &a.agent, async move |e| api::set_direct(&e, req).await, cli::connection)
+                }
+                Some(other) => {
+                    eprintln!("error: --direct takes on or off, not \"{other}\"");
+                    2
+                }
+                None => run(&runtime, &a.agent, async move |e| api::machine_connection(&e, &machine).await, cli::connection),
+            }
+        }
         Some(Command::Mcp(a)) => mcp(a, &runtime),
         Some(Command::Check(args)) => {
             let _guard = runtime.enter();
@@ -701,8 +966,8 @@ fn open(args: OpenArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     #[cfg(not(feature = "gui"))]
     {
         let _ = (engine, args.view);
-        eprintln!("This build of OpenRunner has no window (built without the `gui` feature).");
-        eprintln!("Use the commands (`openrunner --help`) or the MCP server (`openrunner mcp`).");
+        eprintln!("This build of Muxen has no window (built without the `gui` feature).");
+        eprintln!("Use the commands (`muxen --help`) or the MCP server (`muxen mcp`).");
         2
     }
 }
@@ -865,9 +1130,9 @@ fn workspace_exec(a: WsExecArgs, runtime: &tokio::runtime::Runtime) -> u8 {
                 if let Some(log) = &out.log_path {
                     eprintln!("started in the background (pid {}), log: {log}", out.background_pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()));
                 } else if out.timed_out {
-                    eprintln!("openrunner: timed out after {}s", out.duration_ms / 1000);
+                    eprintln!("muxen: timed out after {}s", out.duration_ms / 1000);
                 } else if out.truncated {
-                    eprintln!("openrunner: output was truncated (the middle was dropped)");
+                    eprintln!("muxen: output was truncated (the middle was dropped)");
                 }
             }
             match (out.exit_code, out.timed_out) {
@@ -928,6 +1193,137 @@ fn workspace_shell(a: WsShellArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     }
 }
 
+fn github(cmd: GithubCommand, runtime: &tokio::runtime::Runtime) -> u8 {
+    match cmd {
+        GithubCommand::Inbox(a) => run(runtime, &a, async move |e| api::github_inbox(&e).await, cli::github_inbox),
+        GithubCommand::Repos(a) => run(runtime, &a, async move |e| api::github_repos(&e).await, |r| cli::github_repos(r)),
+        GithubCommand::Repo(a) => {
+            let req = api::RepoRequest { repo: a.repo };
+            run(runtime, &a.agent, async move |e| api::github_repo(&e, req).await, cli::github_repo)
+        }
+        GithubCommand::Accounts(a) => run(runtime, &a, async move |e| api::github_accounts(&e).await, cli::github_accounts),
+        GithubCommand::Use(a) => {
+            let req = api::UseAccountRequest { login: a.login.unwrap_or_default(), machine_id: a.machine };
+            run(runtime, &a.agent, async move |e| api::github_use_account(&e, req).await, cli::github_accounts)
+        }
+        GithubCommand::Favorite(a) => {
+            let req = api::FavoriteRequest { repo: a.repo, favorite: !a.remove };
+            run(runtime, &a.agent, async move |e| api::github_favorite(&e, req), cli::github_favorites)
+        }
+        GithubCommand::Issue(a) => {
+            let req = api::ItemRequest { reference: a.reference };
+            run(runtime, &a.agent, async move |e| api::github_item(&e, req).await, cli::github_item)
+        }
+    }
+}
+
+fn desktop(cmd: DesktopCommand, runtime: &tokio::runtime::Runtime) -> u8 {
+    match cmd {
+        DesktopCommand::Shot(a) => {
+            let machine = a.machine.clone();
+            let path = a.output.clone().unwrap_or_else(|| format!("{machine}-desktop.jpg").into());
+            run(runtime, &a.agent, async move |e| api::desktop_screenshot(&e, &machine).await, move |shot| match std::fs::write(&path, &shot.jpeg) {
+                Ok(()) => format!("Saved {} ({}×{}, screen {}×{}).\n", path.display(), shot.width, shot.height, shot.screen_width, shot.screen_height),
+                Err(e) => format!("Couldn't save {}: {e}\n", path.display()),
+            })
+        }
+        DesktopCommand::Input(a) => match serde_json::from_str(&a.events) {
+            Ok(events) => {
+                let req = api::DesktopInputRequest { machine_id: a.machine, events };
+                run(runtime, &a.agent, async move |e| api::desktop_input(&e, req).await, |v| format!("Sent {} events.\n", v["events"]))
+            }
+            Err(e) => {
+                eprintln!("error: the events aren't valid: {e}");
+                2
+            }
+        },
+    }
+}
+
+fn git(cmd: GitCommand, runtime: &tokio::runtime::Runtime) -> u8 {
+    match cmd {
+        GitCommand::Status(a) => {
+            let machine = a.machine;
+            run(runtime, &a.agent, async move |e| api::git_status(&e, &machine).await, cli::git_setup)
+        }
+        GitCommand::Setup(a) => {
+            let req = api::GitSetupRequest { machine_id: a.machine, identity: a.identity, name: a.name, email: a.email, credentials: a.credentials };
+            run(runtime, &a.agent, async move |e| api::git_setup(&e, req).await, cli::git_setup)
+        }
+    }
+}
+
+fn checkouts(a: CheckoutsArgs, runtime: &tokio::runtime::Runtime) -> u8 {
+    if let (Some(action), Some(machine), Some(path)) = (a.git.clone(), a.machine.clone(), a.path.clone()) {
+        let req = api::GitRequest { machine_id: machine, path, action };
+        return run(runtime, &a.agent, async move |e| api::checkout_git(&e, req).await, |r| format!("{}\n", r.output));
+    }
+    let req = api::CheckoutsRequest { machine_id: a.machine, repo: a.repo };
+    run(runtime, &a.agent, async move |e| api::checkouts(&e, req).await, |r| cli::checkouts(r))
+}
+
+fn session(cmd: SessionCommand, runtime: &tokio::runtime::Runtime) -> u8 {
+    match cmd {
+        SessionCommand::Ls(a) => {
+            let req = api::SessionListRequest { machine_id: a.machine };
+            run(runtime, &a.agent, async move |e| api::sessions_list(&e, req).await, cli::sessions)
+        }
+        SessionCommand::Start(a) => {
+            let req = api::SessionStartRequest { machine_id: a.machine, agent: a.kind, cwd: a.cwd, title: a.title, prompt: a.prompt };
+            run(runtime, &a.agent, async move |e| api::session_start(&e, req).await, cli::session_started)
+        }
+        SessionCommand::Read(a) => {
+            let req = api::SessionReadRequest { session_id: a.session_id, lines: Some(a.lines) };
+            run(runtime, &a.agent, async move |e| api::session_read(&e, req).await, |r| format!("{}\n", r.text))
+        }
+        SessionCommand::Send(a) => {
+            let req = api::SessionSendRequest { session_id: a.session_id, text: a.text, enter: !a.no_enter };
+            run(runtime, &a.agent, async move |e| api::session_send(&e, req).await, |r| format!("Sent to {}.\n", r.session_id))
+        }
+        SessionCommand::Restart(a) => {
+            let req = api::SessionRequest { session_id: a.session_id };
+            run(runtime, &a.agent, async move |e| api::session_restart(&e, req).await, |r| format!("Restarted {}.\n", r.session_id))
+        }
+        SessionCommand::Stop(a) => {
+            let req = api::SessionRequest { session_id: a.session_id };
+            run(runtime, &a.agent, async move |e| api::session_stop(&e, req).await, |r| format!("Stopped {}.\n", r.session_id))
+        }
+        SessionCommand::Attach(a) => session_attach(a, runtime),
+    }
+}
+
+/// Replaces this process with ssh (or the local agent) attached to the session.
+fn session_attach(a: SessionIdArgs, runtime: &tokio::runtime::Runtime) -> u8 {
+    let _guard = runtime.enter();
+    let engine = Engine::new(a.agent.common.paths(), a.agent.demo);
+    let req = api::SessionRequest { session_id: a.session_id };
+    let cmd = match runtime.block_on(api::session_attach(&engine, req)) {
+        Ok(c) => c,
+        Err(e) => return report_error(&a.agent, &e),
+    };
+    if a.agent.demo {
+        eprintln!("demo: would run: {} {}", cmd.program, cmd.args.join(" "));
+        return 0;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&cmd.program).args(&cmd.args).exec();
+        eprintln!("error: couldn't start {}: {err}", cmd.program);
+        1
+    }
+    #[cfg(not(unix))]
+    {
+        match std::process::Command::new(&cmd.program).args(&cmd.args).status() {
+            Ok(status) => status.code().and_then(|c| u8::try_from(c).ok()).unwrap_or(1),
+            Err(err) => {
+                eprintln!("error: couldn't start {}: {err}", cmd.program);
+                1
+            }
+        }
+    }
+}
+
 fn mcp(args: McpArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     if args.print_config {
         print!("{}", mcp::print_config());
@@ -956,7 +1352,7 @@ fn init(args: InitArgs) -> u8 {
         return 1;
     }
     println!("Wrote {}", display_path(&paths.inventory));
-    println!("Add your machines, then run `openrunner` to open the dashboard.");
+    println!("Add your machines, then run `muxen` to open the dashboard.");
     0
 }
 
@@ -980,7 +1376,7 @@ mod tests {
 
     #[test]
     fn parses_workspace_commands() {
-        let cli = Cli::try_parse_from(["openrunner", "ws", "exec", "ws-abc123", "--env", "A=1", "--", "npm", "test"]).unwrap();
+        let cli = Cli::try_parse_from(["muxen", "ws", "exec", "ws-abc123", "--env", "A=1", "--", "npm", "test"]).unwrap();
         match cli.command {
             Some(Command::Workspace(WorkspaceCommand::Exec(a))) => {
                 assert_eq!(a.workspace_id, "ws-abc123");
@@ -989,8 +1385,8 @@ mod tests {
             }
             _ => panic!("expected workspace exec"),
         }
-        assert!(Cli::try_parse_from(["openrunner", "workspace", "sync", "ws-1", "."]).is_err(), "needs --push or --pull");
-        assert!(Cli::try_parse_from(["openrunner", "workspace", "sync", "ws-1", ".", "--push", "--pull"]).is_err());
-        assert!(Cli::try_parse_from(["openrunner", "workspace", "create", "--platform", "linux", "--repo", "acme/api", "--ref", "main", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["muxen", "workspace", "sync", "ws-1", "."]).is_err(), "needs --push or --pull");
+        assert!(Cli::try_parse_from(["muxen", "workspace", "sync", "ws-1", ".", "--push", "--pull"]).is_err());
+        assert!(Cli::try_parse_from(["muxen", "workspace", "create", "--platform", "linux", "--repo", "acme/api", "--ref", "main", "--json"]).is_ok());
     }
 }

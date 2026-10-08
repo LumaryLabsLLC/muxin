@@ -1,0 +1,25 @@
+[package]
+name = "muxen-agent"
+version = "0.2.0"
+edition = "2024"
+description = "Runs on each machine Muxen manages: keeps agent sessions alive and lets the app attach to them"
+license = "LicenseRef-Proprietary"
+publish = false
+
+[dependencies]
+alacritty_terminal = "0.26"
+anyhow = "1"
+libc = "0.2"
+portable-pty = "0.9"
+serde_json = "1"
+# Direct connections (`listen`): QUIC with mutually pinned certificates.
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
+ring = "0.17"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync", "signal"] }
+
+# The desktop view (`screen`): X11 capture and input, JPEG frames.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["xtest", "shm"] }
+jpeg-encoder = "0.6"

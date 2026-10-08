@@ -32,11 +32,11 @@ async fn pause(ms: u64) {
 
 fn demo_path(platform: &str, id: &str) -> String {
     if platform.starts_with("darwin") {
-        format!("/Users/ci/openrunner/workspaces/{id}")
+        format!("/Users/ci/muxen/workspaces/{id}")
     } else if platform.starts_with("windows") {
-        format!("C:\\Users\\ci\\openrunner\\workspaces\\{id}")
+        format!("C:\\Users\\ci\\muxen\\workspaces\\{id}")
     } else {
-        format!("/home/ci/openrunner/workspaces/{id}")
+        format!("/home/ci/muxen/workspaces/{id}")
     }
 }
 
@@ -273,7 +273,7 @@ pub(super) async fn exec(engine: &Arc<Engine>, rec: &WorkspaceRecord, cmd: &str,
                 })
             })?
             .unwrap_or(1);
-        let log = format!(".openrunner/logs/{n}.log");
+        let log = format!(".muxen/logs/{n}.log");
         let mut files = w.workspace_files.lock().unwrap();
         let tree = files.entry(rec.info.id.clone()).or_default();
         tree.files.insert(log.clone(), format!("$ {cmd}\n> ready on http://localhost:3000\n"));
@@ -331,14 +331,14 @@ async fn respond(w: &World, info: &WorkspaceInfo, cmd: &str, cwd: &str) -> (Stri
                 "Darwin mac-studio.local 25.1.0 Darwin Kernel Version 25.1.0 arm64"
             })
         }
-        "env" | "printenv" => return ok(&format!("HOME=/home/ci\nSHELL=/bin/bash\nOPENRUNNER_WORKSPACE={}\nNO_COLOR=1\nPWD={here}", info.id)),
+        "env" | "printenv" => return ok(&format!("HOME=/home/ci\nSHELL=/bin/bash\nMUXEN_WORKSPACE={}\nNO_COLOR=1\nPWD={here}", info.id)),
         _ => {}
     }
     if first == "ls" {
         let long = cmd.contains("-l");
         let prefix = if cwd.is_empty() { String::new() } else { format!("{cwd}/") };
         let mut names: BTreeSet<String> = BTreeSet::new();
-        for path in tree.files.keys().filter(|p| p.starts_with(&prefix) && !p.starts_with(".openrunner")) {
+        for path in tree.files.keys().filter(|p| p.starts_with(&prefix) && !p.starts_with(".muxen")) {
             if let Some(name) = path[prefix.len()..].split('/').next() {
                 names.insert(name.to_string());
             }
@@ -500,7 +500,7 @@ pub(super) fn list(w: &World, rec: &WorkspaceRecord, rel: &str, depth: u32) -> R
         return Err(format!("Folder {rel} not found in the workspace."));
     }
     let mut entries: BTreeMap<String, FileEntry> = BTreeMap::new();
-    for (path, content) in tree.files.iter().filter(|(p, _)| p.starts_with(&prefix) && !p.starts_with(".openrunner")) {
+    for (path, content) in tree.files.iter().filter(|(p, _)| p.starts_with(&prefix) && !p.starts_with(".muxen")) {
         let parts: Vec<&str> = path[prefix.len()..].split('/').collect();
         for i in 0..parts.len().min(depth as usize) {
             let sub = format!("{prefix}{}", parts[..=i].join("/"));

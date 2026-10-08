@@ -36,9 +36,9 @@ switch ($OR_ACTION) {
         git checkout -b $OR_BRANCH 2>&1 | ForEach-Object { "$_" }
         if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine("error: couldn't create branch $OR_BRANCH"); exit 5 }
       }
-      Add-Content -Path '.git\info\exclude' -Value '.openrunner/'
+      Add-Content -Path '.git\info\exclude' -Value '.muxen/'
     }
-    New-Item -ItemType Directory -Force -Path '.openrunner\logs' | Out-Null
+    New-Item -ItemType Directory -Force -Path '.muxen\logs' | Out-Null
     Write-Output 'ready'
   }
   'changes' {

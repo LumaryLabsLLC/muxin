@@ -32,7 +32,7 @@ or_docker_up() {
     fi
     [ -n "$2" ] || printf '%s\n' "$or_dk_out" | tail -n 2
   fi
-  mkdir -p "$1/.openrunner/home" "$1/.openrunner/logs" "$1/.openrunner/run"
+  mkdir -p "$1/.muxen/home" "$1/.muxen/logs" "$1/.muxen/run"
   or_dk_sock=""
   if [ "$OR_SOCKET" = 1 ]; then
     if [ -S /var/run/docker.sock ]; then
@@ -45,8 +45,8 @@ or_docker_up() {
   [ -n "$2" ] || echo "Starting container $OR_CONTAINER from $OR_IMAGE"
   # A shell loop keeps it alive (works on any image with sh, unlike `sleep infinity`).
   # shellcheck disable=SC2086
-  if ! or_dk_out=$(docker run -d --name "$OR_CONTAINER" --label "openrunner.workspace=$OR_ID" --init \
-      --user "$(id -u):$(id -g)" -e HOME=/workspace/.openrunner/home \
+  if ! or_dk_out=$(docker run -d --name "$OR_CONTAINER" --label "muxen.workspace=$OR_ID" --init \
+      --user "$(id -u):$(id -g)" -e HOME=/workspace/.muxen/home \
       -v "$1:/workspace" -w /workspace $or_dk_sock \
       --entrypoint sh "$OR_IMAGE" -c 'trap "exit 0" TERM INT; while :; do sleep 3600 & wait $!; done' 2>&1); then
     echo "error: couldn't start a container from $OR_IMAGE: $(printf '%s' "$or_dk_out" | grep -v '^$' | tail -n 1)" >&2

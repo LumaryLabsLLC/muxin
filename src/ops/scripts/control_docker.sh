@@ -1,7 +1,7 @@
-# OpenRunner: control one runner that lives in a Docker container.
-# OpenRunner prepends these variables:
+# Muxen: control one runner that lives in a Docker container.
+# Muxen prepends these variables:
 #   OR_ACTION     start | stop | restart | logs | remove
-#   OR_CONTAINER  the container, e.g. openrunner-beelink-01
+#   OR_CONTAINER  the container, e.g. muxen-beelink-01
 #   OR_TOKEN      remove token (remove only; empty skips deregistration)
 #   OR_DELETE     1 to delete the runner's volume after removing
 
@@ -46,7 +46,7 @@ case "$OR_ACTION" in
     ;;
   remove)
     image=$(docker inspect -f '{{.Config.Image}}' "$c")
-    vol=$(docker inspect -f '{{index .Config.Labels "openrunner.volume"}}' "$c" 2>/dev/null)
+    vol=$(docker inspect -f '{{index .Config.Labels "muxen.volume"}}' "$c" 2>/dev/null)
     if [ -z "$vol" ]; then
       vol=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/home/runner"}}{{.Name}}{{end}}{{end}}' "$c" 2>/dev/null)
     fi

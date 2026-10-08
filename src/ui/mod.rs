@@ -1,14 +1,20 @@
 //! The native window, built with GPUI (Zed's UI framework).
 
+mod about;
 mod activity;
 mod assets;
 mod detail;
 mod dialogs;
 mod format;
+mod github;
 mod input;
 mod kit;
+mod menu;
 mod overview;
+mod desktop;
+mod sessions;
 mod settings;
+mod terminal;
 mod theme;
 mod themes;
 mod workspaces;
@@ -32,6 +38,8 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
         cx.set_global(appearance.resolve(cx.window_appearance()));
         cx.set_global(appearance);
         input::bind_keys(cx);
+        terminal::bind_keys(cx);
+        desktop::bind_keys(cx);
         root::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(root::menus());
@@ -43,18 +51,23 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
             .and_then(|s| s.split_once('x'))
             .and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?)))
             .unwrap_or((1380., 880.));
-        let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
+        // `--view display:builtin` puts the window on the laptop's own screen
+        // (test runs stay off the main monitor); otherwise the primary display.
+        let wants_builtin = initial_view.as_deref().is_some_and(|v| v.split(',').any(|p| p.trim() == "display:builtin"));
+        let display = wants_builtin.then(|| builtin_display(cx)).flatten();
+        let bounds = Bounds::centered(display, size(px(w), px(h)), cx);
         let titlebar = if cfg!(target_os = "macos") {
-            TitlebarOptions { title: Some("OpenRunner".into()), appears_transparent: true, traffic_light_position: Some(point(px(13.), px(12.))) }
+            TitlebarOptions { title: Some("Muxen".into()), appears_transparent: true, traffic_light_position: Some(point(px(16.), px(19.))) }
         } else {
-            TitlebarOptions { title: Some("OpenRunner".into()), appears_transparent: false, traffic_light_position: None }
+            TitlebarOptions { title: Some("Muxen".into()), appears_transparent: false, traffic_light_position: None }
         };
         let window = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                display_id: display,
                 titlebar: Some(titlebar),
                 window_min_size: Some(size(px(960.), px(600.))),
-                app_id: Some("openrunner".into()),
+                app_id: Some("muxen".into()),
                 ..Default::default()
             },
             |window, cx| {
@@ -82,4 +95,47 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
         .detach();
         cx.activate(true);
     });
+}
+
+/// The built-in display (a MacBook's own screen), when there is one.
+#[cfg(target_os = "macos")]
+fn builtin_display(cx: &App) -> Option<gpui::DisplayId> {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGDisplayIsBuiltin(display: u32) -> i32;
+    }
+    cx.displays().into_iter().map(|d| d.id()).find(|id| unsafe { CGDisplayIsBuiltin(u32::from(*id)) != 0 })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn builtin_display(_: &App) -> Option<gpui::DisplayId> {
+    None
+}
+
+/// A press on our own title bar: a double click zooms (or whatever the system
+/// setting says); otherwise the window follows the mouse. On macOS GPUI only
+/// does this in the top 28 points, so we ask AppKit to drag from the event.
+#[allow(unexpected_cfgs)] // objc's msg_send! checks a cfg this crate doesn't declare
+pub(crate) fn title_bar_press(e: &gpui::MouseDownEvent, window: &mut gpui::Window) {
+    if e.click_count == 2 {
+        window.titlebar_double_click();
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc::runtime::Object;
+        use objc::{class, msg_send, sel, sel_impl};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = HasWindowHandle::window_handle(&*window) else { return };
+        let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+        let view = h.ns_view.as_ptr() as *mut Object;
+        let ns_window: *mut Object = msg_send![view, window];
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let event: *mut Object = msg_send![app, currentEvent];
+        if !ns_window.is_null() && !event.is_null() {
+            let _: () = msg_send![ns_window, performWindowDragWithEvent: event];
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    window.start_window_move();
 }

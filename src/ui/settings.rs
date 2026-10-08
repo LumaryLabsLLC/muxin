@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, Context, Entity, Focusable, SharedString, Subscription, Task, Window, div, prelude::*, px};
 
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, card, icon, mono, section_title};
@@ -24,6 +24,8 @@ pub struct SettingsPage {
     add_result: Option<(bool, String, Option<String>)>,
     save_error: Option<String>,
     saved_at: Option<Instant>,
+    /// The login in use: its permissions and organizations (to offer them).
+    access: Option<crate::api::AccountsOut>,
     pub scroll: gpui::ScrollHandle,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -70,7 +72,7 @@ impl SettingsPage {
             }
         });
 
-        SettingsPage {
+        let mut page = SettingsPage {
             engine,
             snapshot,
             add,
@@ -81,10 +83,39 @@ impl SettingsPage {
             add_result: None,
             save_error: None,
             saved_at: None,
+            access: None,
             scroll: gpui::ScrollHandle::new(),
             _tasks: vec![updates],
             _subscriptions: subs,
+        };
+        if !page.snapshot.demo {
+            page.load_access(cx);
         }
+        page
+    }
+
+    /// Puts the cursor in the field for watching an organization.
+    pub fn focus_add(&self, window: &mut Window, cx: &App) {
+        window.focus(&self.add.focus_handle(cx));
+    }
+
+    /// Reads the login's permissions and organizations (fresh from the GitHub
+    /// CLI, so a permission just granted shows).
+    fn load_access(&mut self, cx: &mut Context<Self>) {
+        let engine = self.engine.clone();
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { crate::api::github_accounts(&engine).await }
+        });
+        let task = cx.spawn(async move |this, cx| {
+            if let Ok(Ok(access)) = job.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.access = Some(access);
+                    cx.notify()
+                });
+            }
+        });
+        self._tasks.push(task);
     }
 
     /// Checks access to an org or repo, then adds it. `preset` comes from a detected-scope chip.
@@ -125,7 +156,11 @@ impl SettingsPage {
                             Err(e) => this.add_result = Some((false, e, None)),
                         }
                     }
-                    Ok(t) => this.add_result = Some((false, t.error.unwrap_or_default(), t.hint)),
+                    Ok(t) => {
+                        this.add_result = Some((false, t.error.unwrap_or_default(), t.hint));
+                        // A missing permission may have just been granted elsewhere: look again.
+                        this.load_access(cx);
+                    }
                     Err(e) => this.add_result = Some((false, format!("The check failed: {e}"), None)),
                 }
                 cx.notify();
@@ -181,9 +216,26 @@ impl SettingsPage {
         let s = &self.snapshot;
         let settings = self.engine.settings();
         let account: AnyElement = if s.github.token_source.is_empty() && !s.demo {
-            note(theme, "triangle-alert", theme.warning, "No GitHub token found. Run `gh auth login` in a terminal, or set GITHUB_TOKEN.").into_any_element()
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(note(theme, "triangle-alert", theme.warning, "Not signed in to GitHub."))
+                .child(
+                    Button::new("gh-sign-in", "Sign in with GitHub")
+                        .style(ButtonStyle::Primary)
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(super::root::SignInGitHub), cx)),
+                )
+                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Uses the GitHub CLI, or set GITHUB_TOKEN."))
+                .into_any_element()
         } else {
-            let who = s.github.login.clone().map(|l| format!("Signed in as {l}")).unwrap_or_else(|| "Token found".into());
+            let who = s
+                .github
+                .login
+                .clone()
+                .or_else(|| self.access.as_ref().and_then(|a| a.using.clone()))
+                .map(|l| format!("Signed in as {l}"))
+                .unwrap_or_else(|| "Token found".into());
             let via = match s.github.token_source.as_str() {
                 "gh" => "using your gh login".to_string(),
                 "" => String::new(),
@@ -239,33 +291,65 @@ impl SettingsPage {
             })
             .collect();
 
-        let detected: Vec<AnyElement> = s
-            .github
-            .detected
+        // Organizations to watch with one click: yours, and ones found in runner configs.
+        let watching = |name: &str| settings.github.orgs.iter().chain(settings.github.repos.iter()).any(|w| w.eq_ignore_ascii_case(name));
+        let mine: Vec<String> = self.access.as_ref().map(|a| a.orgs.clone()).unwrap_or_default().into_iter().filter(|o| !watching(o)).collect();
+        let found: Vec<String> = s.github.detected.iter().filter(|d| !watching(d) && !mine.iter().any(|m| m.eq_ignore_ascii_case(d))).cloned().collect();
+        let grant = self.access.as_ref().and_then(|a| a.grant_command.clone()).filter(|_| !s.demo).map(|cmd| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .p(px(12.))
+                .rounded(px(8.))
+                .bg(theme.warning.opacity(0.10))
+                .child(icon("triangle-alert", 15., theme.warning))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .gap(px(2.))
+                        .child(div().text_size(px(13.)).text_color(theme.text).child("Watching an organization's runners needs one more permission"))
+                        .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!(
+                            "Your GitHub login doesn't have admin:org yet. Granting it runs `{cmd}` in a terminal and finishes in your browser."
+                        ))),
+                )
+                .child(
+                    Button::new("gh-grant", "Grant access")
+                        .style(ButtonStyle::Primary)
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(super::root::GrantGitHubAccess), cx)),
+                )
+                .child(Button::icon_only("gh-recheck", "refresh-cw").tooltip("Check again").on_click(cx.listener(|this, _, _, cx| this.load_access(cx))))
+        });
+        let chip = |id: (&'static str, usize), name: &str, cx: &mut Context<Self>| {
+            let scope = name.to_string();
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .h(px(24.))
+                .px(px(8.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border_variant)
+                .bg(theme.element)
+                .cursor_pointer()
+                .hover(|st| st.bg(theme.element_hover))
+                .font_family(mono_font())
+                .text_size(px(12.))
+                .child(icon("plus", 12., theme.text_muted))
+                .child(name.to_string())
+                .on_click(cx.listener(move |this, _, _, cx| this.add_scope(Some(scope.clone()), cx)))
+                .into_any_element()
+        };
+        let my_orgs: Vec<AnyElement> = mine.iter().enumerate().map(|(i, o)| chip(("my-org", i), o, cx)).collect();
+        let detected: Vec<AnyElement> = found
             .iter()
             .enumerate()
-            .map(|(i, d)| {
-                let scope = d.clone();
-                div()
-                    .id(("detected", i))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.))
-                    .h(px(24.))
-                    .px(px(8.))
-                    .rounded(px(5.))
-                    .border_1()
-                    .border_color(theme.border_variant)
-                    .bg(theme.element)
-                    .cursor_pointer()
-                    .hover(|st| st.bg(theme.element_hover))
-                    .font_family(mono_font())
-                    .text_size(px(12.))
-                    .child(icon("plus", 12., theme.text_muted))
-                    .child(d.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| this.add_scope(Some(scope.clone()), cx)))
-                    .into_any_element()
-            })
+            .map(|(i, d)| chip(("detected", i), d, cx))
             .collect();
 
         div()
@@ -278,9 +362,10 @@ impl SettingsPage {
                     .w_full()
                     .text_size(px(12.5))
                     .text_color(theme.text_muted)
-                    .child("Live runner status and jobs come from the organizations and repositories you watch. Reading org runners needs an org admin token (admin:org)."),
+                    .child("Live runner status and jobs come from the organizations and repositories you watch."),
             )
             .child(account)
+            .children(grant)
             .child(
                 card(theme)
                     .children(rows)
@@ -313,6 +398,17 @@ impl SettingsPage {
                     .child(note(theme, if *ok { "circle-check" } else { "circle-alert" }, if *ok { theme.success } else { theme.error }, msg.clone()))
                     .children(hint.clone().map(|h| hint_line(theme, 99, h)))
             }))
+            .when(!my_orgs.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child("Your organizations:"))
+                        .children(my_orgs),
+                )
+            })
             .when(!detected.is_empty(), |d| {
                 d.child(
                     div()
@@ -378,6 +474,98 @@ impl SettingsPage {
                     .when(self.saved_at.is_some(), |d| d.child(div().text_size(px(12.)).text_color(theme.success).child("Saved")))
                     .children(self.save_error.clone().map(|e| div().text_size(px(12.)).text_color(theme.error).child(e))),
             )
+    }
+
+    /// Font size and line height for agent session terminals, with a preview.
+    fn terminal_section(&self, theme: &Theme, family: SharedString, cx: &mut Context<Self>) -> impl IntoElement {
+        let a = cx.global::<Appearance>().clone();
+        let (size, line_height) = (a.terminal_font_size, a.terminal_line_height);
+        let stepper = |id: &'static str, value: String, step: fn(&mut Appearance, f32), cx: &mut Context<Self>| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .child(Button::icon_only((id, 0usize), "minus").on_click(cx.listener(move |_, _, _, cx| theme_mod::update_terminal(cx, |a| step(a, -1.)))))
+                .child(div().w(px(56.)).flex().justify_center().font_family(mono_font()).text_size(px(12.5)).child(value))
+                .child(Button::icon_only((id, 1usize), "plus").on_click(cx.listener(move |_, _, _, cx| theme_mod::update_terminal(cx, |a| step(a, 1.)))))
+        };
+        let preset = |label: &'static str, value: f32, cx: &mut Context<Self>| {
+            let selected = (line_height - value).abs() < 0.01;
+            div()
+                .id(label)
+                .h(px(24.))
+                .px(px(9.))
+                .flex()
+                .items_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(12.))
+                .text_color(if selected { theme.text } else { theme.text_muted })
+                .when(selected, |d| d.bg(theme.surface).border_1().border_color(theme.border))
+                .when(!selected, |d| d.hover(|st| st.text_color(theme.text)))
+                .child(label)
+                .on_click(cx.listener(move |_, _, _, cx| theme_mod::update_terminal(cx, |a| a.terminal_line_height = value)))
+        };
+        let row = |label: &'static str, control: AnyElement, hint: Option<&'static str>| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .py(px(8.))
+                .child(div().w(px(110.)).flex_none().text_size(px(12.5)).text_color(theme.text_muted).child(label))
+                .child(control)
+                .child(div().flex_1())
+                .children(hint.map(|h| div().text_size(px(11.5)).text_color(theme.text_placeholder).child(h)))
+        };
+        let size_control = stepper("term-size", format!("{size:.0} pt"), |a, d| a.terminal_font_size += d, cx).into_any_element();
+        let presets = div()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .child(preset("Compact", 1.15, cx))
+            .child(preset("Normal", 1.3, cx))
+            .child(preset("Relaxed", 1.5, cx))
+            .child(div().w(px(8.)))
+            .child(stepper("term-line", format!("{line_height:.2}"), |a, d| a.terminal_line_height += d * 0.05, cx))
+            .into_any_element();
+        let reset = (size != theme_mod::TERMINAL_FONT_SIZE || (line_height - theme_mod::TERMINAL_LINE_HEIGHT).abs() > 0.01).then(|| {
+            Button::new("term-reset", "Reset").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| {
+                theme_mod::update_terminal(cx, |a| {
+                    a.terminal_font_size = theme_mod::TERMINAL_FONT_SIZE;
+                    a.terminal_line_height = theme_mod::TERMINAL_LINE_HEIGHT;
+                })
+            }))
+        });
+        // A few lines in the terminal's font, size and spacing.
+        let line_px = (size * line_height).round();
+        let preview = div()
+            .mt(px(4.))
+            .p(px(12.))
+            .rounded(px(8.))
+            .bg(theme.canvas)
+            .border_1()
+            .border_color(theme.border_variant)
+            .font_family(family.clone())
+            .text_size(px(size))
+            .line_height(px(line_px))
+            .text_color(theme.text)
+            .child(div().child("~/code/api $ claude \"fix the flaky test\""))
+            .child(div().text_color(theme.success).child("⏺ Read(e2e/checkout.spec.ts)"))
+            .child(div().text_color(theme.text_muted).child("  ⎿  12 passed (4.1s)"));
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(div().flex().items_center().child(section_title(theme, "Terminal", None)).child(div().flex_1()).children(reset))
+            .child(
+                card(theme)
+                    .px(px(14.))
+                    .py(px(6.))
+                    .child(row("Font", div().font_family(mono_font()).text_size(px(12.5)).child(family).into_any_element(), None))
+                    .child(row("Text size", size_control, Some("⌘+ / ⌘− in a terminal")))
+                    .child(row("Line height", presets, None)),
+            )
+            .child(preview)
     }
 
     fn appearance_section(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -477,7 +665,7 @@ impl SettingsPage {
                     .p(px(14.))
                     .gap(px(10.))
                     .child(div().w_full().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(
-                        "Machines and the runners they should host live in fleet.toml. OpenRunner edits it when you add machines or install runners, and keeps your comments.",
+                        "Machines and the runners they should host live in fleet.toml. Muxen edits it when you add machines or install runners, and keeps your comments.",
                     ))
                     .child(
                         div()
@@ -495,8 +683,9 @@ impl SettingsPage {
 }
 
 impl Render for SettingsPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let terminal_font = super::terminal::font_family(window);
         let shortcuts = [
             ("⌘R", "Check now"),
             ("⇧⌘R", "Sync GitHub"),
@@ -504,8 +693,11 @@ impl Render for SettingsPage {
             ("⌘1 / ⌘2", "Overview / Jobs"),
             ("⌘F or /", "Filter the fleet"),
             ("⌘J", "Toggle activity"),
+            ("⌘B", "Hide or show the sidebar"),
             ("⌘[ / ⌘]", "Back / forward"),
             ("⌘,", "Settings"),
+            ("⌘T", "New session"),
+            ("⌘+ / ⌘− / ⌘0", "Terminal text size (in a terminal)"),
         ];
         div()
             .id("settings-page")
@@ -524,6 +716,7 @@ impl Render for SettingsPage {
                     .gap(px(28.))
                     .child(self.github_section(&theme, cx))
                     .child(self.appearance_section(&theme, cx))
+                    .child(self.terminal_section(&theme, terminal_font, cx))
                     .child(self.checks_section(&theme, cx))
                     .child(self.inventory_section(&theme))
                     .child(
@@ -551,8 +744,10 @@ fn note(_theme: &Theme, icon_name: &'static str, color: gpui::Hsla, text: impl I
     div().flex().items_center().gap(px(8.)).text_size(px(12.5)).child(icon(icon_name, 14., color)).child(text.into())
 }
 
+/// A fix to run: copyable, and a button when it's a GitHub permission Muxen can ask for.
 fn hint_line(theme: &Theme, i: usize, hint: String) -> impl IntoElement {
     let copy = hint.clone();
+    let grant = hint.contains("gh auth refresh") && hint.contains("admin:org");
     div()
         .flex()
         .items_center()
@@ -562,6 +757,13 @@ fn hint_line(theme: &Theme, i: usize, hint: String) -> impl IntoElement {
         .child(Button::icon_only(("hint-copy", i), "copy").tooltip("Copy").on_click(move |_, _, cx| {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))
         }))
+        .when(grant, |d| {
+            d.child(
+                Button::new(("hint-grant", i), "Grant access")
+                    .style(ButtonStyle::Primary)
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(super::root::GrantGitHubAccess), cx)),
+            )
+        })
 }
 
 /// A miniature of the theme: sidebar, a card, the accent and the status colors.

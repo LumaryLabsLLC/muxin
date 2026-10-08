@@ -42,7 +42,7 @@ impl Root {
                                 "A workspace is a folder on one of your machines, optionally a git checkout, that an agent uses as its work environment: it runs commands, edits files and syncs code there. Workspaces persist until destroyed.",
                             ),
                         ).child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!(
-                            "{allowed} of {} machines accept workspaces. Agents create them with the workspace_create MCP tool or `openrunner workspace create`.",
+                            "{allowed} of {} machines accept workspaces. Agents create them with the workspace_create MCP tool or `muxen workspace create`.",
                             s.machines.len()
                         ))),
                     )
@@ -117,11 +117,28 @@ impl Root {
                     .when(w.isolation == "docker", |d| d.child(docker_pill(theme, w)))
                     .children(w.owner.clone().map(|o| kit::pill(o, theme.info)))
                     .child(status_pill(theme, w))
+                    .child({
+                        let ws = w.clone();
+                        Button::icon_only(SharedString::from(format!("ws-session-{}", w.id)), "square-terminal")
+                            .tooltip("New session here")
+                            .disabled(w.status != "ready")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.new_workspace_session(&ws, window, cx)
+                            }))
+                    })
                     .child(
                         Button::icon_only(SharedString::from(format!("ws-copy-{}", w.id)), "copy")
                             .tooltip("Copy shell command")
                             .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(shell.clone()))),
-                    ),
+                    )
+                    .child({
+                        let (wid, name) = (w.id.clone(), w.name.clone());
+                        Button::icon_only(SharedString::from(format!("ws-delete-{}", w.id)), "trash-2")
+                            .style(ButtonStyle::Danger)
+                            .tooltip("Delete workspace")
+                            .on_click(cx.listener(move |this, _, window, cx| this.confirm_destroy_workspace(&wid, &name, window, cx)))
+                    }),
             )
             .child(
                 div()
@@ -154,6 +171,10 @@ impl Root {
                     .child(div().truncate().font_family(mono_font()).child(w.path.clone())),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Workspace(id.clone()), window, cx)))
+            .on_mouse_down(gpui::MouseButton::Right, {
+                let wid = w.id.clone();
+                super::menu::on_right_click(move || super::menu::MenuTarget::Workspace(wid.clone()), cx)
+            })
             .into_any_element()
     }
 
@@ -200,6 +221,14 @@ impl Root {
                 div()
                     .flex()
                     .gap(px(6.))
+                    .child({
+                        let ws = w.clone();
+                        Button::new("ws-new-session", "New session")
+                            .icon("square-terminal")
+                            .style(ButtonStyle::Primary)
+                            .disabled(w.status != "ready")
+                            .on_click(cx.listener(move |this, _, window, cx| this.new_workspace_session(&ws, window, cx)))
+                    })
                     .child(
                         Button::new("ws-copy-shell", "Copy shell command")
                             .icon("terminal")
@@ -277,6 +306,19 @@ impl Root {
             body = body.child(callout(&theme, "error", "Workspace error", err.clone(), None));
         }
         body = body.child(details);
+        // Sessions working in this folder.
+        let here: Vec<_> = self.snapshot.sessions.iter().filter(|x| x.machine_id == w.machine_id && x.cwd.starts_with(&w.path)).cloned().collect();
+        if !here.is_empty() {
+            let rows: Vec<AnyElement> = here.iter().enumerate().map(|(i, x)| self.machine_session_row(&theme, x, i, cx)).collect();
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .child(kit::section_title(&theme, "Sessions", Some(here.len())))
+                    .child(card(&theme).children(rows)),
+            );
+        }
 
         if let Some(result) = self.ws_ui.changes.get(&w.id) {
             let (text, failed) = match result {
@@ -399,6 +441,10 @@ impl Root {
                     .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("used {}", format::ago(Some(w.last_used_at)))))
                     .child(status_pill(theme, w))
                     .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Workspace(id.clone()), window, cx)))
+                    .on_mouse_down(gpui::MouseButton::Right, {
+                        let wid = w.id.clone();
+                        super::menu::on_right_click(move || super::menu::MenuTarget::Workspace(wid.clone()), cx)
+                    })
                     .into_any_element()
             })
             .collect();

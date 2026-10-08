@@ -1,30 +1,32 @@
 //! The root view: a full-height fleet sidebar, a page area with its own
 //! toolbar and history, and an activity drawer that slides over from the right.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, KeyBinding, Menu, MenuItem,
-    ScrollHandle, SharedString, Subscription, Task, Window, actions, div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, Focusable, FontWeight, KeyBinding, Menu,
+    MenuItem, MouseButton, ScrollHandle, SharedString, Subscription, Task, Window, actions, div, prelude::*, px,
 };
 
-use super::dialogs::{AddMachineDialog, ConfirmDialog, DialogEvent, InstallDialog, NewWorkspaceDialog};
+use super::dialogs::{AddMachineDialog, ConfirmDialog, DialogEvent, InstallDialog, NewSessionDialog, NewWorkspaceDialog};
+use super::terminal::TerminalView;
 use super::format;
 use super::input::{InputEvent, TextInput};
-use super::kit::{self, Button, ButtonStyle, icon, runner_glyph, spinner};
+use super::kit::{self, Button, ButtonStyle, icon, spinner};
 use super::settings::SettingsPage;
 use super::theme::{ActiveTheme, mono_font, Theme, ui_font};
 use super::workspaces::WorkspaceUi;
 use super::activity::{ActivityFilter, ActivityItem};
 use crate::fleet::workspaces::{CreateWorkspace, WorkspaceIsolation};
 use crate::fleet::Engine;
+use crate::fleet::sessions::StartSession;
 use crate::fleet::model::{Action, Machine, Runner, Snapshot};
 use crate::ops::RunnerAction;
 
 actions!(
-    openrunner,
+    muxen,
     [
         CheckNow,
         SyncGitHub,
@@ -35,14 +37,21 @@ actions!(
         GoBack,
         GoForward,
         ToggleActivity,
+        ToggleSidebar,
         AddMachine,
+        NewSession,
+        ShowAbout,
+        SignInGitHub,
+        GrantGitHubAccess,
         Dismiss,
         Quit
     ]
 );
 
 const WORKSPACE: &str = "Root";
-pub(super) const SIDEBAR_WIDTH: f32 = 256.;
+pub(super) const SIDEBAR_DEFAULT: f32 = 256.;
+const SIDEBAR_MIN: f32 = 220.;
+const SIDEBAR_MAX: f32 = 420.;
 /// Utilization samples kept for the overview's pulse chart.
 const PULSE_SAMPLES: usize = 64;
 const PULSE_EVERY: Duration = Duration::from_secs(5);
@@ -58,7 +67,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-[", GoBack, None),
         KeyBinding::new("secondary-]", GoForward, None),
         KeyBinding::new("secondary-j", ToggleActivity, None),
+        KeyBinding::new("secondary-b", ToggleSidebar, None),
         KeyBinding::new("secondary-n", AddMachine, None),
+        KeyBinding::new("secondary-t", NewSession, None),
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("escape", Dismiss, Some(WORKSPACE)),
         KeyBinding::new("/", FocusFilter, Some(WORKSPACE)),
@@ -68,8 +79,14 @@ pub fn bind_keys(cx: &mut App) {
 pub fn menus() -> Vec<Menu> {
     vec![
         Menu {
-            name: "OpenRunner".into(),
-            items: vec![MenuItem::action("Settings…", OpenSettings), MenuItem::separator(), MenuItem::action("Quit OpenRunner", Quit)],
+            name: "Muxen".into(),
+            items: vec![
+                MenuItem::action("About Muxen", ShowAbout),
+                MenuItem::separator(),
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
+                MenuItem::action("Quit Muxen", Quit),
+            ],
         },
         Menu {
             name: "Fleet".into(),
@@ -78,6 +95,7 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Sync GitHub", SyncGitHub),
                 MenuItem::separator(),
                 MenuItem::action("Add Machine…", AddMachine),
+                MenuItem::action("New Session…", NewSession),
             ],
         },
         Menu {
@@ -100,10 +118,37 @@ pub enum Route {
     Jobs,
     Workspaces,
     Workspace(String),
+    /// What needs you on GitHub.
+    Github,
+    GithubRepo(String),
+    GithubItem(String, u64),
     Activity,
     Machine(String),
     Runner(String),
+    /// An agent session: "<machine-id>/<name>".
+    Session(String),
+    /// A machine's desktop, live.
+    Desktop(String),
     Settings,
+    About,
+}
+
+/// Drag payload for the sidebar's resize handle; renders nothing.
+struct DraggedSidebar;
+
+/// Drag payload for the divider between a terminal and a desktop.
+pub(super) struct DraggedSplit;
+
+impl Render for DraggedSplit {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+impl Render for DraggedSidebar {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
 }
 
 pub enum Modal {
@@ -111,6 +156,8 @@ pub enum Modal {
     Install(Entity<InstallDialog>),
     Confirm(Entity<ConfirmDialog>),
     NewWorkspace(Entity<NewWorkspaceDialog>),
+    NewSession(Entity<NewSessionDialog>),
+    Licenses(Entity<super::about::LicensesDialog>),
 }
 
 pub struct Notice {
@@ -135,7 +182,6 @@ pub struct Root {
     forward: Vec<Route>,
     pub(super) filter: Entity<TextInput>,
     pub(super) collapsed: HashSet<String>,
-    pub(super) other_open: bool,
     pub(super) activity_filter: ActivityFilter,
     pub(super) activity_selected: Option<ActivityItem>,
     pub(super) activity_scroll: ScrollHandle,
@@ -148,9 +194,41 @@ pub struct Root {
     last_pulse: Option<Instant>,
     /// Width of the page area, for layouts that change with the window size.
     pub(super) content_width: f32,
+    pub(super) sidebar_width: f32,
+    sidebar_resizing: bool,
+    /// The sidebar is tucked away (the toolbar's button, ⌘B).
+    sidebar_hidden: bool,
+    /// Terminals attached to agent sessions, kept while the app runs so
+    /// switching pages doesn't drop them.
+    pub(super) terminals: HashMap<String, Entity<TerminalView>>,
+    /// Machines whose sessions a page asked for before discovery finished.
+    pub(super) sessions_requested: HashSet<String>,
+    /// The GitHub page's data and selection.
+    pub(super) gh: super::github::GithubUi,
+    /// Open desktop views by machine id: the Desktop page's, or the one next to
+    /// a session's terminal. Only what's on screen streams.
+    desktops: std::collections::HashMap<String, Entity<super::desktop::DesktopView>>,
+    /// Sessions showing their machine's desktop beside the terminal.
+    pub(super) split: HashSet<String>,
+    /// The terminal's share of a split page, and whether its divider is being dragged.
+    pub(super) split_ratio: f32,
+    pub(super) split_resizing: bool,
+    /// How git is set up on each machine (the machine page's Git card), and fixes in flight.
+    pub(super) machine_git: std::collections::HashMap<String, super::github::Load<crate::api::GitSetupOut>>,
+    pub(super) git_fixing: std::collections::HashSet<String>,
+    /// How each machine is reached (the machine page's Connection card), and changes in flight.
+    pub(super) machine_conn: std::collections::HashMap<String, super::github::Load<crate::fleet::connection::Connection>>,
+    pub(super) conn_changing: std::collections::HashSet<String>,
+    /// The open right-click menu.
+    pub(super) context_menu: Option<super::menu::ContextMenu>,
+    /// Focus the root on the next render (the focused terminal went away).
+    refocus: bool,
+    /// The newest session notice already announced (None until the first snapshot).
+    last_notice: Option<u64>,
+    window_active: bool,
     pub(super) ws_ui: WorkspaceUi,
     _tasks: Vec<Task<()>>,
-    _subscriptions: Vec<Subscription>,
+    pub(super) _subscriptions: Vec<Subscription>,
 }
 
 impl Root {
@@ -211,7 +289,6 @@ impl Root {
             forward: Vec::new(),
             filter,
             collapsed: HashSet::new(),
-            other_open: false,
             activity_filter: ActivityFilter::default(),
             activity_selected: None,
             activity_scroll: ScrollHandle::new(),
@@ -223,6 +300,24 @@ impl Root {
             pulse: VecDeque::with_capacity(PULSE_SAMPLES),
             last_pulse: None,
             content_width: 1000.,
+            sidebar_width: cx.global::<super::theme::Appearance>().sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX),
+            sidebar_resizing: false,
+            sidebar_hidden: cx.global::<super::theme::Appearance>().sidebar_hidden,
+            terminals: HashMap::new(),
+            sessions_requested: HashSet::new(),
+            gh: Default::default(),
+            desktops: Default::default(),
+            split: Default::default(),
+            split_ratio: cx.global::<super::theme::Appearance>().split_ratio.clamp(0.2, 0.8),
+            split_resizing: false,
+            machine_git: Default::default(),
+            git_fixing: Default::default(),
+            machine_conn: Default::default(),
+            conn_changing: Default::default(),
+            last_notice: None,
+            refocus: false,
+            context_menu: None,
+            window_active: true,
             ws_ui: WorkspaceUi::default(),
             _tasks: vec![updates, ticker],
             _subscriptions: subscriptions,
@@ -239,8 +334,33 @@ impl Root {
             self.activity_seen_len = len;
             self.activity_scroll.scroll_to_bottom();
         }
+        self.announce_notices(&snapshot);
+        // Terminals of sessions that ended go away (one without the agent stops with its terminal).
+        self.terminals.retain(|id, _| snapshot.sessions.iter().any(|s| &s.id == id));
+        // Looking at a session that just closed: back to its machine.
+        if let Route::Session(id) = &self.route {
+            let gone = !snapshot.sessions.iter().any(|s| &s.id == id) && self.snapshot.sessions.iter().any(|s| &s.id == id);
+            if gone {
+                let machine = id.split('/').next().unwrap_or_default().to_string();
+                self.show(Route::Machine(machine), cx);
+                self.refocus = true;
+            }
+        }
         self.snapshot = snapshot;
         cx.notify();
+    }
+
+    /// Session notices show as colored dots in the sidebar until the session is
+    /// opened; one for the session you're looking at counts as read right away.
+    fn announce_notices(&mut self, snapshot: &Snapshot) {
+        let newest = snapshot.notifications.first().map(|n| n.id).unwrap_or(0);
+        let seen = self.last_notice.unwrap_or(newest);
+        for n in snapshot.notifications.iter().filter(|n| n.id > seen) {
+            if self.window_active && self.route == Route::Session(n.session_id.clone()) {
+                self.engine.ack_session(&n.session_id);
+            }
+        }
+        self.last_notice = Some(newest.max(seen));
     }
 
     fn record_pulse(&mut self) {
@@ -288,6 +408,31 @@ impl Root {
             let engine = self.engine.clone();
             self.settings = Some(cx.new(|cx| SettingsPage::new(engine, window, cx)));
         }
+        // A desktop streams only while it's shown: its page, or beside a session.
+        let showing = match &self.route {
+            Route::Desktop(id) => Some(id.clone()),
+            Route::Session(sid) if self.split.contains(sid) => sid.split('/').next().map(str::to_string),
+            _ => None,
+        };
+        self.desktops.retain(|id, _| Some(id) == showing.as_ref());
+        if let (Some(id), Route::Session(_)) = (&showing, &self.route) {
+            if !self.desktops.contains_key(id) {
+                let (engine, mid) = (self.engine.clone(), id.clone());
+                let view = cx.new(|cx| super::desktop::DesktopView::new(engine, mid, window, cx));
+                self.desktops.insert(id.clone(), view);
+            }
+        }
+        // A session page types into its terminal, a desktop into the machine;
+        // other pages take keys at the root.
+        match self.route.clone() {
+            Route::Session(id) => self.open_terminal(&id, window, cx),
+            Route::Desktop(id) => {
+                let engine = self.engine.clone();
+                let view = self.desktops.entry(id.clone()).or_insert_with(|| cx.new(|cx| super::desktop::DesktopView::new(engine, id, window, cx))).clone();
+                window.focus(&view.focus_handle(cx));
+            }
+            _ => window.focus(&self.focus),
+        }
         self.page_scroll = ScrollHandle::new();
         cx.notify();
     }
@@ -312,7 +457,34 @@ impl Root {
                     self.confirm_remove_runner(&r, window, cx);
                 }
             }
-            "size" => {}
+            "size" | "display" => {}
+            "session" => self.navigate(Route::Session(arg.into()), window, cx),
+            "new-session" => self.show_new_session(Some(arg.to_string()).filter(|a| !a.is_empty()), window, cx),
+            // An issue or pull request handed to an agent: "fix:owner/name#12", or in a new workspace "fix-ws:...".
+            "fix" | "fix-ws" => {
+                if let Some((repo, n)) = arg.split_once('#') {
+                    self.gh_item_to_agent(repo.to_string(), n.parse().unwrap_or(0), kind == "fix-ws", window, cx);
+                }
+            }
+            "sidebar" if arg == "hidden" => {
+                self.sidebar_hidden = true;
+                cx.notify();
+            }
+            "sidebar" => {
+                if let Ok(w) = arg.parse::<f32>() {
+                    self.sidebar_width = w.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                    cx.notify();
+                }
+            }
+            "activity-filter" => {
+                self.activity_filter = match arg {
+                    "failed" => ActivityFilter::Failed,
+                    "operations" => ActivityFilter::Operations,
+                    "agents" => ActivityFilter::Agents,
+                    _ => ActivityFilter::All,
+                };
+                self.show(Route::Activity, cx);
+            }
             "settings" => self.navigate(Route::Settings, window, cx),
             "machine" => self.navigate(Route::Machine(arg.into()), window, cx),
             "runner" => self.navigate(Route::Runner(arg.into()), window, cx),
@@ -332,6 +504,22 @@ impl Root {
                 self._tasks.push(task);
             }
             "activity" => self.show(Route::Activity, cx),
+            "about" => self.navigate(Route::About, window, cx),
+            "desktop" => self.navigate(Route::Desktop(arg.into()), window, cx),
+            "desktop-window" => {
+                let name = self.snapshot.machines.iter().find(|m| m.id == arg).map(|m| m.name.clone()).unwrap_or_else(|| arg.to_string());
+                super::desktop::open_window(self.engine.clone(), arg.to_string(), name, cx);
+            }
+            // A session with its machine's desktop beside the terminal.
+            "split" => {
+                self.split.insert(arg.to_string());
+                self.navigate(Route::Session(arg.into()), window, cx);
+            }
+            "github" => match arg.split_once('#') {
+                Some((repo, n)) => self.navigate(Route::GithubItem(repo.into(), n.parse().unwrap_or(0)), window, cx),
+                None if !arg.is_empty() => self.navigate(Route::GithubRepo(arg.into()), window, cx),
+                None => self.navigate(Route::Github, window, cx),
+            },
             "bottom" => {
                 self.page_scroll.scroll_to_bottom();
                 if let (Route::Settings, Some(page)) = (&self.route, &self.settings) {
@@ -363,9 +551,35 @@ impl Root {
         cx.notify();
     }
 
+    /// Runs a `gh auth ...` fix (from a hint) where the login in use lives.
+    fn run_gh_fix(&mut self, args: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !args.starts_with("auth ") || args.chars().any(|c| ";&|`$<>\n'\"\\".contains(c)) {
+            return;
+        }
+        match self.gh_login_machine() {
+            Some(id) => self.gh_cli_run(&id, args, "GitHub access", window, cx),
+            None => self.notify_user(format!("Run `gh {args}` in a terminal."), true, cx),
+        }
+    }
+
+    /// Settings, with the field to watch an organization ready to type in.
+    fn open_github_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(Route::Settings, window, cx);
+        if let Some(s) = &self.settings {
+            s.read(cx).focus_add(window, cx);
+        }
+    }
+
     pub(super) fn run_attention_action(&mut self, action: &Action, window: &mut Window, cx: &mut Context<Self>) {
         match action.kind.as_str() {
+            "settings" if action.target.as_deref() == Some("github") => self.open_github_settings(window, cx),
             "settings" => self.navigate(Route::Settings, window, cx),
+            "gh-sign-in" => window.dispatch_action(Box::new(SignInGitHub), cx),
+            "gh-command" => {
+                if let Some(args) = action.target.clone() {
+                    self.run_gh_fix(&args, window, cx)
+                }
+            }
             "check" => self.engine.trigger_check(action.target.clone()),
             "machine" => {
                 if let Some(t) = &action.target {
@@ -478,19 +692,61 @@ impl Root {
         self.track(task);
     }
 
+    /// Sets up a workspace (its clone shows on the Activity page), then starts
+    /// the session in its folder and opens it.
+    fn start_in_workspace(&mut self, req: CreateWorkspace, session: StartSession, window: &mut Window, cx: &mut Context<Self>) {
+        self.activity_filter = ActivityFilter::All;
+        self.activity_selected = None;
+        self.show(Route::Activity, cx);
+        let machine = self.snapshot.machines.iter().find(|m| m.id == session.machine_id).map(|m| m.name.clone()).unwrap_or_default();
+        self.notify_user(format!("Setting up a workspace on {machine}; the session starts when it's ready."), false, cx);
+        let engine = self.engine.clone();
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.create_workspace_with(req, WorkspaceIsolation::default()).await }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(ws) => this.start_session(StartSession { cwd: ws.path, ..session }, window, cx),
+                Err(e) => this.notify_user(format!("Couldn't set up the workspace: {e}"), true, cx),
+            });
+        });
+        self.track(task);
+    }
+
     pub(super) fn confirm_destroy_workspace(&mut self, id: &str, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let wid = id.to_string();
+        // Sessions working in its folder end with it.
+        let sessions: Vec<String> = match self.snapshot.workspaces.iter().find(|w| w.id == id) {
+            Some(w) => self
+                .snapshot
+                .sessions
+                .iter()
+                .filter(|s| s.machine_id == w.machine_id && (s.cwd == w.path || s.cwd.starts_with(&format!("{}/", w.path))))
+                .map(|s| s.id.clone())
+                .collect(),
+            None => Vec::new(),
+        };
+        let text = match sessions.len() {
+            0 => "Background commands it started are stopped and its folder is deleted from the machine.".to_string(),
+            1 => "The session working in it ends, background commands it started are stopped, and its folder is deleted from the machine.".to_string(),
+            n => format!("The {n} sessions working in it end, background commands it started are stopped, and its folder is deleted from the machine."),
+        };
         let dialog = cx.new(|cx| {
             ConfirmDialog::new(
-                format!("Destroy {name}?"),
-                "Background commands it started are stopped and its folder is deleted from the machine.".into(),
-                "Destroy workspace",
+                format!("Delete {name}?"),
+                text,
+                "Delete workspace",
                 Some("Keep the files on the machine"),
                 move |keep_files, engine| {
                     let engine = engine.clone();
-                    let wid = wid.clone();
+                    let (wid, sessions) = (wid.clone(), sessions.clone());
                     // Runs as an operation; progress and errors show in Activity.
                     engine.runtime().clone().spawn(async move {
+                        for s in &sessions {
+                            let _ = engine.control_session(s, crate::fleet::sessions::Control::Stop).await;
+                        }
                         if let Err(e) = engine.destroy_workspace(&wid, keep_files).await {
                             tracing::warn!("destroying {wid}: {e}");
                         }
@@ -513,19 +769,21 @@ impl Root {
         }
     }
 
-    fn show_modal(&mut self, modal: Modal, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn show_modal(&mut self, modal: Modal, window: &mut Window, cx: &mut Context<Self>) {
         let focus = match &modal {
             Modal::AddMachine(d) => d.read(cx).first_focus(cx),
             Modal::Install(d) => d.read(cx).first_focus(cx),
             Modal::Confirm(d) => d.focus_handle(cx),
             Modal::NewWorkspace(d) => d.read(cx).first_focus(cx),
+            Modal::NewSession(d) => d.read(cx).first_focus(cx),
+            Modal::Licenses(d) => d.focus_handle(cx),
         };
         window.focus(&focus);
         self.modal = Some(modal);
         cx.notify();
     }
 
-    fn on_dialog_event<D>(&mut self, _: &Entity<D>, event: &DialogEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_dialog_event<D>(&mut self, _: &Entity<D>, event: &DialogEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = None;
         match event {
             DialogEvent::Dismissed => {}
@@ -533,6 +791,12 @@ impl Root {
             DialogEvent::MachineAdded(id) => self.navigate(Route::Machine(id.clone()), window, cx),
             DialogEvent::OpenSettings => self.navigate(Route::Settings, window, cx),
             DialogEvent::CreateWorkspace(req, iso) => self.create_workspace(req.clone(), iso.clone(), window, cx),
+            DialogEvent::StartInWorkspace(req, session) => self.start_in_workspace(req.clone(), session.clone(), window, cx),
+            DialogEvent::StartSession(req) => {
+                self.start_session(req.clone(), window, cx);
+                cx.notify();
+                return;
+            }
         }
         window.focus(&self.focus);
         cx.notify();
@@ -586,7 +850,10 @@ impl Root {
     }
 
     fn focus_filter(&mut self, _: &FocusFilter, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.filter.focus_handle(cx));
+        // Not from under an open dialog.
+        if self.modal.is_none() {
+            window.focus(&self.filter.focus_handle(cx));
+        }
     }
 
     fn go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
@@ -617,7 +884,21 @@ impl Root {
         self.show_add_machine(window, cx);
     }
 
+    /// ⌘T: a new session on the machine being looked at, if any.
+    fn new_session(&mut self, _: &NewSession, window: &mut Window, cx: &mut Context<Self>) {
+        let machine = match &self.route {
+            Route::Machine(id) => Some(id.clone()),
+            Route::Session(id) => id.split('/').next().map(str::to_string),
+            _ => None,
+        };
+        self.show_new_session(machine, window, cx);
+    }
+
     fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
+        if self.context_menu.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.modal.take().is_some() {
             window.focus(&self.focus);
         }
@@ -640,12 +921,17 @@ impl Root {
             Route::Runner(id) => Some(id.clone()),
             _ => None,
         };
+        let selected_session = match &self.route {
+            Route::Session(id) => Some(id.clone()),
+            _ => None,
+        };
         let running_ops = s.operations.iter().filter(|o| o.status == "running").count();
         let mac_titlebar = cfg!(target_os = "macos") && !window.is_fullscreen();
 
         let mut rows: Vec<AnyElement> = Vec::new();
-        let runner_machines: Vec<&Machine> = s.machines.iter().filter(|m| m.kind == "runner").collect();
-        let others: Vec<&Machine> = s.machines.iter().filter(|m| m.kind == "other").collect();
+        // Machines with runners first, then the rest; all under one heading.
+        let runner_machines: Vec<&Machine> =
+            s.machines.iter().filter(|m| m.kind == "runner").chain(s.machines.iter().filter(|m| m.kind != "runner")).collect();
         let unassigned: Vec<&Runner> = s.runners.iter().filter(|r| r.machine_id.is_none() && matches_runner(r)).collect();
 
         rows.push(self.section_header("Machines", runner_machines.len(), true, cx).into_any_element());
@@ -653,12 +939,23 @@ impl Root {
             let runners: Vec<&Runner> = m.runner_ids.iter().filter_map(|id| s.runners.iter().find(|r| &r.id == id)).collect();
             let machine_match = q.is_empty() || m.name.to_lowercase().contains(&q);
             let visible: Vec<&Runner> = runners.iter().copied().filter(|r| machine_match || matches_runner(r)).collect();
-            if !machine_match && visible.is_empty() {
+            let sessions: Vec<&crate::fleet::sessions::SessionInfo> = s
+                .sessions
+                .iter()
+                .filter(|x| x.machine_id == m.id && (machine_match || x.title.to_lowercase().contains(&q) || x.agent_name.to_lowercase().contains(&q)))
+                .collect();
+            if !machine_match && visible.is_empty() && sessions.is_empty() {
                 continue;
             }
             let open = !self.collapsed.contains(&m.id) || !q.is_empty();
-            rows.push(self.machine_row(&theme, &s, m, open, selected_machine.as_deref() == Some(&m.id), cx).into_any_element());
+            // Collapsed: the machine carries its sessions' unread dot.
+            let alert = (!open).then(|| sessions.iter().find_map(|x| x.attention.clone().map(|k| (k, x.exit_code)))).flatten();
+            rows.push(self.machine_row(&theme, m, open, !sessions.is_empty(), alert, selected_machine.as_deref() == Some(&m.id), cx).into_any_element());
             if open {
+                // Agent sessions first: they're what you come back to.
+                for x in sessions {
+                    rows.push(self.session_row(&theme, x, selected_session.as_deref() == Some(&x.id), cx).into_any_element());
+                }
                 for r in visible {
                     rows.push(self.runner_row(&theme, &s, r, selected_runner.as_deref() == Some(&r.id), cx).into_any_element());
                 }
@@ -668,38 +965,6 @@ impl Root {
             rows.push(self.section_header("On GitHub only", unassigned.len(), false, cx).into_any_element());
             for r in unassigned {
                 rows.push(self.runner_row(&theme, &s, r, selected_runner.as_deref() == Some(&r.id), cx).into_any_element());
-            }
-        }
-        let others_visible: Vec<&&Machine> = others.iter().filter(|m| q.is_empty() || m.name.to_lowercase().contains(&q)).collect();
-        if !others_visible.is_empty() {
-            let open = self.other_open || !q.is_empty();
-            rows.push(
-                div()
-                    .id("others-toggle")
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .mt(px(14.))
-                    .mx(px(10.))
-                    .px(px(8.))
-                    .h(px(24.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .hover(|st| st.bg(theme.ghost_hover))
-                    .text_size(px(11.5))
-                    .text_color(theme.text_placeholder)
-                    .child(icon(if open { "chevron-down" } else { "chevron-right" }, 12., theme.text_placeholder))
-                    .child(format!("Other machines · {}", others_visible.len()))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.other_open = !this.other_open;
-                        cx.notify()
-                    }))
-                    .into_any_element(),
-            );
-            if open {
-                for m in others_visible {
-                    rows.push(self.machine_row(&theme, &s, m, false, selected_machine.as_deref() == Some(&m.id), cx).into_any_element());
-                }
             }
         }
         if s.machines.is_empty() {
@@ -718,20 +983,22 @@ impl Root {
             .flex()
             .flex_col()
             .flex_none()
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(self.sidebar_width))
             .h_full()
             .bg(theme.sidebar)
             .border_r_1()
             .border_color(theme.border_variant)
             // Room for the macOS traffic lights; the window drags from here.
             .when(mac_titlebar, |d| {
-                d.child(div().id("sidebar-drag").h(px(40.)).flex_none().on_click(|e: &ClickEvent, window, _| {
-                    if e.click_count() == 2 {
-                        window.titlebar_double_click();
-                    }
-                }))
+                d.child(
+                    div()
+                        .id("sidebar-drag")
+                        .h(px(40.))
+                        .flex_none()
+                        .on_mouse_down(gpui::MouseButton::Left, |e: &gpui::MouseDownEvent, window, _| super::title_bar_press(e, window)),
+                )
             })
-            .child(self.brand(&theme, &s))
+            .child(self.brand(&theme, &s, cx))
             .child(
                 div()
                     .flex()
@@ -739,11 +1006,11 @@ impl Root {
                     .gap(px(2.))
                     .px(px(10.))
                     .pt(px(6.))
-                    .child(self.nav_item("nav-overview", "gauge", "Overview", None, Route::Overview, cx))
-                    .child(self.nav_item("nav-jobs", "workflow", "Jobs", Some(s.counts.queued + s.counts.running), Route::Jobs, cx))
-                    .child(self.nav_item("nav-workspaces", "terminal", "Workspaces", Some(s.workspaces.len()), Route::Workspaces, cx))
-                    .child(self.activity_nav(&theme, running_ops, cx))
-                    .child(self.nav_item("nav-settings", "settings", "Settings", None, Route::Settings, cx)),
+                    .child(self.nav_item("nav-overview", "gauge", kit::tiles::OVERVIEW, "Overview", None, Route::Overview, cx))
+                    .child(self.nav_item("nav-jobs", "workflow", kit::tiles::JOBS, "Jobs", Some(s.counts.queued + s.counts.running), Route::Jobs, cx))
+                    .child(self.nav_item("nav-workspaces", "terminal", kit::tiles::WORKSPACES, "Workspaces", Some(s.workspaces.len()), Route::Workspaces, cx))
+                    .child(self.nav_item("nav-github", "agent-github", super::github::TILE, "GitHub", self.gh.waiting(), Route::Github, cx))
+                    .child(self.activity_nav(&theme, running_ops, cx)),
             )
             .child(
                 div().px(px(12.)).pt(px(12.)).pb(px(4.)).child(
@@ -757,35 +1024,47 @@ impl Root {
             .child(self.connection_card(&theme, &s, cx))
     }
 
-    fn brand(&self, theme: &Theme, s: &Snapshot) -> impl IntoElement {
-        let scope = format::scope_label(s);
+    fn brand(&self, theme: &Theme, s: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
+        // What it's looking after: "2 machines · 3 runners · 1 session".
+        let count = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+        let mut summary = vec![count(s.machines.len(), "machine")];
+        if s.counts.runners > 0 {
+            summary.push(count(s.counts.runners, "runner"));
+        }
+        if !s.sessions.is_empty() {
+            summary.push(count(s.sessions.len(), "session"));
+        }
+        // GPUI 0.2 only ellipsizes text whose width is known before layout.
+        let text_w = self.sidebar_width - 74. - if s.demo { 48. } else { 0. };
         div()
+            .id("brand")
             .flex()
             .items_center()
             .gap(px(10.))
             .px(px(16.))
             .pt(px(if cfg!(target_os = "macos") { 2. } else { 14. }))
             .pb(px(8.))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, window, cx| this.navigate(Route::About, window, cx)))
             .child(gpui::img("brand/icon.png").size(px(32.)).flex_none())
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .min_w(px(0.))
-                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("OpenRunner"))
-                    .child(div().truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!(
-                        "{} · {} runners",
-                        scope.unwrap_or_else(|| "self-hosted".into()),
-                        s.counts.runners
-                    ))),
+                    .child(div().w(px(text_w)).truncate().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Muxen"))
+                    .child(div().w(px(text_w)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(summary.join(" · "))),
             )
             .when(s.demo, |d| d.child(div().flex_1()).child(kit::pill("demo", theme.warning)))
     }
 
-    fn nav_item(&self, id: &'static str, icon_name: &'static str, text: &'static str, count: Option<usize>, route: Route, cx: &mut Context<Self>) -> impl IntoElement {
+    #[allow(clippy::too_many_arguments)]
+    fn nav_item(&self, id: &'static str, icon_name: &'static str, colors: (u32, u32), text: &'static str, count: Option<usize>, route: Route, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         // A workspace page keeps "Workspaces" highlighted.
-        let active = self.route == route || (route == Route::Workspaces && matches!(self.route, Route::Workspace(_)));
+        let active = self.route == route
+            || (route == Route::Workspaces && matches!(self.route, Route::Workspace(_)))
+            || (route == Route::Github && matches!(self.route, Route::GithubRepo(_) | Route::GithubItem(..)));
         div()
             .id(id)
             .flex()
@@ -799,7 +1078,7 @@ impl Root {
             .text_color(if active { theme.text } else { theme.text_muted })
             .when(active, |d| d.bg(theme.element_selected))
             .when(!active, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-            .child(icon(icon_name, 15., if active { theme.text_accent } else { theme.text_placeholder }))
+            .child(kit::tile(icon_name, colors.0, colors.1, 22.))
             .child(text)
             .child(div().flex_1())
             .children(count.filter(|n| *n > 0).map(|n| {
@@ -833,7 +1112,7 @@ impl Root {
             .text_color(if open { theme.text } else { theme.text_muted })
             .when(open, |d| d.bg(theme.element_selected))
             .when(!open, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-            .child(icon("activity", 15., if open { theme.text_accent } else { theme.text_placeholder }))
+            .child(kit::tile("activity", kit::tiles::ACTIVITY.0, kit::tiles::ACTIVITY.1, 22.))
             .child("Activity")
             .child(div().flex_1())
             .when(running > 0, |d| d.child(spinner("nav-activity-spin", 13., theme.accent)))
@@ -866,71 +1145,148 @@ impl Root {
             })
     }
 
-    fn machine_row(&self, theme: &Theme, s: &Snapshot, m: &Machine, open: bool, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    #[allow(clippy::too_many_arguments)]
+    fn machine_row(
+        &self,
+        theme: &Theme,
+        m: &Machine,
+        open: bool,
+        has_sessions: bool,
+        alert: Option<(String, Option<i32>)>,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let id = m.id.clone();
         let toggle_id = m.id.clone();
         let has_runners = !m.runner_ids.is_empty();
-        let glyphs: Vec<AnyElement> = m
-            .runner_ids
-            .iter()
-            .filter_map(|rid| s.runners.iter().find(|r| &r.id == rid))
-            .take(8)
-            .map(|r| runner_glyph(theme, &r.state, 7.).into_any_element())
-            .collect();
-        let extra = m.runner_ids.len().saturating_sub(8);
+        let (tile_from, tile_to) = format::machine_tile(m);
+        let (subtitle, tone) = format::machine_subtitle(m);
+        // Runner count: "5/7" while some are working, else the total.
+        let sum = &m.summary;
+        let (count, count_color) = if sum.working > 0 {
+            (format!("{}/{}", sum.working, sum.total), theme.state("working"))
+        } else if sum.offline + sum.unknown == sum.total {
+            (sum.total.to_string(), theme.text_placeholder)
+        } else {
+            (sum.total.to_string(), theme.state("idle"))
+        };
+        // The text column gets an explicit width: GPUI 0.2 only ellipsizes text
+        // whose width is known before layout. Row chrome: margins, padding, tile, gaps,
+        // and the count pill (padding, dot, gap, ~6.7px per mono character).
+        let pill_w = 12. + 6. + 4. + count.len() as f32 * 6.7;
+        let trailing = if has_runners { 10. + pill_w.max(22.) } else if has_sessions { 32. } else { 0. } + if alert.is_some() { 18. } else { 0. };
+        let text_w = (self.sidebar_width - 20. - 16. - 30. - 10. - trailing).max(40.);
         div()
             .id(SharedString::from(format!("side-m-{}", m.id)))
             .group("machine-row")
             .flex()
             .items_center()
-            .gap(px(8.))
-            .h(px(30.))
+            .gap(px(10.))
+            .h(px(44.))
             .mx(px(10.))
-            .pl(px(6.))
-            .pr(px(8.))
-            .rounded(px(8.))
+            .px(px(8.))
+            .rounded(px(9.))
             .cursor_pointer()
             .when(selected, |d| d.bg(theme.element_selected))
             .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+            // OS tile with a status badge in the corner.
             .child(
-                div()
-                    .id(SharedString::from(format!("side-t-{}", m.id)))
-                    .size(px(14.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(has_runners, |d| {
-                        d.invisible()
-                            .group_hover("machine-row", |st| st.visible())
-                            .child(icon(if open { "chevron-down" } else { "chevron-right" }, 11., theme.text_placeholder))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                if !this.collapsed.remove(&toggle_id) {
-                                    this.collapsed.insert(toggle_id.clone());
-                                }
-                                cx.notify()
-                            }))
-                    }),
+                div().relative().flex_none().child(kit::tile(format::machine_icon(m), tile_from, tile_to, 30.)).child(
+                    div()
+                        .absolute()
+                        .right(px(-4.))
+                        .bottom(px(-4.))
+                        .size(px(13.))
+                        .rounded_full()
+                        .bg(theme.sidebar)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(if m.checking {
+                            spinner(SharedString::from(format!("side-spin-{}", m.id)), 10., theme.text_muted).into_any_element()
+                        } else {
+                            kit::dot(theme.machine_status(&m.status), 8.).into_any_element()
+                        }),
+                ),
             )
-            .child(if m.checking {
-                spinner(SharedString::from(format!("side-spin-{}", m.id)), 10., theme.text_muted).into_any_element()
-            } else {
-                kit::dot(theme.machine_status(&m.status), 7.).into_any_element()
-            })
             .child(
                 div()
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .min_w(px(0.))
-                    .truncate()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(if selected { theme.text } else { theme.text })
-                    .child(m.name.clone()),
+                    .overflow_hidden()
+                    .gap(px(1.))
+                    .child(
+                        div()
+                            .w(px(text_w))
+                            .truncate()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(m.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .w(px(text_w))
+                            .truncate()
+                            .text_size(px(11.5))
+                            .text_color(if tone == "error" { theme.error } else { theme.text_placeholder })
+                            .child(subtitle),
+                    ),
             )
-            .child(div().flex().flex_none().gap(px(2.)).children(glyphs))
-            .when(extra > 0, |d| d.child(div().font_family(mono_font()).text_size(px(10.5)).text_color(theme.text_placeholder).child(format!("+{extra}"))))
-            .when(m.kind == "other", |d| {
-                d.child(div().font_family(mono_font()).text_size(px(11.)).text_color(theme.text_placeholder).child(m.platform.clone()))
+            .children(alert.map(|(kind, code)| super::sessions::attention_dot(theme, &kind, code)))
+            .when(has_runners || has_sessions, |d| {
+                d.child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .min_w(px(22.))
+                        .h(px(18.))
+                        .flex()
+                        .justify_end()
+                        .when(has_runners, |d| d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .h(px(18.))
+                                .px(px(6.))
+                                .rounded_full()
+                                .bg(theme.element)
+                                .font_family(mono_font())
+                                .text_size(px(11.))
+                                .text_color(theme.text_muted)
+                                .group_hover("machine-row", |st| st.invisible())
+                                .child(kit::dot(count_color, 6.))
+                                .child(count),
+                        ))
+                        // On hover the count gives way to the expand/collapse toggle.
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("side-t-{}", m.id)))
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .pr(px(4.))
+                                .invisible()
+                                .group_hover("machine-row", |st| st.visible())
+                                .child(icon(if open { "chevron-down" } else { "chevron-right" }, 12., theme.text_muted))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if !this.collapsed.remove(&toggle_id) {
+                                        this.collapsed.insert(toggle_id.clone());
+                                    }
+                                    cx.notify()
+                                })),
+                        ),
+                )
+            })
+            .on_mouse_down(MouseButton::Right, {
+                let mid = m.id.clone();
+                super::menu::on_right_click(move || super::menu::MenuTarget::Machine(mid.clone()), cx)
             })
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(id.clone()), window, cx)))
     }
@@ -939,7 +1295,7 @@ impl Root {
         let id = r.id.clone();
         let job = r.job_id.and_then(|j| s.jobs.running.iter().find(|x| x.id == j));
         let right = match (r.state.as_str(), job) {
-            ("working", Some(j)) => ellipsize(&j.name, 14),
+            ("working", Some(j)) => ellipsize(&j.name, (14. + (self.sidebar_width - SIDEBAR_DEFAULT) / 7.).max(6.) as usize),
             ("working", None) => "working".into(),
             ("offline", _) => "offline".into(),
             ("unknown", _) => "unknown".into(),
@@ -953,7 +1309,7 @@ impl Root {
             .gap(px(8.))
             .h(px(26.))
             .mx(px(10.))
-            .pl(px(28.))
+            .pl(px(22.))
             .pr(px(8.))
             .rounded(px(7.))
             .cursor_pointer()
@@ -984,6 +1340,84 @@ impl Root {
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Runner(id.clone()), window, cx)))
     }
 
+    /// A thin grip on the sidebar's edge: drag to resize, double-click to reset.
+    fn sidebar_handle(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let resizing = self.sidebar_resizing;
+        let hover = theme.accent.opacity(0.5);
+        div()
+            .id("sidebar-resize")
+            .group("sidebar-resize")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(self.sidebar_width - 4.))
+            .w(px(6.))
+            .flex()
+            .justify_center()
+            .cursor_col_resize()
+            .child(
+                div()
+                    .w(px(2.))
+                    .h_full()
+                    .when(resizing, |d| d.bg(theme.accent))
+                    .when(!resizing, |d| d.group_hover("sidebar-resize", |st| st.bg(hover))),
+            )
+            .on_drag(DraggedSidebar, |_, _, _, cx| cx.new(|_| DraggedSidebar))
+            .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
+                if e.click_count() == 2 {
+                    this.sidebar_width = SIDEBAR_DEFAULT;
+                    this.finish_sidebar_resize(cx);
+                    cx.notify();
+                }
+            }))
+    }
+
+    fn resize_sidebar(&mut self, e: &DragMoveEvent<DraggedSidebar>, window: &mut Window, cx: &mut Context<Self>) {
+        // A release GPUI never saw (e.g. outside the window) must not leave the
+        // sidebar following a bare mouse.
+        if e.event.pressed_button != Some(gpui::MouseButton::Left) {
+            cx.stop_active_drag(window);
+            self.finish_sidebar_resize(cx);
+            cx.notify();
+            return;
+        }
+        let width = f32::from(e.event.position.x).round().clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+        self.sidebar_resizing = true;
+        if width != self.sidebar_width {
+            self.sidebar_width = width;
+            cx.notify();
+        }
+    }
+
+    /// Follows the divider between a terminal and a desktop.
+    pub(super) fn resize_split(&mut self, e: &DragMoveEvent<DraggedSplit>, window: &mut Window, cx: &mut Context<Self>) {
+        if e.event.pressed_button != Some(gpui::MouseButton::Left) {
+            cx.stop_active_drag(window);
+            self.finish_split_resize(cx);
+            return;
+        }
+        let (x, left, width) = (f32::from(e.event.position.x), f32::from(e.bounds.origin.x), f32::from(e.bounds.size.width));
+        if width > 0. {
+            self.split_ratio = ((x - left) / width).clamp(0.2, 0.8);
+            self.split_resizing = true;
+            cx.notify();
+        }
+    }
+
+    /// Ends a divider drag and remembers where it was left.
+    pub(super) fn finish_split_resize(&mut self, cx: &mut Context<Self>) {
+        self.split_resizing = false;
+        let ratio = self.split_ratio;
+        super::theme::remember(cx, |a| a.split_ratio = ratio);
+        cx.notify();
+    }
+
+    /// Ends a resize and remembers the width for next launch.
+    fn finish_sidebar_resize(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_resizing = false;
+        super::theme::save_sidebar_width(cx, self.sidebar_width);
+    }
+
     fn connection_card(&self, theme: &Theme, s: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
         let (color, title) = github_status(theme, s);
         let detail = match (s.check.running, s.check.next_at) {
@@ -992,6 +1426,37 @@ impl Root {
             (false, None) if s.check.finished_at.is_some() => format!("Checked {}", format::ago(s.check.finished_at)),
             _ => "Machines not checked yet".into(),
         };
+        // Outer and inner padding, border, dot and gap.
+        let text_w = self.sidebar_width - 60.;
+        // Settings and About, with the version, under the connection card.
+        let footer_button = |id: &'static str, icon_name: &'static str, label: &'static str, route: Route, cx: &mut Context<Self>| {
+            let active = self.route == route;
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .h(px(26.))
+                .px(px(8.))
+                .rounded(px(7.))
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .text_color(if active { theme.text } else { theme.text_muted })
+                .when(active, |d| d.bg(theme.element_selected))
+                .when(!active, |d| d.hover(|st| st.bg(theme.ghost_hover).text_color(theme.text)))
+                .child(icon(icon_name, 13., if active { theme.text_accent } else { theme.text_placeholder }))
+                .child(label)
+                .on_click(cx.listener(move |this, _, window, cx| this.navigate(route.clone(), window, cx)))
+        };
+        let footer = div()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .pt(px(8.))
+            .child(footer_button("footer-settings", "settings", "Settings", Route::Settings, cx))
+            .child(footer_button("footer-about", "info", "About", Route::About, cx))
+            .child(div().flex_1())
+            .child(div().pr(px(6.)).font_family(mono_font()).text_size(px(11.)).text_color(theme.text_placeholder).child(format!("v{}", env!("CARGO_PKG_VERSION"))));
         div().flex_none().p(px(10.)).border_t_1().border_color(theme.border_variant).child(
             div()
                 .id("connection")
@@ -1014,20 +1479,31 @@ impl Root {
                         .flex_1()
                         .min_w(px(0.))
                         .gap(px(2.))
-                        .child(div().truncate().text_size(px(12.5)).text_color(theme.text).child(title))
-                        .child(div().truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(detail)),
+                        .child(div().w(px(text_w)).truncate().text_size(px(12.5)).text_color(theme.text).child(title))
+                        .child(div().w(px(text_w)).truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(detail)),
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.navigate(Route::Settings, window, cx))),
         )
+        .child(footer)
     }
 
     // -----------------------------------------------------------------------
     // Toolbar and overlays
 
-    fn render_toolbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Hides or shows the sidebar, and remembers it.
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_hidden = !self.sidebar_hidden;
+        let hidden = self.sidebar_hidden;
+        super::theme::remember(cx, |a| a.sidebar_hidden = hidden);
+        cx.notify();
+    }
+
+    fn render_toolbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let s = self.snapshot.clone();
         let (section, title) = route_title(&s, &self.route);
+        // Without the sidebar, the macOS window buttons sit on this bar.
+        let traffic_lights = self.sidebar_hidden && cfg!(target_os = "macos") && !window.is_fullscreen();
         div()
             .id("toolbar")
             .flex()
@@ -1035,14 +1511,17 @@ impl Root {
             .items_center()
             .gap(px(10.))
             .h(px(52.))
-            .px(px(16.))
+            .pl(px(if traffic_lights { 86. } else { 16. }))
+            .pr(px(16.))
             .border_b_1()
             .border_color(theme.border_variant)
-            .on_click(|e: &ClickEvent, window, _| {
-                if e.click_count() == 2 {
-                    window.titlebar_double_click();
-                }
-            })
+            // The whole bar moves the window (except its buttons), like a title bar.
+            .on_mouse_down(gpui::MouseButton::Left, |e: &gpui::MouseDownEvent, window, _| super::title_bar_press(e, window))
+            .child(
+                Button::icon_only("toggle-sidebar", "panel-left")
+                    .tooltip(if self.sidebar_hidden { "Show sidebar  ⌘B" } else { "Hide sidebar  ⌘B" })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+            )
             .child(
                 div()
                     .flex()
@@ -1120,6 +1599,65 @@ impl Root {
         )
     }
 
+    /// A machine's desktop: its toolbar (status, network, resolution, open in
+    /// a window, close), then the screen.
+    fn render_desktop(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if !self.desktops.contains_key(id) {
+            self.on_route_changed(window, cx);
+        }
+        let Some(view) = self.desktops.get(id).cloned() else { return div().into_any_element() };
+        let (pop, close) = (id.to_string(), id.to_string());
+        let extra = vec![
+            Button::new("desktop-window", "Open in window")
+                .style(ButtonStyle::Ghost)
+                .icon("external-link")
+                .on_click(cx.listener(move |this, _, window, cx| this.pop_out_desktop(&pop, window, cx)))
+                .into_any_element(),
+            Button::new("desktop-close", "Close")
+                .style(ButtonStyle::Ghost)
+                .icon("x")
+                .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(close.clone()), window, cx)))
+                .into_any_element(),
+        ];
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(super::desktop::toolbar(&view, extra, cx))
+            .child(div().flex_1().min_h(px(0.)).child(view))
+            .into_any_element()
+    }
+
+    /// Moves a machine's desktop into a window of its own (and out of this one).
+    pub(super) fn pop_out_desktop(&mut self, machine_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.snapshot.machines.iter().find(|m| m.id == machine_id).map(|m| m.name.clone()).unwrap_or_else(|| machine_id.to_string());
+        super::desktop::open_window(self.engine.clone(), machine_id.to_string(), name, cx);
+        match self.route.clone() {
+            Route::Desktop(_) => self.navigate(Route::Machine(machine_id.to_string()), window, cx),
+            Route::Session(sid) => {
+                self.split.remove(&sid);
+                self.on_route_changed(window, cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// Shows or hides a machine's desktop next to a session's terminal.
+    pub(super) fn toggle_split(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.split.remove(session_id) {
+            self.split.insert(session_id.to_string());
+        }
+        self.on_route_changed(window, cx);
+    }
+
+    /// The desktop shown next to a session's terminal, if it's split.
+    pub(super) fn split_desktop(&self, session_id: &str) -> Option<Entity<super::desktop::DesktopView>> {
+        if !self.split.contains(session_id) {
+            return None;
+        }
+        self.desktops.get(session_id.split('/').next().unwrap_or_default()).cloned()
+    }
+
     fn render_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.route.clone() {
             Route::Overview => self.render_overview(window, cx).into_any_element(),
@@ -1129,6 +1667,10 @@ impl Root {
             Route::Activity => self.render_activity(cx).into_any_element(),
             Route::Machine(id) => self.render_machine(&id, cx),
             Route::Runner(id) => self.render_runner(&id, cx),
+            Route::Session(id) => self.render_session(&id, window, cx),
+            Route::Desktop(id) => self.render_desktop(&id, window, cx),
+            Route::About => self.render_about(cx),
+            Route::Github | Route::GithubRepo(_) | Route::GithubItem(..) => self.render_github(window, cx),
             Route::Settings => match &self.settings {
                 Some(page) => page.clone().into_any_element(),
                 None => {
@@ -1143,7 +1685,18 @@ impl Root {
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        self.content_width = f32::from(window.viewport_size().width) - SIDEBAR_WIDTH - 56.;
+        // A drag released outside the window never reaches `on_drop`.
+        if self.sidebar_resizing && !cx.has_active_drag() {
+            self.finish_sidebar_resize(cx);
+        }
+        if self.split_resizing && !cx.has_active_drag() {
+            self.finish_split_resize(cx);
+        }
+        self.content_width = f32::from(window.viewport_size().width) - if self.sidebar_hidden { 0. } else { self.sidebar_width } - 56.;
+        self.window_active = window.is_window_active();
+        if std::mem::take(&mut self.refocus) {
+            window.focus(&self.focus);
+        }
         let window_height = f32::from(window.viewport_size().height);
         // Dialogs sit lower on tall windows and scroll when they don't fit.
         let modal_top = if window_height > 800. { 96. } else { 40. };
@@ -1154,8 +1707,11 @@ impl Render for Root {
             Modal::Install(d) => d.clone().into_any_element(),
             Modal::Confirm(d) => d.clone().into_any_element(),
             Modal::NewWorkspace(d) => d.clone().into_any_element(),
+            Modal::NewSession(d) => d.clone().into_any_element(),
+            Modal::Licenses(d) => d.clone().into_any_element(),
         });
         let notice = self.render_notice(&theme);
+        let menu = self.render_menu(&theme, cx);
 
         div()
             .id("workspace")
@@ -1171,7 +1727,22 @@ impl Render for Root {
             .on_action(cx.listener(Self::go_forward))
             .on_action(cx.listener(Self::toggle_activity))
             .on_action(cx.listener(Self::add_machine))
+            .on_action(cx.listener(Self::new_session))
+            .on_action(cx.listener(|this, _: &ShowAbout, window, cx| this.navigate(Route::About, window, cx)))
+            .on_action(cx.listener(|this, _: &SignInGitHub, window, cx| {
+                // GitHub CLI's browser sign-in, in a terminal on this computer.
+                match this.snapshot.machines.iter().find(|m| m.host == "local").map(|m| m.id.clone()) {
+                    Some(id) => this.gh_cli_sign_in(&id, window, cx),
+                    None => this.notify_user("Add this computer as a machine first (host \"local\"), or run `gh auth login` in a terminal.", true, cx),
+                }
+            }))
+            .on_action(cx.listener(|this, _: &GrantGitHubAccess, window, cx| this.run_gh_fix("auth refresh -h github.com -s admin:org", window, cx)))
             .on_action(cx.listener(Self::dismiss))
+            .on_drag_move(cx.listener(Self::resize_sidebar))
+            .on_drop(cx.listener(|this, _: &DraggedSidebar, _, cx| {
+                this.finish_sidebar_resize(cx);
+                cx.notify();
+            }))
             .relative()
             .flex()
             .size_full()
@@ -1179,17 +1750,20 @@ impl Render for Root {
             .text_color(theme.text)
             .font_family(ui_font())
             .text_size(px(13.))
-            .child(self.render_sidebar(window, cx))
+            .when(!self.sidebar_hidden, |d| d.child(self.render_sidebar(window, cx)))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_w(px(0.))
-                    .child(self.render_toolbar(cx))
+                    .child(self.render_toolbar(window, cx))
                     .child(div().flex_1().min_h(px(0.)).child(page)),
             )
+            .when(!self.sidebar_hidden, |d| d.child(self.sidebar_handle(&theme, cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .children(notice)
+            .children(menu)
             .when_some(modal, |d, modal| {
                 d.child(
                     div()
@@ -1250,7 +1824,13 @@ fn route_title(s: &Snapshot, route: &Route) -> (Option<&'static str>, String) {
         Route::Activity => (None, "Activity".into()),
         Route::Workspace(id) => (Some("Workspaces"), s.workspaces.iter().find(|w| &w.id == id).map(|w| w.name.clone()).unwrap_or_else(|| id.clone())),
         Route::Settings => (None, "Settings".into()),
+        Route::About => (None, "About".into()),
+        Route::Github => (None, "GitHub".into()),
+        Route::GithubRepo(name) => (Some("GitHub"), name.clone()),
+        Route::GithubItem(repo, n) => (Some("GitHub"), format!("{repo} #{n}")),
         Route::Machine(id) => (Some("Machines"), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
+        Route::Session(id) => (Some("Sessions"), s.sessions.iter().find(|x| &x.id == id).map(|x| x.title.clone()).unwrap_or_else(|| id.clone())),
+        Route::Desktop(id) => (Some("Desktop"), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
         Route::Runner(id) => {
             let r = s.runners.iter().find(|r| &r.id == id);
             let machine = r.and_then(|r| r.machine_id.as_deref()).and_then(|mid| s.machines.iter().find(|m| m.id == mid));

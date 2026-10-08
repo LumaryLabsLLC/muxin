@@ -20,6 +20,10 @@ icons!(
     "memory-stick", "minus", "monitor", "network", "panel-bottom", "play", "plus", "refresh-cw",
     "rotate-ccw", "scroll-text", "search", "server", "settings", "square", "terminal", "trash-2",
     "triangle-alert", "x", "zap", "arrow-left", "arrow-right", "gauge", "radio", "workflow",
+    "bot", "square-terminal", "power", "plug", "unplug",
+    "agent-claude", "agent-codex", "agent-gemini", "agent-opencode", "agent-amp", "agent-github",
+    "circle-dot", "git-pull-request", "git-pull-request-draft", "git-merge", "message-square", "lock", "star",
+    "arrow-down", "arrow-up", "book-open", "star-filled", "maximize", "minimize", "panel-right", "panel-left",
 );
 
 const FONTS: &[&[u8]] = &[
@@ -34,13 +38,18 @@ const FONTS: &[&[u8]] = &[
 pub const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/brand/icon-512.png");
 /// Small copy of the icon for the sidebar.
 const BRAND_PNG: &[u8] = include_bytes!("../../assets/brand/icon-128.png");
+/// The Lumary Labs wordmark, for the About page.
+const LUMARY_SVG: &[u8] = include_bytes!("../../assets/brand/lumary-wordmark.svg");
 
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if path == "brand/icon.png" {
-            return Ok(Some(Cow::Borrowed(BRAND_PNG)));
+        match path {
+            "brand/icon.png" => return Ok(Some(Cow::Borrowed(BRAND_PNG))),
+            "brand/icon-512.png" => return Ok(Some(Cow::Borrowed(APP_ICON_PNG))),
+            "brand/lumary-wordmark.svg" => return Ok(Some(Cow::Borrowed(LUMARY_SVG))),
+            _ => {}
         }
         let name = path.strip_prefix("icons/").and_then(|p| p.strip_suffix(".svg"));
         Ok(name.and_then(|n| ICONS.iter().find(|(icon, _)| *icon == n)).map(|(_, bytes)| Cow::Borrowed(*bytes)))
@@ -62,7 +71,7 @@ pub fn load_fonts(cx: &mut App) {
     }
 }
 
-/// Shows the OpenRunner icon in the Dock. Bundled builds get it from Info.plist;
+/// Shows the Muxen icon in the Dock. Bundled builds get it from Info.plist;
 /// this covers `cargo run` and `cargo install`.
 #[cfg(target_os = "macos")]
 pub fn set_dock_icon() {

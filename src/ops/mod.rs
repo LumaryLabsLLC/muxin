@@ -3,7 +3,7 @@
 //! background, streams its output into `Snapshot::operations`, and refreshes the
 //! affected machine when it finishes.
 //!
-//! Operation log conventions: lines starting with "▸ " are OpenRunner's own
+//! Operation log conventions: lines starting with "▸ " are Muxen's own
 //! steps, "✓ " marks a success, "error: " and "warning: " are problems; anything
 //! else is output from the machine.
 //!
@@ -216,7 +216,7 @@ impl Engine {
                 match on_machine {
                     Some((spec, probe)) => {
                         let scope = runner_scope(&runner).ok_or_else(|| {
-                            format!("OpenRunner doesn't know which GitHub org or repo {} is registered with.", runner.name)
+                            format!("Muxen doesn't know which GitHub org or repo {} is registered with.", runner.name)
                         })?;
                         Plan::OnMachine {
                             spec: spec.clone(),
@@ -234,7 +234,7 @@ impl Engine {
             }
             _ => {
                 let (spec, probe) = machine.clone().ok_or_else(|| {
-                    format!("{} isn't on a machine in fleet.toml, so OpenRunner can't control it. It can only be removed from GitHub.", runner.name)
+                    format!("{} isn't on a machine in fleet.toml, so Muxen can't control it. It can only be removed from GitHub.", runner.name)
                 })?;
                 if !spec.is_checkable() {
                     return Err(format!("{} has no host in fleet.toml.", spec.name));
@@ -327,7 +327,7 @@ impl Engine {
     fn validate_install(&self, mut req: InstallRequest) -> Result<InstallRequest, String> {
         let (spec, _) = self.machine(&req.machine_id).ok_or("That machine isn't in fleet.toml anymore.")?;
         if !spec.is_checkable() {
-            return Err(format!("{} has no host in fleet.toml, so OpenRunner can't reach it.", spec.name));
+            return Err(format!("{} has no host in fleet.toml, so Muxen can't reach it.", spec.name));
         }
         if self.machine_busy(&spec.id) {
             return Err(format!("Another operation is already changing {}. Wait for it to finish.", spec.name));
@@ -467,7 +467,7 @@ fn validate_machine(name: &str, host: &str) -> Result<(), String> {
     }
     // A leading '-' would be read by ssh as an option.
     if host.starts_with('-') || host.len() > 255 || !host.chars().all(|c| c.is_ascii_alphanumeric() || "@._-:[]%".contains(c)) {
-        return Err(format!("\"{host}\" isn't an ssh destination OpenRunner can use."));
+        return Err(format!("\"{host}\" isn't an ssh destination Muxen can use."));
     }
     Ok(())
 }
@@ -631,7 +631,7 @@ async fn record_installed(engine: &Arc<Engine>, op: u64, req: &InstallRequest, s
         step(engine, op, format!("Adding {} to fleet.toml", done.join(", ")));
         let edit = inventory_edit::edit_file(engine.inventory_path(), |t| inventory_edit::add_runners(t, &spec.id, &done));
         if let Err(e) = edit {
-            engine.op_log(op, format!("warning: {e} The runners still show up because OpenRunner discovers them."));
+            engine.op_log(op, format!("warning: {e} The runners still show up because Muxen discovers them."));
         }
         engine.reload_inventory_now();
     }
@@ -682,7 +682,7 @@ async fn run_action(engine: &Arc<Engine>, op: u64, runner: &Runner, action: Runn
             engine.github().delete_runner(&settings.github, &gh.scope, gh.id).await?;
             engine.op_log(op, format!("✓ {} is no longer registered", runner.name));
             if runner.machine_id.is_some() {
-                engine.op_log(op, "The runner's files on its machine weren't touched, because OpenRunner couldn't reach it.");
+                engine.op_log(op, "The runner's files on its machine weren't touched, because Muxen couldn't reach it.");
             }
             forget_runner(engine, op, runner);
             refresh(engine, op, None).await;
@@ -840,7 +840,7 @@ async fn demo_install_docker(engine: &Arc<Engine>, op: u64, req: &InstallRequest
         engine.op_log(op, "warning: the runners get this machine's Docker socket, which is root-equivalent access to the machine. Only run trusted workflows on them.");
     }
     for name in &req.names {
-        engine.op_log(op, format!("Setting up {name} (container openrunner-{name}, volume openrunner-{name})"));
+        engine.op_log(op, format!("Setting up {name} (container muxen-{name}, volume muxen-{name})"));
         pause(300).await;
         for l in [
             "# Authentication".to_string(),
@@ -1080,7 +1080,7 @@ mod engine_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn controls_a_local_runner() {
-        let tmp = std::env::temp_dir().join(format!("openrunner-ops-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("muxen-ops-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let base = tmp.join("runners");
         stub_runner(&base.join("or-test-01"), "or-test-01");
@@ -1141,14 +1141,14 @@ mod engine_tests {
         let snap = engine.current();
         let r = snap.runners.iter().find(|r| r.id == "ubuntu-nuc/nuc-docker-01").expect("installed runner shows up");
         let local = r.local.as_ref().unwrap();
-        assert_eq!(local.container.as_deref(), Some("openrunner-nuc-docker-01"));
-        assert_eq!(local.dir, "docker://openrunner-nuc-docker-01");
+        assert_eq!(local.container.as_deref(), Some("muxen-nuc-docker-01"));
+        assert_eq!(local.dir, "docker://muxen-nuc-docker-01");
         assert!(r.labels.iter().any(|l| l == "docker"), "{:?}", r.labels);
         assert_eq!(snap.machines.iter().find(|m| m.id == "ubuntu-nuc").unwrap().probe.as_ref().unwrap().docker.as_deref(), Some("29.1.3"));
 
         let o = wait(&engine, engine.runner_action("ubuntu-nuc/nuc-docker-01", RunnerAction::Stop).unwrap()).await;
         assert_eq!(o.status, "succeeded");
-        assert!(o.log.iter().any(|l| l.contains("container openrunner-nuc-docker-01")), "{:?}", o.log);
+        assert!(o.log.iter().any(|l| l.contains("container muxen-nuc-docker-01")), "{:?}", o.log);
         assert_eq!(state(&engine, "ubuntu-nuc/nuc-docker-01"), "offline");
     }
 
@@ -1160,12 +1160,12 @@ mod engine_tests {
 
     /// Real Docker on a real machine, without GitHub: registration is stubbed, and the one
     /// path that does reach GitHub uses a fake token that can't register anything.
-    /// Run with: OPENRUNNER_TEST_DOCKER_HOST=<ssh host> cargo test docker_runner_lifecycle -- --ignored
+    /// Run with: MUXEN_TEST_DOCKER_HOST=<ssh host> cargo test docker_runner_lifecycle -- --ignored
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "needs a machine with Docker: OPENRUNNER_TEST_DOCKER_HOST=<ssh host>"]
+    #[ignore = "needs a machine with Docker: MUXEN_TEST_DOCKER_HOST=<ssh host>"]
     async fn docker_runner_lifecycle_on_real_host() {
-        let Ok(host) = std::env::var("OPENRUNNER_TEST_DOCKER_HOST") else { return };
-        let tmp = std::env::temp_dir().join(format!("openrunner-docker-{}", std::process::id()));
+        let Ok(host) = std::env::var("MUXEN_TEST_DOCKER_HOST") else { return };
+        let tmp = std::env::temp_dir().join(format!("muxen-docker-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("fleet.toml"), format!("[[machine]]\nname = \"Box\"\nhost = \"{host}\"\n")).unwrap();
@@ -1191,26 +1191,26 @@ mod engine_tests {
 
         // Leftovers from an earlier run of this test that panicked.
         let _ = run_script(
-            "docker ps -aq --filter name=openrunner-ortest- | xargs -r docker rm -f; docker volume ls -q --filter name=openrunner-ortest- | xargs -r docker volume rm".into(),
+            "docker ps -aq --filter name=muxen-ortest- | xargs -r docker rm -f; docker volume ls -q --filter name=muxen-ortest- | xargs -r docker volume rm".into(),
         )
         .await;
 
         // 1. A real registration attempt with a fake token fails cleanly: GitHub says no,
         //    and no volume or container is left behind.
-        let script = docker_install_script(image, "", "https://github.com/openrunner-test-no-such-org-7f3a", "openrunner-test-no-such-org-7f3a", "FAKE0TOKEN", &[name.clone()], "docker", "", false, false);
+        let script = docker_install_script(image, "", "https://github.com/muxen-test-no-such-org-7f3a", "muxen-test-no-such-org-7f3a", "FAKE0TOKEN", &[name.clone()], "docker", "", false, false);
         let (ran, log) = run_script(script).await;
         assert!(ran.is_err(), "{log:?}");
         assert!(log.iter().any(|l| l.contains("404") || l.contains("Not Found")), "{log:?}");
         assert!(log.iter().all(|l| !l.contains("FAKE0TOKEN")), "token leaked into the log: {log:?}");
-        let (_, leftovers) = run_script(format!("docker volume ls -q --filter name=openrunner-{name}; docker ps -aq --filter name=openrunner-{name}")).await;
+        let (_, leftovers) = run_script(format!("docker volume ls -q --filter name=muxen-{name}; docker ps -aq --filter name=muxen-{name}")).await;
         assert!(leftovers.is_empty(), "{leftovers:?}");
 
         // 2. Install with registration stubbed: a long-running container with a restart policy.
-        let script = docker_install_script(image, "", "https://github.com/openrunner-test", "openrunner-test", "FAKE0TOKEN", &[name.clone()], "docker", "", false, true);
+        let script = docker_install_script(image, "", "https://github.com/muxen-test", "muxen-test", "FAKE0TOKEN", &[name.clone()], "docker", "", false, true);
         let (ran, log) = run_script(script).await;
         assert!(ran.is_ok(), "{log:?}");
         assert!(log.iter().any(|l| l == &format!("✓ {name} is installed")), "{log:?}");
-        let (_, inspect) = run_script(format!("docker inspect -f '{{{{.HostConfig.RestartPolicy.Name}}}} {{{{index .Config.Labels \"openrunner.runner\"}}}}' openrunner-{name}; docker inspect openrunner-{name} | grep -c FAKE0TOKEN")).await;
+        let (_, inspect) = run_script(format!("docker inspect -f '{{{{.HostConfig.RestartPolicy.Name}}}} {{{{index .Config.Labels \"muxen.runner\"}}}}' muxen-{name}; docker inspect muxen-{name} | grep -c FAKE0TOKEN")).await;
         assert_eq!(inspect, vec![format!("unless-stopped {name}"), "0".to_string()], "{inspect:?}");
 
         // 3. Machine checks find it as a container runner.
@@ -1218,9 +1218,9 @@ mod engine_tests {
         let snap = engine.current();
         let r = snap.runners.iter().find(|r| r.id == id).unwrap_or_else(|| panic!("{id} not found in {:?}", snap.runners.iter().map(|r| &r.id).collect::<Vec<_>>()));
         let local = r.local.clone().unwrap();
-        assert_eq!(local.container.as_deref(), Some(format!("openrunner-{name}").as_str()));
+        assert_eq!(local.container.as_deref(), Some(format!("muxen-{name}").as_str()));
         assert_eq!(local.container_state.as_deref(), Some("running"));
-        assert_eq!(local.url.as_deref(), Some("https://github.com/openrunner-test"));
+        assert_eq!(local.url.as_deref(), Some("https://github.com/muxen-test"));
         assert_eq!(r.state, "idle", "{local:?}");
 
         // 4. Stop / start / restart / logs through the engine (none of these talk to GitHub).
@@ -1235,7 +1235,7 @@ mod engine_tests {
         assert_eq!(state(&engine, &id), "idle");
         let o = wait(&engine, engine.runner_action(&id, RunnerAction::Logs).unwrap()).await;
         assert_eq!(o.status, "succeeded", "{:?}", o.log);
-        assert!(o.log.iter().any(|l| l.contains(&format!("docker logs openrunner-{name}"))), "{:?}", o.log);
+        assert!(o.log.iter().any(|l| l.contains(&format!("docker logs muxen-{name}"))), "{:?}", o.log);
 
         // 5. Remove without a GitHub token (nothing registered), deleting the volume too.
         let runner = engine.current().runners.iter().find(|r| r.id == id).cloned().unwrap();
@@ -1246,7 +1246,7 @@ mod engine_tests {
         engine.op_finish(op, Ok(()));
         let log = op_log(&engine, op).await;
         assert!(removed.is_ok(), "{log:?}");
-        assert!(log.iter().any(|l| l == &format!("Deleted volume openrunner-{name}")), "{log:?}");
+        assert!(log.iter().any(|l| l == &format!("Deleted volume muxen-{name}")), "{log:?}");
         assert!(!engine.current().runners.iter().any(|r| r.id == id));
 
         let _ = std::fs::remove_dir_all(&tmp);

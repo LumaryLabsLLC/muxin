@@ -158,6 +158,19 @@ impl std::fmt::Display for RunError {
 
 async fn run(spec: &MachineSpec, shell: Shell) -> Result<String, RunError> {
     let script = script_for(spec, shell);
+    // Over the machine's live link when one is up (no ssh handshake). A check
+    // doesn't make one: it's also how Muxen first reaches a machine.
+    if shell == Shell::Sh && !spec.is_local() {
+        if let Some(link) = crate::fleet::link::current(&spec.id) {
+            let req = serde_json::json!({ "op": "sh", "script": script, "login": false, "timeout": TIMEOUT.as_secs() });
+            if let Ok(reply) = link.request(req, TIMEOUT).await {
+                let stdout = reply["stdout"].as_str().unwrap_or("").to_string();
+                if stdout.lines().any(|l| l.starts_with("probe=")) {
+                    return Ok(stdout);
+                }
+            }
+        }
+    }
     let mut cmd = if spec.is_local() {
         match shell {
             Shell::Sh => {
@@ -382,7 +395,7 @@ impl ContainerLines {
         if self.container.is_empty() {
             return None;
         }
-        // The runner's own config wins; then OpenRunner's label; then the container name.
+        // The runner's own config wins; then Muxen's label; then the container name.
         let (config_name, config_url) = self.config.unwrap_or_default();
         let name = [config_name, self.label_name, self.container.clone()].into_iter().find(|n| !n.is_empty())?;
         let url = config_url.or_else(|| (!self.label_scope.is_empty()).then(|| format!("https://github.com/{}", self.label_scope)));
@@ -470,7 +483,7 @@ probe=1
 os=linux
 sudo=password
 docker=29.8.1
-c0.container=openrunner-beelink-01
+c0.container=muxen-beelink-01
 c0.state=running
 c0.image=ghcr.io/actions/actions-runner:2.338.0
 c0.name=beelink-01
@@ -493,8 +506,8 @@ c1.restarts=7
         assert_eq!(r.runners.len(), 2);
         let a = &r.runners[0];
         assert_eq!(a.name, "beelink-01");
-        assert_eq!(a.dir, "docker://openrunner-beelink-01");
-        assert_eq!(a.container.as_deref(), Some("openrunner-beelink-01"));
+        assert_eq!(a.dir, "docker://muxen-beelink-01");
+        assert_eq!(a.container.as_deref(), Some("muxen-beelink-01"));
         assert_eq!((a.listener_pid, a.worker_pid), (Some(4242), Some(4300)));
         assert_eq!(a.version.as_deref(), Some("2.339.1"), "the running binary wins over the image tag");
         assert_eq!(a.url.as_deref(), Some("https://github.com/acme"));

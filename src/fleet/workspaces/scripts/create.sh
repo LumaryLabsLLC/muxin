@@ -19,7 +19,14 @@ if [ -n "$OR_REPO" ]; then
   # Start from an empty folder (a retry may follow a failed attempt).
   find . -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
   echo "Cloning $OR_REPO_SHOWN"
-  if [ -n "$OR_REF" ]; then
+  case "$OR_REF" in pull/*/head) or_pull=1 ;; *) or_pull= ;; esac
+  if [ -n "$or_pull" ]; then
+    # A pull request's code (from a fork too): fetch GitHub's ref for it.
+    or_pr=${OR_REF#pull/}; or_pr=pr-${or_pr%/head}
+    git clone --progress --depth 50 "$OR_REPO" . 2>&1 || { echo "error: git clone failed" >&2; exit 4; }
+    git fetch --depth 50 origin "+refs/$OR_REF:refs/heads/$or_pr" 2>&1 || { echo "error: couldn't fetch $OR_REF" >&2; exit 5; }
+    git checkout "$or_pr" 2>&1 || { echo "error: couldn't check out $OR_REF" >&2; exit 5; }
+  elif [ -n "$OR_REF" ]; then
     # Branches and tags clone shallow; a commit needs history.
     if ! git clone --progress --depth 1 --branch "$OR_REF" "$OR_REPO" . 2>&1; then
       find . -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
@@ -33,8 +40,8 @@ if [ -n "$OR_REPO" ]; then
   if [ -n "$OR_BRANCH" ]; then
     git checkout -b "$OR_BRANCH" 2>&1 || { echo "error: couldn't create branch $OR_BRANCH" >&2; exit 5; }
   fi
-  printf '.openrunner/\n' >> .git/info/exclude 2>/dev/null
+  printf '.muxen/\n' >> .git/info/exclude 2>/dev/null
   echo "Checked out $(git rev-parse --abbrev-ref HEAD 2>/dev/null) at $(git rev-parse --short HEAD 2>/dev/null)"
 fi
-mkdir -p .openrunner/logs
+mkdir -p .muxen/logs
 echo "ready"

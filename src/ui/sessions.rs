@@ -1,0 +1,1128 @@
+//! Agent sessions in the window: the session page (a live terminal attached to
+//! the session through the machine's agent, with its controls), starting new sessions, and the
+//! sidebar rows that list them under their machine.
+
+use std::sync::Arc;
+
+use gpui::{AnyElement, ClipboardItem, Context, Focusable, FontWeight, SharedString, Window, div, prelude::*, px};
+
+use super::dialogs::{ConfirmDialog, NewSessionDialog};
+use super::format;
+use super::kit::{self, Button, ButtonStyle, card, icon, section_title, spinner};
+use super::root::{Modal, Root, Route};
+use super::terminal::{TerminalEvent, TerminalView};
+use super::theme::{ActiveTheme, Theme, mono_font};
+use crate::fleet::model::{Machine, Snapshot};
+use crate::fleet::model::Machine as FleetMachine;
+use crate::fleet::sessions::{AGENTS, Control, SessionInfo, StartSession};
+
+/// Toolbar plus the session header, subtracted when sizing a new session.
+const CHROME_HEIGHT: f32 = 52. + 60.;
+
+impl Root {
+    pub(super) fn show_new_session(&mut self, machine: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_new_session_with(machine, None, window, cx);
+    }
+
+    /// The New Session dialog, set up by whatever opened it (a folder, a title,
+    /// a first message for the agent, or a command to run).
+    pub(super) fn show_new_session_prefilled(
+        &mut self,
+        machine: Option<String>,
+        cwd: Option<String>,
+        prefill: super::dialogs::Prefill,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_new_session_with(machine, None, window, cx);
+        if let Some(Modal::NewSession(d)) = &self.modal {
+            d.update(cx, |d, cx| d.prefill(cwd, prefill, cx));
+        }
+    }
+
+    /// A session in a workspace's folder; for a Docker workspace, a shell in its container.
+    pub(super) fn new_workspace_session(&mut self, w: &crate::fleet::model::WorkspaceInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let prefill = match w.container.clone().filter(|_| w.isolation == "docker") {
+            Some(c) => super::dialogs::Prefill {
+                title: Some(format!("{} (container)", w.name)),
+                command: Some((
+                    format!(
+                        "docker start {c} >/dev/null 2>&1; exec docker exec -it -w /workspace {c} sh -c 'if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi'"
+                    ),
+                    format!("A shell inside the workspace's container ({}).", w.image.clone().unwrap_or_else(|| "Docker".into())),
+                )),
+                ..Default::default()
+            },
+            None => super::dialogs::Prefill { title: Some(w.name.clone()), ..Default::default() },
+        };
+        self.show_new_session_prefilled(Some(w.machine_id.clone()), Some(w.path.clone()), prefill, window, cx);
+    }
+
+    /// The New Session dialog, optionally with the agent already chosen.
+    pub(super) fn show_new_session_with(&mut self, machine: Option<String>, agent: Option<&'static str>, window: &mut Window, cx: &mut Context<Self>) {
+        // Learn what's installed while the dialog is open.
+        if let Some(id) = machine.clone() {
+            let engine = self.engine.clone();
+            engine.runtime().clone().spawn(async move {
+                let _ = engine.refresh_sessions(&id).await;
+            });
+        }
+        let engine = self.engine.clone();
+        let dialog = cx.new(|cx| {
+            let d = NewSessionDialog::new(engine, machine, window, cx);
+            match agent {
+                Some(a) => d.with_agent(a),
+                None => d,
+            }
+        });
+        self.show_modal(Modal::NewSession(dialog.clone()), window, cx);
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+    }
+
+    /// Starts a session sized to the page, then opens it.
+    pub(super) fn start_session(&mut self, mut req: StartSession, window: &mut Window, cx: &mut Context<Self>) {
+        let viewport = window.viewport_size();
+        let (cols, rows) = TerminalView::fit(f32::from(viewport.width) - self.sidebar_width, f32::from(viewport.height) - CHROME_HEIGHT, window, cx);
+        req.cols = cols;
+        req.rows = rows;
+        let agent = crate::fleet::sessions::agent(&req.agent).map(|a| a.name).unwrap_or("Session");
+        let machine = self.snapshot.machines.iter().find(|m| m.id == req.machine_id).map(|m| m.name.clone()).unwrap_or_default();
+        self.notify_user(format!("Starting {agent} on {machine}…"), false, cx);
+        let engine = self.engine.clone();
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.start_session(req).await }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(s) => {
+                    this.notice = None;
+                    this.navigate(Route::Session(s.id), window, cx);
+                }
+                Err(e) => this.notify_user(e, true, cx),
+            });
+        });
+        self.track(task);
+    }
+
+    /// Attaches a terminal to the session, unless one is already attached.
+    pub(super) fn open_terminal(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(t) = self.terminals.get(id) {
+            if !t.read(cx).exited() {
+                window.focus(&t.focus_handle(cx));
+                return;
+            }
+        }
+        let persistent = self.snapshot.sessions.iter().find(|s| s.id == id).is_none_or(|s| s.persistent);
+        if !persistent {
+            self.engine.set_direct_status(id, "running");
+        }
+        let mut failed = None;
+        let (machine_id, name) = id.split_once('/').unwrap_or((id, ""));
+        // Over the machine's live link when it's up: no ssh of its own.
+        let link = persistent.then(|| crate::fleet::link::current(machine_id)).flatten();
+        let view = if self.engine.is_demo() {
+            let agent = self.snapshot.sessions.iter().find(|s| s.id == id).map(|s| s.agent.clone()).unwrap_or_default();
+            cx.new(|cx| TerminalView::replay(&demo_screen(&agent), window, cx))
+        } else if let Some(link) = link {
+            let size = (120, 36);
+            let (io, output) = attach_over_link(&self.engine, link, name, size);
+            cx.new(|cx| TerminalView::remote(io, output, size, window, cx))
+        } else {
+            let command = self.engine.attach_command(id);
+            cx.new(|cx| {
+                let spawned = command.and_then(|c| TerminalView::spawn(c.program, c.args, window, cx));
+                spawned.unwrap_or_else(|e| {
+                    failed = Some(e);
+                    TerminalView::replay(b"", window, cx)
+                })
+            })
+        };
+        if let Some(e) = failed {
+            self.notify_user(e, true, cx);
+            return;
+        }
+        // When the attach ends (detached, the session ended, the network dropped), re-read the machine.
+        let machine = id.split('/').next().unwrap_or_default().to_string();
+        let sid = id.to_string();
+        let shell = self.snapshot.sessions.iter().find(|s| s.id == id).is_some_and(|s| s.agent == "shell");
+        self._subscriptions.push(cx.subscribe(&view, move |this, _, event: &TerminalEvent, cx| match event {
+            TerminalEvent::Exited(code) => {
+                // A session without the agent ends with its terminal: a shell that
+                // exits or an agent that quits cleanly closes; a crash stays.
+                if !persistent {
+                    if shell || *code == Some(0) {
+                        this.engine.remove_direct(&sid);
+                    } else {
+                        this.engine.set_direct_status(&sid, "exited");
+                    }
+                }
+                this.refresh_machine_sessions(&machine);
+                cx.notify();
+            }
+        }));
+        window.focus(&view.focus_handle(cx));
+        self.terminals.insert(id.to_string(), view);
+        self.refresh_machine_sessions(id.split('/').next().unwrap_or_default());
+    }
+
+    pub(super) fn refresh_machine_sessions(&self, machine_id: &str) {
+        let engine = self.engine.clone();
+        let id = machine_id.to_string();
+        engine.runtime().clone().spawn(async move {
+            let _ = engine.refresh_sessions(&id).await;
+        });
+    }
+
+    pub(super) fn restart_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let engine = self.engine.clone();
+        let sid = id.to_string();
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            let sid = sid.clone();
+            async move { engine.control_session(&sid, Control::Restart).await }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(_) => this.open_terminal(&sid, window, cx),
+                Err(e) => this.notify_user(e, true, cx),
+            });
+        });
+        self.track(task);
+    }
+
+    pub(super) fn confirm_end_session(&mut self, s: &SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let sid = s.id.clone();
+        let detail = if s.agent == "shell" || s.agent.is_empty() {
+            "The shell and anything still running in it stop.".to_string()
+        } else {
+            format!("{} and anything it started in this terminal stop. Its conversation ends.", s.agent_name)
+        };
+        let dialog = cx.new(|cx| {
+            ConfirmDialog::new(
+                format!("End {}?", s.title),
+                detail,
+                "End session",
+                None,
+                move |_, engine| {
+                    let engine = engine.clone();
+                    let sid = sid.clone();
+                    engine.runtime().clone().spawn(async move {
+                        if let Err(e) = engine.control_session(&sid, Control::Stop).await {
+                            tracing::warn!("ending {sid}: {e}");
+                        }
+                    });
+                    Ok(None)
+                },
+                self.engine.clone(),
+                window,
+                cx,
+            )
+        });
+        self.show_modal(Modal::Confirm(dialog.clone()), window, cx);
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+    }
+
+    // -----------------------------------------------------------------------
+    // The page
+
+    pub(super) fn render_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let s = self.snapshot.clone();
+        let Some(info) = s.sessions.iter().find(|x| x.id == id).cloned() else {
+            // Sessions are discovered over ssh; until then, don't call it ended.
+            let machine = id.split('/').next().unwrap_or_default();
+            let known = self.engine.sessions_of(machine).is_some_and(|f| f.checked_at.is_some());
+            if !known {
+                if self.sessions_requested.insert(machine.to_string()) {
+                    self.refresh_machine_sessions(machine);
+                }
+                return looking(&theme);
+            }
+            return ended(&theme, id, cx);
+        };
+        if !self.terminals.contains_key(id) {
+            self.open_terminal(id, window, cx);
+        }
+        if info.attention.is_some() && window.is_window_active() {
+            self.engine.ack_session(id);
+        }
+        let machine = s.machines.iter().find(|m| m.id == info.machine_id).map(|m| m.name.clone()).unwrap_or_else(|| info.machine_id.clone());
+        let machine_id = info.machine_id.clone();
+        // Desktops: Linux (X11) machines so far.
+        let desktop_capable = info.persistent && s.machines.iter().any(|m| m.id == info.machine_id && m.platform.starts_with("linux"));
+        let split = self.split.contains(&info.id);
+        let terminal = self.terminals.get(id).cloned();
+        let detached = terminal.as_ref().is_some_and(|t| t.read(cx).exited());
+        let (icon_name, (from, to)) = kit::agent_look(&info.agent);
+        let exited = info.status == "exited";
+
+        let status = if exited {
+            kit::pill(format!("Exited{}", info.exit_code.map(|c| format!(" ({c})")).unwrap_or_default()), theme.text_placeholder).into_any_element()
+        } else if info.busy {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(12.))
+                .text_color(theme.text_accent)
+                .child(spinner("session-busy", 12., theme.accent))
+                .child("Working")
+                .into_any_element()
+        } else {
+            div().text_size(px(12.)).text_color(theme.text_placeholder).child(if info.agent == "shell" { "Idle" } else { "Waiting for you" }).into_any_element()
+        };
+
+        let attach = info.attach_command.clone();
+        let sid = info.id.clone();
+        let sid2 = info.id.clone();
+        let header = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(12.))
+            .px(px(20.))
+            .py(px(12.))
+            .border_b_1()
+            .border_color(theme.border_variant)
+            .child(kit::tile(icon_name, from, to, 32.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .gap(px(2.))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(info.title.clone()))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .text_size(px(12.))
+                            .text_color(theme.text_placeholder)
+                            .child(info.agent_name.clone())
+                            .child("·")
+                            .child(machine)
+                            .child("·")
+                            .child(div().font_family(mono_font()).text_size(px(11.5)).child(info.cwd.clone())),
+                    ),
+            )
+            .when(!info.persistent, |d| d.child(kit::pill("Ends when you close Muxen", theme.warning)))
+            .child(status)
+            .when(info.persistent, |d| {
+                d.child(
+                    Button::icon_only("session-copy-attach", "copy")
+                        .tooltip("Copy the command to open it in your own terminal")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(attach.clone()));
+                            this.notify_user("Copied. Paste it into any terminal to attach.", false, cx);
+                        })),
+                )
+            })
+            .when(exited, |d| {
+                d.child(
+                    Button::new("session-restart", "Restart")
+                        .icon("rotate-ccw")
+                        .on_click(cx.listener(move |this, _, window, cx| this.restart_session(&sid, window, cx))),
+                )
+            })
+            // The machine's desktop beside the terminal, to check what the agent did.
+            .when(desktop_capable, |d| {
+                let sid = info.id.clone();
+                d.child(
+                    Button::new("session-desktop", "Desktop")
+                        .icon("panel-right")
+                        .style(if split { ButtonStyle::Outlined } else { ButtonStyle::Ghost })
+                        .tooltip(if split { "Hide the desktop" } else { "Show the machine's desktop beside the terminal" })
+                        .on_click(cx.listener(move |this, _, window, cx| this.toggle_split(&sid, window, cx))),
+                )
+            })
+            .child(Button::new("session-end", "End").icon("power").style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(s) = this.snapshot.sessions.iter().find(|x| x.id == sid2).cloned() {
+                    this.confirm_end_session(&s, window, cx);
+                }
+            })));
+
+        let sid3 = info.id.clone();
+        let body = div()
+            .relative()
+            .flex_1()
+            .min_h(px(0.))
+            .children(terminal.map(|t| t.into_any_element()))
+            .when(detached && !exited && info.persistent, |d| {
+                d.child(
+                    div().absolute().inset_0().bg(theme.scrim).flex().items_center().justify_center().child(
+                        card(&theme)
+                            .items_center()
+                            .gap(px(10.))
+                            .p(px(20.))
+                            .bg(theme.elevated)
+                            .child(icon("unplug", 22., theme.text_muted))
+                            .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Disconnected"))
+                            .child(
+                                div()
+                                    .text_size(px(12.5))
+                                    .text_color(theme.text_muted)
+                                    .child("The session is still running on the machine."),
+                            )
+                            .child(
+                                Button::new("session-reconnect", "Reconnect")
+                                    .icon("plug")
+                                    .style(ButtonStyle::Primary)
+                                    .on_click(cx.listener(move |this, _, window, cx| this.open_terminal(&sid3, window, cx))),
+                            ),
+                    ),
+                )
+            });
+
+        let panel = self.split_desktop(&info.id).map(|view| {
+            let (pop, close) = (machine_id.clone(), info.id.clone());
+            let extra = vec![
+                Button::icon_only("split-window", "external-link")
+                    .tooltip("Open in a window")
+                    .on_click(cx.listener(move |this, _, window, cx| this.pop_out_desktop(&pop, window, cx)))
+                    .into_any_element(),
+                Button::icon_only("split-close", "x")
+                    .tooltip("Hide the desktop")
+                    .on_click(cx.listener(move |this, _, window, cx| this.toggle_split(&close, window, cx)))
+                    .into_any_element(),
+            ];
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .h_full()
+                .flex()
+                .flex_col()
+                .child(super::desktop::toolbar(&view, extra, cx))
+                .child(div().flex_1().min_h(px(0.)).child(view))
+        });
+        let body = match panel {
+            Some(panel) => {
+                // Terminal | divider (drag to resize, double-click for half and half) | desktop
+                let resizing = self.split_resizing;
+                let hover = theme.border;
+                let divider = div()
+                    .id("split-divider")
+                    .group("split-divider")
+                    .flex_none()
+                    .w(px(6.))
+                    .h_full()
+                    .flex()
+                    .justify_center()
+                    .cursor_col_resize()
+                    .child(
+                        div()
+                            .w(px(if resizing { 2. } else { 1. }))
+                            .h_full()
+                            .when(resizing, |d| d.bg(theme.accent))
+                            .when(!resizing, |d| d.bg(theme.border_variant).group_hover("split-divider", |st| st.bg(hover).w(px(2.)))),
+                    )
+                    .on_drag(super::root::DraggedSplit, |_, _, _, cx| cx.new(|_| super::root::DraggedSplit))
+                    .on_click(cx.listener(|this, e: &gpui::ClickEvent, _, cx| {
+                        if e.click_count() == 2 {
+                            this.split_ratio = 0.5;
+                            this.finish_split_resize(cx);
+                        }
+                    }));
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .on_drag_move(cx.listener(Self::resize_split))
+                    .on_drop(cx.listener(|this, _: &super::root::DraggedSplit, _, cx| this.finish_split_resize(cx)))
+                    // The terminal pane was made to fill the page (flex_1: a zero basis);
+                    // in a split its basis is its share of the width.
+                    .child(body.flex_none().flex_basis(gpui::relative(self.split_ratio)).min_w(px(0.)))
+                    .child(divider)
+                    .child(panel)
+                    .into_any_element()
+            }
+            None => body.into_any_element(),
+        };
+        div().size_full().flex().flex_col().child(header).child(body).into_any_element()
+    }
+
+    // -----------------------------------------------------------------------
+    // Sidebar
+
+    pub(super) fn session_row(&self, theme: &Theme, s: &SessionInfo, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = s.id.clone();
+        let (icon_name, (from, to)) = kit::agent_look(&s.agent);
+        let exited = s.status == "exited";
+        // Explicit width: GPUI 0.2 only ellipsizes text whose width it knows up front.
+        let trailing = if exited { 40. } else if s.busy || s.attention.is_some() { 20. } else { 0. };
+        let trailing = trailing + if exited && s.attention.is_some() { 14. } else { 0. };
+        let text_w = (self.sidebar_width - 20. - 22. - 8. - 16. - 8. - trailing).max(40.);
+        div()
+            .id(SharedString::from(format!("side-s-{}", s.id)))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(26.))
+            .mx(px(10.))
+            .pl(px(22.))
+            .pr(px(8.))
+            .rounded(px(7.))
+            .cursor_pointer()
+            .when(selected, |d| d.bg(theme.element_selected))
+            .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+            .child(kit::tile(icon_name, from, to, 16.))
+            .child(
+                div()
+                    .w(px(text_w))
+                    .truncate()
+                    .text_size(px(12.5))
+                    .text_color(if exited { theme.text_placeholder } else if selected { theme.text } else { theme.text_muted })
+                    .child(s.title.clone()),
+            )
+            .child(div().flex_1())
+            .when(s.busy && !exited, |d| d.child(spinner(SharedString::from(format!("side-s-spin-{}", s.id)), 11., theme.accent)))
+            // Unread: it finished, rang the bell, or exited. Cleared by opening it.
+            .when(!s.busy && !selected, |d| d.children(s.attention.as_deref().map(|kind| attention_dot(theme, kind, s.exit_code))))
+            .when(exited, |d| d.child(div().text_size(px(11.)).text_color(theme.text_placeholder).child("exited")))
+            .on_mouse_down(gpui::MouseButton::Right, {
+                let sid = s.id.clone();
+                super::menu::on_right_click(move || super::menu::MenuTarget::Session(sid.clone()), cx)
+            })
+            .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Session(id.clone()), window, cx)))
+    }
+}
+
+impl Root {
+    /// The machine page's list of agent sessions, with a way to start one.
+    pub(super) fn machine_sessions(&self, theme: &Theme, s: &Snapshot, m: &Machine, cx: &mut Context<Self>) -> AnyElement {
+        let sessions: Vec<&SessionInfo> = s.sessions.iter().filter(|x| x.machine_id == m.id).collect();
+        let installed: Vec<&str> = AGENTS.iter().filter(|a| m.agents.iter().any(|i| i == a.id)).map(|a| a.name).collect();
+        let mid = m.id.clone();
+        let title = div()
+            .flex()
+            .items_center()
+            .child(section_title(theme, "Agent sessions", Some(sessions.len())))
+            .child(div().flex_1())
+            .when(!installed.is_empty(), |d| {
+                d.child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("Installed: {}", installed.join(", "))))
+            });
+
+
+        let content = if sessions.is_empty() {
+            let text = match (runs_in_app(m), m.platform.starts_with("windows")) {
+                (true, true) => "Run Claude Code, Codex or a shell here. On Windows, sessions run while Muxen is open.".to_string(),
+                (true, false) => format!("Run Claude Code, Codex or a shell here. {} so sessions run while Muxen is open.", m.sessions_error.clone().unwrap_or_default().trim_end_matches('.')),
+                _ => "Run Claude Code, Codex, OpenCode or a shell here. Sessions keep working on the machine after you close Muxen.".to_string(),
+            };
+            card(theme)
+                .p(px(16.))
+                .flex_row()
+                .items_center()
+                .gap(px(12.))
+                .child(icon("square-terminal", 16., theme.text_placeholder))
+                .child(div().flex_1().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(text))
+                .child(
+                    Button::new("m-session-empty", "New session")
+                        .icon("plus")
+                        .on_click(cx.listener(move |this, _, window, cx| this.show_new_session(Some(mid.clone()), window, cx))),
+                )
+                .into_any_element()
+        } else {
+            let rows: Vec<AnyElement> = sessions.iter().enumerate().map(|(i, x)| self.machine_session_row(theme, x, i, cx)).collect();
+            card(theme).children(rows).into_any_element()
+        };
+        div().flex().flex_col().gap(px(10.)).child(title).child(content).into_any_element()
+    }
+
+    pub(super) fn machine_session_row(&self, theme: &Theme, x: &SessionInfo, i: usize, cx: &mut Context<Self>) -> AnyElement {
+        let id = x.id.clone();
+        let (icon_name, (from, to)) = kit::agent_look(&x.agent);
+        let state = if x.status == "exited" {
+            div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!("Exited{}", x.exit_code.map(|c| format!(" ({c})")).unwrap_or_default())).into_any_element()
+        } else if x.busy {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(12.))
+                .text_color(theme.text_accent)
+                .child(spinner(SharedString::from(format!("ms-spin-{}", x.id)), 12., theme.accent))
+                .child("Working")
+                .into_any_element()
+        } else if let Some(kind) = x.attention.as_deref() {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(12.))
+                .text_color(theme.text)
+                .child(attention_dot(theme, kind, x.exit_code))
+                .child(if kind == "bell" { "Needs you" } else { "Waiting for you" })
+                .into_any_element()
+        } else {
+            div().text_size(px(12.)).text_color(theme.text_placeholder).child(if x.agent == "shell" { "Idle" } else { "Waiting for you" }).into_any_element()
+        };
+        div()
+            .id(SharedString::from(format!("ms-{}", x.id)))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(14.))
+            .py(px(10.))
+            .when(i > 0, |d| d.border_t_1().border_color(theme.border_variant))
+            .cursor_pointer()
+            .hover(|st| st.bg(theme.ghost_hover))
+            .child(kit::tile(icon_name, from, to, 26.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .gap(px(1.))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child(x.title.clone()))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(6.))
+                            .text_size(px(11.5))
+                            .text_color(theme.text_placeholder)
+                            .child(x.agent_name.clone())
+                            .child("·")
+                            .child(div().font_family(mono_font()).child(x.cwd.clone()))
+                            .child("·")
+                            .child(format!("started {}", format::ago(x.created_at))),
+                    ),
+            )
+            .child(state)
+            .child(icon("chevron-right", 14., theme.text_placeholder))
+            .on_mouse_down(gpui::MouseButton::Right, {
+                let sid = x.id.clone();
+                super::menu::on_right_click(move || super::menu::MenuTarget::Session(sid.clone()), cx)
+            })
+            .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Session(id.clone()), window, cx)))
+            .into_any_element()
+    }
+}
+
+/// Sessions here can't live in Muxen's agent (Windows, or a platform it
+/// has no build for), so they run in this window and end with it.
+pub(super) fn runs_in_app(m: &FleetMachine) -> bool {
+    m.platform.starts_with("windows") || (m.agent_version.is_none() && m.sessions_error.as_deref().is_some_and(|e| e.contains("no agent")))
+}
+
+/// The unread marker: amber when the agent rang for you, the accent when it
+/// finished and is waiting, red when it exited with an error.
+pub(super) fn attention_dot(theme: &Theme, kind: &str, exit_code: Option<i32>) -> gpui::Div {
+    let color = match kind {
+        "bell" => theme.warning,
+        "exited" if exit_code.is_some_and(|c| c != 0) => theme.error,
+        "exited" => theme.text_placeholder,
+        _ => theme.accent,
+    };
+    kit::dot(color, 8.).flex_none()
+}
+
+fn looking(theme: &Theme) -> AnyElement {
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(8.))
+        .pb(px(80.))
+        .text_size(px(12.5))
+        .text_color(theme.text_muted)
+        .child(spinner("session-looking", 14., theme.text_muted))
+        .child("Looking for the session on the machine…")
+        .into_any_element()
+}
+
+impl Root {
+    /// The GitHub CLI on a machine (what agents there use for issues and pull
+    /// requests): who it's signed in as, or a way to sign in.
+    /// The machine page's Git card: whether commits and pushes to GitHub work
+    /// there, with a button for each fix.
+    pub(super) fn machine_git(&mut self, theme: &Theme, m: &Machine, cx: &mut Context<Self>) -> AnyElement {
+        use super::github::Load;
+        if !self.machine_git.contains_key(&m.id) {
+            self.load_machine_git(&m.id, cx);
+        }
+        let mid = m.id.clone();
+        let fixing = self.git_fixing.contains(&m.id);
+        let title = div()
+            .flex()
+            .items_center()
+            .child(section_title(theme, "Git", None))
+            .child(div().flex_1())
+            .child(Button::icon_only("m-git-refresh", "refresh-cw").tooltip("Check again").on_click(cx.listener({
+                let mid = mid.clone();
+                move |this, _, _, cx| this.load_machine_git(&mid, cx)
+            })));
+        let row = |glyph: &'static str, name: &'static str, ok: Option<bool>, value: String, detail: Option<String>| {
+            let (mark, color) = match ok {
+                Some(true) => ("circle-check", theme.success),
+                Some(false) => ("circle-alert", theme.warning),
+                None => ("circle", theme.text_placeholder),
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .px(px(14.))
+                .py(px(10.))
+                .child(icon(glyph, 15., theme.text_muted))
+                .child(div().w(px(130.)).flex_none().text_size(px(12.5)).text_color(theme.text_muted).child(name))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .gap(px(2.))
+                        .child(div().flex().items_center().gap(px(6.)).child(icon(mark, 13., color)).child(div().text_size(px(13.)).text_color(theme.text).child(value)))
+                        .children(detail.map(|d| div().text_size(px(11.5)).text_color(theme.text_placeholder).child(d))),
+                )
+        };
+
+        // The GitHub CLI there: what pushes and agents use for GitHub.
+        let gh = m.gh.clone();
+        let gh_row = match gh.as_ref().map(|g| (g.installed, g.logged_in, g.account.clone())) {
+            Some((true, true, Some(a))) => row("agent-github", "GitHub CLI", Some(true), format!("Signed in as @{a}"), None).into_any_element(),
+            Some((true, _, _)) => row("agent-github", "GitHub CLI", Some(false), "Not signed in".into(), Some("Pushes and agents there use it to reach GitHub.".into()))
+                .child(Button::new("m-gh-login", "Sign in").on_click(cx.listener({
+                    let mid = mid.clone();
+                    move |this, _, window, cx| this.gh_cli_sign_in(&mid, window, cx)
+                })))
+                .into_any_element(),
+            Some((false, _, _)) => row("agent-github", "GitHub CLI", None, "Not installed".into(), Some("Install it from cli.github.com to push and use GitHub from here.".into())).into_any_element(),
+            None => row("agent-github", "GitHub CLI", None, "Checking…".into(), None).into_any_element(),
+        };
+        let gh_signed_in = gh.as_ref().is_some_and(|g| g.logged_in);
+
+        let rows: Vec<AnyElement> = match self.machine_git.get(&m.id) {
+            Some(Load::Ready(g)) if g.setup.git.is_none() => {
+                vec![row("git-branch", "git", Some(false), format!("git isn't installed on {}", m.name), Some("Install it with the system's package manager.".into())).into_any_element()]
+            }
+            Some(Load::Ready(g)) => {
+                let identity = match (&g.setup.name, &g.setup.email) {
+                    (Some(n), Some(e)) => row("git-branch", "Commits as", Some(true), format!("{n} <{e}>"), None).into_any_element(),
+                    _ => {
+                        let sets = match (&g.suggested_name, &g.suggested_email) {
+                            (Some(n), Some(e)) => format!("Sets {n} <{e}>, GitHub's private address for you."),
+                            _ => "Uses your GitHub name and private address.".into(),
+                        };
+                        row("git-branch", "Commits as", Some(false), "No name or email: commits will fail".into(), Some(sets))
+                            .child(Button::new("m-git-identity", "Use my GitHub identity").loading(fixing).on_click(cx.listener({
+                                let mid = mid.clone();
+                                move |this, _, _, cx| this.fix_machine_git(&mid, true, false, cx)
+                            })))
+                            .into_any_element()
+                    }
+                };
+                let push = match g.push.as_str() {
+                    "gh" => row("arrow-up", "Pushes to GitHub", Some(true), "With the GitHub CLI's login".into(), None).into_any_element(),
+                    other => {
+                        let (value, ok) = match other {
+                            "other" => (format!("With {}", g.setup.helpers.iter().chain(g.setup.ssh_keys.iter()).cloned().collect::<Vec<_>>().join(", ")), None),
+                            _ => ("No GitHub login: pushes will fail".to_string(), Some(false)),
+                        };
+                        let detail = if gh_signed_in { "Using the GitHub CLI's login works for any GitHub repository." } else { "Sign in to the GitHub CLI first, then git can use its login." };
+                        row("arrow-up", "Pushes to GitHub", ok, value, Some(detail.into()))
+                            .child(Button::new("m-git-credentials", "Use the GitHub CLI").disabled(!gh_signed_in).loading(fixing).on_click(cx.listener({
+                                let mid = mid.clone();
+                                move |this, _, _, cx| this.fix_machine_git(&mid, false, true, cx)
+                            })))
+                            .into_any_element()
+                    }
+                };
+                vec![identity, push]
+            }
+            Some(Load::Failed(e)) => vec![row("git-branch", "git", None, e.clone(), None).into_any_element()],
+            _ => vec![div().flex().items_center().gap(px(10.)).px(px(14.)).py(px(10.)).child(spinner("m-git-spin", 13., theme.text_muted)).child(div().text_size(px(12.5)).text_color(theme.text_muted).child("Checking git…")).into_any_element()],
+        };
+        let all: Vec<AnyElement> = std::iter::once(gh_row).chain(rows).collect();
+        let count = all.len();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(title)
+            .child(card(theme).children(all.into_iter().enumerate().map(|(i, r)| div().when(i > 0 && i < count, |d| d.border_t_1().border_color(theme.border_variant)).child(r))))
+            .into_any_element()
+    }
+
+    /// The machine page's Connection card: direct (QUIC) or over ssh, how fast,
+    /// and turning direct connections on or off.
+    pub(super) fn machine_connection(&mut self, theme: &Theme, m: &Machine, cx: &mut Context<Self>) -> AnyElement {
+        use super::github::Load;
+        if !self.machine_conn.contains_key(&m.id) {
+            self.load_machine_connection(&m.id, cx);
+        }
+        let mid = m.id.clone();
+        let changing = self.conn_changing.contains(&m.id);
+        let (glyph, color, value, detail, direct) = match self.machine_conn.get(&m.id) {
+            Some(Load::Ready(c)) => {
+                let speed = c.latency_ms.map(|ms| format!(" · {ms} ms")).unwrap_or_default();
+                let net = c.network.clone().map(|n| format!(" · {n}")).unwrap_or_default();
+                let at = c.peer.clone().map(|p| format!(" ({p})")).unwrap_or_default();
+                match c.via.as_str() {
+                    "direct" => (
+                        "zap",
+                        if c.note.is_some() { theme.warning } else { theme.success },
+                        format!("Direct{net}{speed}"),
+                        c.note.clone().unwrap_or_else(|| format!("QUIC to {}{at}, no ssh in between.", c.address.clone().unwrap_or_default())),
+                        true,
+                    ),
+                    "ssh" => (
+                        "network",
+                        if c.direct { theme.warning } else { theme.text_muted },
+                        format!("Over ssh{net}{speed}"),
+                        c.note.clone().unwrap_or_else(|| "One ssh connection kept open. A direct connection is faster to set up and needed for seeing the desktop.".into()),
+                        c.direct,
+                    ),
+                    _ => ("unplug", theme.text_placeholder, "Not connected".into(), c.note.clone().unwrap_or_else(|| "The agent there didn't answer.".into()), c.direct),
+                }
+            }
+            Some(Load::Failed(e)) => ("unplug", theme.error, "Not connected".into(), e.clone(), false),
+            _ => ("network", theme.text_placeholder, "Checking…".into(), String::new(), false),
+        };
+        let button = if direct {
+            Button::new("m-direct-off", "Use ssh only").style(ButtonStyle::Ghost).loading(changing).on_click(cx.listener({
+                let mid = mid.clone();
+                move |this, _, _, cx| this.set_machine_direct(&mid, false, cx)
+            }))
+        } else {
+            Button::new("m-direct-on", "Connect directly").loading(changing).on_click(cx.listener({
+                let mid = mid.clone();
+                move |this, _, _, cx| this.set_machine_direct(&mid, true, cx)
+            }))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(section_title(theme, "Connection", None))
+                    .child(div().flex_1())
+                    .child(Button::icon_only("m-conn-refresh", "refresh-cw").tooltip("Check again").on_click(cx.listener({
+                        let mid = mid.clone();
+                        move |this, _, _, cx| this.load_machine_connection(&mid, cx)
+                    }))),
+            )
+            .child(
+                card(theme)
+                    .flex_row()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(14.))
+                    .py(px(12.))
+                    .child(icon(glyph, 16., color))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .gap(px(2.))
+                            .child(div().text_size(px(13.)).text_color(theme.text).child(value))
+                            .when(!detail.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(detail))),
+                    )
+                    // Seeing the desktop: Linux (X11) machines so far.
+                    .when(m.platform.starts_with("linux"), |d| {
+                        d.child(Button::new("m-desktop", "Show desktop").icon("monitor").on_click(cx.listener({
+                            let mid = mid.clone();
+                            move |this, _, window, cx| this.navigate(Route::Desktop(mid.clone()), window, cx)
+                        })))
+                    })
+                    .child(button),
+            )
+            .into_any_element()
+    }
+
+    fn load_machine_connection(&mut self, machine_id: &str, cx: &mut Context<Self>) {
+        use super::github::Load;
+        self.machine_conn.entry(machine_id.to_string()).or_insert(Load::Loading);
+        let (engine, id) = (self.engine.clone(), machine_id.to_string());
+        let job = engine.runtime().spawn({
+            let (engine, id) = (engine.clone(), id.clone());
+            async move { engine.connection(&id).await }
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                this.machine_conn.insert(id, match result {
+                    Ok(c) => Load::Ready(c),
+                    Err(e) => Load::Failed(e),
+                });
+                cx.notify()
+            });
+        });
+        self.track(task);
+    }
+
+    /// Pairs for a direct connection (installs the listener there), or goes back to ssh.
+    fn set_machine_direct(&mut self, machine_id: &str, enabled: bool, cx: &mut Context<Self>) {
+        use super::github::Load;
+        if !self.conn_changing.insert(machine_id.to_string()) {
+            return;
+        }
+        cx.notify();
+        let (engine, id) = (self.engine.clone(), machine_id.to_string());
+        let job = engine.runtime().spawn({
+            let (engine, id) = (engine.clone(), id.clone());
+            async move { engine.set_direct(&id, enabled).await }
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                this.conn_changing.remove(&id);
+                match result {
+                    Ok(c) => {
+                        let text = match (enabled, c.via.as_str()) {
+                            (true, "direct") => "Connected directly.".to_string(),
+                            (true, _) => c.note.clone().unwrap_or_else(|| "Set up, but the direct connection didn't come up; using ssh.".into()),
+                            (false, _) => "Back to ssh only; the listener there was removed.".to_string(),
+                        };
+                        this.notify_user(text, enabled && c.via != "direct", cx);
+                        this.machine_conn.insert(id, Load::Ready(c));
+                    }
+                    Err(e) => this.notify_user(e, true, cx),
+                }
+            });
+        });
+        self.track(task);
+    }
+
+    fn load_machine_git(&mut self, machine_id: &str, cx: &mut Context<Self>) {
+        use super::github::Load;
+        if !self.machine_git.contains_key(machine_id) {
+            self.machine_git.insert(machine_id.to_string(), Load::Loading);
+        }
+        let (engine, id) = (self.engine.clone(), machine_id.to_string());
+        let job = engine.runtime().spawn({
+            let (engine, id) = (engine.clone(), id.clone());
+            async move { crate::api::git_status(&engine, &id).await }
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(crate::api::ApiError::invalid(e.to_string())));
+            let _ = this.update(cx, |this, cx| {
+                this.machine_git.insert(id, match result {
+                    Ok(g) => Load::Ready(g),
+                    Err(e) => Load::Failed(e.message),
+                });
+                cx.notify()
+            });
+        });
+        self.track(task);
+    }
+
+    /// Sets git's identity (from the GitHub account) and/or its GitHub login (the GitHub CLI's).
+    fn fix_machine_git(&mut self, machine_id: &str, identity: bool, credentials: bool, cx: &mut Context<Self>) {
+        use super::github::Load;
+        if !self.git_fixing.insert(machine_id.to_string()) {
+            return;
+        }
+        cx.notify();
+        let (engine, id) = (self.engine.clone(), machine_id.to_string());
+        let req = crate::api::GitSetupRequest { machine_id: id.clone(), identity, name: None, email: None, credentials };
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { crate::api::git_setup(&engine, req).await }
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(crate::api::ApiError::invalid(e.to_string())));
+            let _ = this.update(cx, |this, cx| {
+                this.git_fixing.remove(&id);
+                match result {
+                    Ok(g) => {
+                        let done = if identity { "Commits there now carry your GitHub identity." } else { "git there now uses the GitHub CLI's login." };
+                        this.machine_git.insert(id, Load::Ready(g));
+                        this.notify_user(done, false, cx)
+                    }
+                    Err(e) => this.notify_user(e.message, true, cx),
+                }
+            });
+        });
+        self.track(task);
+    }
+
+    /// Opens a terminal on the machine running `gh auth login` in the browser
+    /// flow (it shows a code to enter at github.com/login/device).
+    pub(super) fn gh_cli_sign_in(&mut self, machine_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.gh_cli_run(machine_id, "auth login --hostname github.com --git-protocol https --web", "Sign in to GitHub", window, cx);
+    }
+
+    /// Runs a GitHub CLI command (sign-in, granting a permission) in a terminal
+    /// on a machine, where its browser steps can be followed.
+    pub(super) fn gh_cli_run(&mut self, machine_id: &str, args: &str, title: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let req = StartSession {
+            machine_id: machine_id.to_string(),
+            agent: "shell".into(),
+            cwd: "~".into(),
+            title: Some(title.into()),
+            command: Some(format!("gh {args}; printf '\\nPress Enter to close.'; read _")),
+            ..Default::default()
+        };
+        self.notify_user("Follow the steps in the terminal: copy the code, then open github.com/login/device.", false, cx);
+        self.start_session(req, window, cx);
+    }
+
+    /// Where the GitHub login in use lives: the machine chosen for it, else this computer.
+    pub(super) fn gh_login_machine(&self) -> Option<String> {
+        let chosen = self.engine.settings().github.account_machine;
+        if !chosen.is_empty() && self.snapshot.machines.iter().any(|m| m.id == chosen) {
+            return Some(chosen);
+        }
+        self.snapshot.machines.iter().find(|m| m.host == "local").map(|m| m.id.clone())
+    }
+}
+
+/// A terminal's keys and size, sent over the machine's link.
+struct LinkIo {
+    link: Arc<crate::fleet::link::Link>,
+    channel: u32,
+}
+
+impl super::terminal::RemoteIo for LinkIo {
+    fn write(&self, bytes: &[u8]) {
+        self.link.send(self.channel, crate::fleet::link::DATA, bytes);
+    }
+
+    fn resize(&self, cols: u16, rows: u16) {
+        let mut size = Vec::with_capacity(4);
+        size.extend(cols.to_be_bytes());
+        size.extend(rows.to_be_bytes());
+        self.link.send(self.channel, crate::fleet::link::RESIZE, &size);
+    }
+
+    fn close(&self) {
+        self.link.close_channel(self.channel);
+    }
+}
+
+/// Attaches to a session over the machine's link: a channel for it, the
+/// attach request, and its output turned into what the terminal reads.
+fn attach_over_link(
+    engine: &Arc<crate::fleet::Engine>,
+    link: Arc<crate::fleet::link::Link>,
+    name: &str,
+    (cols, rows): (u16, u16),
+) -> (Arc<dyn super::terminal::RemoteIo>, futures::channel::mpsc::UnboundedReceiver<super::terminal::RemoteOutput>) {
+    use super::terminal::RemoteOutput;
+    use crate::fleet::link::{DATA, EXIT};
+    let (channel, mut frames) = link.open_channel();
+    let (tx, output) = futures::channel::mpsc::unbounded();
+    let rt = engine.runtime().clone();
+    rt.spawn(async move {
+        while let Some((kind, bytes)) = frames.recv().await {
+            match kind {
+                DATA => {
+                    let _ = tx.unbounded_send(RemoteOutput::Bytes(bytes));
+                }
+                EXIT => {
+                    let code = (bytes.len() == 4).then(|| i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+                    let _ = tx.unbounded_send(RemoteOutput::Ended(code));
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // The channel closed: detached, the session's gone, or the link dropped.
+        let _ = tx.unbounded_send(RemoteOutput::Ended(None));
+    });
+    let request = serde_json::json!({ "op": "attach", "name": name, "channel": channel, "cols": cols, "rows": rows });
+    let attaching = link.clone();
+    rt.spawn(async move {
+        let ok = attaching.request(request, std::time::Duration::from_secs(15)).await.is_ok_and(|r| r["ok"].as_bool() == Some(true));
+        if !ok {
+            attaching.close_channel(channel);
+        }
+    });
+    (Arc::new(LinkIo { link, channel }), output)
+}
+
+/// The session is gone (ended here, by an agent, or on the machine).
+fn ended(theme: &Theme, id: &str, cx: &mut Context<Root>) -> AnyElement {
+    let machine = id.split('/').next().unwrap_or_default().to_string();
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(10.))
+        .pb(px(80.))
+        .child(div().size(px(44.)).rounded_full().bg(theme.element).flex().items_center().justify_center().child(icon("square-terminal", 20., theme.text_muted)))
+        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("This session has ended"))
+        .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(id.to_string()))
+        .child(
+            Button::new("session-back", "Back to the machine")
+                .icon("arrow-left")
+                .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(machine.clone()), window, cx))),
+        )
+        .into_any_element()
+}
+
+/// What demo sessions show: a plausible screen for each agent.
+fn demo_screen(agent: &str) -> Vec<u8> {
+    let dim = "\x1b[2m";
+    let reset = "\x1b[0m";
+    let orange = "\x1b[38;2;217;119;87m";
+    let green = "\x1b[32m";
+    let bold = "\x1b[1m";
+    let lines: Vec<String> = match agent {
+        "claude" => vec![
+            format!("{orange}╭───────────────────────────────────────────────────╮{reset}"),
+            format!("{orange}│{reset} {orange}✻{reset} Welcome to {bold}Claude Code{reset}!                         {orange}│{reset}"),
+            format!("{orange}│{reset}   {dim}cwd: /Users/ci/code/checkout{reset}                    {orange}│{reset}"),
+            format!("{orange}╰───────────────────────────────────────────────────╯{reset}"),
+            String::new(),
+            format!("{dim}>{reset} Fix the flaky checkout test"),
+            String::new(),
+            format!("{green}⏺{reset} Read({bold}e2e/checkout.spec.ts{reset})"),
+            format!("  {dim}⎿  Read 84 lines{reset}"),
+            String::new(),
+            "⏺ The discount is applied after tax in applyCoupon(); the test".into(),
+            "  expects it before. Moving the discount ahead of the tax step.".into(),
+            String::new(),
+            format!("{green}⏺{reset} Update({bold}src/cart/applyCoupon.ts{reset})"),
+            format!("  {dim}⎿  Updated with 3 additions and 2 removals{reset}"),
+            String::new(),
+            format!("{green}⏺{reset} Bash(npm test -- e2e/checkout.spec.ts)"),
+            format!("  {dim}⎿{reset}  {green}✓{reset} 12 passed {dim}(4.1s){reset}"),
+            String::new(),
+            format!("{orange}✻ Thinking… {dim}(12s · ↓ 1.2k tokens · esc to interrupt){reset}"),
+            String::new(),
+            format!("{dim}╭───────────────────────────────────────────────────╮{reset}"),
+            format!("{dim}│{reset} >                                                 {dim}│{reset}"),
+            format!("{dim}╰───────────────────────────────────────────────────╯{reset}"),
+            format!("  {dim}? for shortcuts{reset}"),
+        ],
+        "codex" => vec![
+            format!("{bold}>_ OpenAI Codex{reset} {dim}(research preview){reset}"),
+            format!("{dim}model: gpt-5-codex   directory: ~/code/ios-app{reset}"),
+            String::new(),
+            format!("{bold}›{reset} Add a dark mode toggle to Settings"),
+            String::new(),
+            format!("{green}•{reset} Explored SettingsView.swift, AppTheme.swift"),
+            format!("{green}•{reset} Edited SettingsView.swift {green}+42{reset} \x1b[31m-3{reset}"),
+            format!("{green}•{reset} Ran xcodebuild -scheme App build {dim}— succeeded{reset}"),
+            String::new(),
+            "Added a Toggle bound to @AppStorage(\"darkMode\") and applied".into(),
+            ".preferredColorScheme at the root view.".into(),
+            String::new(),
+            format!("{bold}›{reset} "),
+        ],
+        _ => vec![
+            format!("{green}ci@ubuntu-nuc{reset}:{bold}~/api{reset}$ opencode"),
+            String::new(),
+            format!("{bold}  opencode{reset}  {dim}v0.15{reset}"),
+            String::new(),
+            format!("{dim}  Ask anything… {reset}"),
+        ],
+    };
+    lines.join("\r\n").into_bytes()
+}

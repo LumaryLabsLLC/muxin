@@ -1,6 +1,6 @@
-# OpenRunner: install GitHub Actions runners as Docker containers (Linux, or any
+# Muxen: install GitHub Actions runners as Docker containers (Linux, or any
 # machine with a Docker daemon that runs Linux containers).
-# OpenRunner prepends these variables:
+# Muxen prepends these variables:
 #   OR_IMAGE           runner image, e.g. ghcr.io/actions/actions-runner:2.329.0
 #   OR_IMAGE_FALLBACK  image to try when OR_IMAGE can't be pulled (may be empty)
 #   OR_URL             https://github.com/<org> or https://github.com/<owner>/<repo>
@@ -14,7 +14,7 @@
 #
 # Each runner gets a named volume mounted at /home/runner (Docker fills it from
 # the image the first time), a one-off container that registers it, and then a
-# long-running container `openrunner-<name>` that runs run.sh and restarts with
+# long-running container `muxen-<name>` that runs run.sh and restarts with
 # the Docker daemon. The token reaches config.sh only through stdin and the
 # environment of a throwaway container: never argv, never `docker inspect`.
 
@@ -29,8 +29,8 @@ if ! docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
 fi
 
 for name in $OR_NAMES; do
-  if docker container inspect "openrunner-$name" >/dev/null 2>&1; then
-    fail "A container called openrunner-$name already exists. Remove it first or pick another name."
+  if docker container inspect "muxen-$name" >/dev/null 2>&1; then
+    fail "A container called muxen-$name already exists. Remove it first or pick another name."
   fi
 done
 
@@ -70,15 +70,15 @@ if [ "$OR_SOCKET" = 1 ]; then
 fi
 
 for name in $OR_NAMES; do
-  c="openrunner-$name"
-  vol="openrunner-$name"
+  c="muxen-$name"
+  vol="muxen-$name"
   say "Setting up $name (container $c, volume $vol)"
-  docker volume create --label "openrunner.runner=$name" "$vol" >/dev/null || fail "Couldn't create the volume $vol."
+  docker volume create --label "muxen.runner=$name" "$vol" >/dev/null || fail "Couldn't create the volume $vol."
 
   if [ "$OR_STUB" = 1 ]; then
     # Tests only: write a .runner like config.sh would, without talking to GitHub.
     docker run --rm -v "$vol:/home/runner" --entrypoint bash "$image" -c \
-      'printf "{\"agentName\":\"%s\",\"gitHubUrl\":\"%s\"}" "$1" "$2" > /home/runner/.runner' openrunner "$name" "$OR_URL" \
+      'printf "{\"agentName\":\"%s\",\"gitHubUrl\":\"%s\"}" "$1" "$2" > /home/runner/.runner' muxen "$name" "$OR_URL" \
       || fail "Couldn't prepare $vol."
     say "√ Runner successfully added ($name, stubbed)"
   else
@@ -87,14 +87,14 @@ for name in $OR_NAMES; do
     [ -n "$OR_GROUP" ] && set -- "$@" --runnergroup "$OR_GROUP"
     # The token travels on stdin into the throwaway container's environment.
     if ! printf '%s' "$OR_TOKEN" | docker run --rm -i -e ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=0 -v "$vol:/home/runner" --entrypoint bash "$image" \
-      -c 'export ACTIONS_RUNNER_INPUT_TOKEN="$(cat)"; exec ./config.sh "$@"' openrunner "$@"; then
+      -c 'export ACTIONS_RUNNER_INPUT_TOKEN="$(cat)"; exec ./config.sh "$@"' muxen "$@"; then
       docker volume rm "$vol" >/dev/null 2>&1
       fail "config.sh failed for $name; nothing was left behind."
     fi
   fi
 
   set -- -d --name "$c" --hostname "$name" --restart unless-stopped \
-    --label "openrunner.runner=$name" --label "openrunner.scope=$OR_SCOPE" --label "openrunner.volume=$vol" \
+    --label "muxen.runner=$name" --label "muxen.scope=$OR_SCOPE" --label "muxen.volume=$vol" \
     -v "$vol:/home/runner"
   if [ "$OR_STUB" = 1 ]; then
     # Tests only: a process named like the runner's listener, so checks see it.

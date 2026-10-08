@@ -5,7 +5,7 @@ use gpui::{AnyElement, Context, Div, FontWeight, Hsla, ScrollHandle, SharedStrin
 use super::format;
 use super::kit::{self, Button, ButtonStyle, card, chip, icon, meter, section_title};
 use super::theme::{ActiveTheme, mono_font, Theme};
-use super::root::{Route, SIDEBAR_WIDTH, Root};
+use super::root::{Route, Root};
 use crate::fleet::model::{Job, Machine, Snapshot};
 
 const CARD_MIN_WIDTH: f32 = 290.;
@@ -31,7 +31,7 @@ impl Root {
     pub(super) fn render_overview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let s = self.snapshot.clone();
-        let content_width = f32::from(window.viewport_size().width) - SIDEBAR_WIDTH - PAGE_PADDING * 2.;
+        let content_width = f32::from(window.viewport_size().width) - self.sidebar_width - PAGE_PADDING * 2.;
 
         let mut body = page("overview-page", &self.page_scroll).child(self.pulse_card(&theme, &s)).child(stat_tiles(&theme, &s));
 
@@ -85,13 +85,14 @@ impl Root {
                     .into_any_element()
             })
             .collect();
-        let compared = if s.check.running {
-            "Checking machines now…".to_string()
-        } else if s.check.finished_at.is_some() {
-            format!("Machines compared with {} {}", s.inventory.path, format::ago(s.check.finished_at))
-        } else {
-            format!("Machines not checked yet · {}", s.inventory.path)
+        // When Muxen last looked at the machines, in plain words.
+        let checked = match (s.check.running, s.check.finished_at, s.check.next_at) {
+            (true, _, _) => "Checking your machines now…".to_string(),
+            (false, Some(_), Some(next)) => format!("Machines checked {} · next {}", format::ago(s.check.finished_at), format::until(next)),
+            (false, Some(_), None) => format!("Machines checked {}", format::ago(s.check.finished_at)),
+            (false, None, _) => "Machines not checked yet".into(),
         };
+        let busy = if c.runners == 0 { "No runners yet".to_string() } else { format!("{} of {} online runners busy", c.working, online) };
         card(theme)
             .flex_row()
             .gap(px(24.))
@@ -128,8 +129,8 @@ impl Root {
                             )
                             .child(div().pb(px(6.)).font_family(mono_font()).text_size(px(18.)).text_color(theme.text_muted).child("%")),
                     )
-                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(format!("{} of {} online runners busy", c.working, online)))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(compared)),
+                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(busy))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(checked)),
             )
             .child(
                 div()
@@ -286,17 +287,10 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(
-                        div()
-                            .size(px(32.))
-                            .flex_none()
-                            .rounded(px(8.))
-                            .bg(theme.element)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon(format::machine_icon(m), 16., theme.text_muted)),
-                    )
+                    .child({
+                        let (from, to) = format::machine_tile(m);
+                        kit::tile(format::machine_icon(m), from, to, 32.)
+                    })
                     .child(
                         div()
                             .flex()

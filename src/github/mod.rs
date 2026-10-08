@@ -3,7 +3,7 @@
 //! unchanged endpoint returns 304 and doesn't count against the rate limit.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -11,9 +11,11 @@ use futures::stream::{self, StreamExt};
 use reqwest::header::{ACCEPT, AUTHORIZATION, ETAG, IF_NONE_MATCH, LINK, USER_AGENT};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::GitHubSettings;
+
+pub mod hub;
 
 const CONCURRENCY: usize = 6;
 const ORG_REPOS_TTL: Duration = Duration::from_secs(300);
@@ -215,7 +217,12 @@ impl std::fmt::Display for ApiError {
 struct Token {
     value: String,
     source: String,
+    /// Logins change (a new account, more permissions); look again after a while.
+    fetched: Instant,
 }
+
+/// How long a token from the GitHub CLI is reused before asking it again.
+const TOKEN_TTL: Duration = Duration::from_secs(60);
 
 struct Cached {
     etag: String,
@@ -223,12 +230,31 @@ struct Cached {
     next: Option<String>,
 }
 
+/// An account the GitHub CLI is signed in to.
+#[derive(Debug, Clone, Serialize)]
+pub struct Account {
+    pub login: String,
+    /// The CLI's own active account (what `gh` uses in a terminal).
+    pub gh_active: bool,
+    /// False when its login has expired or been revoked.
+    pub ok: bool,
+    pub scopes: String,
+}
+
+/// Gets the token of another machine's GitHub CLI login: (machine id, host).
+pub type TokenFetcher = Arc<dyn Fn(String, String) -> futures::future::BoxFuture<'static, Option<String>> + Send + Sync>;
+
 pub struct Client {
     http: reqwest::Client,
     api_url: Mutex<String>,
+    account: Mutex<String>,
+    account_machine: Mutex<String>,
+    fetcher: Mutex<Option<TokenFetcher>>,
     token: Mutex<Option<Token>>,
     cache: Mutex<HashMap<String, Cached>>,
     rate: Mutex<Option<Rate>>,
+    /// The token's OAuth scopes, from GitHub's last answer (None: unknown, e.g. a fine-grained token).
+    scopes: Mutex<Option<Vec<String>>>,
     login: Mutex<Option<String>>,
     org_repos: Mutex<HashMap<String, (Instant, Vec<String>)>>,
     release: Mutex<Option<(Instant, String)>>,
@@ -244,23 +270,33 @@ impl Client {
         Client {
             http,
             api_url: Mutex::new("https://api.github.com".into()),
+            account: Mutex::new(String::new()),
+            account_machine: Mutex::new(String::new()),
+            fetcher: Mutex::new(None),
             token: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
             rate: Mutex::new(None),
+            scopes: Mutex::new(None),
             login: Mutex::new(None),
             org_repos: Mutex::new(HashMap::new()),
             release: Mutex::new(None),
         }
     }
 
-    fn set_api_url(&self, url: &str) {
-        let mut current = self.api_url.lock().unwrap();
-        if *current != url {
-            *current = url.to_string();
-            // A different server means different credentials and cached responses.
+    /// Points the client at the configured server and account. A different
+    /// server or account means different credentials and cached responses.
+    fn configure(&self, settings: &GitHubSettings) {
+        let mut url = self.api_url.lock().unwrap();
+        let mut account = self.account.lock().unwrap();
+        let mut machine = self.account_machine.lock().unwrap();
+        if *url != settings.api_url || *account != settings.account || *machine != settings.account_machine {
+            *url = settings.api_url.clone();
+            *account = settings.account.clone();
+            *machine = settings.account_machine.clone();
             *self.token.lock().unwrap() = None;
             *self.login.lock().unwrap() = None;
             self.cache.lock().unwrap().clear();
+            self.org_repos.lock().unwrap().clear();
         }
     }
 
@@ -272,12 +308,51 @@ impl Client {
     }
 
     async fn token(&self) -> Option<Token> {
-        if let Some(t) = self.token.lock().unwrap().clone() {
+        if let Some(t) = self.token.lock().unwrap().clone().filter(|t| t.fetched.elapsed() < TOKEN_TTL) {
             return Some(t);
         }
-        let found = resolve_token(&self.gh_hostname()).await;
+        let account = self.account.lock().unwrap().clone();
+        let machine = self.account_machine.lock().unwrap().clone();
+        let found = match env_token() {
+            Some(t) => Some(t),
+            None if machine.is_empty() => gh_token(&self.gh_hostname(), &account).await,
+            None => {
+                let fetch = self.fetcher.lock().unwrap().clone();
+                match fetch {
+                    Some(f) => f(machine, self.gh_hostname()).await.map(|value| Token { value, source: "gh".into(), fetched: Instant::now() }),
+                    None => None,
+                }
+            }
+        };
         *self.token.lock().unwrap() = found.clone();
         found
+    }
+
+    /// How to get a token when another machine's login is chosen.
+    pub fn set_token_fetcher(&self, f: TokenFetcher) {
+        *self.fetcher.lock().unwrap() = Some(f);
+    }
+
+    /// The token's OAuth scopes as GitHub last reported them, if it's an OAuth token.
+    pub fn scopes(&self) -> Option<Vec<String>> {
+        self.scopes.lock().unwrap().clone()
+    }
+
+    /// Asks for the login again on the next request (after `gh auth refresh`).
+    pub fn reload_login(&self) {
+        *self.token.lock().unwrap() = None;
+        *self.scopes.lock().unwrap() = None;
+    }
+
+    /// Organizations you're a member of.
+    pub async fn my_orgs(&self, settings: &GitHubSettings) -> Result<Vec<String>, String> {
+        #[derive(Deserialize)]
+        struct Org {
+            login: String,
+        }
+        self.configure(settings);
+        let pages: Vec<Vec<Org>> = self.get_all("/user/orgs?per_page=100", 2).await.map_err(|e| e.message)?;
+        Ok(pages.into_iter().flatten().map(|o| o.login).collect())
     }
 
     fn forget_token(&self) {
@@ -327,7 +402,7 @@ impl Client {
                 .header(AUTHORIZATION, format!("Bearer {}", token.value))
                 .header(ACCEPT, "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
-                .header(USER_AGENT, concat!("openrunner/", env!("CARGO_PKG_VERSION")));
+                .header(USER_AGENT, concat!("muxen/", env!("CARGO_PKG_VERSION")));
             if let Some(etag) = &cached_etag {
                 req = req.header(IF_NONE_MATCH, etag);
             }
@@ -345,17 +420,21 @@ impl Client {
                     return Ok((value, c.next.clone()));
                 }
             }
-            if status == StatusCode::UNAUTHORIZED && retry_auth {
-                // gh tokens can be rotated by `gh auth refresh`; look it up again once.
+            let rate_limited = resp
+                .headers()
+                .get("x-ratelimit-remaining")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v == "0");
+            if retry_auth && refused(status, rate_limited) {
+                // The login may have changed since we read it (`gh auth refresh`
+                // granting a permission, another account): look again, and retry
+                // once if it did.
                 self.forget_token();
-                return self.get_page(url, false).await;
+                if self.token().await.is_some_and(|fresh| status == StatusCode::UNAUTHORIZED || fresh.value != token.value) {
+                    return self.get_page(url, false).await;
+                }
             }
             if !status.is_success() {
-                let rate_limited = resp
-                    .headers()
-                    .get("x-ratelimit-remaining")
-                    .and_then(|v| v.to_str().ok())
-                    .is_some_and(|v| v == "0");
                 let body = resp.bytes().await.unwrap_or_default();
                 let message = serde_json::from_slice::<ApiErrorBody>(&body).map(|b| b.message).unwrap_or_default();
                 let message = if rate_limited {
@@ -385,6 +464,9 @@ impl Client {
     }
 
     fn record_rate(&self, headers: &reqwest::header::HeaderMap) {
+        if let Some(s) = headers.get("x-oauth-scopes").and_then(|v| v.to_str().ok()) {
+            *self.scopes.lock().unwrap() = Some(s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect());
+        }
         let num = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<i64>().ok());
         if let (Some(limit), Some(remaining), Some(reset)) =
             (num("x-ratelimit-limit"), num("x-ratelimit-remaining"), num("x-ratelimit-reset"))
@@ -517,7 +599,7 @@ impl Client {
 
     /// One full pass: runners for every configured scope, then active jobs.
     pub async fn sync(&self, settings: &GitHubSettings) -> GitHubData {
-        self.set_api_url(&settings.api_url);
+        self.configure(settings);
         let mut data = GitHubData::default();
         let Some(token) = self.token().await else {
             data.error = Some("No GitHub token found. Run `gh auth login` or set GITHUB_TOKEN.".into());
@@ -585,7 +667,7 @@ impl Client {
 
     /// Validates an org or repo before it's added in Settings.
     pub async fn test_scope(&self, settings: &GitHubSettings, scope: &str) -> ScopeTest {
-        self.set_api_url(&settings.api_url);
+        self.configure(settings);
         let name = crate::config::strip_github_url(scope);
         let kind = if name.contains('/') { ScopeKind::Repo } else { ScopeKind::Org };
         if self.token().await.is_none() {
@@ -625,7 +707,7 @@ impl Client {
 
     /// Deletes a runner registration directly, for runners whose machine is gone.
     pub async fn delete_runner(&self, settings: &GitHubSettings, scope: &str, runner_id: u64) -> Result<(), String> {
-        self.set_api_url(&settings.api_url);
+        self.configure(settings);
         let (kind, name) = parse_scope(scope);
         let path = format!("{}/actions/runners/{runner_id}", scope_path(kind, &name));
         match self.send(reqwest::Method::DELETE, &path).await {
@@ -636,13 +718,13 @@ impl Client {
 
     /// The newest actions/runner release, e.g. "2.329.0".
     pub async fn latest_runner_release(&self, settings: &GitHubSettings) -> Option<String> {
-        self.set_api_url(&settings.api_url);
+        self.configure(settings);
         self.latest_runner_version().await
     }
 
     /// The URL runners are registered against, e.g. https://github.com/acme.
     pub fn web_url(&self, settings: &GitHubSettings, scope: &str) -> String {
-        self.set_api_url(&settings.api_url);
+        self.configure(settings);
         let (_, name) = parse_scope(scope);
         format!("https://{}/{name}", self.gh_hostname())
     }
@@ -652,7 +734,7 @@ impl Client {
         struct TokenBody {
             token: String,
         }
-        self.set_api_url(&settings.api_url);
+        self.configure(settings);
         if self.token().await.is_none() {
             return Err("No GitHub token found. Run `gh auth login` or set GITHUB_TOKEN.".into());
         }
@@ -678,15 +760,19 @@ impl Client {
                 .header(AUTHORIZATION, format!("Bearer {}", token.value))
                 .header(ACCEPT, "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
-                .header(USER_AGENT, concat!("openrunner/", env!("CARGO_PKG_VERSION")))
+                .header(USER_AGENT, concat!("muxen/", env!("CARGO_PKG_VERSION")))
                 .send()
                 .await
                 .map_err(|e| ApiError { status: None, message: format!("Couldn't reach GitHub: {}", root_cause(&e)) })?;
             self.record_rate(resp.headers());
             let status = resp.status();
-            if status == StatusCode::UNAUTHORIZED && attempt == 0 {
+            let rate_limited = resp.headers().get("x-ratelimit-remaining").and_then(|v| v.to_str().ok()).is_some_and(|v| v == "0");
+            if attempt == 0 && refused(status, rate_limited) {
+                // As in get_page: a changed login gets one more try.
                 self.forget_token();
-                continue;
+                if self.token().await.is_some_and(|fresh| status == StatusCode::UNAUTHORIZED || fresh.value != token.value) {
+                    continue;
+                }
             }
             let body = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
             if status.is_success() {
@@ -699,6 +785,41 @@ impl Client {
         Err(ApiError { status: Some(StatusCode::UNAUTHORIZED), message: "GitHub rejected the token.".into() })
     }
 
+    /// The accounts the GitHub CLI is signed in to on this server.
+    pub async fn accounts(&self, settings: &GitHubSettings) -> Result<Vec<Account>, String> {
+        #[derive(Deserialize)]
+        struct Status {
+            hosts: HashMap<String, Vec<RawAccount>>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawAccount {
+            login: String,
+            #[serde(default)]
+            active: bool,
+            #[serde(default)]
+            state: String,
+            #[serde(default)]
+            scopes: Option<String>,
+        }
+        self.configure(settings);
+        let host = self.gh_hostname();
+        let out = tokio::process::Command::new(gh_program())
+            .args(["auth", "status", "--json", "hosts", "--hostname", &host])
+            .output()
+            .await
+            .map_err(|e| format!("Couldn't run the GitHub CLI (gh): {e}"))?;
+        // It exits 1 when an account has a problem, but still lists them all.
+        let status: Status = serde_json::from_slice(&out.stdout)
+            .map_err(|_| "The GitHub CLI (gh) couldn't list its accounts. It needs gh 2.40 or newer.".to_string())?;
+        Ok(status
+            .hosts
+            .into_values()
+            .flatten()
+            .map(|a| Account { ok: a.state.is_empty() || a.state == "success", login: a.login, gh_active: a.active, scopes: a.scopes.unwrap_or_default() })
+            .collect())
+    }
+
     pub async fn token_source(&self) -> String {
         self.token().await.map(|t| t.source).unwrap_or_default()
     }
@@ -707,10 +828,15 @@ impl Client {
     /// private repositories into agent workspaces. The caller must keep the token
     /// out of argv and logs.
     pub async fn git_credentials(&self, settings: &GitHubSettings) -> Option<(String, String)> {
-        self.set_api_url(&settings.api_url);
+        self.configure(settings);
         let token = self.token().await?;
         Some((self.gh_hostname(), token.value))
     }
+}
+
+/// GitHub turning the login away (not a rate limit): bad token, missing permission, or hidden.
+fn refused(status: StatusCode, rate_limited: bool) -> bool {
+    status == StatusCode::UNAUTHORIZED || (!rate_limited && (status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND))
 }
 
 fn data_token_source(client: &Client) -> String {
@@ -765,22 +891,48 @@ fn scope_path(kind: ScopeKind, name: &str) -> String {
     }
 }
 
-/// `OPENRUNNER_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, then `gh auth token`.
-async fn resolve_token(hostname: &str) -> Option<Token> {
-    for var in ["OPENRUNNER_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"] {
-        if let Ok(v) = std::env::var(var) {
-            if !v.trim().is_empty() {
-                return Some(Token { value: v.trim().to_string(), source: var.to_string() });
-            }
-        }
+/// `MUXEN_GITHUB_TOKEN`, `GITHUB_TOKEN` or `GH_TOKEN`, which win over any login.
+fn env_token() -> Option<Token> {
+    ["MUXEN_GITHUB_TOKEN", "OPENRUNNER_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"].into_iter().find_map(|var| {
+        let v = std::env::var(var).ok()?;
+        (!v.trim().is_empty()).then(|| Token { value: v.trim().to_string(), source: var.to_string(), fetched: Instant::now() })
+    })
+}
+
+/// `gh auth token` here, for `account`, else the GitHub CLI's active account.
+async fn gh_token(hostname: &str, account: &str) -> Option<Token> {
+    let mut cmd = tokio::process::Command::new(gh_program());
+    cmd.args(["auth", "token", "--hostname", hostname]).kill_on_drop(true);
+    if !account.is_empty() {
+        cmd.args(["--user", account]);
     }
-    let out = tokio::process::Command::new("gh")
-        .args(["auth", "token", "--hostname", hostname])
-        .output()
-        .await
-        .ok()?;
+    // A locked keyring can make gh wait indefinitely.
+    let out = tokio::time::timeout(Duration::from_secs(10), cmd.output()).await.ok()?.ok()?;
     let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (out.status.success() && !value.is_empty()).then(|| Token { value, source: "gh".into() })
+    (out.status.success() && !value.is_empty()).then(|| Token { value, source: "gh".into(), fetched: Instant::now() })
+}
+
+/// `gh` from PATH, or from where installers usually put it. Apps started from
+/// Finder, the Dock or a desktop launcher get a minimal PATH without Homebrew.
+fn gh_program() -> std::path::PathBuf {
+    let on_path = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|dir| dir.join(if cfg!(windows) { "gh.exe" } else { "gh" }).is_file()))
+        .unwrap_or(false);
+    if on_path {
+        return "gh".into();
+    }
+    let home = dirs::home_dir().unwrap_or_default();
+    let candidates = [
+        std::path::PathBuf::from("/opt/homebrew/bin/gh"),
+        "/usr/local/bin/gh".into(),
+        "/home/linuxbrew/.linuxbrew/bin/gh".into(),
+        "/usr/bin/gh".into(),
+        "/snap/bin/gh".into(),
+        home.join(".local/bin/gh"),
+        home.join("bin/gh"),
+        r"C:\Program Files\GitHub CLI\gh.exe".into(),
+    ];
+    candidates.into_iter().find(|p| p.is_file()).unwrap_or_else(|| "gh".into())
 }
 
 fn next_link(header: &str) -> Option<String> {

@@ -32,7 +32,7 @@ switch ($OR_ACTION) {
     if (-not (Test-Path -LiteralPath $full -PathType Container)) { [Console]::Error.WriteLine("error: there's no folder $OR_REL in the workspace"); exit 3 }
     $root = (Get-Item -LiteralPath $full -Force).FullName.TrimEnd('\') + '\'
     Get-ChildItem -LiteralPath $full -Recurse -Depth ([int]$OR_DEPTH - 1) -Force |
-      Where-Object { $_.FullName -notmatch '\\(\.git|\.openrunner)(\\|$)' } |
+      Where-Object { $_.FullName -notmatch '\\(\.git|\.muxen)(\\|$)' } |
       Select-Object -First 2001 |
       ForEach-Object {
         $kind = if ($_.LinkType) { 'l' } elseif ($_.PSIsContainer) { 'd' } else { 'f' }

@@ -715,23 +715,8 @@ impl SettingsPage {
             let swatches: Vec<AnyElement> = PALETTES.iter().filter(|p| p.dark == dark).map(|p| {
                 let id = p.id;
                 swatch(theme, p, p.id == chosen, theme.id == p.id).on_click(cx.listener(move |_, _, window, cx| {
-                    theme_mod::update_appearance(window, cx, |a, system| {
-                        let system_dark = matches!(system, gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark);
-                        if dark {
-                            a.dark = id.into();
-                        } else {
-                            a.light = id.into();
-                        }
-                        // Picking a theme you can't currently see switches to it.
-                        let showing_dark = match a.mode {
-                            Mode::Dark => true,
-                            Mode::Light => false,
-                            Mode::System => system_dark,
-                        };
-                        if showing_dark != dark {
-                            a.mode = if dark { Mode::Dark } else { Mode::Light };
-                        }
-                    })
+                    // Picking a theme you can't currently see switches to it.
+                    theme_mod::update_appearance(window, cx, |a, system| theme_mod::choose_theme(a, id, system))
                 })).into_any_element()
             }).collect();
             swatch_rows(swatches)

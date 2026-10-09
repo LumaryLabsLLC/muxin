@@ -5,9 +5,9 @@
 use gpui::{App, KeyBinding, Keystroke};
 
 use super::root::{
-    AddMachine, CheckNow, FocusFilter, GoBack, GoForward, GoToMachine1, GoToMachine2, GoToMachine3, GoToMachine4, GoToMachine5, GoToMachine6,
+    AddMachine, CheckNow, CommandPalette, FocusFilter, GoBack, GoForward, GoToMachine1, GoToMachine2, GoToMachine3, GoToMachine4, GoToMachine5, GoToMachine6,
     GoToMachine7, GoToMachine8, GoToMachine9, NewSession, OpenSettings, ShowGithub, ShowJobs, ShowOverview, ShowWorkspaces, SyncGitHub,
-    ToggleActivity, ToggleSidebar,
+    QuickOpen, ToggleActivity, ToggleSidebar,
 };
 use super::theme::Appearance;
 
@@ -34,6 +34,8 @@ const fn page(mac: &'static str, other: &'static str) -> &'static str {
 
 /// In the order Settings lists them.
 pub const ALL: &[Shortcut] = &[
+    shortcut!("quick-open", "Go to a machine, session or desktop", "secondary-p", QuickOpen),
+    shortcut!("commands", "Command palette", "secondary-shift-p", CommandPalette),
     shortcut!("overview", "Overview", page("ctrl-1", "alt-1"), ShowOverview),
     shortcut!("jobs", "Jobs", page("ctrl-2", "alt-2"), ShowJobs),
     shortcut!("workspaces", "Workspaces", page("ctrl-3", "alt-3"), ShowWorkspaces),

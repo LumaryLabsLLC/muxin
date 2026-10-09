@@ -51,6 +51,8 @@ actions!(
         ToggleSidebar,
         AddMachine,
         NewSession,
+        QuickOpen,
+        CommandPalette,
         ShowAbout,
         SignInGitHub,
         GrantGitHubAccess,
@@ -72,6 +74,7 @@ const PULSE_EVERY: Duration = Duration::from_secs(5);
 pub fn bind_keys(cx: &mut App) {
     let custom = super::shortcuts::bindings(cx);
     cx.bind_keys(custom);
+    super::palette::bind_keys(cx);
     cx.bind_keys([
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("escape", Dismiss, Some(WORKSPACE)),
@@ -104,6 +107,9 @@ pub fn menus() -> Vec<Menu> {
         Menu {
             name: "View".into(),
             items: vec![
+                MenuItem::action("Go to…", QuickOpen),
+                MenuItem::action("Command Palette…", CommandPalette),
+                MenuItem::separator(),
                 MenuItem::action("Overview", ShowOverview),
                 MenuItem::action("Jobs", ShowJobs),
                 MenuItem::action("Workspaces", ShowWorkspaces),
@@ -237,6 +243,8 @@ pub struct Root {
     pub(super) offline_details: std::collections::HashSet<String>,
     /// The open right-click menu.
     pub(super) context_menu: Option<super::menu::ContextMenu>,
+    /// ⌘P / ⇧⌘P, while it's open.
+    pub(super) palette: Option<super::palette::Palette>,
     /// Focus the root on the next render (the focused terminal went away).
     refocus: bool,
     /// The newest session notice already announced (None until the first snapshot).
@@ -367,6 +375,7 @@ impl Root {
             last_notice: None,
             refocus: false,
             context_menu: None,
+            palette: None,
             window_active: false,
             ws_ui: WorkspaceUi::default(),
             clipboard_seen: (super::pasteboard_state().map(|s| s.0).unwrap_or(0), String::new()),
@@ -396,6 +405,13 @@ impl Root {
                 self.show(Route::Machine(machine), cx);
                 self.refocus = true;
             }
+        }
+        // Favorites of machines that are gone (removed, destroyed) go too. Not
+        // while the list is empty: that's before config.toml has been read.
+        let favorites = &cx.global::<super::theme::Appearance>().favorite_machines;
+        if !snapshot.machines.is_empty() && favorites.iter().any(|f| !snapshot.machines.iter().any(|m| &m.id == f)) {
+            let ids: Vec<String> = snapshot.machines.iter().map(|m| m.id.clone()).collect();
+            super::theme::remember(cx, |a| a.favorite_machines.retain(|f| ids.contains(f)));
         }
         self.snapshot = snapshot;
         cx.notify();
@@ -591,6 +607,12 @@ impl Root {
             "menu" => self.open_menu(super::menu::MenuTarget::Machine(arg.into()), gpui::point(px(260.), px(160.)), cx),
             "runner-menu" => self.open_menu(super::menu::MenuTarget::Runner(arg.into()), gpui::point(px(200.), px(560.)), cx),
             "favorite" => self.set_favorite_machine(arg, true, cx),
+            // The palette with this text typed: "palette:" (places), "palette:>set" (commands).
+            "palette" => self.open_palette_with(arg, window, cx),
+            "themes" => {
+                self.open_palette(true, window, cx);
+                self.choose_theme(cx);
+            }
             "cloud" => self.show_cloud_dialog(window, cx),
             // An icon style ("icons:tiles"), for screenshots.
             "icons" => super::theme::update_appearance(window, cx, |a, _| a.icon_style = arg.into()),
@@ -1205,6 +1227,10 @@ impl Root {
     }
 
     fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            self.close_palette(window, cx);
+            return;
+        }
         if self.context_menu.take().is_some() {
             cx.notify();
             return;
@@ -1905,7 +1931,7 @@ impl Root {
     // Toolbar and overlays
 
     /// Hides or shows the sidebar, and remembers it.
-    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_hidden = !self.sidebar_hidden;
         let hidden = self.sidebar_hidden;
         super::theme::remember(cx, |a| a.sidebar_hidden = hidden);
@@ -2196,6 +2222,7 @@ impl Render for Root {
         });
         let notice = self.render_notice(&theme);
         let menu = self.render_menu(&theme, cx);
+        let palette = self.render_palette(&theme, cx);
 
         div()
             .id("workspace")
@@ -2224,6 +2251,8 @@ impl Render for Root {
             .on_action(cx.listener(Self::toggle_activity))
             .on_action(cx.listener(Self::add_machine))
             .on_action(cx.listener(Self::new_session))
+            .on_action(cx.listener(|this, _: &QuickOpen, window, cx| this.open_palette(false, window, cx)))
+            .on_action(cx.listener(|this, _: &CommandPalette, window, cx| this.open_palette(true, window, cx)))
             .on_action(cx.listener(|this, _: &ShowAbout, window, cx| this.navigate(Route::About, window, cx)))
             .on_action(cx.listener(|this, _: &SignInGitHub, window, cx| {
                 // GitHub CLI's browser sign-in, in a terminal on this computer.
@@ -2260,6 +2289,7 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .children(notice)
             .children(menu)
+            .children(palette)
             .when_some(modal, |d, modal| {
                 d.child(
                     div()

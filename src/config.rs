@@ -28,6 +28,9 @@ pub struct Paths {
     pub state: PathBuf,
     /// Agent workspaces, shared by every Muxen process (see fleet::workspaces).
     pub workspaces: PathBuf,
+    /// Cloud machines destroyed lately (see DestroyedCloud). Its own file, so
+    /// the processes that write state.json don't save over each other's.
+    pub cloud_history: PathBuf,
 }
 
 impl Paths {
@@ -47,6 +50,7 @@ impl Paths {
             config,
             state: dir.join("state.json"),
             workspaces: dir.join("workspaces.json"),
+            cloud_history: dir.join("cloud-history.json"),
             dir,
         }
     }
@@ -309,6 +313,21 @@ pub struct CloudRef {
     /// RFC 3339.
     #[serde(default)]
     pub created_at: String,
+}
+
+/// Cloud machines destroyed lately, from cloud-history.json.
+pub fn read_cloud_history(path: &Path) -> Vec<DestroyedCloud> {
+    std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+/// Adds one (replacing an earlier entry for the same droplet) and forgets
+/// those destroyed more than about a year ago.
+pub fn add_cloud_history(path: &Path, entry: DestroyedCloud) -> Result<()> {
+    let mut all = read_cloud_history(path);
+    let keep_from = entry.destroyed_at - chrono::Duration::days(400);
+    all.retain(|e| e.destroyed_at > keep_from && e.cloud.id != entry.cloud.id);
+    all.push(entry);
+    write_atomic(path, serde_json::to_string_pretty(&all)?.as_bytes())
 }
 
 /// A cloud machine Muxen destroyed, kept so this month's costs still count it.
@@ -628,8 +647,6 @@ pub struct PersistedState {
     /// Cloud machines' power ("active", "off", ...) as the provider last
     /// reported it, by machine id.
     pub droplets: HashMap<String, String>,
-    /// Cloud machines destroyed lately (for this month's costs).
-    pub cloud_history: Vec<DestroyedCloud>,
     pub check_started_at: Option<DateTime<Utc>>,
     pub check_finished_at: Option<DateTime<Utc>>,
 }
@@ -656,6 +673,27 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn cloud_history_keeps_one_entry_per_droplet() {
+        let dir = std::env::temp_dir().join(format!("muxen-cloud-history-{}", std::process::id()));
+        let path = dir.join("cloud-history.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = |id: u64, at: &str| DestroyedCloud {
+            name: format!("dev-{id}"),
+            cloud: CloudRef { provider: "digitalocean".into(), id, region: "nyc3".into(), size: "s-1vcpu-1gb".into(), price_hourly: 0.00893, created_at: "2026-10-09T18:53:17Z".into() },
+            destroyed_at: DateTime::parse_from_rfc3339(at).unwrap().with_timezone(&Utc),
+        };
+        assert!(read_cloud_history(&path).is_empty());
+        add_cloud_history(&path, entry(1, "2025-01-01T00:00:00Z")).unwrap();
+        add_cloud_history(&path, entry(2, "2026-10-09T21:22:19Z")).unwrap();
+        add_cloud_history(&path, entry(2, "2026-10-09T21:22:20Z")).unwrap();
+        // Over a year old is gone; the same droplet twice is one entry.
+        let all = read_cloud_history(&path);
+        assert_eq!(all.iter().map(|e| e.cloud.id).collect::<Vec<_>>(), vec![2]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn old_files_become_one_config_toml() {

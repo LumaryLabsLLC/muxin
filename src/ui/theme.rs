@@ -261,6 +261,32 @@ pub fn save_sidebar_width(cx: &mut App, width: f32) {
 }
 
 /// Changes the appearance preference, saves it, and re-themes the window.
+/// Makes `id` the theme for its kind (light or dark), switching to that kind
+/// when it isn't the one showing.
+pub fn choose_theme(a: &mut Appearance, id: &str, system: WindowAppearance) {
+    let Some(dark) = super::themes::find(id).map(|p| p.dark) else { return };
+    if dark {
+        a.dark = id.into();
+    } else {
+        a.light = id.into();
+    }
+    let showing_dark = match a.mode {
+        Mode::Dark => true,
+        Mode::Light => false,
+        Mode::System => matches!(system, WindowAppearance::Dark | WindowAppearance::VibrantDark),
+    };
+    if showing_dark != dark {
+        a.mode = if dark { Mode::Dark } else { Mode::Light };
+    }
+}
+
+/// Shows these preferences without saving them (a preview).
+pub fn preview_appearance(window: &mut Window, cx: &mut App, appearance: Appearance) {
+    cx.set_global(appearance);
+    apply(window, cx);
+    window.refresh();
+}
+
 pub fn update_appearance(window: &mut Window, cx: &mut App, f: impl FnOnce(&mut Appearance, WindowAppearance)) {
     let system = window.appearance();
     let mut appearance = cx.global::<Appearance>().clone();

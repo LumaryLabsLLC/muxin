@@ -340,6 +340,12 @@ impl Engine {
         if self.machine_busy(machine_id) {
             return Err("An operation is still running on this machine. Wait for it to finish.".into());
         }
+        self.forget_machine(machine_id)
+    }
+
+    /// Drops a machine from config.toml, for an operation that is itself
+    /// what's changing it (destroying a cloud machine).
+    pub(crate) fn forget_machine(self: &Arc<Self>, machine_id: &str) -> Result<(), String> {
         let edit = |text: &str| inventory_edit::remove_machine(text, machine_id);
         match self.demo_world() {
             Some(w) => w.edit_inventory(edit)?,

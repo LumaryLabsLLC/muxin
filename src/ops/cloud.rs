@@ -272,7 +272,8 @@ impl Engine {
                 // Its cost this month still counts.
                 me.record_destroyed(&spec.id, crate::config::DestroyedCloud { name: spec.name.clone(), cloud: cloud.clone(), destroyed_at: Utc::now() });
                 me.op_log(op, format!("▸ Removing {} from config.toml", spec.name));
-                me.remove_machine(&spec.id)?;
+                // Not remove_machine: this operation is the one keeping the machine busy.
+                me.forget_machine(&spec.id)?;
                 // Its address may be reused by someone else's droplet.
                 if let Some(ip) = spec.host.rsplit('@').next() {
                     let _ = tokio::process::Command::new("ssh-keygen").args(["-R", ip]).output().await;
@@ -388,7 +389,8 @@ impl Engine {
                 since_created: usage::cost_since(c.price_hourly, created, None, now),
             });
         }
-        let hourly_now = machines.iter().map(|l| l.price_hourly).sum::<f64>();
+        // fold, not sum: an empty f64 sum is -0.0 ("$-0.00").
+        let hourly_now = machines.iter().fold(0., |t, l| t + l.price_hourly);
         for h in self.cloud_history() {
             let created = DateTime::parse_from_rfc3339(&h.cloud.created_at).map(|t| t.with_timezone(&Utc)).unwrap_or(h.destroyed_at);
             let this_month = usage::cost_in_month(h.cloud.price_hourly, created, Some(h.destroyed_at), month, now);
@@ -410,7 +412,7 @@ impl Engine {
                 since_created: usage::cost_since(h.cloud.price_hourly, created, Some(h.destroyed_at), now),
             });
         }
-        let this_month = machines.iter().map(|l| l.this_month).sum::<f64>();
+        let this_month = machines.iter().fold(0., |t, l| t + l.this_month);
 
         let (mut account, mut account_error, mut account_needs_sign_in) = (None, None, false);
         if self.demo_world().is_none() {

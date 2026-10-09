@@ -62,6 +62,8 @@ pub struct TextInput {
     mono: bool,
     /// Shows "•" for each character and won't copy (tokens, keys).
     secret: bool,
+    /// No frame of its own (it sits in one, like the palette's).
+    bare: bool,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -80,6 +82,7 @@ impl TextInput {
             is_selecting: false,
             mono: false,
             secret: false,
+            bare: false,
         }
     }
 
@@ -90,6 +93,11 @@ impl TextInput {
 
     pub fn secret(mut self) -> Self {
         self.secret = true;
+        self
+    }
+
+    pub fn bare(mut self) -> Self {
+        self.bare = true;
         self
     }
 
@@ -569,12 +577,11 @@ impl Render for TextInput {
             .h(px(28.))
             .px(px(8.))
             .rounded(px(6.))
-            .border_1()
-            .border_color(if focused { theme.border_focused } else { theme.border_variant })
-            .bg(theme.canvas)
+            .when(!self.bare, |d| d.border_1().border_color(if focused { theme.border_focused } else { theme.border_variant }).bg(theme.canvas))
+            .when(self.bare, |d| d.px(px(0.)))
             .text_color(theme.text)
             .font_family(if self.mono { mono_font() } else { ui_font() })
-            .text_size(px(13.))
+            .text_size(px(if self.bare { 14. } else { 13. }))
             .line_height(px(18.))
             .overflow_hidden()
             .child(TextElement { input: cx.entity() })

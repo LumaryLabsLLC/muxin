@@ -13,6 +13,7 @@ mod input;
 mod kit;
 mod menu;
 mod overview;
+mod palette;
 mod desktop;
 mod sessions;
 mod settings;
@@ -71,6 +72,9 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
                 titlebar: Some(titlebar),
                 window_min_size: Some(size(px(960.), px(600.))),
                 app_id: Some("muxen".into()),
+                // A test window (on the laptop's screen) doesn't take the keyboard
+                // from whatever the user is typing in.
+                focus: !wants_builtin,
                 ..Default::default()
             },
             |window, cx| {
@@ -96,7 +100,9 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
             }
         })
         .detach();
-        cx.activate(true);
+        if !wants_builtin {
+            cx.activate(true);
+        }
     });
 }
 

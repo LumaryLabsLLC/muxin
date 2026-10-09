@@ -40,6 +40,9 @@ pub struct ProbeResult {
     /// "laptop" | "desktop", when the machine says.
     #[serde(default)]
     pub form_factor: Option<String>,
+    /// Whether it has a graphical session to show (Linux: an X server). None: not said.
+    #[serde(default)]
+    pub desktop: Option<bool>,
     pub cores: Option<u32>,
     pub cpu_pct: Option<f64>,
     pub mem_total: Option<u64>,
@@ -76,6 +79,9 @@ impl ProbeResult {
             self.arch = self.arch.take().or_else(|| p.arch.clone());
             self.os_version = self.os_version.take().or_else(|| p.os_version.clone());
             self.form_factor = self.form_factor.take().or_else(|| p.form_factor.clone());
+            if !self.ok {
+                self.desktop = self.desktop.or(p.desktop);
+            }
         }
         self
     }
@@ -369,6 +375,7 @@ pub fn parse(out: &str) -> ProbeResult {
             "hostname" => r.hostname = text(),
             "os_version" => r.os_version = text().filter(|v| v != "macOS"),
             "form_factor" => r.form_factor = text(),
+            "desktop" => r.desktop = Some(value == "yes"),
             "cores" => r.cores = value.parse().ok(),
             "cpu_pct" => r.cpu_pct = value.parse::<f64>().ok().map(|v| v.clamp(0.0, 100.0)),
             "mem_total" => r.mem_total = value.parse().ok().filter(|v| *v > 0),

@@ -63,6 +63,8 @@ enum Action {
 
 enum Item {
     Action { label: String, glyph: Glyph, action: Action, danger: bool },
+    /// An action that can't be done right now: shown dimmed, not clickable.
+    Off { label: String, glyph: Glyph },
     /// Text that isn't clickable.
     Note(String),
     Separator,
@@ -91,19 +93,25 @@ impl Root {
                 let Some(m) = s.machines.iter().find(|m| &m.id == id) else { return Vec::new() };
                 let mut items = Vec::new();
                 if !m.host.is_empty() {
-                    items.push(act("New terminal", "square-terminal", Action::NewTerminal(id.clone())));
+                    // These need the machine up: dimmed while it's off or unreachable.
+                    let up = m.status != "offline";
+                    let needs_up = |item: Item| match item {
+                        Item::Action { label, glyph, .. } if !up => Item::Off { label, glyph },
+                        other => other,
+                    };
+                    items.push(needs_up(act("New terminal", "square-terminal", Action::NewTerminal(id.clone()))));
                     for a in AGENTS.iter().filter(|a| a.id != "shell" && m.agents.iter().any(|i| i == a.id)) {
-                        items.push(Item::Action { label: format!("New {} session…", a.name), glyph: Glyph::Agent(a.id), action: Action::NewAgent(id.clone(), a.id), danger: false });
+                        items.push(needs_up(Item::Action { label: format!("New {} session…", a.name), glyph: Glyph::Agent(a.id), action: Action::NewAgent(id.clone(), a.id), danger: false }));
                     }
                     if super::format::has_desktop(m) && !m.local {
-                        items.push(act("Show desktop", "monitor", Action::ShowDesktop(id.clone())));
+                        items.push(needs_up(act("Show desktop", "monitor", Action::ShowDesktop(id.clone()))));
                     }
                     if !m.platform.starts_with("windows") {
-                        items.push(act("Copy files…", "folder", Action::CopyFiles(id.clone())));
+                        items.push(needs_up(act("Copy files…", "folder", Action::CopyFiles(id.clone()))));
                     }
                     items.push(Item::Separator);
                     items.push(act("Check now", "refresh-cw", Action::Check(id.clone())));
-                    items.push(act("Install runner…", "plus", Action::InstallRunner(id.clone())));
+                    items.push(needs_up(act("Install runner…", "plus", Action::InstallRunner(id.clone()))));
                     items.push(Item::Separator);
                 }
                 if Root::is_favorite(cx, id) {
@@ -115,7 +123,9 @@ impl Root {
                 // A cloud machine is powered and destroyed; removing it alone would leave it running (and billed).
                 if m.cloud.is_some() {
                     let off = m.status == "offline";
-                    items.push(act(if off { "Power on" } else { "Power off" }, "power", Action::CloudPower(id.clone(), off)));
+                    let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(id.as_str()) && o.kind != "logs");
+                    let label = if off { "Power on" } else { "Power off" };
+                    items.push(if busy { Item::Off { label: label.into(), glyph: Glyph::Icon("power") } } else { act(label, "power", Action::CloudPower(id.clone(), off)) });
                     items.push(Item::Action { label: "Destroy…".into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
                 } else {
                     items.push(Item::Action { label: "Remove from fleet…".into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
@@ -368,7 +378,7 @@ impl Root {
         let longest = items
             .iter()
             .map(|i| match i {
-                Item::Action { label, .. } => label.chars().count() as f32 * 7.4 + 64.,
+                Item::Action { label, .. } | Item::Off { label, .. } => label.chars().count() as f32 * 7.4 + 64.,
                 Item::Note(text) => text.chars().count() as f32 * 6.8 + 32.,
                 Item::Separator => 0.,
             })
@@ -384,17 +394,22 @@ impl Root {
             .map(|(i, item)| match item {
                 Item::Separator => div().h(px(1.)).my(px(4.)).mx(px(8.)).bg(theme.border_variant).into_any_element(),
                 Item::Note(text) => div().px(px(12.)).py(px(5.)).text_size(px(12.)).text_color(theme.text_placeholder).child(text).into_any_element(),
+                Item::Off { label, glyph } => div()
+                    .flex()
+                    .items_center()
+                    .gap(px(9.))
+                    .h(px(28.))
+                    .mx(px(4.))
+                    .px(px(8.))
+                    .opacity(0.4)
+                    .text_size(px(13.))
+                    .text_color(theme.text)
+                    .child(div().w(px(18.)).flex().justify_center().child(menu_glyph(theme, glyph)))
+                    .child(div().w(px(width - 56.)).truncate().child(label))
+                    .into_any_element(),
                 Item::Action { label, glyph, action, danger } => {
                     let color = if danger { theme.error } else { theme.text };
-                    let glyph = match glyph {
-                        Glyph::Icon(name) => kit::color_tile(name, 18.).into_any_element(),
-                        Glyph::Agent(agent) => {
-                            let (name, (from, to)) = kit::agent_look(agent);
-                            kit::tile(name, from, to, 18.).into_any_element()
-                        }
-                        Glyph::Selected => icon("check", 14., theme.accent).into_any_element(),
-                        Glyph::None => div().into_any_element(),
-                    };
+                    let glyph = menu_glyph(theme, glyph);
                     div()
                         .id(("menu-item", i))
                         .flex()
@@ -464,5 +479,17 @@ fn platform_label(label: &str) -> Option<&'static str> {
         "arm64" => Some("arm64"),
         "arm" => Some("arm"),
         _ => None,
+    }
+}
+
+fn menu_glyph(theme: &Theme, glyph: Glyph) -> AnyElement {
+    match glyph {
+        Glyph::Icon(name) => kit::color_tile(name, 18.).into_any_element(),
+        Glyph::Agent(agent) => {
+            let (name, (from, to)) = kit::agent_look(agent);
+            kit::tile(name, from, to, 18.).into_any_element()
+        }
+        Glyph::Selected => icon("check", 14., theme.accent).into_any_element(),
+        Glyph::None => div().into_any_element(),
     }
 }

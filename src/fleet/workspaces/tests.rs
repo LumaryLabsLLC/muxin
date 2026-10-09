@@ -68,6 +68,7 @@ fn machine(id: &str, platform: &str, cpu: f64, working: usize, disk_free: u64, a
             arch: None,
             os_version: None,
             form_factor: None,
+            desktop: None,
             cores: Some(8),
             cpu_pct: Some(cpu),
             mem_total: Some(100),

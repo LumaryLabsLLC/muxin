@@ -404,6 +404,27 @@ pub struct MachineSummary {
     /// and whether traffic to it goes peer-to-peer or through a relay.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tailnet: Option<crate::fleet::model::TailnetDevice>,
+    /// A cloud machine Muxen created: provider, droplet id, region, size,
+    /// USD an hour, what it has cost so far and since when it's been idle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<CloudOut>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CloudOut {
+    /// "digitalocean"
+    pub provider: String,
+    pub droplet_id: u64,
+    pub region: String,
+    pub size: String,
+    /// USD an hour, billed while it exists (powered off too).
+    pub price_hourly: f64,
+    pub created_at: Option<DateTime<Utc>>,
+    /// USD since it was created.
+    pub cost_so_far: f64,
+    pub idle_since: Option<DateTime<Utc>>,
+    /// "on", "off" (still billed) or "starting", as last seen; null until known.
+    pub power: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -636,6 +657,17 @@ pub fn machine_summary(m: &Machine) -> MachineSummary {
         error: m.probe.as_ref().filter(|p| !p.ok).and_then(|p| p.error.clone()),
         unreachable: m.unreachable.clone(),
         tailnet: m.tailnet.clone(),
+        cloud: m.cloud.as_ref().map(|c| CloudOut {
+            provider: c.provider.clone(),
+            droplet_id: c.id,
+            region: c.region.clone(),
+            size: c.size.clone(),
+            price_hourly: c.price_hourly,
+            created_at: c.created_at,
+            cost_so_far: (c.cost_so_far * 100.).round() / 100.,
+            idle_since: c.idle_since,
+            power: c.power.clone(),
+        }),
     }
 }
 

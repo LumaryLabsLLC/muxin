@@ -17,11 +17,12 @@ must ship with every copy of Muxen.
 | portable-pty (WezTerm; terminals in `muxen-agent`) | MIT | <https://github.com/wezterm/wezterm> |
 | Agent logos (`assets/icons/agent-*.svg`), SVGs from LobeHub Icons | MIT | <https://github.com/lobehub/lobe-icons> |
 | Pi logo (`assets/icons/agent-pi.svg`), from Pi's press kit (Earendil) | trademark of its owner | <https://pi.dev/press-kit> |
+| DigitalOcean logo (`assets/icons/brand-digitalocean.svg`), SVG from Simple Icons | CC0-1.0 (the SVG); trademark of DigitalOcean | <https://simpleicons.org> |
 | Rust crates listed in `Cargo.lock` | MIT and/or Apache-2.0 (mostly), see each crate | Generate the full list before each release, e.g. with `cargo about generate` |
 
 The agent logos are trademarks of their owners (Anthropic, OpenAI, Google,
-SST, Sourcegraph, Earendil). Muxen shows them only to identify which CLI a session
-runs; check each owner's brand guidelines before using them in marketing.
+SST, Sourcegraph, Earendil), as is DigitalOcean's. Muxen shows them only to identify which CLI a session
+runs, or that a machine is a DigitalOcean droplet; check each owner's brand guidelines before using them in marketing.
 
 Before shipping a release, regenerate the crate list and include the license
 texts in the app bundle (for example `Muxen.app/Contents/Resources/`).

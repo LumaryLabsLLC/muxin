@@ -230,6 +230,8 @@ pub struct CloudInfo {
     pub cost_so_far: f64,
     /// Idle (no busy session, job or CPU) since then, as this app has seen it.
     pub idle_since: Option<DateTime<Utc>>,
+    /// "on", "off" or "starting", as last seen; None until known.
+    pub power: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -255,6 +257,8 @@ pub struct Probe {
     pub os_version: Option<String>,
     /// "laptop" | "desktop", when the machine says.
     pub form_factor: Option<String>,
+    /// Whether it has a graphical session to show (Linux: an X server). None: not said.
+    pub desktop: Option<bool>,
     pub cores: Option<u32>,
     pub cpu_pct: Option<f64>,
     pub mem_total: Option<u64>,

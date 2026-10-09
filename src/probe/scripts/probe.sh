@@ -58,6 +58,8 @@ linux)
   "") ;;
   *) kv form_factor desktop ;;
   esac
+  # An X server (Xorg, or Xwayland under a Wayland desktop): Show desktop needs one.
+  if ls /tmp/.X11-unix/X* >/dev/null 2>&1; then kv desktop yes; else kv desktop no; fi
   kv cores "$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null)"
   kv load "$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
   kv uptime_s "$(cut -d. -f1 /proc/uptime 2>/dev/null)"

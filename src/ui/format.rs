@@ -99,13 +99,16 @@ pub fn diagnostics_summary(m: &Machine) -> (String, &'static str) {
 
 /// Whether Muxen can show the machine's desktop (Linux with X11, macOS).
 pub fn has_desktop(m: &Machine) -> bool {
-    m.platform.starts_with("linux") || m.platform.starts_with("darwin")
+    // A Linux machine needs an X server; one checked before checks said is given the benefit of the doubt.
+    m.platform.starts_with("darwin") || (m.platform.starts_with("linux") && m.probe.as_ref().and_then(|p| p.desktop) != Some(false))
 }
 
 /// Gradient for a machine's icon tile, by OS.
 pub fn machine_tile(m: &Machine) -> (u32, u32) {
     use super::kit::tiles;
-    if m.platform.starts_with("darwin") {
+    if m.cloud.as_ref().is_some_and(|c| c.provider == "digitalocean") {
+        tiles::DIGITALOCEAN
+    } else if m.platform.starts_with("darwin") {
         tiles::MACOS
     } else if m.platform.starts_with("linux") {
         tiles::LINUX
@@ -124,6 +127,9 @@ pub fn machine_subtitle(m: &Machine) -> (String, &'static str) {
     }
     if m.status == "offline" {
         let seen = m.unreachable.as_ref().and_then(|u| u.last_seen_at);
+        if is_powered_off(m) {
+            return ("Powered off".into(), "muted");
+        }
         return match (is_just_offline(m), seen) {
             (true, Some(t)) => (format!("Offline · seen {}", ago(Some(t))), "muted"),
             (true, None) => ("Offline".into(), "muted"),
@@ -170,6 +176,9 @@ fn short_os(v: &str) -> String {
 }
 
 pub fn machine_icon(m: &Machine) -> &'static str {
+    if m.cloud.as_ref().is_some_and(|c| c.provider == "digitalocean") {
+        return "brand-digitalocean";
+    }
     let name = m.name.to_ascii_lowercase();
     let laptop = m.probe.as_ref().and_then(|p| p.form_factor.as_deref()) == Some("laptop");
     if name.contains("nas") || name.contains("storage") {
@@ -201,18 +210,30 @@ mod tests {
 /// Offline in the everyday sense (shut down, asleep, off the network), as
 /// opposed to on but refusing us: nothing for the user to fix.
 pub fn is_just_offline(m: &Machine) -> bool {
-    m.status == "offline" && m.unreachable.as_ref().is_some_and(|u| u.kind == "offline")
+    m.status == "offline" && m.unreachable.as_ref().is_some_and(|u| matches!(u.kind.as_str(), "offline" | "powered-off"))
+}
+
+/// A cloud machine that's powered off (and still billed).
+pub fn is_powered_off(m: &Machine) -> bool {
+    m.status == "offline" && m.unreachable.as_ref().is_some_and(|u| u.kind == "powered-off")
 }
 
 /// A machine that can't be reached, in a word or two: "Offline", "Can't connect".
 pub fn unreachable_word(m: &Machine) -> &'static str {
-    if is_just_offline(m) { "Offline" } else { "Can't connect" }
+    if is_powered_off(m) {
+        "Powered off"
+    } else if is_just_offline(m) {
+        "Offline"
+    } else {
+        "Can't connect"
+    }
 }
 
 /// Why it can't be reached, short enough for the sidebar.
 pub fn unreachable_reason(m: &Machine) -> &'static str {
     match m.unreachable.as_ref().map(|u| u.kind.as_str()) {
         Some("offline") => "Offline",
+        Some("powered-off") => "Powered off",
         Some("refused") => "Not accepting ssh",
         Some("auth") => "ssh key not accepted",
         Some("unknown-host") => "Host not found",

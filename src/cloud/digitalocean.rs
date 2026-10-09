@@ -79,7 +79,13 @@ impl Client {
         if let Some(b) = body {
             req = req.json(&b);
         }
-        let resp = req.send().await.map_err(|e| format!("Couldn't reach DigitalOcean: {e}"))?;
+        let resp = req.send().await.map_err(|e| {
+            if e.is_timeout() {
+                "DigitalOcean didn't answer within 30 seconds. Try again in a moment.".to_string()
+            } else {
+                format!("Couldn't reach DigitalOcean: {}", root_cause(&e))
+            }
+        })?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if status.is_success() {
@@ -191,6 +197,15 @@ impl Client {
     pub async fn droplet_action(&self, id: u64, action: &str) -> Result<(), String> {
         self.call(Method::POST, &format!("/droplets/{id}/actions"), Some(json!({ "type": action }))).await.map(|_| ())
     }
+}
+
+/// The innermost error: reqwest's own message only says the request failed.
+fn root_cause(e: &dyn std::error::Error) -> String {
+    let mut e = e;
+    while let Some(next) = e.source() {
+        e = next;
+    }
+    e.to_string()
 }
 
 fn strings(v: &Value) -> Vec<String> {

@@ -616,6 +616,9 @@ pub struct PersistedState {
     /// Machines on the user's tailnet, as Tailscale last saw them (kept for
     /// when Tailscale is off).
     pub tailnet: HashMap<String, crate::fleet::model::TailnetDevice>,
+    /// Cloud machines' power ("active", "off", ...) as the provider last
+    /// reported it, by machine id.
+    pub droplets: HashMap<String, String>,
     pub check_started_at: Option<DateTime<Utc>>,
     pub check_finished_at: Option<DateTime<Utc>>,
 }

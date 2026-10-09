@@ -171,7 +171,8 @@ pub fn tile_in(look: Look, icon_name: &str, from: u32, to: u32, size: f32) -> Di
     match look.style.backdrop() {
         Backdrop::Solid => el.rounded(px(size * 0.27)).bg(base).child(icon(&glyph, size * 0.58, gpui::white())),
         Backdrop::Faint => el.rounded(px(size * 0.27)).bg(base.opacity(0.2)).child(icon(&glyph, size * 0.62, tone)),
-        Backdrop::None => el.child(icon(&glyph, size * 0.86, if look.style.colored() { tone } else { look.muted })),
+        // A provider's logo keeps its color even in Minimal, so a droplet reads as one at a glance.
+        Backdrop::None => el.child(icon(&glyph, size * 0.86, if look.style.colored() || icon_name.starts_with("brand-") { tone } else { look.muted })),
     }
 }
 
@@ -197,6 +198,8 @@ pub mod tiles {
     pub const LINUX: (u32, u32) = (0xffb35c, 0xf0703f);
     pub const WINDOWS: (u32, u32) = (0x5ad2f4, 0x1f8fd6);
     pub const OTHER: (u32, u32) = (0xa7aebb, 0x5f6673);
+    /// DigitalOcean's blue, for droplets.
+    pub const DIGITALOCEAN: (u32, u32) = (0x4d9bff, 0x0069ff);
 }
 
 /// An icon's colors, by what it stands for, so a thing looks the same in

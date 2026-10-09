@@ -88,7 +88,7 @@ impl Theme {
     pub fn machine_status(&self, m: &crate::fleet::model::Machine) -> Hsla {
         match (m.status.as_str(), m.unreachable.as_ref().map(|u| u.kind.as_str())) {
             ("online", _) => self.success,
-            ("offline", Some("offline")) => self.text_placeholder,
+            ("offline", Some("offline" | "powered-off")) => self.text_placeholder,
             ("offline", Some("refused" | "tailscale-off")) => self.warning,
             ("offline", _) => self.error,
             _ => self.text_placeholder,

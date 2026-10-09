@@ -124,10 +124,11 @@ impl Root {
 
         let mut body = page("machine-page", &self.page_scroll).child(header);
         if let Some(c) = &m.cloud {
-            body = body.child(self.cloud_card(&theme, &m, c, cx));
+            body = body.child(self.cloud_card(&theme, &s, &m, c, busy, cx));
         }
 
-        if let Some(u) = m.unreachable.as_ref().filter(|_| offline) {
+        // A powered-off cloud machine says so on its cloud card.
+        if let Some(u) = m.unreachable.as_ref().filter(|u| offline && u.kind != "powered-off") {
             body = body.child(self.unreachable_card(&theme, &m, u, cx));
         }
 
@@ -237,8 +238,25 @@ impl Root {
     }
 
     /// Where a cloud machine runs, what it costs, and its power.
-    fn cloud_card(&self, theme: &Theme, m: &Machine, c: &crate::fleet::model::CloudInfo, cx: &mut Context<Self>) -> impl IntoElement {
+    fn cloud_card(&self, theme: &Theme, s: &Snapshot, m: &Machine, c: &crate::fleet::model::CloudInfo, busy: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let off = m.status == "offline";
+        let powering = s.operations.iter().find(|o| o.status == "running" && o.machine_id.as_deref() == Some(&m.id)).and_then(|o| match o.kind.as_str() {
+            "cloud-power-on" => Some(true),
+            "cloud-power-off" => Some(false),
+            _ => None,
+        });
+        let title = match powering {
+            Some(true) => "DigitalOcean · powering on…",
+            Some(false) => "DigitalOcean · shutting down…",
+            None if off => "DigitalOcean · powered off (still billed)",
+            None => "DigitalOcean",
+        };
+        let power_label = match powering {
+            Some(true) => "Powering on…",
+            Some(false) => "Shutting down…",
+            None if off => "Power on",
+            None => "Power off",
+        };
         let idle = c.idle_since.map(|t| (chrono::Utc::now() - t).num_minutes()).filter(|min| *min >= 30).map(|min| format!(" · idle {}", crate::util::short_duration(min as u64 * 60)));
         let detail = format!(
             "{} · {} · ${:.3}/h · ${:.2} so far{}",
@@ -255,7 +273,10 @@ impl Root {
             .gap(px(12.))
             .px(px(14.))
             .py(px(12.))
-            .child(kit::color_tile("cloud", 28.))
+            .child({
+                let (from, to) = format::machine_tile(m);
+                kit::tile(format::machine_icon(m), from, to, 28.)
+            })
             .child(
                 div()
                     .flex()
@@ -263,11 +284,11 @@ impl Root {
                     .flex_1()
                     .min_w(px(0.))
                     .gap(px(2.))
-                    .child(div().text_size(px(13.)).child(if off { "DigitalOcean · powered off (still billed)" } else { "DigitalOcean" }))
+                    .child(div().text_size(px(13.)).child(title))
                     .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(detail)),
             )
-            .child(Button::new("m-cloud-power", if off { "Power on" } else { "Power off" }).icon("power").on_click(cx.listener(move |this, _, _, cx| this.cloud_power(&mid, off, cx))))
-            .child(Button::new("m-cloud-destroy", "Destroy…").style(ButtonStyle::Danger).on_click(cx.listener(move |this, _, window, cx| this.confirm_remove_machine(&machine, window, cx))))
+            .child(Button::new("m-cloud-power", power_label).icon("power").disabled(busy).on_click(cx.listener(move |this, _, _, cx| this.cloud_power(&mid, off, cx))))
+            .child(Button::new("m-cloud-destroy", "Destroy…").style(ButtonStyle::Danger).disabled(busy).on_click(cx.listener(move |this, _, window, cx| this.confirm_remove_machine(&machine, window, cx))))
     }
 
     fn machine_runner_row(&self, theme: &Theme, s: &Snapshot, r: &Runner, i: usize, busy: bool, cx: &mut Context<Self>) -> AnyElement {

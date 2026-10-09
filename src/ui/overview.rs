@@ -607,6 +607,7 @@ fn meter_row(theme: &Theme, label: &'static str, value: Option<String>, fraction
 fn status_word(m: &Machine) -> &'static str {
     match m.status.as_str() {
         "online" => "online",
+        "offline" if format::is_powered_off(m) => "powered off",
         "offline" if format::is_just_offline(m) => "offline",
         "offline" => "can't connect",
         "manual" => "no host",

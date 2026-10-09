@@ -35,6 +35,8 @@ pub struct Inputs<'a> {
     pub tailnet: &'a HashMap<String, TailnetDevice>,
     /// Tailscale on this computer, when it's installed.
     pub tailscale: Option<&'a TailscaleStatus>,
+    /// Cloud machines' power as the provider last reported it, by machine id.
+    pub droplets: &'a HashMap<String, String>,
 }
 
 pub fn build(input: &Inputs) -> Snapshot {
@@ -121,9 +123,14 @@ pub fn build(input: &Inputs) -> Snapshot {
             Some(_) => "offline",
         };
         let device = input.tailnet.get(&spec.id);
-        let unreachable = probe
-            .filter(|p| !p.ok && spec.is_checkable())
-            .map(|p| explain_unreachable(spec, p, input.settings.check_interval_minutes > 0, device, input.tailscale));
+        let powered_off = spec.cloud.is_some() && input.droplets.get(&spec.id).is_some_and(|s| s == "off");
+        let unreachable = probe.filter(|p| !p.ok && spec.is_checkable()).map(|p| {
+            if powered_off {
+                powered_off_reason(spec, p)
+            } else {
+                explain_unreachable(spec, p, input.settings.check_interval_minutes > 0, device, input.tailscale)
+            }
+        });
         machine_diagnostics(&mut diagnostics, spec, probe, unreachable.as_ref());
         diagnostics.sort_by_key(|d| level_rank(&d.level));
 
@@ -168,6 +175,15 @@ pub fn build(input: &Inputs) -> Snapshot {
                     created_at,
                     cost_so_far: (hours.ceil() * c.price_hourly * 100.).round() / 100.,
                     idle_since: crate::ops::cloud::idle_since(&spec.id),
+                    power: if status == "online" {
+                        Some("on".into())
+                    } else {
+                        input.droplets.get(&spec.id).map(|s| match s.as_str() {
+                            "active" => "on".into(),
+                            "new" => "starting".into(),
+                            other => other.to_string(),
+                        })
+                    },
                 }
             }),
         });
@@ -324,6 +340,7 @@ fn to_probe(p: &ProbeResult) -> Probe {
         arch: p.arch.clone(),
         os_version: p.os_version.clone(),
         form_factor: p.form_factor.clone(),
+        desktop: p.desktop,
         cores: p.cores,
         cpu_pct: p.cpu_pct,
         mem_total: p.mem_total,
@@ -364,6 +381,18 @@ pub fn unreachable_kind(error: &str) -> &'static str {
         "refused"
     } else {
         "error"
+    }
+}
+
+/// A cloud machine the user (or the provider) powered off: nothing's wrong.
+fn powered_off_reason(spec: &MachineSpec, p: &ProbeResult) -> Unreachable {
+    Unreachable {
+        kind: "powered-off".into(),
+        title: format!("{} is powered off", spec.name),
+        detail: "It's still billed while it's off. Power it on to use it, or destroy it to stop the charges.".into(),
+        hint: None,
+        last_seen_at: p.last_seen_at,
+        error: p.error.clone().unwrap_or_default(),
     }
 }
 
@@ -561,7 +590,12 @@ fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Opt
     let Some(p) = probe else { return };
     if !p.ok {
         if let Some(u) = unreachable {
-            let level = if comes_back_by_itself(&u.kind) { "warning" } else { "error" };
+            let level = match u.kind.as_str() {
+                // Off on purpose: worth knowing, nothing to fix.
+                "powered-off" => "info",
+                k if comes_back_by_itself(k) => "warning",
+                _ => "error",
+            };
             out.push(diag(level, "unreachable", format!("{}. {}", u.title, u.detail), u.hint.clone(), None));
         }
         return;
@@ -961,6 +995,7 @@ mod tests {
             token_source: "gh".into(),
             tailnet: &HashMap::new(),
             tailscale: None,
+            droplets: &HashMap::new(),
         })
     }
 

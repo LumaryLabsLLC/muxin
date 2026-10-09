@@ -73,6 +73,8 @@ struct State {
     tailnet: HashMap<String, super::model::TailnetDevice>,
     /// Tailscale on this computer; None until read, or when it isn't installed.
     tailscale: Option<super::model::TailscaleStatus>,
+    /// Cloud machines' power as the provider last reported it ("active", "off", ...).
+    droplets: HashMap<String, String>,
     /// Stop flags of the operations that can be cancelled.
     cancels: HashMap<u64, Arc<std::sync::atomic::AtomicBool>>,
 }
@@ -143,6 +145,7 @@ impl Engine {
             checkouts: HashMap::new(),
             tailnet: persisted.tailnet,
             tailscale: None,
+            droplets: persisted.droplets,
             cancels: HashMap::new(),
         };
         let (tx, _) = watch::channel(Arc::new(Snapshot::default()));
@@ -485,6 +488,16 @@ impl Engine {
             }
         }
         self.publish(&mut st);
+    }
+
+    /// Records a cloud machine's power as the provider reports it ("active", "off", ...).
+    pub(crate) fn set_droplet_status(&self, machine_id: &str, status: &str) {
+        let mut st = self.state.lock().unwrap();
+        if st.droplets.get(machine_id).map(String::as_str) != Some(status) {
+            st.droplets.insert(machine_id.to_string(), status.to_string());
+            self.save_state(&mut st);
+            self.publish(&mut st);
+        }
     }
 
     /// True while another operation is changing this machine.
@@ -873,13 +886,21 @@ impl Engine {
                         Some(w) => w.probe(&spec).await,
                         None => probe::probe(&spec, shell).await,
                     };
-                    (spec.id, result)
+                    (spec.id, spec.cloud.as_ref().map(|c| c.id), result)
                 }
             })
             .collect();
 
-        while let Some((id, result)) = pending.next().await {
+        while let Some((id, droplet, result)) = pending.next().await {
             let reachable = result.ok;
+            if let Some(droplet) = droplet.filter(|_| self.demo.is_none()) {
+                if reachable {
+                    self.set_droplet_status(&id, "active");
+                } else {
+                    let (me, id) = (self.clone(), id.clone());
+                    self.rt.spawn(async move { me.refresh_droplet_status(&id, droplet).await });
+                }
+            }
             let mut st = self.state.lock().unwrap();
             st.checking.remove(&id);
             let result = result.after(st.probes.get(&id));
@@ -935,6 +956,7 @@ impl Engine {
         let persisted = PersistedState {
             probes: st.probes.clone(),
             tailnet: st.tailnet.clone(),
+            droplets: st.droplets.clone(),
             check_started_at: st.check_started_at,
             check_finished_at: st.check_finished_at,
         };
@@ -1036,6 +1058,7 @@ impl Engine {
             token_source: st.token_source.clone(),
             tailnet: &st.tailnet,
             tailscale: st.tailscale.as_ref(),
+            droplets: &st.droplets,
         });
         snapshot.version = st.version;
         snapshot.operations = st.operations.iter().cloned().collect();

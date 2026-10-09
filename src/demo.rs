@@ -316,6 +316,7 @@ impl World {
             arch: Some(hw.arch.into()),
             os_version: Some(hw.os_version.into()),
             form_factor: Some(if hw.id.contains("laptop") || hw.id.contains("macbook") { "laptop" } else { "desktop" }.into()),
+            desktop: Some(hw.os != "windows"),
             cores: Some(hw.cores),
             cpu_pct: Some((cpu * 10.0).round() / 10.0),
             mem_total: Some(mem_total),

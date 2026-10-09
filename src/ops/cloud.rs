@@ -285,23 +285,76 @@ impl Engine {
     pub fn cloud_power(self: &Arc<Self>, machine_id: &str, on: bool) -> Result<u64, String> {
         let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in the fleet anymore.")?;
         let cloud = spec.cloud.clone().ok_or_else(|| format!("{} isn't a cloud machine Muxen created.", spec.name))?;
+        if self.machine_busy(&spec.id) {
+            return Err("An operation is still running on this machine. Wait for it to finish.".into());
+        }
         let title = format!("{} {}", if on { "Power on" } else { "Power off" }, spec.name);
         let op = self.begin_op(if on { "cloud-power-on" } else { "cloud-power-off" }, title, Some(spec.id.clone()), None);
         let me = self.clone();
-        let id = spec.id.clone();
         self.runtime().spawn(async move {
-            let result = async {
-                let client = me.do_client().await?;
-                client.droplet_action(cloud.id, if on { "power_on" } else { "shutdown" }).await?;
-                me.op_log(op, if on { "✓ Powering on" } else { "✓ Shutting down (still billed while off)" });
-                tokio::time::sleep(Duration::from_secs(20)).await;
-                me.trigger_check(Some(id));
-                Ok(())
-            }
-            .await;
+            let result = me.run_cloud_power(op, &spec, cloud.id, on).await;
             super::finish(&me, op, result);
         });
         Ok(op)
+    }
+
+    /// Asks DigitalOcean whether a droplet that didn't answer a check is
+    /// powered off (best effort: not signed in, or a blip, changes nothing).
+    pub(crate) async fn refresh_droplet_status(self: &Arc<Self>, machine_id: &str, droplet: u64) {
+        let Ok(client) = self.do_client().await else { return };
+        if let Ok(d) = client.droplet(droplet).await {
+            self.set_droplet_status(machine_id, &d.status);
+        }
+    }
+
+    /// Powers the droplet on or off and waits until it really is: on means
+    /// answering ssh again, off means DigitalOcean reports it off.
+    async fn run_cloud_power(self: &Arc<Self>, op: u64, spec: &MachineSpec, droplet: u64, on: bool) -> Result<(), String> {
+        let client = self.do_client().await?;
+        let want = if on { "active" } else { "off" };
+        if client.droplet(droplet).await?.status == want {
+            self.set_droplet_status(&spec.id, want);
+            self.op_log(op, if on { "It's already on." } else { "It's already off." });
+        } else {
+            self.op_log(op, if on { "▸ Powering on" } else { "▸ Shutting down" });
+            client.droplet_action(droplet, if on { "power_on" } else { "shutdown" }).await?;
+            let started = std::time::Instant::now();
+            let mut forced = false;
+            loop {
+                tokio::time::sleep(Duration::from_secs(4)).await;
+                // A blip while polling isn't a failure; the next poll tries again.
+                if client.droplet(droplet).await.is_ok_and(|d| d.status == want) {
+                    self.set_droplet_status(&spec.id, want);
+                    break;
+                }
+                let waited = started.elapsed();
+                if !on && !forced && waited > Duration::from_secs(60) {
+                    self.op_log(op, "! It didn't shut down within a minute; turning it off");
+                    client.droplet_action(droplet, "power_off").await?;
+                    forced = true;
+                }
+                if waited > Duration::from_secs(180) {
+                    return Err(format!("DigitalOcean didn't report it {} within 3 minutes.", if on { "on" } else { "off" }));
+                }
+            }
+        }
+        if on {
+            self.op_log(op, "▸ Waiting for it to answer ssh");
+            let started = std::time::Instant::now();
+            loop {
+                let ok = tokio::process::Command::new("ssh").args(crate::probe::ssh_args(spec)).arg("true").output().await.is_ok_and(|o| o.status.success());
+                if ok {
+                    break;
+                }
+                if started.elapsed() > Duration::from_secs(120) {
+                    return Err("It's on, but hasn't answered ssh within 2 minutes.".into());
+                }
+                tokio::time::sleep(Duration::from_secs(4)).await;
+            }
+        }
+        self.run_check(Some(vec![spec.id.clone()])).await;
+        self.op_log(op, if on { format!("✓ {} is on", spec.name) } else { format!("✓ {} is off (DigitalOcean still bills for it until it's destroyed)", spec.name) });
+        Ok(())
     }
 
     /// Watches cloud machines for idleness (every 10 minutes) and does what

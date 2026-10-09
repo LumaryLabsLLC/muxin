@@ -3597,6 +3597,7 @@ dependencies = [
  "reqwest",
  "ring",
  "rustls",
+ "security-framework",
  "serde",
  "serde_json",
  "smallvec",

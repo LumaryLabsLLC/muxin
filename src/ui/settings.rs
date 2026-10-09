@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, App, Context, Entity, Focusable, SharedString, Subscription, Task, Window, div, prelude::*, px};
 
+mod cloud;
+
+pub(super) use cloud::regular_size;
+
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, card, icon, mono, section_title};
 use super::theme::{self as theme_mod, ActiveTheme, Appearance, mono_font, Mode, Theme};
@@ -12,6 +16,44 @@ use super::themes::{PALETTES, Palette};
 use crate::config::Settings;
 use crate::fleet::Engine;
 use crate::fleet::model::Snapshot;
+
+/// The groups Settings is split into, one tab each.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SettingsTab {
+    #[default]
+    General,
+    Appearance,
+    Terminal,
+    GitHub,
+    Cloud,
+    Keyboard,
+}
+
+impl SettingsTab {
+    const ALL: [SettingsTab; 6] = [SettingsTab::General, SettingsTab::Appearance, SettingsTab::Terminal, SettingsTab::GitHub, SettingsTab::Cloud, SettingsTab::Keyboard];
+
+    fn label(self) -> &'static str {
+        match self {
+            SettingsTab::General => "General",
+            SettingsTab::Appearance => "Appearance",
+            SettingsTab::Terminal => "Terminal",
+            SettingsTab::GitHub => "GitHub",
+            SettingsTab::Cloud => "Cloud",
+            SettingsTab::Keyboard => "Keyboard",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            SettingsTab::General => "sliders-horizontal",
+            SettingsTab::Appearance => "palette",
+            SettingsTab::Terminal => "terminal",
+            SettingsTab::GitHub => "agent-github",
+            SettingsTab::Cloud => "cloud",
+            SettingsTab::Keyboard => "keyboard",
+        }
+    }
+}
 
 pub struct SettingsPage {
     engine: Arc<Engine>,
@@ -27,6 +69,8 @@ pub struct SettingsPage {
     /// The login in use: its permissions and organizations (to offer them).
     access: Option<crate::api::AccountsOut>,
     pub scroll: gpui::ScrollHandle,
+    tab: SettingsTab,
+    cloud: cloud::CloudState,
     /// A shortcut waiting for its new keys, and what catches them before
     /// they run anything.
     recording: Option<&'static str>,
@@ -78,6 +122,8 @@ impl SettingsPage {
             }
         });
 
+        let (cloud_state, cloud_subs) = cloud::CloudState::new(window, cx);
+        subs.extend(cloud_subs);
         let mut page = SettingsPage {
             engine,
             snapshot,
@@ -91,6 +137,8 @@ impl SettingsPage {
             saved_at: None,
             access: None,
             scroll: gpui::ScrollHandle::new(),
+            tab: SettingsTab::default(),
+            cloud: cloud_state,
             recording: None,
             catch_keys: None,
             shortcut_note: None,
@@ -106,6 +154,21 @@ impl SettingsPage {
     /// Puts the cursor in the field for watching an organization.
     pub fn focus_add(&self, window: &mut Window, cx: &App) {
         window.focus(&self.add.focus_handle(cx));
+    }
+
+    /// Shows a tab, from its top.
+    pub fn show_tab(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
+        if self.tab != tab {
+            self.tab = tab;
+            self.scroll.set_offset(gpui::point(px(0.), px(0.)));
+            if tab != SettingsTab::Keyboard {
+                self.stop_recording(cx);
+            }
+            if tab == SettingsTab::Cloud {
+                self.load_cloud(cx);
+            }
+            cx.notify();
+        }
     }
 
     /// Reads the login's permissions and organizations (fresh from the GitHub
@@ -365,7 +428,7 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "GitHub", None))
+            .child(section_title(theme, "Watching", None))
             .child(
                 div()
                     .w_full()
@@ -430,7 +493,8 @@ impl SettingsPage {
             })
     }
 
-    fn checks_section(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    /// How often to sync GitHub (`github`) or check the machines (otherwise).
+    fn checks_section(&self, theme: &Theme, github: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let row = |label: &'static str, input: Entity<TextInput>, unit: &'static str, help: &'static str, first: bool| {
             div()
                 .flex()
@@ -451,43 +515,65 @@ impl SettingsPage {
                 .child(div().w(px(80.)).flex_none().flex().flex_col().child(input))
                 .child(div().w(px(60.)).text_size(px(12.)).text_color(theme.text_muted).child(unit))
         };
+        let rows = if github {
+            card(theme)
+                .child(row("Sync GitHub every", self.poll.clone(), "seconds", "Asks GitHub for runner and job status. Unchanged answers are free.", true))
+                .child(row("Scan recent repos for jobs", self.scan.clone(), "per org", "The most recently pushed repositories are checked for jobs.", false))
+        } else {
+            card(theme).child(row("Check machines every", self.interval.clone(), "minutes", "A read-only check over ssh. 0: only when you ask.", true))
+        };
         div()
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Polling", None))
-            .child(
-                card(theme)
-                    .child(row("Sync GitHub every", self.poll.clone(), "seconds", "Unchanged responses don't count against the API rate limit.", true))
-                    .child(row(
-                        "Scan recent repos for jobs",
-                        self.scan.clone(),
-                        "per org",
-                        "The most recently pushed repositories are checked for queued and running jobs.",
-                        false,
-                    ))
-                    .child(row(
-                        "Check machines every",
-                        self.interval.clone(),
-                        "minutes",
-                        "Runs the read-only machine check over SSH. 0 means only when you ask.",
-                        false,
-                    )),
-            )
+            .child(section_title(theme, if github { "Syncing" } else { "Machine checks" }, None))
+            .child(rows)
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(Button::new("save-intervals", "Save").style(ButtonStyle::Primary).on_click(cx.listener(|this, _, _, cx| this.save_intervals(cx))))
+                    .child(
+                        Button::new(if github { "save-sync" } else { "save-checks" }, "Save")
+                            .style(ButtonStyle::Primary)
+                            .on_click(cx.listener(|this, _, _, cx| this.save_intervals(cx))),
+                    )
                     .when(self.saved_at.is_some(), |d| d.child(div().text_size(px(12.)).text_color(theme.success).child("Saved")))
                     .children(self.save_error.clone().map(|e| div().text_size(px(12.)).text_color(theme.error).child(e))),
             )
     }
 
     /// Font size and line height for agent session terminals, with a preview.
-    fn terminal_section(&self, theme: &Theme, family: SharedString, cx: &mut Context<Self>) -> impl IntoElement {
+    fn terminal_section(&self, theme: &Theme, family: SharedString, fonts: Vec<SharedString>, cx: &mut Context<Self>) -> impl IntoElement {
         let a = cx.global::<Appearance>().clone();
+        // Each installed monospace font, in itself.
+        let font_chips: Vec<AnyElement> = fonts
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let selected = f == family;
+                let pick = f.to_string();
+                div()
+                    .id(("term-font", i))
+                    .h(px(28.))
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .cursor_pointer()
+                    .border_color(if selected { theme.accent } else { theme.border_variant })
+                    .bg(if selected { theme.accent.opacity(0.10) } else { theme.element })
+                    .when(!selected, |d| d.hover(|st| st.bg(theme.element_hover)))
+                    .font_family(f.clone())
+                    .text_size(px(12.5))
+                    .text_color(if selected { theme.text } else { theme.text_muted })
+                    .child(f)
+                    .on_click(cx.listener(move |_, _, _, cx| theme_mod::update_terminal(cx, |a| a.terminal_font = pick.clone())))
+                    .into_any_element()
+            })
+            .collect();
         let (size, line_height) = (a.terminal_font_size, a.terminal_line_height);
         let stepper = |id: &'static str, value: String, step: fn(&mut Appearance, f32), cx: &mut Context<Self>| {
             div()
@@ -537,9 +623,13 @@ impl SettingsPage {
             .child(div().w(px(8.)))
             .child(stepper("term-line", format!("{line_height:.2}"), |a, d| a.terminal_line_height += d * 0.05, cx))
             .into_any_element();
-        let reset = (size != theme_mod::TERMINAL_FONT_SIZE || (line_height - theme_mod::TERMINAL_LINE_HEIGHT).abs() > 0.01).then(|| {
+        let changed = size != theme_mod::TERMINAL_FONT_SIZE
+            || (line_height - theme_mod::TERMINAL_LINE_HEIGHT).abs() > 0.01
+            || a.terminal_font != super::terminal::DEFAULT_FONT;
+        let reset = changed.then(|| {
             Button::new("term-reset", "Reset").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| {
                 theme_mod::update_terminal(cx, |a| {
+                    a.terminal_font = super::terminal::DEFAULT_FONT.into();
                     a.terminal_font_size = theme_mod::TERMINAL_FONT_SIZE;
                     a.terminal_line_height = theme_mod::TERMINAL_LINE_HEIGHT;
                 })
@@ -565,12 +655,20 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(12.))
-            .child(div().flex().items_center().child(section_title(theme, "Terminal", None)).child(div().flex_1()).children(reset))
+            .child(div().flex().items_center().child(section_title(theme, "Text and cursor", None)).child(div().flex_1()).children(reset))
             .child(
                 card(theme)
                     .px(px(14.))
                     .py(px(6.))
-                    .child(row("Font", div().font_family(mono_font()).text_size(px(12.5)).child(family).into_any_element(), None))
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap(px(12.))
+                            .py(px(8.))
+                            .child(div().w(px(110.)).flex_none().pt(px(6.)).text_size(px(12.5)).text_color(theme.text_muted).child("Font"))
+                            .child(div().flex_1().min_w(px(0.)).flex().flex_wrap().gap(px(6.)).children(font_chips)),
+                    )
                     .child(row("Text size", size_control, Some("⌘+ / ⌘− in a terminal")))
                     .child(row("Line height", presets, None))
                     .child(row(
@@ -644,7 +742,7 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(12.))
-            .child(section_title(theme, "Appearance", None))
+            .child(section_title(theme, "Theme", None))
             .child(
                 div()
                     .flex()
@@ -667,6 +765,48 @@ impl SettingsPage {
             .child(dark_grid)
             .child(kit::label(theme, "Light themes").text_size(px(12.)).text_color(theme.text_muted))
             .child(light_grid)
+            .child(kit::label(theme, "Icons").text_size(px(12.)).text_color(theme.text_muted))
+            .child(self.icon_styles(theme, &appearance, cx))
+    }
+
+    /// One card per icon style, each drawn in its own style.
+    fn icon_styles(&self, theme: &Theme, appearance: &Appearance, cx: &mut Context<Self>) -> impl IntoElement {
+        let chosen = kit::IconStyle::from_id(&appearance.icon_style);
+        let sample = [("gauge", kit::tiles::OVERVIEW), ("workflow", kit::tiles::JOBS), ("terminal", kit::tiles::WORKSPACES), ("laptop", kit::tiles::MACOS)];
+        let cards: Vec<AnyElement> = kit::IconStyle::ALL
+            .into_iter()
+            .map(|style| {
+                let look = kit::Look::new(style, theme);
+                let selected = style == chosen;
+                div()
+                    .id(SharedString::from(format!("icon-style-{}", style.id())))
+                    .w(px(118.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .p(px(10.))
+                    .rounded(px(9.))
+                    .border_1()
+                    .cursor_pointer()
+                    .border_color(if selected { theme.accent } else { theme.border_variant })
+                    .bg(if selected { theme.accent.opacity(0.08) } else { theme.surface })
+                    .when(!selected, |d| d.hover(|st| st.border_color(theme.border)))
+                    .child(div().flex().gap(px(6.)).children(sample.iter().map(|(name, (from, to))| kit::tile_in(look, name, *from, *to, 20.))))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .text_size(px(12.))
+                            .text_color(if selected { theme.text } else { theme.text_muted })
+                            .child(style.label())
+                            .when(selected, |d| d.child(icon("check", 12., theme.text_accent))),
+                    )
+                    .on_click(cx.listener(move |_, _, window, cx| theme_mod::update_appearance(window, cx, |a, _| a.icon_style = style.id().into())))
+                    .into_any_element()
+            })
+            .collect();
+        div().flex().flex_wrap().gap(px(10.)).children(cards)
     }
 
     /// Tailscale on this computer: whether it's on, and what Muxen uses it for.
@@ -764,13 +904,13 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Inventory", None))
+            .child(section_title(theme, "Fleet file", None))
             .child(
                 card(theme)
                     .p(px(14.))
                     .gap(px(10.))
                     .child(div().w_full().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(
-                        "Machines and the runners they should host live in fleet.toml. Muxen edits it when you add machines or install runners, and keeps your comments.",
+                        "Machines and the runners they should host live in config.toml. Muxen edits it when you add machines or install runners, and keeps your comments.",
                     ))
                     .child(
                         div()
@@ -790,31 +930,51 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let terminal_font = super::terminal::font_family(window);
-        div()
-            .id("settings-page")
-            .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .px(px(28.))
-            .pt(px(24.))
-            .pb(px(40.))
-            .child(
+        let tabs: Vec<AnyElement> = SettingsTab::ALL
+            .into_iter()
+            .map(|tab| {
+                let selected = self.tab == tab;
                 div()
-                    .w_full()
-                    .max_w(px(760.))
+                    .id(SharedString::from(format!("settings-tab-{}", tab.label())))
                     .flex()
-                    .flex_col()
-                    .gap(px(28.))
-                    .child(self.github_section(&theme, cx))
-                    .children(self.tailscale_section(&theme))
-                    .child(self.clipboard_section(&theme))
-                    .child(self.appearance_section(&theme, cx))
-                    .child(self.terminal_section(&theme, terminal_font, cx))
-                    .child(self.checks_section(&theme, cx))
-                    .child(self.inventory_section(&theme))
-                    .child(self.keyboard_section(&theme, cx)),
-            )
+                    .items_center()
+                    .gap(px(7.))
+                    .h(px(30.))
+                    .px(px(12.))
+                    .rounded(px(7.))
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .text_color(if selected { theme.text } else { theme.text_muted })
+                    .when(selected, |d| d.bg(theme.surface).border_1().border_color(theme.border).shadow_sm())
+                    .when(!selected, |d| d.hover(|st| st.text_color(theme.text)))
+                    .child(icon(tab.icon(), 14., if selected { theme.text } else { theme.text_placeholder }))
+                    .child(tab.label())
+                    .on_click(cx.listener(move |this, _, _, cx| this.show_tab(tab, cx)))
+                    .into_any_element()
+            })
+            .collect();
+        let bar = div().flex_none().px(px(28.)).pt(px(18.)).pb(px(14.)).border_b_1().border_color(theme.border_variant).child(
+            div().flex().w_full().max_w(px(760.)).gap(px(2.)).p(px(3.)).rounded(px(9.)).bg(theme.element).border_1().border_color(theme.border_variant).children(tabs),
+        );
+        let body = div().w_full().max_w(px(760.)).flex().flex_col().gap(px(28.));
+        let body = match self.tab {
+            SettingsTab::General => body
+                .child(self.clipboard_section(&theme))
+                .children(self.tailscale_section(&theme))
+                .child(self.checks_section(&theme, false, cx))
+                .child(self.inventory_section(&theme)),
+            SettingsTab::Appearance => body.child(self.appearance_section(&theme, cx)),
+            SettingsTab::Terminal => body.child(self.terminal_section(&theme, super::terminal::font_family(window), super::terminal::monospace_families(window), cx)),
+            SettingsTab::GitHub => body.child(self.github_section(&theme, cx)).child(self.checks_section(&theme, true, cx)),
+            SettingsTab::Cloud => body.child(self.cloud_section(&theme, cx)),
+            SettingsTab::Keyboard => body.child(self.keyboard_section(&theme, cx)),
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(bar)
+            .child(div().id("settings-page").flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.scroll).px(px(28.)).pt(px(22.)).pb(px(40.)).child(body))
     }
 }
 
@@ -902,7 +1062,7 @@ impl SettingsPage {
                 div()
                     .flex()
                     .items_center()
-                    .child(section_title(theme, "Keyboard", None))
+                    .child(section_title(theme, "Shortcuts", None))
                     .child(div().flex_1())
                     .when(any_changed, |d| {
                         d.child(Button::new("sc-reset-all", "Reset all").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, _, cx| this.reset_all_shortcuts(cx))))
@@ -1062,7 +1222,9 @@ fn swatch(theme: &Theme, p: &Palette, chosen: bool, showing: bool) -> gpui::Stat
     let bar = |w: f32, color: gpui::Hsla| div().w(px(w)).h(px(4.)).rounded_full().bg(color);
     div()
         .id(SharedString::from(format!("theme-{}", p.id)))
-        .w(px(164.))
+        // A quarter of the row: the grid fills the page's width.
+        .flex_1()
+        .min_w(px(0.))
         .flex()
         .flex_col()
         .gap(px(7.))
@@ -1147,7 +1309,11 @@ fn swatch_rows(swatches: Vec<AnyElement>) -> gpui::Div {
     let mut rows = Vec::new();
     let mut iter = swatches.into_iter().peekable();
     while iter.peek().is_some() {
-        let row: Vec<AnyElement> = iter.by_ref().take(4).collect();
+        let mut row: Vec<AnyElement> = iter.by_ref().take(4).collect();
+        // A short last row keeps the same column widths.
+        while row.len() < 4 {
+            row.push(div().flex_1().into_any_element());
+        }
         rows.push(div().flex().gap(px(12.)).children(row));
     }
     div().flex().flex_col().gap(px(14.)).children(rows)

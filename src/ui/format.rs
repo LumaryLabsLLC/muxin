@@ -171,11 +171,13 @@ fn short_os(v: &str) -> String {
 
 pub fn machine_icon(m: &Machine) -> &'static str {
     let name = m.name.to_ascii_lowercase();
+    let laptop = m.probe.as_ref().and_then(|p| p.form_factor.as_deref()) == Some("laptop");
     if name.contains("nas") || name.contains("storage") {
         "hard-drive"
-    } else if name.contains("laptop") || name.contains("macbook") || name.contains("book") {
+    } else if laptop || name.contains("laptop") || name.contains("macbook") || name.contains("book") {
         "laptop"
-    } else if m.platform.starts_with("windows") {
+    } else if m.platform.starts_with("windows") || m.platform.starts_with("darwin") {
+        // A Mac or PC on a desk; Linux boxes are mostly servers.
         "monitor"
     } else {
         "server"

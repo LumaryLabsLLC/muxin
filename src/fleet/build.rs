@@ -156,6 +156,20 @@ pub fn build(input: &Inputs) -> Snapshot {
             gh: None,
             unreachable,
             tailnet: device.cloned(),
+            cloud: spec.cloud.as_ref().map(|c| {
+                let created_at = DateTime::parse_from_rfc3339(&c.created_at).ok().map(|t| t.with_timezone(&Utc));
+                let hours = created_at.map(|t| (input.now - t).num_minutes().max(0) as f64 / 60.).unwrap_or(0.);
+                crate::fleet::model::CloudInfo {
+                    provider: c.provider.clone(),
+                    id: c.id,
+                    region: c.region.clone(),
+                    size: c.size.clone(),
+                    price_hourly: c.price_hourly,
+                    created_at,
+                    cost_so_far: (hours.ceil() * c.price_hourly * 100.).round() / 100.,
+                    idle_since: crate::ops::cloud::idle_since(&spec.id),
+                }
+            }),
         });
     }
 
@@ -309,6 +323,7 @@ fn to_probe(p: &ProbeResult) -> Probe {
         os: p.os.clone(),
         arch: p.arch.clone(),
         os_version: p.os_version.clone(),
+        form_factor: p.form_factor.clone(),
         cores: p.cores,
         cpu_pct: p.cpu_pct,
         mem_total: p.mem_total,
@@ -464,9 +479,9 @@ fn runner_diagnostics(
                 "runner-missing",
                 format!("{name} isn't installed here: no runner folder with that name was found."),
                 Some(if p.os.as_deref() == Some("windows") {
-                    "If it lives somewhere unusual, add its folder to runner_dirs in fleet.toml.".into()
+                    "If it lives somewhere unusual, add its folder to runner_dirs in config.toml.".into()
                 } else {
-                    "If it lives somewhere unusual, add its folder to runner_dirs in fleet.toml (globs work).".into()
+                    "If it lives somewhere unusual, add its folder to runner_dirs in config.toml (globs work).".into()
                 }),
                 rid,
             )),
@@ -538,7 +553,7 @@ fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Opt
             "info",
             "no-host",
             "No host configured, so this machine isn't checked.".into(),
-            Some("Set host in fleet.toml (an ssh destination, or \"local\").".into()),
+            Some("Set host in config.toml (an ssh destination, or \"local\").".into()),
             None,
         ));
         return;
@@ -681,7 +696,7 @@ fn attention(
         out.push(Attention {
             id: "inventory-error".into(),
             level: "error".into(),
-            title: "fleet.toml couldn't be read".into(),
+            title: "config.toml couldn't be read".into(),
             detail: format!("{err} Showing the last good inventory."),
             action: None,
         });
@@ -792,7 +807,7 @@ fn attention(
         let (title, detail) = if stuck.len() == 1 {
             (
                 format!("“{}” can't find a runner", first.name),
-                format!("Queued {waited} in {} — no online runner has the labels {labels}.", first.repo),
+                format!("Queued {waited} in {}. {}.", first.repo, first.waiting_reason(runners)),
             )
         } else {
             (
@@ -801,6 +816,25 @@ fn attention(
             )
         };
         out.push(Attention { id: "stuck-jobs".into(), level: "warning".into(), title, detail, action: action("View queue", "queue", None) });
+    }
+
+    // Cloud machines nobody has used for a while (Settings › Cloud says how long).
+    let idle_hours = input.settings.cloud.idle_hours;
+    if idle_hours > 0 && input.settings.cloud.idle_action != "off" {
+        for m in machines {
+            let Some(c) = &m.cloud else { continue };
+            let Some(since) = c.idle_since else { continue };
+            let hours = (input.now - since).num_minutes() / 60;
+            if hours >= idle_hours as i64 && m.status == "online" {
+                out.push(Attention {
+                    id: format!("cloud-idle-{}", m.id),
+                    level: "info".into(),
+                    title: format!("{} has been idle for {hours}h", m.name),
+                    detail: format!("It costs ${:.3} an hour while it exists. Destroy it from its page when you're done.", c.price_hourly),
+                    action: action("View machine", "machine", Some(m.id.clone())),
+                });
+            }
+        }
     }
 
     for m in machines {
@@ -821,9 +855,9 @@ fn attention(
             id: "unassigned".into(),
             level: "info".into(),
             title: if unassigned == 1 {
-                format!("{} isn't in fleet.toml", names[0])
+                format!("{} isn't in config.toml", names[0])
             } else {
-                format!("{unassigned} GitHub runners aren't in fleet.toml")
+                format!("{unassigned} GitHub runners aren't in config.toml")
             },
             detail: format!(
                 "{} {} registered on GitHub but no machine lists {}. Add {} to a [[machine]]'s runners to track {}.",
@@ -858,7 +892,7 @@ fn attention(
         out.push(Attention {
             id: format!("inventory-warning-{i}"),
             level: "info".into(),
-            title: "fleet.toml".into(),
+            title: "config.toml".into(),
             detail: w.clone(),
             action: None,
         });

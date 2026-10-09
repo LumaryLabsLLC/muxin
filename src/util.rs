@@ -85,3 +85,27 @@ mod tests {
         assert_eq!(short_duration(754), "12m");
     }
 }
+
+/// A random token from the system's secure generator (letters and digits),
+/// for values that must not be guessable (an OAuth `state`).
+pub fn random_token(len: usize) -> String {
+    use ring::rand::SecureRandom;
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let mut bytes = vec![0u8; len];
+    let _ = ring::rand::SystemRandom::new().fill(&mut bytes);
+    bytes.iter().map(|b| DIGITS[*b as usize % DIGITS.len()] as char).collect()
+}
+
+/// Opens a web page in the user's browser.
+pub fn open_url(url: &str) {
+    let mut cmd = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    let _ = cmd.arg(url).spawn();
+}

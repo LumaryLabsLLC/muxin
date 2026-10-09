@@ -207,7 +207,7 @@ async fn read() -> Option<Tailnet> {
     parse(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// ssh's way to a machine through Tailscale, for when the host in fleet.toml
+/// ssh's way to a machine through Tailscale, for when the host in config.toml
 /// (or ssh's config) only works at home, like a local-network address.
 #[derive(Default)]
 struct SshRoute {

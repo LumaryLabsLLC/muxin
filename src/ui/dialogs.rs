@@ -23,6 +23,9 @@ pub enum DialogEvent {
     OperationStarted(u64),
     MachineAdded(String),
     OpenSettings,
+    /// Open the New cloud machine dialog instead.
+    NewCloudMachine,
+    OpenCloudSettings,
     /// The root view runs it, so it can open the workspace when it's ready.
     CreateWorkspace(CreateWorkspace, WorkspaceIsolation),
     /// The root view starts it, sized to the page, and opens its terminal.
@@ -31,7 +34,7 @@ pub enum DialogEvent {
     StartInWorkspace(CreateWorkspace, StartSession),
 }
 
-fn frame(theme: &Theme, title: impl Into<SharedString>, intro: Option<SharedString>) -> gpui::Div {
+pub(super) fn frame(theme: &Theme, title: impl Into<SharedString>, intro: Option<SharedString>) -> gpui::Div {
     div()
         .w(px(500.))
         .flex()
@@ -48,7 +51,7 @@ fn frame(theme: &Theme, title: impl Into<SharedString>, intro: Option<SharedStri
         .children(intro.map(|t| div().text_size(px(12.5)).text_color(theme.text_muted).child(t)))
 }
 
-fn field(theme: &Theme, name: &'static str, input: impl IntoElement, help: Option<&'static str>) -> impl IntoElement {
+pub(super) fn field(theme: &Theme, name: &'static str, input: impl IntoElement, help: Option<&'static str>) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -58,7 +61,7 @@ fn field(theme: &Theme, name: &'static str, input: impl IntoElement, help: Optio
         .children(help.map(|h| div().text_size(px(11.5)).text_color(theme.text_placeholder).child(h)))
 }
 
-fn error_line(theme: &Theme, error: &Option<String>) -> Option<impl IntoElement> {
+pub(super) fn error_line(theme: &Theme, error: &Option<String>) -> Option<impl IntoElement> {
     error.as_ref().map(|e| {
         div()
             .flex()
@@ -74,7 +77,7 @@ fn error_line(theme: &Theme, error: &Option<String>) -> Option<impl IntoElement>
     })
 }
 
-fn footer(children: Vec<AnyElement>) -> impl IntoElement {
+pub(super) fn footer(children: Vec<AnyElement>) -> impl IntoElement {
     div().flex().justify_end().gap(px(8.)).pt(px(4.)).children(children)
 }
 
@@ -248,6 +251,8 @@ impl Render for AddMachineDialog {
         }))
         .children(error_line(&theme, &self.error))
         .child(footer(vec![
+            Button::new("am-cloud", "New cloud machine…").style(ButtonStyle::Ghost).icon("cloud").on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::NewCloudMachine))).into_any_element(),
+            div().flex_1().into_any_element(),
             Button::new("am-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
             Button::new("am-add", "Add machine").style(ButtonStyle::Primary).key_hint("↵").on_click(cx.listener(|this, _, _, cx| this.submit(cx))).into_any_element(),
         ]))
@@ -304,6 +309,11 @@ enum ModeChoice {
 }
 
 impl InstallDialog {
+    /// Fills in the extra labels ("gpu, cuda").
+    pub fn set_labels(&self, labels: String, cx: &mut Context<Self>) {
+        self.labels.update(cx, |i, cx| i.set_text(labels, cx));
+    }
+
     pub fn new(engine: Arc<Engine>, snapshot: Arc<Snapshot>, machine_id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = engine.settings();
         let mut scopes: Vec<String> = settings.github.orgs.iter().chain(settings.github.repos.iter()).cloned().collect();
@@ -1300,7 +1310,7 @@ impl NewSessionDialog {
 }
 
 /// The window height a dialog's title, intro, buttons and margins take.
-const MODAL_CHROME: f32 = 300.;
+pub(super) const MODAL_CHROME: f32 = 300.;
 
 /// Machines that can run sessions: any with a host (or this computer).
 fn session_machines(s: &Snapshot) -> Vec<&crate::fleet::model::Machine> {

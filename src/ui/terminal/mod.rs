@@ -33,7 +33,7 @@ use gpui::{
 use super::theme::{self as theme_mod, ActiveTheme, Appearance};
 use colors::Palette;
 
-/// Font size and line height, from the user's settings (ui.json).
+/// Font size and line height, from the user's settings (config.toml).
 #[derive(Clone, Copy)]
 pub struct Metrics {
     pub size: f32,
@@ -80,6 +80,8 @@ pub fn bind_keys(cx: &mut App) {
 pub fn font_family(window: &Window) -> gpui::SharedString {
     render::family(window)
 }
+
+pub use render::{DEFAULT_FONT, monospace_families, set_font};
 
 /// Hands terminal events from the PTY thread to the view.
 #[derive(Clone)]

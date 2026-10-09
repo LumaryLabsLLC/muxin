@@ -15,18 +15,176 @@ pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
     svg().path(SharedString::from(format!("icons/{name}.svg"))).size(px(size)).flex_none().text_color(color)
 }
 
-/// A colorful rounded tile with a white glyph, in the spirit of the app icon
-/// (and macOS System Settings). `from`/`to` are 0xRRGGBB gradient stops.
+/// How icons look across the app (Settings › Appearance › Icons). Each style
+/// draws the same icons from its own set: on a solid tile in white, on a
+/// faint tile in color, or on their own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum IconStyle {
+    /// Solid tile, white filled glyph (Phosphor).
+    Tiles,
+    /// Faint tile, colored two-tone glyph (Solar).
+    Soft,
+    /// No tile, colored two-tone glyph (Solar).
+    Duotone,
+    /// Solid tile, white rounded glyph (MingCute).
+    Rounded,
+    /// Faint tile, colored filled glyph (Fluent).
+    Fluent,
+    /// No tile, gray line glyph (Hugeicons); no colored icons anywhere.
+    #[default]
+    Minimal,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Backdrop {
+    Solid,
+    Faint,
+    None,
+}
+
+impl IconStyle {
+    pub const ALL: [IconStyle; 6] = [IconStyle::Minimal, IconStyle::Tiles, IconStyle::Soft, IconStyle::Duotone, IconStyle::Rounded, IconStyle::Fluent];
+
+    /// As saved in config.toml.
+    pub fn id(self) -> &'static str {
+        match self {
+            IconStyle::Tiles => "tiles",
+            IconStyle::Soft => "soft",
+            IconStyle::Duotone => "duotone",
+            IconStyle::Rounded => "rounded",
+            IconStyle::Fluent => "fluent",
+            IconStyle::Minimal => "minimal",
+        }
+    }
+
+    pub fn from_id(id: &str) -> IconStyle {
+        IconStyle::ALL.into_iter().find(|s| s.id() == id).unwrap_or_default()
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            IconStyle::Tiles => "Tiles",
+            IconStyle::Soft => "Soft",
+            IconStyle::Duotone => "Duotone",
+            IconStyle::Rounded => "Rounded",
+            IconStyle::Fluent => "Fluent",
+            IconStyle::Minimal => "Minimal",
+        }
+    }
+
+    /// The prefix of its glyph files (assets/icons/<prefix>-<name>.svg).
+    fn prefix(self) -> &'static str {
+        match self {
+            IconStyle::Tiles => "pf",
+            IconStyle::Soft | IconStyle::Duotone => "so",
+            IconStyle::Rounded => "mc",
+            IconStyle::Fluent => "fl",
+            IconStyle::Minimal => "hg",
+        }
+    }
+
+    fn backdrop(self) -> Backdrop {
+        match self {
+            IconStyle::Tiles | IconStyle::Rounded => Backdrop::Solid,
+            IconStyle::Soft | IconStyle::Fluent => Backdrop::Faint,
+            IconStyle::Duotone | IconStyle::Minimal => Backdrop::None,
+        }
+    }
+
+    /// Icons have their own colors (all but Minimal).
+    pub fn colored(self) -> bool {
+        self != IconStyle::Minimal
+    }
+}
+
+/// The style in use, with the theme colors it draws with.
+#[derive(Clone, Copy)]
+pub struct Look {
+    pub style: IconStyle,
+    text: Hsla,
+    muted: Hsla,
+    dark: bool,
+}
+
+impl Look {
+    pub fn new(style: IconStyle, theme: &Theme) -> Look {
+        Look { style, text: theme.text, muted: theme.text_muted, dark: theme.canvas.l < 0.5 }
+    }
+}
+
+static LOOK: std::sync::RwLock<Option<Look>> = std::sync::RwLock::new(None);
+
+/// Sets the style and colors icons are drawn with (when the theme or the
+/// preference changes; see theme::apply).
+pub fn set_look(look: Look) {
+    if let Ok(mut l) = LOOK.write() {
+        *l = Some(look);
+    }
+}
+
+fn look() -> Look {
+    LOOK.read().ok().and_then(|l| *l).unwrap_or(Look {
+        style: IconStyle::default(),
+        text: gpui::white(),
+        muted: gpui::hsla(0., 0., 0.62, 1.),
+        dark: true,
+    })
+}
+
+pub fn icon_style() -> IconStyle {
+    look().style
+}
+
+/// The icons each style has its own glyph for (assets/icons/<prefix>-<name>.svg).
+const STYLED: &[&str] = &[
+    "gauge", "workflow", "terminal", "activity", "server", "laptop", "monitor", "hard-drive", "folder", "folder-open", "file", "copy",
+    "refresh-cw", "rotate-ccw", "play", "square", "trash-2", "power", "unplug", "plug", "zap", "external-link", "git-branch", "arrow-up",
+    "box", "layers", "lock", "info", "inbox", "clock", "bot", "scroll-text", "circle-check", "circle-x", "triangle-alert", "circle-alert",
+    "star", "message-square", "settings", "search", "cpu", "memory-stick", "book-open", "network", "plus", "x", "check", "agent-github",
+];
+
+/// The glyph a style draws for an icon; logos and others are used as they are.
+fn glyph(style: IconStyle, name: &str) -> String {
+    let name = match name {
+        "square-terminal" => "terminal",
+        "star-filled" => "star",
+        other => other,
+    };
+    if STYLED.contains(&name) { format!("{}-{name}", style.prefix()) } else { name.to_string() }
+}
+
+/// An icon on its tile, in the style in use. `from`/`to` are its color pair
+/// (0xRRGGBB, see `tiles` and `icon_colors`); `size` is the tile's.
 pub fn tile(icon_name: &str, from: u32, to: u32, size: f32) -> Div {
-    div()
-        .flex_none()
-        .size(px(size))
-        .rounded(px(size * 0.27))
-        .bg(gpui::linear_gradient(160., gpui::linear_color_stop(gpui::rgb(from), 0.), gpui::linear_color_stop(gpui::rgb(to), 1.)))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(icon(icon_name, size * 0.6, gpui::white()))
+    tile_in(look(), icon_name, from, to, size)
+}
+
+/// `tile`, in a given look (Settings shows each style this way).
+pub fn tile_in(look: Look, icon_name: &str, from: u32, to: u32, size: f32) -> Div {
+    let glyph = glyph(look.style, icon_name);
+    // In color on the page, a pair's lighter color reads on dark themes and
+    // its deeper one on light themes; near-black brand colors use the text color.
+    let tone = if look.dark { from } else { to };
+    let tone: Hsla = if luminance(tone) < 0.22 { look.text } else { gpui::rgb(tone).into() };
+    let base: Hsla = gpui::rgb(mix(from, to)).into();
+    let el = div().flex_none().size(px(size)).flex().items_center().justify_center();
+    match look.style.backdrop() {
+        Backdrop::Solid => el.rounded(px(size * 0.27)).bg(base).child(icon(&glyph, size * 0.58, gpui::white())),
+        Backdrop::Faint => el.rounded(px(size * 0.27)).bg(base.opacity(0.2)).child(icon(&glyph, size * 0.62, tone)),
+        Backdrop::None => el.child(icon(&glyph, size * 0.86, if look.style.colored() { tone } else { look.muted })),
+    }
+}
+
+/// The color halfway between two 0xRRGGBB colors.
+fn mix(a: u32, b: u32) -> u32 {
+    let ch = |shift: u32| (((a >> shift) & 0xff) + ((b >> shift) & 0xff)) / 2 << shift;
+    ch(16) | ch(8) | ch(0)
+}
+
+/// Relative brightness of a 0xRRGGBB color, 0 to 1.
+fn luminance(c: u32) -> f32 {
+    let ch = |shift: u32| ((c >> shift) & 0xff) as f32 / 255.;
+    0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0)
 }
 
 /// Tile colors per navigation destination.
@@ -57,7 +215,7 @@ pub fn icon_colors(name: &str) -> Option<(u32, u32)> {
         "plus" => (0xb69cff, 0x7a4ce8),
         "trash-2" | "circle-x" | "square" => (0xff8080, 0xdc3b33),
         "power" | "unplug" => (0xff8fb1, 0xd63c6e),
-        "external-link" | "info" | "inbox" | "message-square" | "arrow-up" | "arrow-down" => (0x6cb6ff, 0x2f6fe4),
+        "external-link" | "info" | "inbox" | "message-square" | "arrow-up" | "arrow-down" | "cloud" => (0x6cb6ff, 0x2f6fe4),
         "git-branch" | "git-merge" | "git-pull-request" | "git-pull-request-draft" | "workflow" | "list" | "scroll-text" => {
             (0xffa95c, 0xea6a2a)
         }
@@ -79,9 +237,11 @@ pub fn color_tile(name: &str, size: f32) -> Div {
 }
 
 /// An icon's own color, readable on this theme: the lighter stop on dark
-/// themes, the deeper one on light themes. Logos keep the text color.
+/// themes, the deeper one on light themes. Logos keep the text color, and
+/// the Minimal style has none.
 pub fn tint(theme: &Theme, name: &str) -> Option<Hsla> {
-    if name.starts_with("agent-") {
+    // Minimal: no colored icons, only status colors.
+    if name.starts_with("agent-") || !icon_style().colored() {
         return None;
     }
     let (from, to) = icon_colors(name)?;
@@ -102,6 +262,7 @@ pub fn agent_look(agent: &str) -> (&'static str, (u32, u32)) {
         "opencode" => ("agent-opencode", (0x34363c, 0x16171a)),
         "gemini" => ("agent-gemini", (0x4796e3, 0x9a6fd0)),
         "amp" => ("agent-amp", (0xf2704f, 0xc9352b)),
+        "pi" => ("agent-pi", (0x5aa6cf, 0x3a7fa6)),
         "shell" => ("terminal", (0x8f95ff, 0x5057e0)),
         _ => ("bot", (0xa7aebb, 0x5f6673)),
     }
@@ -461,4 +622,16 @@ pub fn checkbox(
         )
         .child(text.into())
         .on_click(move |_, w, cx| on_toggle(&!checked, w, cx))
+}
+
+/// Items in explicit rows of `per_row`. GPUI measures a wrapping flex row
+/// inside an auto-width column as one long line, so what follows overlaps it.
+pub fn rows_of(items: Vec<gpui::AnyElement>, per_row: usize, gap: f32) -> Div {
+    let mut rows = Vec::new();
+    let mut iter = items.into_iter().peekable();
+    while iter.peek().is_some() {
+        let row: Vec<gpui::AnyElement> = iter.by_ref().take(per_row.max(1)).collect();
+        rows.push(div().flex().gap(px(gap)).children(row));
+    }
+    div().flex().flex_col().gap(px(gap)).children(rows)
 }

@@ -1,4 +1,4 @@
-//! Right-click menus for machines, sessions and repositories.
+//! Right-click menus for machines, runners, sessions and repositories.
 
 use gpui::{AnyElement, ClipboardItem, Context, FontWeight, MouseButton, Pixels, Point, Window, anchored, deferred, div, prelude::*, px};
 
@@ -6,9 +6,14 @@ use super::kit::{self, icon};
 use super::root::{Root, Route};
 use super::theme::Theme;
 use crate::fleet::sessions::{AGENTS, StartSession};
+use crate::ops::RunnerAction;
 
 pub enum MenuTarget {
     Machine(String),
+    /// A runner, by id ("beelink/beelink-01").
+    Runner(String),
+    /// A queued or running job, by GitHub id.
+    Job(u64),
     Session(String),
     /// A GitHub repository, "owner/name".
     Repo(String),
@@ -35,6 +40,14 @@ enum Action {
     Check(String),
     InstallRunner(String),
     Remove(String),
+    Runner(String, RunnerAction),
+    RemoveRunner(String),
+    FavoriteMachine(String, bool),
+    CloudPower(String, bool),
+    ShowRunner(String),
+    /// Install a runner with these labels on this machine.
+    InstallWith(String, Vec<String>),
+    CancelRun(u64),
     CopyAttach(String),
     Restart(String),
     End(String),
@@ -69,7 +82,7 @@ impl Root {
         cx.notify();
     }
 
-    fn menu_items(&self) -> Vec<Item> {
+    fn menu_items(&self, cx: &gpui::App) -> Vec<Item> {
         let Some(menu) = &self.context_menu else { return Vec::new() };
         let s = &self.snapshot;
         let act = |label: &str, icon_name: &'static str, action: Action| Item::Action { label: label.into(), glyph: Glyph::Icon(icon_name), action, danger: false };
@@ -93,7 +106,81 @@ impl Root {
                     items.push(act("Install runner…", "plus", Action::InstallRunner(id.clone())));
                     items.push(Item::Separator);
                 }
-                items.push(Item::Action { label: "Remove from fleet…".into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
+                if Root::is_favorite(cx, id) {
+                    items.push(act("Remove from favorites", "star", Action::FavoriteMachine(id.clone(), false)));
+                } else {
+                    items.push(act("Add to favorites", "star", Action::FavoriteMachine(id.clone(), true)));
+                }
+                items.push(Item::Separator);
+                // A cloud machine is powered and destroyed; removing it alone would leave it running (and billed).
+                if m.cloud.is_some() {
+                    let off = m.status == "offline";
+                    items.push(act(if off { "Power on" } else { "Power off" }, "power", Action::CloudPower(id.clone(), off)));
+                    items.push(Item::Action { label: "Destroy…".into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
+                } else {
+                    items.push(Item::Action { label: "Remove from fleet…".into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
+                }
+                items
+            }
+            MenuTarget::Runner(id) => {
+                let Some(r) = s.runners.iter().find(|r| &r.id == id) else { return Vec::new() };
+                let mut items = Vec::new();
+                // Start, stop and the rest need its machine (GitHub-only runners can only be removed).
+                if r.local.is_some() && r.machine_id.is_some() {
+                    let running = r.local.as_ref().is_some_and(|l| l.listener);
+                    if running {
+                        items.push(act("Stop", "square", Action::Runner(id.clone(), RunnerAction::Stop)));
+                    } else {
+                        items.push(act("Start", "play", Action::Runner(id.clone(), RunnerAction::Start)));
+                    }
+                    items.push(act("Restart", "rotate-ccw", Action::Runner(id.clone(), RunnerAction::Restart)));
+                    items.push(act("Show logs", "scroll-text", Action::Runner(id.clone(), RunnerAction::Logs)));
+                    items.push(Item::Separator);
+                }
+                if let Some(job) = r.job_id.and_then(|j| s.jobs.running.iter().find(|x| x.id == j)) {
+                    items.push(act("Open its job on GitHub", "external-link", Action::OpenUrl(job.url.clone())));
+                }
+                if let Some(url) = r.github.as_ref().and_then(runner_settings_url) {
+                    items.push(act("Open on GitHub", "agent-github", Action::OpenUrl(url)));
+                }
+                items.push(act("Copy name", "copy", Action::CopyUrl(r.name.clone())));
+                items.push(Item::Separator);
+                items.push(Item::Action { label: "Remove runner…".into(), glyph: Glyph::Icon("trash-2"), action: Action::RemoveRunner(id.clone()), danger: true });
+                items
+            }
+            MenuTarget::Job(id) => {
+                let Some(j) = s.jobs.queued.iter().chain(s.jobs.running.iter()).find(|j| j.id == *id) else { return Vec::new() };
+                let mut items = Vec::new();
+                if let Some(rid) = &j.runner_id {
+                    items.push(act("Show its runner", "server", Action::ShowRunner(rid.clone())));
+                }
+                // Stuck: a runner with what it needs, on a machine of the right OS and CPU.
+                if j.status != "in_progress" && j.matching_online == 0 {
+                    let extra: Vec<String> = j.labels.iter().filter(|l| platform_label(l).is_none() && !l.eq_ignore_ascii_case("self-hosted")).cloned().collect();
+                    let fits: Vec<&crate::fleet::model::Machine> =
+                        s.machines.iter().filter(|m| !m.host.is_empty() && m.status == "online" && j.labels.iter().all(|l| platform_label(l).is_none_or(|p| m.platform.contains(p)))).collect();
+                    if !extra.is_empty() {
+                        items.push(Item::Note(format!("Needs a runner with {}", extra.join(", "))));
+                    }
+                    if fits.is_empty() {
+                        items.push(Item::Note("None of your machines fits it.".into()));
+                    }
+                    for m in fits {
+                        items.push(Item::Action {
+                            label: format!("Add runner on {}", m.name),
+                            glyph: Glyph::Icon("plus"),
+                            action: Action::InstallWith(m.id.clone(), extra.clone()),
+                            danger: false,
+                        });
+                    }
+                }
+                if !items.is_empty() {
+                    items.push(Item::Separator);
+                }
+                items.push(act("Open on GitHub", "external-link", Action::OpenUrl(j.url.clone())));
+                items.push(act("Copy link", "copy", Action::CopyUrl(j.url.clone())));
+                items.push(Item::Separator);
+                items.push(Item::Action { label: "Cancel run…".into(), glyph: Glyph::Icon("circle-x"), action: Action::CancelRun(*id), danger: true });
                 items
             }
             MenuTarget::Session(id) => {
@@ -196,6 +283,17 @@ impl Root {
             Action::ShowDesktop(machine) => self.navigate(Route::Desktop(machine), window, cx),
             Action::CopyFiles(machine) => self.show_copy_files(Some(machine), None, window, cx),
             Action::Check(machine) => self.engine.trigger_check(Some(machine)),
+            Action::Runner(id, action) => self.runner_action(&id, action, cx),
+            Action::FavoriteMachine(id, favorite) => self.set_favorite_machine(&id, favorite, cx),
+            Action::CloudPower(id, on) => self.cloud_power(&id, on, cx),
+            Action::ShowRunner(id) => self.navigate(Route::Runner(id), window, cx),
+            Action::InstallWith(machine, labels) => self.show_install_dialog_with(&machine, &labels, window, cx),
+            Action::CancelRun(job) => self.confirm_cancel_run(job, window, cx),
+            Action::RemoveRunner(id) => {
+                if let Some(r) = self.snapshot.runners.iter().find(|r| r.id == id).cloned() {
+                    self.confirm_remove_runner(&r, window, cx);
+                }
+            }
             Action::InstallRunner(machine) => self.show_install_dialog(&machine, window, cx),
             Action::Remove(machine) => {
                 if let Some(m) = self.snapshot.machines.iter().find(|m| m.id == machine).cloned() {
@@ -260,11 +358,22 @@ impl Root {
     /// The open menu, drawn above everything, with a backdrop that closes it.
     pub(super) fn render_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let position = self.context_menu.as_ref()?.position;
-        let items = self.menu_items();
+        let items = self.menu_items(cx);
         if items.is_empty() {
             self.context_menu = None;
             return None;
         }
+        // As wide as its longest line (about 7.4px a character at 13px, plus the
+        // glyph and padding), within reason.
+        let longest = items
+            .iter()
+            .map(|i| match i {
+                Item::Action { label, .. } => label.chars().count() as f32 * 7.4 + 64.,
+                Item::Note(text) => text.chars().count() as f32 * 6.8 + 32.,
+                Item::Separator => 0.,
+            })
+            .fold(0., f32::max);
+        let width = longest.clamp(200., 420.);
         let close = |this: &mut Root, _: &gpui::MouseDownEvent, _: &mut Window, cx: &mut Context<Root>| {
             this.context_menu = None;
             cx.notify();
@@ -300,7 +409,8 @@ impl Root {
                         .text_size(px(13.))
                         .text_color(color)
                         .child(div().w(px(18.)).flex().justify_center().child(glyph))
-                        .child(label)
+                        // Margins, padding, glyph and gap; past the widest menu, "…".
+                        .child(div().w(px(width - 56.)).truncate().child(label))
                         .on_click(cx.listener(move |this, _, window, cx| this.run_menu_action(action.clone(), window, cx)))
                         .into_any_element()
                 }
@@ -309,7 +419,7 @@ impl Root {
         let menu = div()
             .id("context-menu")
             .occlude()
-            .w(px(240.))
+            .w(px(width))
             .py(px(4.))
             .rounded(px(9.))
             .bg(theme.elevated)
@@ -332,4 +442,27 @@ impl Root {
 /// Makes a sidebar row open its menu on right-click.
 pub(super) fn on_right_click(target: impl Fn() -> MenuTarget + 'static, cx: &mut Context<Root>) -> impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static {
     cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| this.open_menu(target(), e.position, cx))
+}
+
+/// The runner's page in its repository's or organization's settings on GitHub.
+fn runner_settings_url(g: &crate::fleet::model::GitHubRunner) -> Option<String> {
+    match g.scope.split_once(':')? {
+        ("repo", repo) => Some(format!("https://github.com/{repo}/settings/actions/runners/{}", g.id)),
+        ("org", org) => Some(format!("https://github.com/organizations/{org}/settings/actions/runners/{}", g.id)),
+        _ => None,
+    }
+}
+
+/// What a GitHub runner label says about the platform, as it appears in a
+/// machine's "linux-x64": GitHub adds these itself, so they aren't extra labels.
+fn platform_label(label: &str) -> Option<&'static str> {
+    match label.to_ascii_lowercase().as_str() {
+        "linux" => Some("linux"),
+        "macos" => Some("darwin"),
+        "windows" => Some("windows"),
+        "x64" => Some("x64"),
+        "arm64" => Some("arm64"),
+        "arm" => Some("arm"),
+        _ => None,
+    }
 }

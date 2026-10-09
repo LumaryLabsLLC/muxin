@@ -37,6 +37,9 @@ pub struct ProbeResult {
     pub os: Option<String>,
     pub arch: Option<String>,
     pub os_version: Option<String>,
+    /// "laptop" | "desktop", when the machine says.
+    #[serde(default)]
+    pub form_factor: Option<String>,
     pub cores: Option<u32>,
     pub cpu_pct: Option<f64>,
     pub mem_total: Option<u64>,
@@ -72,6 +75,7 @@ impl ProbeResult {
             self.os = self.os.take().or_else(|| p.os.clone());
             self.arch = self.arch.take().or_else(|| p.arch.clone());
             self.os_version = self.os_version.take().or_else(|| p.os_version.clone());
+            self.form_factor = self.form_factor.take().or_else(|| p.form_factor.clone());
         }
         self
     }
@@ -364,6 +368,7 @@ pub fn parse(out: &str) -> ProbeResult {
             "arch" => r.arch = text(),
             "hostname" => r.hostname = text(),
             "os_version" => r.os_version = text().filter(|v| v != "macOS"),
+            "form_factor" => r.form_factor = text(),
             "cores" => r.cores = value.parse().ok(),
             "cpu_pct" => r.cpu_pct = value.parse::<f64>().ok().map(|v| v.clamp(0.0, 100.0)),
             "mem_total" => r.mem_total = value.parse().ok().filter(|v| *v > 0),

@@ -107,7 +107,7 @@ impl ActiveTheme for App {
 }
 
 // ---------------------------------------------------------------------------
-// Appearance preference (ui.json)
+// Appearance preference ([ui] in config.toml)
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -126,6 +126,8 @@ pub struct Appearance {
     /// Sidebar width in pixels, as last dragged, and whether it's hidden.
     pub sidebar_width: f32,
     pub sidebar_hidden: bool,
+    /// The terminal's font family (SF Mono unless picked in Settings).
+    pub terminal_font: String,
     /// Terminal text size in points, and line height as a multiple of it.
     pub terminal_font_size: f32,
     pub terminal_line_height: f32,
@@ -139,6 +141,10 @@ pub struct Appearance {
     pub split_ratio: f32,
     /// Machines whose desktop is an item in the sidebar.
     pub desktops: Vec<String>,
+    /// Favorite machines: first in the sidebar (so ⌘1, ⌘2, …), with a star.
+    pub favorite_machines: Vec<String>,
+    /// How icons look (see kit::IconStyle): "minimal", "tiles", "soft", ...
+    pub icon_style: String,
     /// Shortcuts the user changed: id → keys ("" for none). See shortcuts.rs.
     pub shortcuts: std::collections::BTreeMap<String, String>,
     /// Where to save; None in demo mode.
@@ -154,6 +160,7 @@ impl Default for Appearance {
             dark: DEFAULT_DARK.into(),
             sidebar_width: super::root::SIDEBAR_DEFAULT,
             sidebar_hidden: false,
+            terminal_font: super::terminal::DEFAULT_FONT.into(),
             terminal_font_size: TERMINAL_FONT_SIZE,
             terminal_line_height: TERMINAL_LINE_HEIGHT,
             terminal_cursor_blink: true,
@@ -161,6 +168,8 @@ impl Default for Appearance {
             github_folded_owners: Vec::new(),
             split_ratio: 0.5,
             desktops: Vec::new(),
+            favorite_machines: Vec::new(),
+            icon_style: super::kit::IconStyle::default().id().into(),
             shortcuts: Default::default(),
             path: None,
         }
@@ -170,25 +179,17 @@ impl Default for Appearance {
 impl Global for Appearance {}
 
 impl Appearance {
+    /// `[ui]` in config.toml.
     pub fn load(path: Option<PathBuf>) -> Appearance {
-        let mut a: Appearance = path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
+        let mut a: Appearance = path.as_deref().map(|p| crate::config::read_section(p, "ui")).unwrap_or_default();
         a.path = path;
         a
     }
 
     fn save(&self) {
         let Some(path) = &self.path else { return };
-        match serde_json::to_vec_pretty(self) {
-            Ok(bytes) => {
-                if let Err(e) = crate::config::write_atomic(path, &bytes) {
-                    tracing::warn!("saving appearance: {e:#}");
-                }
-            }
-            Err(e) => tracing::warn!("saving appearance: {e}"),
+        if let Err(e) = crate::config::write_section(path, "ui", self) {
+            tracing::warn!("saving appearance: {e}");
         }
     }
 
@@ -219,6 +220,9 @@ pub fn apply(window: &Window, cx: &mut App) {
     if let Ok(mut f) = FONTS.write() {
         *f = fonts;
     }
+    super::terminal::set_font(&cx.global::<Appearance>().terminal_font);
+    let style = super::kit::IconStyle::from_id(&cx.global::<Appearance>().icon_style);
+    super::kit::set_look(super::kit::Look::new(style, &theme));
     cx.set_global(theme);
 }
 
@@ -232,6 +236,7 @@ pub fn update_terminal(cx: &mut App, f: impl FnOnce(&mut Appearance)) {
     f(&mut appearance);
     appearance.terminal_font_size = appearance.terminal_font_size.round().clamp(8., 32.);
     appearance.terminal_line_height = ((appearance.terminal_line_height * 20.).round() / 20.).clamp(1., 2.);
+    super::terminal::set_font(&appearance.terminal_font);
     appearance.save();
     cx.set_global(appearance);
     cx.refresh_windows();

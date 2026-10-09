@@ -48,6 +48,8 @@ cocoa = { version = "=0.26.0", optional = true }
 # Also already in GPUI's tree: to start a native window drag from our own title bar.
 objc = { version = "0.2", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
+# Already in the tree (through reqwest/native roots): the Keychain, for cloud sign-ins.
+security-framework = "3"
 
 [workspace]
 members = [".", "agent"]

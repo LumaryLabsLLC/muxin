@@ -1,4 +1,4 @@
-//! Edits fleet.toml in place with `toml_edit`, so the user's comments, ordering
+//! Edits config.toml in place with `toml_edit`, so the user's comments, ordering
 //! and formatting survive when Muxen adds or removes machines and runners.
 //! Every function works on text, which lets demo mode reuse them on its
 //! in-memory inventory.
@@ -40,7 +40,7 @@ pub fn add_machine(text: &str, name: &str, host: &str) -> Result<(String, String
     {
         let machines = machines_mut(&mut doc)?;
         if machines.iter().any(|t| table_name(t).eq_ignore_ascii_case(name)) {
-            return Err(format!("A machine called \"{name}\" is already in fleet.toml."));
+            return Err(format!("A machine called \"{name}\" is already in config.toml."));
         }
         let mut table = Table::new();
         table["name"] = value(name);
@@ -52,7 +52,7 @@ pub fn add_machine(text: &str, name: &str, host: &str) -> Result<(String, String
     doc.set_trailing(rest);
     let out = doc.to_string();
     let id = Inventory::parse(&out)
-        .map_err(|e| format!("fleet.toml would be invalid: {e}"))?
+        .map_err(|e| format!("config.toml would be invalid: {e}"))?
         .machines
         .last()
         .map(|m| m.id.clone())
@@ -86,6 +86,30 @@ pub fn remove_machine(text: &str, machine_id: &str) -> Result<String, String> {
     finish(doc)
 }
 
+/// Records that a machine is a cloud machine (or forgets it, with `None`).
+pub fn set_machine_cloud(text: &str, machine_id: &str, cloud: Option<&crate::config::CloudRef>) -> Result<String, String> {
+    let mut doc = parse(text)?;
+    let machines = machines_mut(&mut doc)?;
+    let index = find_machine(machines, machine_id)?;
+    let table = machines.get_mut(index).ok_or("That machine isn't in config.toml.")?;
+    match cloud {
+        Some(c) => {
+            let mut t = toml_edit::InlineTable::new();
+            t.insert("provider", c.provider.as_str().into());
+            t.insert("id", (c.id as i64).into());
+            t.insert("region", c.region.as_str().into());
+            t.insert("size", c.size.as_str().into());
+            t.insert("price_hourly", c.price_hourly.into());
+            t.insert("created_at", c.created_at.as_str().into());
+            table["cloud"] = value(t);
+        }
+        None => {
+            table.remove("cloud");
+        }
+    }
+    finish(doc)
+}
+
 /// Splits document trailing text into the comment lines glued to the last table and the rest.
 fn split_attached(trailing: &str) -> (&str, &str) {
     if trailing.is_empty() || trailing.starts_with('\n') {
@@ -113,7 +137,7 @@ pub fn add_runners(text: &str, machine_id: &str, names: &[String]) -> Result<Str
     let table = machines.get_mut(index).ok_or("Machine not found.")?;
     match table.get_mut("runners") {
         Some(item) => {
-            let list = item.as_array_mut().ok_or("`runners` in fleet.toml isn't a list.")?;
+            let list = item.as_array_mut().ok_or("`runners` in config.toml isn't a list.")?;
             for n in names {
                 if !list.iter().any(|v| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case(n))) {
                     list.push(n.as_str());
@@ -159,12 +183,12 @@ pub fn set_workspaces(text: &str, machine_id: &str, allowed: bool) -> Result<Str
 }
 
 fn parse(text: &str) -> Result<DocumentMut, String> {
-    text.parse::<DocumentMut>().map_err(|e| format!("fleet.toml has a syntax error, so it wasn't changed: {}", e.to_string().trim()))
+    text.parse::<DocumentMut>().map_err(|e| format!("config.toml has a syntax error, so it wasn't changed: {}", e.to_string().trim()))
 }
 
 fn finish(doc: DocumentMut) -> Result<String, String> {
     let out = doc.to_string();
-    Inventory::parse(&out).map_err(|e| format!("fleet.toml would be invalid: {e}"))?;
+    Inventory::parse(&out).map_err(|e| format!("config.toml would be invalid: {e}"))?;
     Ok(out)
 }
 
@@ -174,7 +198,7 @@ fn machines_mut(doc: &mut DocumentMut) -> Result<&mut ArrayOfTables, String> {
     }
     doc.get_mut("machine")
         .and_then(Item::as_array_of_tables_mut)
-        .ok_or_else(|| "fleet.toml defines `machine` in a form Muxen can't edit. Use [[machine]] tables.".to_string())
+        .ok_or_else(|| "config.toml defines `machine` in a form Muxen can't edit. Use [[machine]] tables.".to_string())
 }
 
 fn table_name(t: &Table) -> &str {
@@ -195,7 +219,7 @@ fn find_machine(machines: &ArrayOfTables, machine_id: &str) -> Result<usize, Str
             return Ok(i);
         }
     }
-    Err(format!("Machine \"{machine_id}\" isn't in fleet.toml."))
+    Err(format!("Machine \"{machine_id}\" isn't in config.toml."))
 }
 
 #[cfg(test)]
@@ -216,6 +240,25 @@ mod workspace_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cloud_machines_keep_where_they_live() {
+        let (text, id) = super::add_machine("# my fleet\n", "Droplet", "me@203.0.113.7").unwrap();
+        let cloud = crate::config::CloudRef {
+            provider: "digitalocean".into(),
+            id: 42,
+            region: "nyc3".into(),
+            size: "s-2vcpu-4gb".into(),
+            price_hourly: 0.03571,
+            created_at: "2026-10-09T12:00:00Z".into(),
+        };
+        let text = super::set_machine_cloud(&text, &id, Some(&cloud)).unwrap();
+        assert!(text.starts_with("# my fleet"));
+        let inv = crate::config::Inventory::parse(&text).unwrap();
+        assert_eq!(inv.machines[0].cloud.as_ref(), Some(&cloud));
+        let text = super::set_machine_cloud(&text, &id, None).unwrap();
+        assert!(crate::config::Inventory::parse(&text).unwrap().machines[0].cloud.is_none());
+    }
+
     use super::*;
     use crate::config::default_inventory;
 

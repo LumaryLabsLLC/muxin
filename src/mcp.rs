@@ -28,7 +28,7 @@ and the machine/runner they're about. Ids: machines are slugs like \"mac-studio\
 
 Read-only: fleet_status, get_machine, list_runners, list_jobs, check_machines (runs a read-only \
 check over ssh), get_operation, list_operations, get_settings, list_ssh_hosts, list_files.
-Changes things: add_machine / remove_machine edit fleet.toml only. install_runners and \
+Changes things: add_machine / remove_machine edit config.toml only. install_runners and \
 runner_action run commands on real machines and register or deregister runners on GitHub; \
 confirm with the user before stopping, removing or installing unless they asked for exactly that.
 
@@ -48,7 +48,7 @@ done: nothing is deleted automatically. Commands run as the user on a real machi
 anything there you wouldn't do in their own terminal without asking.
 
 Agent sessions: long-running terminals on fleet machines, each running an AI agent CLI (Claude \
-Code, Codex, OpenCode, Gemini CLI, Amp) or a plain shell, kept alive by Muxen's agent on \
+Code, Codex, OpenCode, Gemini CLI, Amp, Pi) or a plain shell, kept alive by Muxen's agent on \
 the machine so they survive disconnects. The user watches and types into them in the Muxen app. session_list shows them \
 (and which agents each machine has); session_start starts one, optionally with a first prompt; \
 session_read returns its screen as text; session_send types into it; session_stop ends it. \
@@ -291,6 +291,11 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "remove_machine" => ok(json!({ "removed": api::remove_machine(engine, args(a)?).await? })),
         "install_runners" => ok(api::install_runners(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "runner_action" => ok(api::runner_action(engine, args(a)?, Surface::Mcp, |_| {}).await?),
+        "cancel_run" => ok(api::cancel_run(engine, args(a)?, Surface::Mcp, |_| {}).await?),
+        "cloud_options" => ok(api::cloud_options(engine).await),
+        "cloud_create" => ok(api::cloud_create(engine, args(a)?, Surface::Mcp, |_| {}).await?),
+        "cloud_destroy" => ok(api::cloud_destroy(engine, args(a)?, Surface::Mcp, |_| {}).await?),
+        "cloud_power" => ok(api::cloud_power(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "get_operation" => ok(api::operation(engine, args(a)?)?),
         "cancel_operation" => ok(api::cancel_operation(engine, args(a)?)?),
         "list_files" => ok(api::list_files(engine, args(a)?).await?),
@@ -395,7 +400,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "add_machine",
-            "description": "Add a machine to the fleet (written to fleet.toml, comments preserved) and check it. `host` is anything the system ssh accepts (user@host, an ~/.ssh/config alias; see list_ssh_hosts) or \"local\" for this computer. Key-based ssh must work without a password prompt. Doesn't install anything.",
+            "description": "Add a machine to the fleet (written to config.toml, comments preserved) and check it. `host` is anything the system ssh accepts (user@host, an ~/.ssh/config alias; see list_ssh_hosts) or \"local\" for this computer. Key-based ssh must work without a password prompt. Doesn't install anything.",
             "inputSchema": schema(json!({
                 "name": { "type": "string", "description": "Display name, e.g. \"Mac Studio\"." },
                 "host": { "type": "string", "description": "ssh destination or \"local\"." },
@@ -405,13 +410,13 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "remove_machine",
-            "description": "Remove a machine from fleet.toml. Nothing on the machine changes and its runners stay registered on GitHub; use runner_action remove first to take runners down.",
+            "description": "Remove a machine from config.toml. Nothing on the machine changes and its runners stay registered on GitHub; use runner_action remove first to take runners down.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
             "annotations": annotations("Remove machine", false, true, true, false),
         }),
         json!({
             "name": "install_runners",
-            "description": "Install GitHub Actions runners on a machine and register each with the GitHub org/repo (`scope`) using a registration token from the user's gh login, then add them to fleet.toml. How they run (`mode`): \"auto\" (default) picks a boot-time service when the machine allows it (macOS, Windows, Linux with passwordless sudo), else Docker containers when Docker is available, else a background run.sh; \"docker\" runs one container per runner from GitHub's actions-runner image (no sudo, restarted by Docker, jobs get a clean Linux userland). Modifies the real machine and GitHub. Needs admin on the org (admin:org scope) or repo. Names default to \"<machine-id>-01\", \"-02\", ...",
+            "description": "Install GitHub Actions runners on a machine and register each with the GitHub org/repo (`scope`) using a registration token from the user's gh login, then add them to config.toml. How they run (`mode`): \"auto\" (default) picks a boot-time service when the machine allows it (macOS, Windows, Linux with passwordless sudo), else Docker containers when Docker is available, else a background run.sh; \"docker\" runs one container per runner from GitHub's actions-runner image (no sudo, restarted by Docker, jobs get a clean Linux userland). Modifies the real machine and GitHub. Needs admin on the org (admin:org scope) or repo. Names default to \"<machine-id>-01\", \"-02\", ...",
             "inputSchema": schema(json!({
                 "machine_id": { "type": "string", "description": MACHINE_ID },
                 "scope": { "type": "string", "description": "GitHub org (\"acme\") or repo (\"acme/api\"). Optional when exactly one is watched." },
@@ -430,7 +435,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "runner_action",
-            "description": "Control one runner on its machine: start, stop or restart its service; logs (read-only tail of its newest _diag log); or remove (stop, uninstall the service, deregister from GitHub, drop it from fleet.toml, optionally delete its folder). For a runner no machine lists (\"github/<name>\"), remove deregisters it on GitHub. stop and remove take the runner offline; confirm with the user first.",
+            "description": "Control one runner on its machine: start, stop or restart its service; logs (read-only tail of its newest _diag log); or remove (stop, uninstall the service, deregister from GitHub, drop it from config.toml, optionally delete its folder). For a runner no machine lists (\"github/<name>\"), remove deregisters it on GitHub. stop and remove take the runner offline; confirm with the user first.",
             "inputSchema": schema(json!({
                 "runner_id": { "type": "string", "description": RUNNER_ID },
                 "action": { "type": "string", "enum": ["start", "stop", "restart", "logs", "remove"] },
@@ -439,6 +444,47 @@ pub fn tools() -> Vec<Value> {
                 "timeout_secs": { "type": "integer", "minimum": 1, "description": "How long to wait. Default 180." }
             }), &["runner_id", "action"]),
             "annotations": annotations("Runner action", false, true, false, true),
+        }),
+        json!({
+            "name": "cloud_options",
+            "description": "The user's DigitalOcean sign-in, regions, sizes (with hourly and monthly prices) and the defaults for a new cloud machine. Read-only.",
+            "inputSchema": schema(json!({}), &[]),
+            "annotations": annotations("Cloud options", true, false, true, true),
+        }),
+        json!({
+            "name": "cloud_create",
+            "description": "Create a DigitalOcean droplet in the user's account, set it up (their user and SSH key, git, and the extras chosen: Docker, GitHub CLI, languages like Go, Rust, Python or PHP, agent CLIs, Tailscale), and add it to the fleet. It COSTS MONEY every hour it exists: tell the user the size and price (cloud_options) and get their OK first. Takes a few minutes.",
+            "inputSchema": schema(json!({
+                "name": { "type": "string" },
+                "region": { "type": "string", "description": "Region slug, e.g. nyc3. Default: the user's setting, else the nearest." },
+                "size": { "type": "string", "description": "Size slug, e.g. s-2vcpu-4gb. Default: the user's setting." },
+                "install": { "type": "array", "items": { "type": "string", "enum": crate::cloud::setup::EXTRAS.iter().map(|(id, _)| *id).collect::<Vec<_>>() }, "description": "What it comes with besides git: tools, languages (node, python, go, rust, php, ruby, java, bun, deno, dotnet), agent CLIs, tailscale. Default: the user's setting." },
+                "wait": { "type": "boolean", "description": "Wait until it's ready. Default true." },
+                "timeout_secs": { "type": "integer", "minimum": 1 }
+            }), &["name"]),
+            "annotations": annotations("Create cloud machine", false, false, false, true),
+        }),
+        json!({
+            "name": "cloud_destroy",
+            "description": "Destroy a cloud machine Muxen created: deletes the droplet (everything on it is lost) and removes it from the fleet. Confirm with the user first; make sure work there is pushed.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string" }, "wait": { "type": "boolean" } }), &["machine_id"]),
+            "annotations": annotations("Destroy cloud machine", false, true, true, true),
+        }),
+        json!({
+            "name": "cloud_power",
+            "description": "Power a cloud machine on or off. DigitalOcean still bills a droplet while it's off; only cloud_destroy stops the cost.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string" }, "power": { "type": "string", "enum": ["on", "off"] }, "wait": { "type": "boolean" } }), &["machine_id", "power"]),
+            "annotations": annotations("Cloud power", false, false, true, true),
+        }),
+        json!({
+            "name": "cancel_run",
+            "description": "Cancel the GitHub Actions workflow run that a queued or running job belongs to (job_id from list_jobs). GitHub cancels whole runs, so every unfinished job in it stops. Confirm with the user first.",
+            "inputSchema": schema(json!({
+                "job_id": { "type": "integer", "description": "A queued or running job's id, from list_jobs." },
+                "wait": { "type": "boolean", "description": "Wait for GitHub to accept it. Default true." },
+                "timeout_secs": { "type": "integer", "minimum": 1, "description": "How long to wait. Default 60." }
+            }), &["job_id"]),
+            "annotations": annotations("Cancel run", false, true, false, true),
         }),
         json!({
             "name": "get_operation",
@@ -615,7 +661,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "workspace_allow",
-            "description": "Turn agent workspaces on or off for a machine (edits fleet.toml, comments preserved). Machines allow them by default; only change this when the user asks.",
+            "description": "Turn agent workspaces on or off for a machine (edits config.toml, comments preserved). Machines allow them by default; only change this when the user asks.",
             "inputSchema": schema(json!({
                 "machine_id": { "type": "string", "description": MACHINE_ID },
                 "allowed": { "type": "boolean" }
@@ -624,7 +670,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "session_list",
-            "description": "Agent sessions on the user's machines: terminals running Claude Code, Codex, OpenCode, Gemini CLI, Amp or a shell, kept alive by Muxen's agent on the machine. Each has an id (<machine-id>/<name>), agent, title, folder, status (running/exited), busy (printed output in the last few seconds, i.e. the agent is working) and the command a human can paste to attach. Also lists, per machine, the agent CLIs installed. Reads the machines over ssh, so it's always current (and sets up Muxen's agent on a machine the first time).",
+            "description": "Agent sessions on the user's machines: terminals running Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell, kept alive by Muxen's agent on the machine. Each has an id (<machine-id>/<name>), agent, title, folder, status (running/exited), busy (printed output in the last few seconds, i.e. the agent is working) and the command a human can paste to attach. Also lists, per machine, the agent CLIs installed. Reads the machines over ssh, so it's always current (and sets up Muxen's agent on a machine the first time).",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &[]),
             "annotations": annotations("List agent sessions", true, false, true, true),
         }),
@@ -633,7 +679,7 @@ pub fn tools() -> Vec<Value> {
             "description": "Start an agent CLI (or a shell) in a new session on a machine, in a folder there, optionally with a first prompt. It keeps running until stopped; the user can watch and type into it from the Muxen app. Returns the session. Only start sessions the user asked for.",
             "inputSchema": schema(json!({
                 "machine_id": { "type": "string", "description": MACHINE_ID },
-                "agent": { "type": "string", "enum": ["claude", "codex", "opencode", "gemini", "amp", "shell"], "description": "Which CLI to run. session_list shows which are installed on each machine." },
+                "agent": { "type": "string", "enum": ["claude", "codex", "opencode", "gemini", "amp", "pi", "shell"], "description": "Which CLI to run. session_list shows which are installed on each machine." },
                 "cwd": { "type": "string", "description": "Folder on the machine, e.g. \"~/code/api\". Default: the home folder." },
                 "title": { "type": "string", "description": "Shown in the app's sidebar. Default: agent and folder name." },
                 "prompt": { "type": "string", "description": "First message for the agent." }
@@ -821,7 +867,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 50);
+        assert_eq!(tools.len(), 55);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

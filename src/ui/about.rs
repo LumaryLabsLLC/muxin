@@ -24,6 +24,11 @@ const COMPONENTS: &[(&str, &str, &str)] = &[
     ("portable-pty", "WezTerm", "MIT"),
     ("Geist and Geist Mono", "Vercel", "SIL Open Font License 1.1"),
     ("Lucide icons", "Lucide", "ISC"),
+    ("Phosphor icons", "Phosphor Icons", "MIT"),
+    ("Hugeicons", "Hugeicons", "MIT"),
+    ("Solar icons", "480 Design", "CC BY 4.0"),
+    ("MingCute icons", "MingCute Design", "Apache-2.0"),
+    ("Fluent UI System Icons", "Microsoft", "MIT"),
     ("Agent logos", "LobeHub Icons; marks belong to their owners", "MIT"),
     ("Rust crates", "See THIRD_PARTY_NOTICES.md", "MIT / Apache-2.0"),
 ];

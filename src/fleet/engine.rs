@@ -95,7 +95,7 @@ impl Engine {
         let (inventory, inventory_info, settings, persisted) = match &world {
             Some(w) => (
                 w.inventory(),
-                InventoryInfo { path: "demo://fleet.toml".into(), loaded_at: Some(Utc::now()), ..Default::default() },
+                InventoryInfo { path: "demo://config.toml".into(), loaded_at: Some(Utc::now()), ..Default::default() },
                 w.settings(),
                 PersistedState::default(),
             ),
@@ -301,7 +301,7 @@ impl Engine {
     }
 
     /// Picks up what other Muxen processes wrote to the shared config
-    /// directory: fleet.toml edits, settings.json changes, and newer machine
+    /// directory: config.toml edits (machines and settings), and newer machine
     /// checks in state.json. Cheap when nothing changed (three `stat` calls).
     pub fn refresh_from_disk(&self) {
         if self.demo.is_some() {
@@ -346,7 +346,14 @@ impl Engine {
         Some((spec, st.probes.get(id).cloned()))
     }
 
-    /// Re-reads fleet.toml right away (after Muxen edited it) and publishes.
+    /// Re-reads config.toml right away (after Muxen edited it) and publishes.
+    /// Publishes the snapshot again (when something outside the state changed, like idle times).
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub(crate) fn republish(&self) {
+        let mut st = self.state.lock().unwrap();
+        self.publish(&mut st);
+    }
+
     pub(crate) fn reload_inventory_now(&self) {
         let mut st = self.state.lock().unwrap();
         match &self.demo {
@@ -628,7 +635,7 @@ impl Engine {
                 _ = tokio::time::sleep(poll) => {}
                 _ = self.sync_now.notified() => {}
             }
-            // Pick up fleet.toml edits (and settings/checks from other Muxen
+            // Pick up config.toml edits (and settings/checks from other Muxen
             // processes) without waiting for the next full check.
             let before = self.state.lock().unwrap().inventory.machines.len();
             self.refresh_from_disk();
@@ -905,7 +912,7 @@ impl Engine {
         self.publish(&mut st);
     }
 
-    /// Re-reads settings.json if another process changed it. Returns true if the settings changed.
+    /// Re-reads [settings] if another process changed config.toml. Returns true if the settings changed.
     fn reload_settings(&self, st: &mut State) -> bool {
         let modified = mtime(&self.paths.settings);
         if modified == st.settings_mtime {
@@ -971,7 +978,7 @@ impl Engine {
         changed
     }
 
-    /// Re-reads fleet.toml when it changed (or `force`). Returns true if the inventory changed.
+    /// Re-reads config.toml when it changed (or `force`). Returns true if the inventory changed.
     /// On a parse error the last good inventory stays in place and the error is shown.
     fn reload_inventory(&self, st: &mut State, force: bool) -> bool {
         let path = &self.paths.inventory;
@@ -1065,7 +1072,7 @@ fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// Writes a starter fleet.toml (this computer only) the first time Muxen runs.
+/// Writes a starter config.toml (this computer only) the first time Muxen runs.
 pub fn ensure_inventory(paths: &Paths) {
     if paths.inventory.exists() {
         return;
@@ -1086,7 +1093,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("muxen-xproc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("fleet.toml"), "[[machine]]\nname = \"Box\"\nhost = \"box.invalid\"\n").unwrap();
+        std::fs::write(dir.join("config.toml"), "[[machine]]\nname = \"Box\"\nhost = \"box.invalid\"\n").unwrap();
         let paths = Paths::resolve(Some(dir.clone()), None);
         let window = Engine::new(paths.clone(), false);
         let agent = Engine::new(paths.clone(), false);

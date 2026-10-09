@@ -9,7 +9,7 @@
 
 Point it at the machines you own (a Mac Studio under the desk, a NUC, a Linux box, a few MacBooks, a Windows laptop) and Muxen becomes the hub for all of them:
 
-- **Agent sessions:** Claude Code, Codex, OpenCode, Gemini CLI, Amp or a shell on any machine, in a real terminal, still running after you close the app.
+- **Agent sessions:** Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell on any machine, in a real terminal, still running after you close the app.
 - **Desktops:** see a Linux machine's screen live and use it, beside an agent's terminal or in its own window.
 - **Files and clipboard:** copy files and folders between any two machines, and copy on your Mac to paste on a machine (and back).
 - **GitHub:** your inbox, repositories, issues and pull requests, with one click to hand an issue to an agent on the machine you pick.
@@ -55,7 +55,7 @@ To get a real app with the Muxen icon:
 
 ```sh
 muxen --demo                       # explore a simulated fleet first; nothing real is touched
-muxen                              # your fleet: starts with this computer in fleet.toml
+muxen                              # your fleet: starts with this computer in config.toml
 muxen add-machine --name "Mac Studio" --host ci@mac-studio.local
 muxen watch acme                   # live runner status and jobs for the acme org
 muxen install mac-studio --count 2 # two runners, registered with acme, as services
@@ -67,7 +67,7 @@ muxen status
 - **Overview:** a *fleet pulse* chart of how busy your online runners are, counts of working, idle, offline and queued, what needs attention (with a button that fixes or explains each item), and a card per machine with live CPU, memory and disk.
 - **Machines and runners:** install runners on a machine, and start, stop, restart, show logs for or remove each one. A machine that's off or out of reach says so in plain words (offline, Remote Login off, ssh key not accepted, Tailscale off on this Mac, …), with when it was last seen and what to do; Muxen picks it back up by itself when it returns.
 - **Adding machines (⌘N):** suggestions from your `~/.ssh/config`, your Tailscale network, and this network (machines advertising ssh over Bonjour, and Macs that would be addable once Remote Login is on).
-- **Agent sessions (⌘T):** a real terminal on any machine running Claude Code, Codex, OpenCode, Gemini CLI, Amp or a shell. Sessions are listed under their machine in the sidebar (a spinner while the agent works, a colored dot when it wants you) and keep running when you close the app. Terminal font size, line height and a blinking cursor are in Settings.
+- **Agent sessions (⌘T):** a real terminal on any machine running Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell. Sessions are listed under their machine in the sidebar (a spinner while the agent works, a colored dot when it wants you) and keep running when you close the app. Terminal font size, line height and a blinking cursor are in Settings.
 - **Copy files:** a two-pane dialog to copy files and folders from one machine to another (see [Files and the clipboard](#files-and-the-clipboard)); or drop files from the Finder onto a machine in the sidebar.
 - **Activity (⌘J):** one timeline of everything happening on the fleet: operations started in the app (with live output) and every command agents ran in workspaces, filterable by kind or failures.
 - **Workspaces:** see what agents are doing on your machines (every command, its exit code and output), review a workspace's git changes, copy a shell command to step in, or destroy it.
@@ -76,16 +76,17 @@ muxen status
   - dark: Muxen Graphite, macOS Dark, Gruvbox Dark, Catppuccin Mocha / Macchiato / Frappé, Tokyo Night, Nord, Rosé Pine, Solarized Dark, Dracula, Everforest Dark, Kanagawa Wave, GitHub Dark;
   - light: Muxen Paper, macOS Light, Gruvbox Light, Catppuccin Latte, Tokyo Night Day, Nord Light, Rosé Pine Dawn, Solarized Light, Everforest Light, Kanagawa Lotus, GitHub Light.
 
-  The macOS themes also switch to the system fonts (SF Pro, and SF Mono when it's installed). The choice is saved in `ui.json` next to `fleet.toml`.
+  The macOS themes also switch to the system fonts (SF Pro, and SF Mono when it's installed). The choice is saved in `config.toml` (`[ui]`).
 
 Keyboard: ⌘1…⌘9 go to your machines · ⌃1…⌃4 overview, jobs, workspaces, GitHub (Alt on Linux and Windows) · ⌘J activity · ⌘R check machines · ⇧⌘R sync GitHub · ⌘N add machine · ⌘T new session · ⌘F or `/` search the fleet · ⌘B sidebar · ⌘[ / ⌘] back / forward · ⌘, settings. Hold ⌘ to see them in the app, and change them in Settings › Keyboard. On Linux and Windows, use Ctrl instead of ⌘.
 
-## The inventory: `fleet.toml`
+## Your settings: `config.toml`
 
-Muxen keeps its files in `~/.config/muxen/`, or in `$MUXEN_HOME` if that's set. Run `muxen paths` to see where they are.
+Muxen keeps everything you set in one file, `config.toml`, in `~/.config/muxin/` (`%APPDATA%\muxin\` on Windows), or in `$MUXIN_HOME` if that's set. Run `muxen paths` to see where it is. Older versions kept `fleet.toml`, `settings.json` and `ui.json` in `~/.config/muxen/`; the first run brings them into `config.toml` and leaves the old folder as it was.
 
-- `fleet.toml` lists your machines. You can edit it by hand. Muxen also edits it when you add machines or install runners, and keeps your comments when it does.
-- `settings.json` holds the watched GitHub orgs and repos, the polling intervals, and whether the clipboard is shared.
+- `[[machine]]` tables list your machines. Edit them by hand if you like: Muxen also edits them when you add machines or install runners, and keeps your comments.
+- `[settings]` holds the watched GitHub orgs and repos, the polling intervals, whether the clipboard is shared, and cloud machine options.
+- `[ui]` holds the app's look: theme, icons, terminal font and size, shortcuts, favorite machines.
 - `state.json` holds the last machine check, and what Tailscale last said about each machine.
 - `direct.json` holds the machines paired for direct connections, and their addresses.
 
@@ -160,7 +161,7 @@ The MCP server has these tools:
 | `list_runners` | Runners, optionally filtered by machine or state. |
 | `list_jobs` | Queued and running jobs, including which ones no runner can take. |
 | `check_machines` | Runs the read-only machine check over ssh now. |
-| `add_machine`, `remove_machine` | Edit `fleet.toml`. Nothing on the machine changes. |
+| `add_machine`, `remove_machine` | Edit `config.toml`. Nothing on the machine changes. |
 | `install_runners` | Downloads, registers and starts runners on a machine. |
 | `runner_action` | Starts, stops, restarts or removes a runner, or reads its logs. |
 | `get_operation`, `list_operations` | Progress and output of long operations. |
@@ -225,7 +226,7 @@ Ids:
 
 Every command also accepts `--demo`.
 
-The window, the CLI and MCP servers can all run at once. They share the files in the config directory and pick up each other's changes: settings, edits to `fleet.toml`, and newer machine checks.
+The window, the CLI and MCP servers can all run at once. They share the files in the config directory and pick up each other's changes: settings, edits to `config.toml`, and newer machine checks.
 
 ## Agent workspaces
 
@@ -260,7 +261,7 @@ muxen ws allow studionas --off                 # forbid workspaces on a machine
 
 `ws exec` passes the command's stdout and stderr through and exits with its exit code (124 if it timed out), so it composes in scripts. With `--json` it prints the full result instead.
 
-**Safety.** Host workspace commands run as the ssh user on your machine, with that user's permissions; they aren't sandboxed. Use Docker isolation for code you don't trust. Workspaces are on by default for every machine with a host. Turn them off per machine with `workspaces = false` in `fleet.toml`, the toggle on the machine's page in the app, or `muxen workspace allow <machine> --off`. Nothing is deleted automatically: workspaces stay until you or an agent destroys them. Folders live under `~/muxen/workspaces/<id>` on each machine (`workspace_root` in `fleet.toml` changes that).
+**Safety.** Host workspace commands run as the ssh user on your machine, with that user's permissions; they aren't sandboxed. Use Docker isolation for code you don't trust. Workspaces are on by default for every machine with a host. Turn them off per machine with `workspaces = false` in `config.toml`, the toggle on the machine's page in the app, or `muxen workspace allow <machine> --off`. Nothing is deleted automatically: workspaces stay until you or an agent destroys them. Folders live under `~/muxen/workspaces/<id>` on each machine (`workspace_root` in `config.toml` changes that).
 
 ## Your GitHub, and handing issues to agents
 
@@ -268,7 +269,7 @@ The GitHub page is built for the loop of picking an issue, handing it to an agen
 
 - **For you:** pull requests waiting for your review, issues assigned to you, and your open pull requests.
 - **Repositories:** everything you own, collaborate on or reach through your orgs, with each one's open issues, pull requests and GitHub Actions runs. Star the ones you work on to keep them at the top, and show the list as one list or grouped by owner (you, then your organizations, then repositories other people shared with you).
-- **On your machines:** each machine's agent finds git checkouts in your code folders (`~/Developer`, `~/code`, `~/src`, … set in `settings.json` as `codeFolders`) and links them to their GitHub repository, with branch, commits ahead/behind and uncommitted changes. Fetch, Pull and Push from there.
+- **On your machines:** each machine's agent finds git checkouts in your code folders (`~/Developer`, `~/code`, `~/src`, … set in `config.toml` as `code_folders` under `[settings]`) and links them to their GitHub repository, with branch, commits ahead/behind and uncommitted changes. Fetch, Pull and Push from there.
 - **Fix with agent:** on any issue (or **Review with agent** on a pull request), one click opens a new session in that repository's checkout on the machine you pick (this computer first), with the issue's link, title and description as the agent's first message. Right-click an issue or pull request for **Fix in a new workspace…**: pick any machine and agent, and Muxen clones the repository there (an issue gets its own branch, like `issue-910-content-excalidraw`; a pull request checks out its branch, forks included), then starts the agent in it.
 
 Muxen uses the GitHub CLI's login (`gh auth login`) or `GITHUB_TOKEN`. Settings has a **Sign in with GitHub** button that runs the CLI's browser sign-in; each machine's page shows whether its own `gh` is signed in (agents there use it for issues and pull requests) and can sign it in too.
@@ -353,7 +354,7 @@ If [Tailscale](https://tailscale.com) is on your Mac, Muxen uses it to keep mach
 
 - **Home network first.** A paired machine is tried on its local-network address first, and through its Tailscale address a moment later; the first to answer wins. At home that's the local network; at a café it's Tailscale.
 - **Moving.** When your Mac changes networks, connections that no longer work are rebuilt the best way from where you are, and ones that went through Tailscale move back to the local network when you're home again. Open terminals and desktops carry on.
-- **ssh too.** If a machine's host only works at home (a local IP in `fleet.toml` or your ssh config), ssh goes to its tailnet address instead when the usual one doesn't answer.
+- **ssh too.** If a machine's host only works at home (a local IP in `config.toml` or your ssh config), ssh goes to its tailnet address instead when the usual one doesn't answer.
 - **Offline answers.** Tailscale's view tells Muxen when a machine is back, whether Tailscale lost it too, or that Tailscale is off on this Mac (with **Open Tailscale**).
 - **The Connection card** says which way it goes (Local network, or Tailscale peer-to-peer or through a relay), whether the machine is on your tailnet, and offers **Set up Tailscale** on Linux machines that aren't (the install command, typed in a shell there for you to run).
 - **Adding machines:** the Add machine dialog lists the computers on your tailnet; one added by its tailnet name is reachable from anywhere.
@@ -374,6 +375,19 @@ muxen cp adibs-macbook-pro:~/Projects/site beelink:~/www --no-wait
 ```
 
 **Shared clipboard.** Text you copy on your Mac can be pasted on your Linux desktops and other Macs, and what you copy there lands on your Mac (and on the other machines). Passwords copied from password managers (marked private on the clipboard) stay on your Mac. Turn it off in Settings › Clipboard.
+
+## Cloud machines
+
+Need a machine you don't have? Muxen can make one in your DigitalOcean account. Connect in **Settings › Cloud** with an API token (kept in the macOS Keychain), the browser sign-in, or `doctl`'s login. Then pick **New cloud machine…** in the Add machine dialog: a name, a region (the nearest is preselected) and a size with its price. Muxen creates the droplet with your user and SSH key, installs what you chose (Docker, git and the GitHub CLI; Node with Claude Code and Codex; Tailscale), and adds it to your fleet. Then it's like any other machine: terminals, agent sessions, files, workspaces.
+
+Its page shows what it costs, with **Power off** (DigitalOcean still bills a droplet that's off) and **Destroy**. Settings › Cloud also says what happens when one sits idle: nothing, a reminder, power off, or destroy, after the hours you choose.
+
+```sh
+muxen cloud login --token dop_v1_...
+muxen cloud options
+muxen cloud create dev-1 --size s-2vcpu-4gb
+muxen cloud destroy dev-1
+```
 
 ## How checks and installs work
 
@@ -414,4 +428,4 @@ Source layout:
 
 Copyright © 2026 Adib Hanna. All rights reserved. Muxen is proprietary software; see `LICENSE`.
 
-It includes third-party components under their own licenses, listed in `THIRD_PARTY_NOTICES.md`: the Geist fonts (SIL Open Font License, `assets/fonts/OFL.txt`), the Lucide icons (ISC, `assets/icons/LICENSE.txt`), GPUI (Apache-2.0) and the Rust crates in `Cargo.lock`.
+It includes third-party components under their own licenses, listed in `THIRD_PARTY_NOTICES.md`: the Geist fonts (SIL Open Font License, `assets/fonts/OFL.txt`), the Lucide icons (ISC, `assets/icons/LICENSE.txt`), the Phosphor, Hugeicons and Fluent icons (MIT), the MingCute icons (Apache-2.0) and the Solar icons (CC BY 4.0), with their licenses in `assets/icons/`, GPUI (Apache-2.0) and the Rust crates in `Cargo.lock`.

@@ -217,11 +217,11 @@ impl Engine {
                     .find(|x| x.id == m || x.name.eq_ignore_ascii_case(&m))
                     .ok_or_else(|| format!("Machine \"{m}\" not found in the fleet. Known machines: {}.", machine_names(&snap.machines)))?;
                 if found.host.is_empty() {
-                    return Err(format!("{} has no host in fleet.toml, so Muxen can't reach it.", found.name));
+                    return Err(format!("{} has no host in config.toml, so Muxen can't reach it.", found.name));
                 }
                 if !found.workspaces_allowed {
                     return Err(format!(
-                        "Workspaces are turned off for {}. Turn them on from its page in Muxen, or remove `workspaces = false` from its entry in fleet.toml.",
+                        "Workspaces are turned off for {}. Turn them on from its page in Muxen, or remove `workspaces = false` from its entry in config.toml.",
                         found.name
                     ));
                 }
@@ -229,7 +229,7 @@ impl Engine {
             }
             None => pick_machine_for(&snap.machines, clean_opt(req.platform).as_deref(), docker)?.id.clone(),
         };
-        let (spec, mut probe) = self.machine(&machine_id).ok_or("Machine not found in fleet.toml anymore.")?;
+        let (spec, mut probe) = self.machine(&machine_id).ok_or("Machine not found in config.toml anymore.")?;
         if self.demo_world().is_none() && !probe.as_ref().is_some_and(|p| p.ok) {
             self.run_check(Some(vec![spec.id.clone()])).await;
             probe = self.machine(&spec.id).and_then(|(_, p)| p);
@@ -550,7 +550,7 @@ impl Engine {
                 Ok(())
             }
             (None, None) => {
-                self.op_log(op, format!("warning: {} isn't in fleet.toml anymore, so its files can't be cleaned up; forgetting the workspace.", rec.info.machine_name));
+                self.op_log(op, format!("warning: {} isn't in config.toml anymore, so its files can't be cleaned up; forgetting the workspace.", rec.info.machine_name));
                 Ok(())
             }
         };
@@ -579,10 +579,10 @@ impl Engine {
         self.current().workspaces.clone()
     }
 
-    /// Turns agent workspaces on or off for a machine (edits fleet.toml).
+    /// Turns agent workspaces on or off for a machine (edits config.toml).
     pub fn set_workspaces_allowed(self: &Arc<Self>, machine_id: &str, allowed: bool) -> Result<(), String> {
         if self.machine(machine_id).is_none() {
-            return Err(format!("Machine \"{machine_id}\" not found in fleet.toml."));
+            return Err(format!("Machine \"{machine_id}\" not found in config.toml."));
         }
         let edit = |text: &str| crate::ops::inventory_edit::set_workspaces(text, machine_id, allowed);
         match self.demo_world() {
@@ -628,12 +628,12 @@ impl Engine {
     fn workspace_machine(&self, rec: &WorkspaceRecord) -> Result<MachineSpec, String> {
         let (spec, _) = self.machine(&rec.info.machine_id).ok_or_else(|| {
             format!(
-                "Machine {} not found in fleet.toml anymore, so Muxen can't reach workspace {}. Destroy it with keepFiles to forget it.",
+                "Machine {} not found in config.toml anymore, so Muxen can't reach workspace {}. Destroy it with keepFiles to forget it.",
                 rec.info.machine_name, rec.info.id
             )
         })?;
         if !spec.is_checkable() {
-            return Err(format!("{} has no host in fleet.toml.", spec.name));
+            return Err(format!("{} has no host in config.toml.", spec.name));
         }
         Ok(spec)
     }

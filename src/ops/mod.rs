@@ -9,6 +9,7 @@
 //!
 //! PUBLIC API — the UI depends on these signatures.
 
+pub(crate) mod cloud;
 pub(crate) mod inventory_edit;
 pub(crate) mod remote;
 
@@ -142,7 +143,7 @@ pub enum RunnerAction {
     Restart,
     /// Tail the newest _diag log into the operation output (read-only).
     Logs,
-    /// Stop, uninstall the service, deregister from GitHub, and drop it from fleet.toml.
+    /// Stop, uninstall the service, deregister from GitHub, and drop it from config.toml.
     Remove { delete_files: bool },
 }
 
@@ -168,7 +169,7 @@ impl RunnerAction {
     }
 }
 
-/// A machine to add to fleet.toml.
+/// A machine to add to config.toml.
 #[derive(Debug, Clone)]
 pub struct NewMachine {
     pub name: String,
@@ -180,7 +181,7 @@ impl Engine {
     /// Starts installing runners. Returns the operation id.
     pub fn install_runners(self: &Arc<Self>, req: InstallRequest) -> Result<u64, String> {
         let req = self.validate_install(req)?;
-        let (spec, probe) = self.machine(&req.machine_id).ok_or("That machine isn't in fleet.toml anymore.")?;
+        let (spec, probe) = self.machine(&req.machine_id).ok_or("That machine isn't in config.toml anymore.")?;
         let title = match req.names.as_slice() {
             [one] => format!("Install {one} on {}", spec.name),
             many => format!("Install {} runners on {}", many.len(), spec.name),
@@ -234,10 +235,10 @@ impl Engine {
             }
             _ => {
                 let (spec, probe) = machine.clone().ok_or_else(|| {
-                    format!("{} isn't on a machine in fleet.toml, so Muxen can't control it. It can only be removed from GitHub.", runner.name)
+                    format!("{} isn't on a machine in config.toml, so Muxen can't control it. It can only be removed from GitHub.", runner.name)
                 })?;
                 if !spec.is_checkable() {
-                    return Err(format!("{} has no host in fleet.toml.", spec.name));
+                    return Err(format!("{} has no host in config.toml.", spec.name));
                 }
                 let dir = dir.clone().ok_or_else(|| {
                     format!("{} wasn't found on {} at the last check. Check the machine again, or install the runner.", runner.name, spec.name)
@@ -270,7 +271,30 @@ impl Engine {
         Ok(op)
     }
 
-    /// Adds a machine to fleet.toml (keeping its comments and formatting) and checks it.
+    /// Cancels the workflow run a queued or running job belongs to (all of
+    /// its jobs, as GitHub cancels whole runs). Returns the operation id.
+    pub fn cancel_run(self: &Arc<Self>, job_id: u64) -> Result<u64, String> {
+        let snap = self.current();
+        let job = snap.jobs.queued.iter().chain(snap.jobs.running.iter()).find(|j| j.id == job_id).cloned().ok_or("That job isn't queued or running anymore.")?;
+        if self.demo_world().is_some() {
+            return Err("The demo can't cancel runs.".into());
+        }
+        let op = self.begin_op("cancel-run", format!("Cancel {} in {}", job.workflow, job.repo), None, None);
+        let me = self.clone();
+        self.runtime().spawn(async move {
+            let settings = me.settings();
+            me.op_log(op, format!("Cancelling run {} of {} ({})", job.run_id, job.workflow, job.repo));
+            let result = me.github().cancel_run(&settings.github, &job.repo, job.run_id).await;
+            if result.is_ok() {
+                me.op_log(op, "GitHub is cancelling it; its jobs stop in a few seconds.");
+                me.trigger_sync();
+            }
+            finish(&me, op, result);
+        });
+        Ok(op)
+    }
+
+    /// Adds a machine to config.toml (keeping its comments and formatting) and checks it.
     /// Returns the new machine's id.
     pub fn add_machine(self: &Arc<Self>, machine: NewMachine) -> Result<String, String> {
         let name = machine.name.trim().to_string();
@@ -297,10 +321,10 @@ impl Engine {
         Ok(id)
     }
 
-    /// Removes a machine from fleet.toml. Doesn't touch the machine itself.
+    /// Removes a machine from config.toml. Doesn't touch the machine itself.
     pub fn remove_machine(self: &Arc<Self>, machine_id: &str) -> Result<(), String> {
         if self.machine(machine_id).is_none() {
-            return Err("That machine isn't in fleet.toml anymore.".into());
+            return Err("That machine isn't in config.toml anymore.".into());
         }
         if self.machine_busy(machine_id) {
             return Err("An operation is still running on this machine. Wait for it to finish.".into());
@@ -325,9 +349,9 @@ impl Engine {
     }
 
     fn validate_install(&self, mut req: InstallRequest) -> Result<InstallRequest, String> {
-        let (spec, _) = self.machine(&req.machine_id).ok_or("That machine isn't in fleet.toml anymore.")?;
+        let (spec, _) = self.machine(&req.machine_id).ok_or("That machine isn't in config.toml anymore.")?;
         if !spec.is_checkable() {
-            return Err(format!("{} has no host in fleet.toml, so Muxen can't reach it.", spec.name));
+            return Err(format!("{} has no host in config.toml, so Muxen can't reach it.", spec.name));
         }
         if self.machine_busy(&spec.id) {
             return Err(format!("Another operation is already changing {}. Wait for it to finish.", spec.name));
@@ -433,7 +457,7 @@ enum Plan {
     OnMachine { spec: MachineSpec, probe: Option<ProbeResult>, dir: String, container: Option<String>, scope: Option<String>, delete_files: bool },
     /// The machine is gone or unreachable: deregister through the GitHub API.
     GitHubOnly,
-    /// Not installed anywhere we can see; just drop it from fleet.toml.
+    /// Not installed anywhere we can see; just drop it from config.toml.
     InventoryOnly,
 }
 
@@ -624,11 +648,11 @@ fn docker_install_script(
     with_params(Shell::Sh, &params, INSTALL_DOCKER_SH)
 }
 
-/// Adds what got installed to fleet.toml (even if a later runner failed) and refreshes.
+/// Adds what got installed to config.toml (even if a later runner failed) and refreshes.
 async fn record_installed(engine: &Arc<Engine>, op: u64, req: &InstallRequest, spec: &MachineSpec, ran: Result<(), String>) -> Result<(), String> {
     let done = if ran.is_ok() { req.names.clone() } else { installed_names(engine, op, &req.names) };
     if !done.is_empty() {
-        step(engine, op, format!("Adding {} to fleet.toml", done.join(", ")));
+        step(engine, op, format!("Adding {} to config.toml", done.join(", ")));
         let edit = inventory_edit::edit_file(engine.inventory_path(), |t| inventory_edit::add_runners(t, &spec.id, &done));
         if let Err(e) = edit {
             engine.op_log(op, format!("warning: {e} The runners still show up because Muxen discovers them."));
@@ -706,10 +730,10 @@ fn control_docker_script(action: RunnerAction, container: &str, token: &str, del
     with_params(Shell::Sh, &params, CONTROL_DOCKER_SH)
 }
 
-/// Drops a removed runner from fleet.toml if it was listed there.
+/// Drops a removed runner from config.toml if it was listed there.
 fn forget_runner(engine: &Arc<Engine>, op: u64, runner: &Runner) {
     let (Some(mid), true) = (runner.machine_id.as_deref(), runner.declared) else { return };
-    step(engine, op, format!("Removing {} from fleet.toml", runner.name));
+    step(engine, op, format!("Removing {} from config.toml", runner.name));
     let edit = |t: &str| inventory_edit::remove_runner(t, mid, &runner.name);
     let result = match engine.demo_world() {
         Some(w) => w.edit_inventory(edit),
@@ -817,7 +841,7 @@ async fn demo_install(engine: &Arc<Engine>, op: u64, req: &InstallRequest, spec:
     }
 
     w.install_runners(&spec.id, &req.names, &req.labels, false);
-    step(engine, op, format!("Adding {} to fleet.toml", req.names.join(", ")));
+    step(engine, op, format!("Adding {} to config.toml", req.names.join(", ")));
     w.edit_inventory(|t| inventory_edit::add_runners(t, &spec.id, &req.names))?;
     engine.reload_inventory_now();
     refresh(engine, op, Some(spec)).await;
@@ -856,7 +880,7 @@ async fn demo_install_docker(engine: &Arc<Engine>, op: u64, req: &InstallRequest
         engine.op_log(op, format!("✓ {name} is installed"));
     }
     w.install_runners(&spec.id, &req.names, &docker_labels(&req.labels), true);
-    step(engine, op, format!("Adding {} to fleet.toml", req.names.join(", ")));
+    step(engine, op, format!("Adding {} to config.toml", req.names.join(", ")));
     w.edit_inventory(|t| inventory_edit::add_runners(t, &spec.id, &req.names))?;
     engine.reload_inventory_now();
     refresh(engine, op, Some(spec)).await;
@@ -1085,7 +1109,7 @@ mod engine_tests {
         let base = tmp.join("runners");
         stub_runner(&base.join("or-test-01"), "or-test-01");
         std::fs::write(
-            tmp.join("fleet.toml"),
+            tmp.join("config.toml"),
             format!("# test fleet\n[[machine]]\nname = \"Here\"\nhost = \"local\"\nrunners = [\"or-test-01\"]\nrunner_dirs = [\"{}/*\"]\n", base.display()),
         )
         .unwrap();
@@ -1114,7 +1138,7 @@ mod engine_tests {
         assert_eq!(new_id, "spare");
         assert!(engine.current().machines.iter().any(|m| m.id == "spare"));
         engine.remove_machine("spare").unwrap();
-        let text = std::fs::read_to_string(tmp.join("fleet.toml")).unwrap();
+        let text = std::fs::read_to_string(tmp.join("config.toml")).unwrap();
         assert!(text.starts_with("# test fleet") && !text.contains("Spare"), "{text}");
         assert_eq!(engine.suggest_runner_names("here", 2), vec!["here-01", "here-02"]);
 
@@ -1168,7 +1192,7 @@ mod engine_tests {
         let tmp = std::env::temp_dir().join(format!("muxen-docker-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        std::fs::write(tmp.join("fleet.toml"), format!("[[machine]]\nname = \"Box\"\nhost = \"{host}\"\n")).unwrap();
+        std::fs::write(tmp.join("config.toml"), format!("[[machine]]\nname = \"Box\"\nhost = \"{host}\"\n")).unwrap();
         let engine = Engine::new(Paths::resolve(Some(tmp.clone()), None), false);
         engine.run_check(None).await;
         let (spec, probe) = engine.machine("box").unwrap();

@@ -17,7 +17,7 @@ use crate::probe::{self, ProbeResult, Shell};
 const PS_READ_STDIN: &str = "[Console]::In.ReadToEnd() | Invoke-Expression";
 const STDERR_TAIL: usize = 4;
 
-/// The shell a machine speaks: pinned in fleet.toml, else what the last check used, else by OS.
+/// The shell a machine speaks: pinned in config.toml, else what the last check used, else by OS.
 pub fn shell_for(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Shell {
     spec.shell
         .or_else(|| probe.and_then(|p| p.shell))

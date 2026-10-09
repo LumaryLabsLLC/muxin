@@ -1,8 +1,10 @@
-//! On-disk configuration.
+//! On-disk configuration, in one folder (`~/.config/muxin`, `%APPDATA%\muxin`):
 //!
-//! - `fleet.toml` — the inventory: machines and the runners they host. Edited by hand.
-//! - `settings.json` — app settings changed from the dashboard (GitHub orgs/repos, intervals).
+//! - `config.toml` — everything the user sets: `[settings]` (GitHub, checks,
+//!   cloud), `[ui]` (the app's look, fonts, shortcuts) and the `[[machine]]`
+//!   list. The app edits each part in place, so comments on machines survive.
 //! - `state.json` — the last machine check, so a restart still shows "checked 42m ago".
+//! - Internal state: pairing keys (`direct.json`, `identity`), `workspaces.json`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -17,7 +19,11 @@ use crate::util::slug;
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub dir: PathBuf,
+    /// config.toml.
+    pub config: PathBuf,
+    /// Where the machines are read from: config.toml, unless `-f` names another file.
     pub inventory: PathBuf,
+    /// Where settings are kept: config.toml.
     pub settings: PathBuf,
     pub state: PathBuf,
     /// Agent workspaces, shared by every Muxen process (see fleet::workspaces).
@@ -25,31 +31,193 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// `$MUXEN_HOME`, else `$XDG_CONFIG_HOME/muxen`, else `~/.config/muxen`.
+    /// `$MUXIN_HOME` (or `$MUXEN_HOME`), else the platform's config folder:
+    /// `~/.config/muxin` ($XDG_CONFIG_HOME on Linux), `%APPDATA%\muxin` on Windows.
     pub fn resolve(dir: Option<PathBuf>, inventory: Option<PathBuf>) -> Paths {
-        let dir = dir.or_else(|| std::env::var_os("MUXEN_HOME").map(PathBuf::from)).unwrap_or_else(|| {
-            let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| dirs::home_dir().map(|h| h.join(".config")));
-            match base {
-                Some(base) => {
-                    let dir = base.join("muxen");
-                    // Muxen was called OpenRunner: bring its folder along, once.
-                    let old = base.join("openrunner");
-                    if !dir.exists() && old.is_dir() && std::fs::rename(&old, &dir).is_ok() {
-                        tracing::info!("moved {} to {}", display_path(&old), display_path(&dir));
-                    }
-                    dir
-                }
-                None => PathBuf::from(".muxen"),
-            }
-        });
+        let base = config_base();
+        let chosen = dir.or_else(|| std::env::var_os("MUXIN_HOME").map(PathBuf::from)).or_else(|| std::env::var_os("MUXEN_HOME").map(PathBuf::from));
+        // Only the default folder takes over the old default folder's files; a
+        // folder that was asked for keeps to itself.
+        let dir = chosen.clone().unwrap_or_else(|| base.as_ref().map(|b| b.join("muxin")).unwrap_or_else(|| PathBuf::from(".muxin")));
+        migrate(&dir, if chosen.is_some() { None } else { base.as_deref() });
+        let config = dir.join("config.toml");
         Paths {
-            inventory: inventory.unwrap_or_else(|| dir.join("fleet.toml")),
-            settings: dir.join("settings.json"),
+            inventory: inventory.unwrap_or_else(|| config.clone()),
+            settings: config.clone(),
+            config,
             state: dir.join("state.json"),
             workspaces: dir.join("workspaces.json"),
             dir,
         }
     }
+}
+
+/// Where per-user config folders go on this platform.
+fn config_base() -> Option<PathBuf> {
+    if cfg!(windows) {
+        dirs::config_dir()
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| dirs::home_dir().map(|h| h.join(".config")))
+    }
+}
+
+/// Muxen used to keep `fleet.toml`, `settings.json` and `ui.json` in
+/// `~/.config/muxen` (and before that `~/.config/openrunner`). The first time,
+/// they become one config.toml in `dir`, and the rest of the old folder (pairing
+/// keys, workspaces) is copied along. The old folder is left as it was.
+fn migrate(dir: &Path, base: Option<&Path>) {
+    let config = dir.join("config.toml");
+    if config.exists() {
+        return;
+    }
+    const OLD_FILES: [&str; 3] = ["fleet.toml", "settings.json", "ui.json"];
+    let candidates = [Some(dir.to_path_buf()), base.map(|b| b.join("muxen")), base.map(|b| b.join("openrunner"))];
+    let Some(old) = candidates.into_iter().flatten().find(|d| OLD_FILES.iter().any(|f| d.join(f).exists())) else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    if old != dir {
+        copy_dir(&old, dir, &OLD_FILES);
+    }
+    let mut text = std::fs::read_to_string(old.join("fleet.toml")).unwrap_or_default();
+    for (file, key, camel) in [("settings.json", "settings", true), ("ui.json", "ui", false)] {
+        let Some(value) = std::fs::read_to_string(old.join(file)).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else { continue };
+        let value = json_for_toml(value, camel);
+        match toml::Value::try_from(&value).map_err(|e| e.to_string()).and_then(|v| set_section(&text, key, &v)) {
+            Ok(t) => text = t,
+            Err(e) => tracing::warn!("couldn't bring {} into config.toml: {e}", display_path(&old.join(file))),
+        }
+    }
+    match write_atomic(&config, text.as_bytes()) {
+        Ok(()) => tracing::info!("moved Muxen's settings from {} into {}", display_path(&old), display_path(&config)),
+        Err(e) => tracing::warn!("couldn't write {}: {e:#}", display_path(&config)),
+    }
+}
+
+/// Copies a folder's contents (but `skip`) into another, recursively.
+fn copy_dir(from: &Path, to: &Path, skip: &[&str]) {
+    let Ok(entries) = std::fs::read_dir(from) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        if skip.iter().any(|s| name == *s) {
+            continue;
+        }
+        let (src, dst) = (e.path(), to.join(&name));
+        if src.is_dir() {
+            if std::fs::create_dir_all(&dst).is_ok() {
+                copy_dir(&src, &dst, &[]);
+            }
+        } else if !dst.exists() {
+            let _ = std::fs::copy(&src, &dst);
+        }
+    }
+}
+
+/// JSON settings as TOML can hold them: no nulls, and (`camel`) keys in snake_case.
+fn json_for_toml(v: serde_json::Value, camel: bool) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (if camel { snake_case(&k) } else { k }, json_for_toml(v, camel)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().filter(|v| !v.is_null()).map(|v| json_for_toml(v, camel)).collect()),
+        other => other,
+    }
+}
+
+fn snake_case(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if c.is_ascii_uppercase() {
+            out.push('_');
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// config.toml sections
+
+const CONFIG_HEADER: &str = "# Muxen: settings, look and machines. The app writes [settings] and [ui];\n# change them here or in Settings. Comments on machines are kept.\n\n";
+
+/// Reads one section of config.toml (`[settings]`, `[ui]`), defaults if it's
+/// missing or doesn't read.
+pub fn read_section<T: serde::de::DeserializeOwned + Default>(path: &Path, key: &str) -> T {
+    let Ok(text) = std::fs::read_to_string(path) else { return T::default() };
+    let table = match text.parse::<toml::Table>() {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("ignoring {}: {}", display_path(path), e.to_string().trim());
+            return T::default();
+        }
+    };
+    match table.get(key).cloned().map(|v| v.try_into::<T>()) {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => {
+            tracing::warn!("ignoring [{key}] in {}: {}", display_path(path), e.to_string().trim());
+            T::default()
+        }
+        None => T::default(),
+    }
+}
+
+/// Writes one section of config.toml in place; the rest of the file stays as it is.
+pub fn write_section<T: Serialize>(path: &Path, key: &str, value: &T) -> Result<(), String> {
+    crate::ops::inventory_edit::edit_file(path, |text| set_section(text, key, value))
+}
+
+/// `text` with `[key]` replaced by `value`: where it was, or (new) at the top,
+/// above the machines.
+pub fn set_section<T: Serialize>(text: &str, key: &str, value: &T) -> Result<String, String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| format!("config.toml doesn't read: {}", e.to_string().trim()))?;
+    let rendered = toml::to_string(value).map_err(|e| e.to_string())?;
+    let fresh: toml_edit::DocumentMut = rendered.parse().map_err(|e: toml_edit::TomlError| e.to_string())?;
+    let mut table = fresh.as_table().clone();
+    table.set_implicit(false);
+    doc.insert(key, toml_edit::Item::Table(table));
+    // Fixed places above the machines: [settings], then [ui], then others.
+    // Reading the file renumbers places, so every section gets its own again.
+    fn place(t: &mut toml_edit::Table, position: isize) {
+        t.set_position(Some(position));
+        for (_, item) in t.iter_mut() {
+            if let Some(sub) = item.as_table_mut() {
+                place(sub, position);
+            }
+        }
+    }
+    for (k, position) in [("settings", -30), ("ui", -20)] {
+        if let Some(t) = doc.get_mut(k).and_then(|i| i.as_table_mut()) {
+            place(t, position);
+        }
+    }
+    if !matches!(key, "settings" | "ui") {
+        if let Some(t) = doc.get_mut(key).and_then(|i| i.as_table_mut()) {
+            place(t, -10);
+        }
+    }
+    // The header goes on whichever section comes first; the others start after a blank line.
+    let first = ["settings", "ui"].into_iter().find(|k| doc.contains_key(k));
+    for k in ["settings", "ui"] {
+        if let Some(t) = doc.get_mut(k).and_then(|i| i.as_table_mut()) {
+            t.decor_mut().set_prefix(if Some(k) == first { CONFIG_HEADER } else { "\n" });
+        }
+    }
+    // A blank line between the sections and the first machine.
+    if let Some(first) = doc.get_mut("machine").and_then(|m| m.as_array_of_tables_mut()).and_then(|a| a.get_mut(0)) {
+        let p = first.decor().prefix().and_then(|p| p.as_str()).unwrap_or("").to_string();
+        if !p.starts_with('\n') {
+            first.decor_mut().set_prefix(format!("\n{p}"));
+        }
+    }
+    let out = doc.to_string();
+    Inventory::parse(&out).map_err(|e| format!("config.toml would be invalid: {e}"))?;
+    Ok(out)
 }
 
 /// Shortens paths under the home directory to `~/...` for display.
@@ -63,13 +231,20 @@ pub fn display_path(path: &Path) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Inventory (fleet.toml)
+// Inventory (config.toml)
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InventoryFile {
     #[serde(default, rename = "machine")]
     machines: Vec<MachineSpec>,
+    /// The other parts of config.toml (read elsewhere).
+    #[serde(default)]
+    #[allow(dead_code)]
+    settings: Option<toml::Table>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    ui: Option<toml::Table>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,6 +287,28 @@ pub struct MachineSpec {
     pub ssh_options: Vec<String>,
     #[serde(default)]
     pub notes: Option<String>,
+    /// A cloud machine Muxen created (and can power off or destroy).
+    #[serde(default)]
+    pub cloud: Option<CloudRef>,
+}
+
+/// Where a cloud machine lives, as config.toml records it:
+/// `cloud = { provider = "digitalocean", id = 123, region = "nyc3", size = "s-2vcpu-4gb", price_hourly = 0.03571, created_at = "..." }`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CloudRef {
+    pub provider: String,
+    pub id: u64,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub size: String,
+    /// What it costs per hour while it exists (powered off too), in USD.
+    #[serde(default)]
+    pub price_hourly: f64,
+    /// RFC 3339.
+    #[serde(default)]
+    pub created_at: String,
 }
 
 fn yes() -> bool {
@@ -176,7 +373,7 @@ fn machine_id_base(name: &str, explicit_id: &str) -> String {
 }
 
 /// A machine's id: its `id` (or `name`) slugged, with "-2", "-3"... appended to
-/// repeats in file order. Shared with the fleet.toml editor so both agree.
+/// repeats in file order. Shared with the config.toml editor so both agree.
 pub fn assign_machine_id(name: &str, explicit_id: &str, taken: &mut HashSet<String>) -> String {
     let base = machine_id_base(name, explicit_id);
     let mut id = base.clone();
@@ -192,7 +389,8 @@ pub fn assign_machine_id(name: &str, explicit_id: &str, taken: &mut HashSet<Stri
 pub fn default_inventory() -> String {
     let host = local_hostname();
     format!(
-        r#"# Muxen fleet inventory
+        r#"# Muxen: your settings and machines. Settings and the app's look go in
+# [settings] and [ui], which Muxen adds when you change them.
 #
 # Each [[machine]] is a computer that hosts self-hosted GitHub Actions runners,
 # or one you just want to keep an eye on. Muxen checks machines over SSH
@@ -240,10 +438,10 @@ pub fn local_hostname() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Settings (settings.json)
+// Settings ([settings] in config.toml)
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(default)]
 pub struct Settings {
     pub github: GitHubSettings,
     pub github_poll_seconds: u32,
@@ -255,6 +453,37 @@ pub struct Settings {
     pub favorite_repos: Vec<String>,
     /// Text copied here can be pasted on the machines (Linux desktops, Macs), and back.
     pub share_clipboard: bool,
+    /// Cloud machines: how Muxen signs in, what new ones come with, what happens when they sit idle.
+    pub cloud: CloudSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct CloudSettings {
+    /// How Muxen signs in to DigitalOcean: "token" (kept in the Keychain), "oauth" (browser sign-in) or "doctl" (its CLI's login).
+    pub digitalocean_auth: String,
+    /// Defaults for new machines; empty picks for you.
+    pub region: String,
+    pub size: String,
+    /// What a new machine comes with, by id: tools, languages, agent CLIs,
+    /// Tailscale (see cloud::setup::EXTRAS).
+    pub install: Vec<String>,
+    /// When a cloud machine has been idle `idle_hours`: "warn", "poweroff" or "destroy" ("off" does nothing).
+    pub idle_action: String,
+    pub idle_hours: u32,
+}
+
+impl Default for CloudSettings {
+    fn default() -> Self {
+        CloudSettings {
+            digitalocean_auth: "token".into(),
+            region: String::new(),
+            size: "s-2vcpu-4gb".into(),
+            install: crate::cloud::setup::default_extras(),
+            idle_action: "warn".into(),
+            idle_hours: 3,
+        }
+    }
 }
 
 /// Common places people keep code, a few levels deep, plus repos sitting right in the home folder.
@@ -267,7 +496,7 @@ pub fn default_code_folders() -> Vec<String> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(default)]
 pub struct GitHubSettings {
     pub orgs: Vec<String>,
     pub repos: Vec<String>,
@@ -289,6 +518,7 @@ impl Default for Settings {
             code_folders: default_code_folders(),
             favorite_repos: Vec::new(),
             share_clipboard: true,
+            cloud: CloudSettings::default(),
         }
     }
 }
@@ -300,21 +530,13 @@ impl Default for GitHubSettings {
 }
 
 impl Settings {
+    /// `[settings]` in config.toml.
     pub fn load(path: &Path) -> Settings {
-        match std::fs::read_to_string(path) {
-            Ok(text) => match serde_json::from_str::<Settings>(&text) {
-                Ok(s) => s.normalized().unwrap_or_default(),
-                Err(e) => {
-                    tracing::warn!("ignoring {}: {e}", display_path(path));
-                    Settings::default()
-                }
-            },
-            Err(_) => Settings::default(),
-        }
+        read_section::<Settings>(path, "settings").normalized().unwrap_or_default()
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        write_atomic(path, &serde_json::to_vec_pretty(self)?)
+        write_section(path, "settings", self).map_err(|e| anyhow::anyhow!(e))
     }
 
     /// Trims, de-duplicates and validates. Returns a message suitable for the UI on error.
@@ -420,6 +642,37 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn old_files_become_one_config_toml() {
+        let dir = std::env::temp_dir().join(format!("muxin-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fleet.toml"), "# my machines\n\n[[machine]]\nname = \"Box\" # the NUC\nhost = \"box\"\n").unwrap();
+        std::fs::write(dir.join("settings.json"), r#"{"github":{"orgs":["acme"],"repos":[],"scanRepos":7,"apiUrl":"https://api.github.com","account":"","accountMachine":""},"githubPollSeconds":30,"checkIntervalMinutes":5,"shareClipboard":false}"#).unwrap();
+        std::fs::write(dir.join("ui.json"), r#"{"mode":"dark","icon_style":"tiles","shortcuts":{"jobs":"ctrl-j"},"desktops":[],"path":null}"#).unwrap();
+        migrate(&dir, None);
+
+        let config = dir.join("config.toml");
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(text.find("[settings]").unwrap() < text.find("[[machine]]").unwrap(), "settings come first:\n{text}");
+        assert!(text.contains("# the NUC"), "comments on machines are kept:\n{text}");
+        let s = Settings::load(&config);
+        assert_eq!((s.github.orgs.clone(), s.github.scan_repos, s.github_poll_seconds, s.check_interval_minutes, s.share_clipboard), (vec!["acme".to_string()], 7, 30, 5, false));
+        let ui: toml::Table = read_section(&config, "ui");
+        assert_eq!(ui.get("icon_style").and_then(|v| v.as_str()), Some("tiles"));
+        assert_eq!(Inventory::load(&config).unwrap().machines[0].name, "Box");
+
+        // Saving settings again changes only [settings].
+        let mut s2 = s.clone();
+        s2.check_interval_minutes = 9;
+        s2.save(&config).unwrap();
+        let text2 = std::fs::read_to_string(&config).unwrap();
+        assert!(text2.contains("# the NUC") && text2.contains("icon_style"));
+        assert_eq!(Settings::load(&config).check_interval_minutes, 9);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]

@@ -67,6 +67,7 @@ fn machine(id: &str, platform: &str, cpu: f64, working: usize, disk_free: u64, a
             os: None,
             arch: None,
             os_version: None,
+            form_factor: None,
             cores: Some(8),
             cpu_pct: Some(cpu),
             mem_total: Some(100),
@@ -88,6 +89,7 @@ fn machine(id: &str, platform: &str, cpu: f64, working: usize, disk_free: u64, a
         gh: None,
         unreachable: None,
         tailnet: None,
+        cloud: None,
     }
 }
 
@@ -255,7 +257,7 @@ async fn local_end_to_end() {
     let tmp = tmp.canonicalize().unwrap();
     let root = tmp.join("workspaces");
     std::fs::write(
-        tmp.join("fleet.toml"),
+        tmp.join("config.toml"),
         format!("[[machine]]\nname = \"Here\"\nhost = \"local\"\nworkspace_root = \"{}\"\n", root.display()),
     )
     .unwrap();
@@ -464,7 +466,7 @@ async fn local_docker_end_to_end() {
     std::fs::create_dir_all(&tmp).unwrap();
     let tmp = tmp.canonicalize().unwrap();
     let root = tmp.join("workspaces");
-    std::fs::write(tmp.join("fleet.toml"), format!("[[machine]]\nname = \"Here\"\nhost = \"local\"\nworkspace_root = \"{}\"\n", root.display())).unwrap();
+    std::fs::write(tmp.join("config.toml"), format!("[[machine]]\nname = \"Here\"\nhost = \"local\"\nworkspace_root = \"{}\"\n", root.display())).unwrap();
     let engine = Engine::new(Paths::resolve(Some(tmp.clone()), None), false);
     engine.run_check(None).await;
     let info = engine
@@ -521,7 +523,7 @@ async fn remote_docker_end_to_end() {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     std::fs::write(
-        tmp.join("fleet.toml"),
+        tmp.join("config.toml"),
         format!("[[machine]]\nname = \"Remote\"\nhost = \"{host}\"\nworkspace_root = \"~/muxen-test/workspaces\"\n"),
     )
     .unwrap();

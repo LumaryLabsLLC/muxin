@@ -1,5 +1,5 @@
 //! The app's keyboard shortcuts: what each one does, its keys by default, and
-//! the user's own keys from Settings (saved in ui.json). ⌘1…⌘9 go to the
+//! the user's own keys from Settings (saved in config.toml). ⌘1…⌘9 go to the
 //! machines in the sidebar; holding ⌘ shows every shortcut where it applies.
 
 use gpui::{App, KeyBinding, Keystroke};

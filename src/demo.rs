@@ -150,7 +150,7 @@ struct Sim {
 
 pub struct World {
     sim: Mutex<Sim>,
-    /// fleet.toml for the demo, edited in memory by add/remove machine and installs.
+    /// config.toml for the demo, edited in memory by add/remove machine and installs.
     inventory: Mutex<String>,
     /// Files in the demo's agent workspaces, by workspace id (see fleet::workspaces).
     pub(crate) workspace_files: Mutex<std::collections::HashMap<String, crate::fleet::workspaces::DemoTree>>,
@@ -195,7 +195,7 @@ impl World {
         add("minis-01-01", Some("ubuntu-nuc"), labels(&["self-hosted", "Linux", "X64"]), "2.329.0");
         add("windows-01", Some("windows-laptop"), labels(&["self-hosted", "Windows", "ARM64"]), "2.329.0");
         add("minis-02-01", Some("windows-nuc"), labels(&["self-hosted", "Windows", "X64"]), "2.329.0");
-        // Registered on GitHub, but not in fleet.toml.
+        // Registered on GitHub, but not in config.toml.
         add("linux-spot-01", None, labels(&["self-hosted", "Linux", "X64", "spot"]), "2.329.0");
 
         let mut sim = Sim { rng: now.timestamp_nanos_opt().unwrap_or(1) as u64 | 1, last_tick: now, next_id: 9_000_100, runners, jobs: Vec::new() };
@@ -315,6 +315,7 @@ impl World {
             os: Some(hw.os.into()),
             arch: Some(hw.arch.into()),
             os_version: Some(hw.os_version.into()),
+            form_factor: Some(if hw.id.contains("laptop") || hw.id.contains("macbook") { "laptop" } else { "desktop" }.into()),
             cores: Some(hw.cores),
             cpu_pct: Some((cpu * 10.0).round() / 10.0),
             mem_total: Some(mem_total),
@@ -418,7 +419,7 @@ impl World {
     // -----------------------------------------------------------------------
     // Control operations (see crate::ops), simulated.
 
-    /// Applies an edit to the demo's fleet.toml text.
+    /// Applies an edit to the demo's config.toml text.
     pub fn edit_inventory(&self, edit: impl FnOnce(&str) -> Result<String, String>) -> Result<(), String> {
         let mut text = self.inventory.lock().unwrap();
         *text = edit(&text)?;

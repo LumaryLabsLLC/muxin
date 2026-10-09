@@ -1,5 +1,6 @@
 mod api;
 mod cli;
+mod cloud;
 mod config;
 mod demo;
 mod fleet;
@@ -46,14 +47,16 @@ enum Command {
     Machines(AgentArgs),
     /// Everything about one machine: runners, diagnostics, resources
     Machine(MachineArgs),
-    /// Add a machine to fleet.toml (and check it)
+    /// Add a machine to config.toml (and check it)
     AddMachine(AddMachineArgs),
-    /// Remove a machine from fleet.toml (nothing on the machine changes)
+    /// Remove a machine from config.toml (nothing on the machine changes)
     RemoveMachine(MachineArgs),
     /// List runners
     Runners(RunnersArgs),
     /// Queued and running self-hosted jobs
     Jobs(AgentArgs),
+    /// Cancel the workflow run a queued or running job belongs to (all its jobs)
+    CancelRun(CancelRunArgs),
     /// Install runners on a machine and register them with GitHub
     Install(InstallArgs),
     /// Start, stop, restart, show logs for, or remove a runner
@@ -87,6 +90,9 @@ enum Command {
     /// A machine's desktop: a screenshot, or mouse and keyboard input
     #[command(subcommand)]
     Desktop(DesktopCommand),
+    /// Cloud machines: create DigitalOcean droplets to work in, power them, destroy them
+    #[command(subcommand)]
+    Cloud(CloudCommand),
     /// Agent sessions: Claude Code, Codex, OpenCode, ... kept running on your machines
     #[command(alias = "sessions", subcommand)]
     Session(SessionCommand),
@@ -94,7 +100,7 @@ enum Command {
     Mcp(McpArgs),
     /// Check every machine once and print a fleet report
     Check(CheckArgs),
-    /// Write a starter fleet.toml
+    /// Write a starter config.toml
     Init(InitArgs),
     /// Print where Muxen keeps its files
     Paths(CommonArgs),
@@ -102,11 +108,11 @@ enum Command {
 
 #[derive(Args, Clone)]
 struct CommonArgs {
-    /// Config directory [default: ~/.config/muxen, or $MUXEN_HOME]
+    /// Config directory [default: ~/.config/muxin (%APPDATA%\\muxin on Windows), or $MUXIN_HOME]
     #[arg(long, value_name = "DIR")]
     config_dir: Option<PathBuf>,
 
-    /// Inventory file [default: <config-dir>/fleet.toml]
+    /// Inventory file [default: <config-dir>/config.toml]
     #[arg(long, short = 'f', value_name = "FILE")]
     inventory: Option<PathBuf>,
 }
@@ -253,6 +259,19 @@ struct InstallArgs {
 }
 
 #[derive(Args)]
+struct CancelRunArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+
+    /// The job's id (from `muxen jobs --json`)
+    job_id: u64,
+
+    /// Return right away with the operation id
+    #[arg(long)]
+    no_wait: bool,
+}
+
+#[derive(Args)]
 struct RunnerArgs {
     #[command(flatten)]
     agent: AgentArgs,
@@ -335,6 +354,78 @@ struct GhRepoArgs {
     agent: AgentArgs,
     /// owner/name or a GitHub URL
     repo: String,
+}
+
+#[derive(Subcommand)]
+enum CloudCommand {
+    /// The account, regions, sizes and defaults for a new machine
+    Options(AgentArgs),
+    /// Create a droplet, set it up, and add it to the fleet (it costs money while it exists)
+    Create(CloudCreateArgs),
+    /// Delete a cloud machine's droplet and remove it from the fleet
+    Destroy(CloudMachineArgs),
+    /// Power a cloud machine on or off (DigitalOcean still bills it while off)
+    Power(CloudPowerArgs),
+    /// Sign in to DigitalOcean: --token TOKEN, --doctl, or --browser
+    Login(CloudLoginArgs),
+    /// Forget the DigitalOcean sign-in
+    Logout(AgentArgs),
+}
+
+#[derive(Args)]
+struct CloudCreateArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// The machine's name
+    name: String,
+    /// Region slug, e.g. nyc3 (default: Settings, else the nearest)
+    #[arg(long)]
+    region: Option<String>,
+    /// Size slug, e.g. s-2vcpu-4gb (default: Settings)
+    #[arg(long)]
+    size: Option<String>,
+    /// What it comes with, comma-separated: docker, gh, node, python, go, rust, php, ruby,
+    /// java, bun, deno, dotnet, claude, codex, gemini, opencode, amp, pi, tailscale
+    /// ("" for nothing; default: Settings)
+    #[arg(long)]
+    install: Option<String>,
+    /// Return right away with the operation id
+    #[arg(long)]
+    no_wait: bool,
+}
+
+#[derive(Args)]
+struct CloudMachineArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+}
+
+#[derive(Args)]
+struct CloudPowerArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// on or off
+    #[arg(value_parser = ["on", "off"])]
+    state: String,
+}
+
+#[derive(Args)]
+struct CloudLoginArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// A DigitalOcean API token (kept in the Keychain)
+    #[arg(long, conflicts_with_all = ["doctl", "browser"])]
+    token: Option<String>,
+    /// Use doctl's login
+    #[arg(long, conflicts_with = "browser")]
+    doctl: bool,
+    /// Sign in in the browser
+    #[arg(long)]
+    browser: bool,
 }
 
 #[derive(Subcommand)]
@@ -486,7 +577,7 @@ enum SessionCommand {
     /// List sessions (and which agents each machine has)
     #[command(alias = "list")]
     Ls(SessionLsArgs),
-    /// Start an agent (claude, codex, opencode, gemini, amp) or a shell on a machine
+    /// Start an agent (claude, codex, opencode, gemini, amp, pi) or a shell on a machine
     Start(SessionStartArgs),
     /// Print a session's screen and recent scrollback
     Read(SessionReadArgs),
@@ -516,7 +607,7 @@ struct SessionStartArgs {
     agent: AgentArgs,
     /// Machine id or name
     machine: String,
-    /// claude, codex, opencode, gemini, amp or shell
+    /// claude, codex, opencode, gemini, amp, pi or shell
     #[arg(value_name = "AGENT")]
     kind: String,
     /// Folder on the machine (default: home)
@@ -816,7 +907,7 @@ struct InitArgs {
     #[command(flatten)]
     common: CommonArgs,
 
-    /// Overwrite an existing fleet.toml
+    /// Overwrite an existing config.toml
     #[arg(long)]
     force: bool,
 }
@@ -860,7 +951,7 @@ fn main() -> ExitCode {
         Some(Command::RemoveMachine(a)) => {
             let req = api::MachineRequest { machine_id: a.machine_id };
             run(&runtime, &a.agent, async move |e| api::remove_machine(&e, req).await, |m| {
-                format!("Removed {} ({}) from fleet.toml. Nothing on the machine changed.\n", m.name, m.id)
+                format!("Removed {} ({}) from config.toml. Nothing on the machine changed.\n", m.name, m.id)
             })
         }
         Some(Command::Runners(a)) => {
@@ -898,6 +989,10 @@ fn main() -> ExitCode {
                 timeout_secs: Some(a.timeout),
             };
             run(&runtime, &a.agent, async move |e| api::runner_action(&e, req, api::Surface::Cli, stream_line).await, cli::action)
+        }
+        Some(Command::CancelRun(a)) => {
+            let req = api::CancelRunRequest { job_id: a.job_id, wait: !a.no_wait, timeout_secs: None };
+            run(&runtime, &a.agent, async move |e| api::cancel_run(&e, req, api::Surface::Cli, stream_line).await, cli::action)
         }
         Some(Command::Watch(a)) => {
             let req = api::GitHubScopesRequest { add: a.scopes, remove: vec![] };
@@ -950,6 +1045,7 @@ fn main() -> ExitCode {
         Some(Command::Checkouts(a)) => checkouts(a, &runtime),
         Some(Command::Git(cmd)) => git(cmd, &runtime),
         Some(Command::Desktop(cmd)) => desktop(cmd, &runtime),
+        Some(Command::Cloud(cmd)) => cloud(cmd, &runtime),
         Some(Command::Files(a)) => {
             let (machine, path) = a.target.split_once(':').map(|(m, p)| (m.to_string(), p.to_string())).unwrap_or((a.target.clone(), String::new()));
             let req = api::ListFilesRequest { machine_id: machine, path };
@@ -987,8 +1083,10 @@ fn main() -> ExitCode {
         Some(Command::Paths(args)) => {
             let p = args.paths();
             println!("config dir  {}", display_path(&p.dir));
-            println!("inventory   {}", display_path(&p.inventory));
-            println!("settings    {}", display_path(&p.settings));
+            println!("config      {}", display_path(&p.config));
+            if p.inventory != p.config {
+                println!("machines    {}", display_path(&p.inventory));
+            }
             println!("state       {}", display_path(&p.state));
             0
         }
@@ -1008,6 +1106,8 @@ fn open(args: OpenArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     }
     #[cfg(feature = "gui")]
     {
+        // The window is the one process that watches cloud machines for idleness.
+        engine.start_cloud_idle_watch();
         ui::run(engine, args.view);
         0
     }
@@ -1293,6 +1393,43 @@ fn github(cmd: GithubCommand, runtime: &tokio::runtime::Runtime) -> u8 {
             let req = api::ItemRequest { reference: a.reference };
             run(runtime, &a.agent, async move |e| api::github_item(&e, req).await, cli::github_item)
         }
+    }
+}
+
+fn cloud(cmd: CloudCommand, runtime: &tokio::runtime::Runtime) -> u8 {
+    match cmd {
+        CloudCommand::Options(a) => run(runtime, &a, async move |e| Ok::<_, api::ApiError>(api::cloud_options(&e).await), cli::cloud_options),
+        CloudCommand::Create(a) => {
+            let req = api::CloudCreateRequest {
+                name: a.name,
+                region: a.region,
+                size: a.size,
+                install: a.install.map(|list| list.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()),
+                wait: !a.no_wait,
+                timeout_secs: None,
+            };
+            run(runtime, &a.agent, async move |e| api::cloud_create(&e, req, api::Surface::Cli, stream_line).await, cli::action)
+        }
+        CloudCommand::Destroy(a) => {
+            let req = api::CloudMachineRequest { machine_id: a.machine, power: None, wait: true };
+            run(runtime, &a.agent, async move |e| api::cloud_destroy(&e, req, api::Surface::Cli, stream_line).await, cli::action)
+        }
+        CloudCommand::Power(a) => {
+            let req = api::CloudMachineRequest { machine_id: a.machine, power: Some(a.state), wait: true };
+            run(runtime, &a.agent, async move |e| api::cloud_power(&e, req, api::Surface::Cli, stream_line).await, cli::action)
+        }
+        CloudCommand::Login(a) => {
+            let method = if a.doctl { "doctl" } else if a.browser { "oauth" } else { "token" };
+            let token = a.token.clone();
+            if method == "token" && token.is_none() {
+                eprintln!("error: pass --token TOKEN, --doctl or --browser");
+                return 2;
+            }
+            run(runtime, &a.agent, async move |e| e.cloud_sign_in(method, token, |url| crate::util::open_url(url)).await.map_err(api::ApiError::invalid), |email| {
+                format!("Signed in to DigitalOcean as {email}.\n")
+            })
+        }
+        CloudCommand::Logout(a) => run(runtime, &a, async move |e| Ok::<_, api::ApiError>(e.cloud_sign_out()), |_| "Signed out of DigitalOcean.\n".to_string()),
     }
 }
 

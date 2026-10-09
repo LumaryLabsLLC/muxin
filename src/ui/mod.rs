@@ -2,6 +2,7 @@
 
 mod about;
 mod activity;
+mod cloud_dialog;
 mod assets;
 mod detail;
 mod dialogs;
@@ -34,8 +35,8 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
     Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
         assets::load_fonts(cx);
         assets::set_dock_icon();
-        // UI preferences live next to the inventory; demo mode keeps them in memory.
-        let prefs_path = (!engine.is_demo()).then(|| engine.paths().dir.join("ui.json"));
+        // The look lives in config.toml ([ui]); demo mode keeps it in memory.
+        let prefs_path = (!engine.is_demo()).then(|| engine.paths().config.clone());
         let appearance = Appearance::load(prefs_path);
         cx.set_global(appearance.resolve(cx.window_appearance()));
         cx.set_global(appearance);

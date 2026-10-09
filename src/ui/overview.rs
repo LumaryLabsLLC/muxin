@@ -36,7 +36,7 @@ impl Root {
         let mut body = page("overview-page", &self.page_scroll).child(self.pulse_card(&theme, &s)).child(stat_tiles(&theme, &s));
 
         if let Some(err) = &s.inventory.error {
-            body = body.child(callout(&theme, "error", "fleet.toml has an error", err.clone(), None));
+            body = body.child(callout(&theme, "error", "config.toml has an error", err.clone(), None));
         }
         if !s.attention.is_empty() {
             body = body.child(self.render_attention(&theme, &s, cx));
@@ -49,7 +49,7 @@ impl Root {
                 .when(!wide, |d| d.flex_col())
                 .gap(px(if wide { GAP } else { 26. }))
                 .child(div().flex_1().min_w(px(0.)).child(self.render_running(&theme, &s, cx)))
-                .child(div().flex_1().min_w(px(0.)).child(self.render_queued(&theme, &s, "ov-q"))),
+                .child(div().flex_1().min_w(px(0.)).child(self.render_queued(&theme, &s, "ov-q", if wide { (content_width - GAP) / 2. } else { content_width }, cx))),
         )
     }
 
@@ -401,8 +401,9 @@ impl Root {
             .child(card(theme).when(rows.is_empty(), |d| d.child(kit::empty_state(theme, "circle", "No runner is working right now."))).children(rows))
     }
 
-    pub(super) fn render_queued(&self, theme: &Theme, s: &Snapshot, prefix: &str) -> impl IntoElement {
-        let rows: Vec<AnyElement> = s.jobs.queued.iter().enumerate().map(|(i, j)| queued_row(theme, j, i, prefix)).collect();
+    /// The queue, `width` wide (its rows' text needs to know).
+    pub(super) fn render_queued(&self, theme: &Theme, s: &Snapshot, prefix: &str, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows: Vec<AnyElement> = s.jobs.queued.iter().enumerate().map(|(i, j)| queued_row(theme, j, i, prefix, width, j.waiting_reason(&s.runners), cx)).collect();
         let empty = if !s.github.configured && !s.demo {
             kit::empty_state(theme, "inbox", "Waiting for job data from GitHub.")
         } else {
@@ -436,12 +437,12 @@ impl Root {
                     Some(
                         Button::new("jobs-settings", "Open settings")
                             .style(ButtonStyle::Primary)
-                            .on_click(cx.listener(|this, _, window, cx| this.navigate(Route::Settings, window, cx)))
+                            .on_click(cx.listener(|this, _, window, cx| this.open_settings_tab(super::settings::SettingsTab::GitHub, window, cx)))
                             .into_any_element(),
                     ),
                 ))
             })
-            .child(self.render_queued(&theme, &s, "jobs-q"))
+            .child(self.render_queued(&theme, &s, "jobs-q", self.content_width, cx))
             .child(
                 div()
                     .flex()
@@ -454,6 +455,7 @@ impl Root {
 
     fn running_job_row(&self, theme: &Theme, j: &Job, i: usize, cx: &mut Context<Self>) -> AnyElement {
         let url = j.url.clone();
+        let job_id = j.id;
         let runner = j.runner_id.clone();
         div()
             .id(("running-job", i))
@@ -464,7 +466,7 @@ impl Root {
             .py(px(10.))
             .when(i > 0, |d| d.border_t_1().border_color(theme.border_variant))
             .child(div().flex_none().w(px(3.)).h(px(26.)).rounded_full().bg(theme.accent))
-            .child(job_title(theme, j))
+            .child(job_title(theme, j, None))
             .child(
                 div()
                     .id(("running-job-runner", i))
@@ -492,6 +494,8 @@ impl Root {
                     .child(format::elapsed(j.started_at.unwrap_or(j.created_at))),
             )
             .child(Button::icon_only(("running-job-open", i), "external-link").tooltip("Open on GitHub").on_click(move |_, _, cx| cx.open_url(&url)))
+            .child(Button::icon_only(("running-job-more", i), "ellipsis").tooltip("More").on_click(job_menu(job_id, cx)))
+            .on_mouse_down(gpui::MouseButton::Right, super::menu::on_right_click(move || super::menu::MenuTarget::Job(job_id), cx))
             .into_any_element()
     }
 }
@@ -610,9 +614,12 @@ fn status_word(m: &Machine) -> &'static str {
     }
 }
 
-fn queued_row(theme: &Theme, j: &Job, i: usize, prefix: &str) -> AnyElement {
+fn queued_row(theme: &Theme, j: &Job, i: usize, prefix: &str, width: f32, reason: String, cx: &mut Context<Root>) -> AnyElement {
     let url = j.url.clone();
+    let id = j.id;
     let stuck = j.matching_online == 0;
+    // The row's chrome: border, padding, the bar, gaps, the wait column and the buttons.
+    let title_w = (width - 2. - 28. - 3. - 4. * 12. - 190. - 26. - 26. - if stuck { 112. } else { 0. }).max(80.);
     div()
         .id(SharedString::from(format!("{prefix}-{i}")))
         .flex()
@@ -621,6 +628,7 @@ fn queued_row(theme: &Theme, j: &Job, i: usize, prefix: &str) -> AnyElement {
         .px(px(14.))
         .py(px(10.))
         .when(i > 0, |d| d.border_t_1().border_color(theme.border_variant))
+        .on_mouse_down(gpui::MouseButton::Right, super::menu::on_right_click(move || super::menu::MenuTarget::Job(id), cx))
         .child(div().flex_none().w(px(3.)).h(px(26.)).rounded_full().bg(if stuck { theme.warning } else { theme.track }))
         .child(
             div()
@@ -629,39 +637,47 @@ fn queued_row(theme: &Theme, j: &Job, i: usize, prefix: &str) -> AnyElement {
                 .flex_1()
                 .min_w(px(0.))
                 .gap(px(6.))
-                .child(job_title(theme, j))
+                .child(job_title(theme, j, Some(title_w)))
                 .child(div().flex().flex_wrap().gap(px(4.)).children(j.labels.iter().map(|l| chip(theme, l.clone())))),
         )
         .child(
             div()
-                .w(px(150.))
+                .w(px(190.))
                 .flex_none()
                 .flex()
                 .flex_col()
                 .items_end()
                 .child(div().font_family(mono_font()).text_size(px(12.)).text_color(theme.text_muted).child(format!("waiting {}", format::elapsed(j.created_at))))
-                .child(div().text_size(px(11.)).text_color(if stuck { theme.warning } else { theme.text_placeholder }).child(if stuck {
-                    "no online runner matches".to_string()
-                } else {
-                    format!("{} runner{} can take it", j.matching_online, if j.matching_online == 1 { "" } else { "s" })
-                })),
+                .child(div().text_size(px(11.)).text_color(if stuck { theme.warning } else { theme.text_placeholder }).child(reason)),
         )
+        // Nothing can take it: the fix, one click away (pick the machine in the menu).
+        .when(stuck, |d| {
+            d.child(Button::new(SharedString::from(format!("{prefix}-add-{i}")), "Add runner").icon("plus").on_click(job_menu(id, cx)))
+        })
         .child(
             Button::icon_only(SharedString::from(format!("{prefix}-open-{i}")), "external-link")
                 .tooltip("Open on GitHub")
                 .on_click(move |_, _, cx| cx.open_url(&url)),
         )
+        .child(Button::icon_only(SharedString::from(format!("{prefix}-more-{i}")), "ellipsis").tooltip("More").on_click(job_menu(id, cx)))
         .into_any_element()
 }
 
-fn job_title(theme: &Theme, j: &Job) -> impl IntoElement {
+/// Opens a job's menu where the pointer is (for its buttons).
+fn job_menu(id: u64, cx: &mut Context<Root>) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static {
+    cx.listener(move |this, _, window, cx| this.open_menu(super::menu::MenuTarget::Job(id), window.mouse_position(), cx))
+}
+
+/// The job's name, then where it's from. `width`: GPUI 0.2 only ellipsizes
+/// text whose width it knows before layout, which a row inside a column doesn't.
+fn job_title(theme: &Theme, j: &Job, width: Option<f32>) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
         .flex_1()
         .min_w(px(0.))
-        .child(div().truncate().text_size(px(13.)).child(j.name.clone()))
-        .child(div().truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!(
+        .child(div().when_some(width, |d, w| d.w(px(w))).truncate().text_size(px(13.)).child(j.name.clone()))
+        .child(div().when_some(width, |d, w| d.w(px(w))).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!(
             "{} · {}{}",
             j.repo,
             j.workflow,

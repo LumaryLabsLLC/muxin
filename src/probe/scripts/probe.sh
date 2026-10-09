@@ -18,6 +18,8 @@ kv hostname "$(hostname 2>/dev/null)"
 case "$os" in
 darwin)
   kv os_version "macOS $(sw_vers -productVersion 2>/dev/null)"
+  # A battery means a laptop.
+  if pmset -g batt 2>/dev/null | grep -q InternalBattery; then kv form_factor laptop; else kv form_factor desktop; fi
   kv cores "$(sysctl -n hw.ncpu 2>/dev/null)"
   kv load "$(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}')"
   boot=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p')
@@ -50,6 +52,12 @@ linux)
   else
     kv os_version "Linux $(uname -r 2>/dev/null)"
   fi
+  # SMBIOS chassis type: 8-10, 14, 31, 32 are portables.
+  case "$(cat /sys/class/dmi/id/chassis_type 2>/dev/null)" in
+  8 | 9 | 10 | 14 | 31 | 32) kv form_factor laptop ;;
+  "") ;;
+  *) kv form_factor desktop ;;
+  esac
   kv cores "$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null)"
   kv load "$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
   kv uptime_s "$(cut -d. -f1 /proc/uptime 2>/dev/null)"

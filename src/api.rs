@@ -85,7 +85,7 @@ fn op_error(message: String) -> ApiError {
     let lower = message.to_ascii_lowercase();
     let code = if lower.contains("another operation") || lower.contains("still running") {
         "busy"
-    } else if lower.contains("isn't in fleet.toml") || lower.contains("isn't in the fleet") {
+    } else if lower.contains("isn't in config.toml") || lower.contains("isn't in the fleet") {
         "not_found"
     } else {
         "invalid"
@@ -225,6 +225,18 @@ impl std::str::FromStr for ActionName {
             other => Err(ApiError::invalid(format!("Unknown action \"{other}\". Use start, stop, restart, logs or remove."))),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelRunRequest {
+    /// A queued or running job (`list_jobs`); its whole workflow run is cancelled.
+    pub job_id: u64,
+    /// Wait for GitHub to accept it (default true).
+    #[serde(default = "yes")]
+    pub wait: bool,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -439,7 +451,7 @@ pub struct RunnerOut {
     pub state: String,
     /// Where `state` came from: "github" (live), "probe" (last machine check) or "none".
     pub source: String,
-    /// Listed in fleet.toml (vs discovered on the machine or on GitHub).
+    /// Listed in config.toml (vs discovered on the machine or on GitHub).
     pub declared: bool,
     pub labels: Vec<String>,
     pub version: Option<String>,
@@ -1072,7 +1084,7 @@ pub async fn check(engine: &Arc<Engine>, req: CheckRequest) -> ApiResult<Vec<Mac
             let s = engine.current();
             let m = find_machine(&s, id)?;
             if m.host.is_empty() {
-                return Err(ApiError::invalid(format!("{} has no host in fleet.toml, so it can't be checked.", m.name)));
+                return Err(ApiError::invalid(format!("{} has no host in config.toml, so it can't be checked.", m.name)));
             }
             Some(m.id.clone())
         }
@@ -1194,6 +1206,81 @@ pub async fn runner_action(engine: &Arc<Engine>, req: RunnerActionRequest, surfa
     let tail = if req.action == ActionName::Logs { LOGS_TAIL } else { DEFAULT_TAIL };
     let timeout = req.timeout_secs.unwrap_or(ACTION_TIMEOUT_SECS);
     finish_action(engine, op, req.wait, timeout, tail, runner.machine_id.clone(), vec![runner.name.clone()], surface, on_line).await
+}
+
+/// The DigitalOcean account, regions, sizes and defaults for a new cloud machine.
+pub async fn cloud_options(engine: &Arc<Engine>) -> crate::cloud::CloudOptions {
+    engine.cloud_options().await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudCreateRequest {
+    pub name: String,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub size: Option<String>,
+    /// What it comes with, by id (cloud::setup::EXTRAS: tools, languages, agent CLIs, tailscale).
+    #[serde(default)]
+    pub install: Option<Vec<String>>,
+    /// Wait until it's set up and in the fleet (default true; takes a few minutes).
+    #[serde(default = "yes")]
+    pub wait: bool,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Creates a DigitalOcean droplet and adds it to the fleet.
+pub async fn cloud_create(engine: &Arc<Engine>, req: CloudCreateRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<ActionResponse> {
+    freshen(engine).await;
+    let machine = crate::cloud::CloudCreate {
+        name: req.name,
+        region: req.region,
+        size: req.size,
+        install: req.install,
+    };
+    let op = engine.cloud_create(machine).map_err(op_error)?;
+    finish_action(engine, op, req.wait, req.timeout_secs.unwrap_or(1800), DEFAULT_TAIL, None, Vec::new(), surface, on_line).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudMachineRequest {
+    pub machine_id: String,
+    /// For power: "on" or "off".
+    #[serde(default)]
+    pub power: Option<String>,
+    #[serde(default = "yes")]
+    pub wait: bool,
+}
+
+/// Destroys a cloud machine: deletes the droplet and removes it from the fleet.
+pub async fn cloud_destroy(engine: &Arc<Engine>, req: CloudMachineRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<ActionResponse> {
+    let s = freshen(engine).await;
+    let m = find_machine(&s, &req.machine_id)?.clone();
+    let op = engine.cloud_destroy(&m.id).map_err(op_error)?;
+    finish_action(engine, op, req.wait, 300, DEFAULT_TAIL, Some(m.id), Vec::new(), surface, on_line).await
+}
+
+/// Powers a cloud machine on or off (it's still billed while off).
+pub async fn cloud_power(engine: &Arc<Engine>, req: CloudMachineRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<ActionResponse> {
+    let s = freshen(engine).await;
+    let m = find_machine(&s, &req.machine_id)?.clone();
+    let on = match req.power.as_deref() {
+        Some("on") => true,
+        Some("off") => false,
+        _ => return Err(ApiError::invalid("power must be \"on\" or \"off\".")),
+    };
+    let op = engine.cloud_power(&m.id, on).map_err(op_error)?;
+    finish_action(engine, op, req.wait, 300, DEFAULT_TAIL, Some(m.id), Vec::new(), surface, on_line).await
+}
+
+/// Cancels the workflow run a queued or running job belongs to.
+pub async fn cancel_run(engine: &Arc<Engine>, req: CancelRunRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<ActionResponse> {
+    freshen(engine).await;
+    let op = engine.cancel_run(req.job_id).map_err(op_error)?;
+    finish_action(engine, op, req.wait, req.timeout_secs.unwrap_or(60), DEFAULT_TAIL, None, Vec::new(), surface, on_line).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1654,7 +1741,7 @@ fn ws_error(message: String, surface: Surface) -> ApiError {
     let m = message.to_ascii_lowercase();
     let code = if m.contains("not implemented") || m.contains("implemented yet") {
         "internal"
-    } else if m.contains("no workspace") || m.contains("unknown workspace") || m.contains("isn't in fleet.toml") || m.contains("no machine") || m.contains("not found") {
+    } else if m.contains("no workspace") || m.contains("unknown workspace") || m.contains("isn't in config.toml") || m.contains("no machine") || m.contains("not found") {
         "not_found"
     } else if m.contains("unreachable")
         || m.contains("timed out")
@@ -1674,8 +1761,8 @@ fn ws_error(message: String, surface: Surface) -> ApiError {
         err = err.with_hint("The machine didn't answer over ssh. Check that `ssh <host>` works without a password prompt, or pick another machine.");
     } else if m.contains("doesn't allow") || m.contains("not allowed") || m.contains("disabled") {
         err = err.with_hint(surface.say(
-            "Turn workspaces on for that machine (workspace_allow, the toggle in the app, or `workspaces = true` in fleet.toml), or pick another machine.",
-            "Turn workspaces on for that machine (`muxen workspace allow <machine-id>`, the toggle in the app, or `workspaces = true` in fleet.toml), or pick another machine.",
+            "Turn workspaces on for that machine (workspace_allow, the toggle in the app, or `workspaces = true` in config.toml), or pick another machine.",
+            "Turn workspaces on for that machine (`muxen workspace allow <machine-id>`, the toggle in the app, or `workspaces = true` in config.toml), or pick another machine.",
         ));
     } else if m.contains("rsync") {
         err = err.with_hint("Install rsync on both this computer and the machine.");
@@ -1945,7 +2032,7 @@ pub fn workspace_allow(engine: &Arc<Engine>, req: WorkspaceAllowRequest, surface
     let s = engine.current();
     let m = find_machine(&s, &req.machine_id)?;
     if m.host.is_empty() {
-        return Err(ApiError::invalid(format!("{} has no host in fleet.toml, so it can't host workspaces.", m.name)));
+        return Err(ApiError::invalid(format!("{} has no host in config.toml, so it can't host workspaces.", m.name)));
     }
     let id = m.id.clone();
     engine.set_workspaces_allowed(&id, req.allowed).map_err(|e| ws_error(e, surface))?;
@@ -2200,7 +2287,7 @@ pub struct SessionListRequest {
 #[serde(deny_unknown_fields)]
 pub struct SessionStartRequest {
     pub machine_id: String,
-    /// "claude", "codex", "opencode", "gemini", "amp" or "shell".
+    /// "claude", "codex", "opencode", "gemini", "amp", "pi" or "shell".
     pub agent: String,
     /// Folder on the machine to start in. Default: the home folder.
     #[serde(default)]

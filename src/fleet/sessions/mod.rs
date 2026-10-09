@@ -1,5 +1,5 @@
 //! Agent sessions: terminals on fleet machines running an AI agent (Claude Code,
-//! Codex, OpenCode, ...) or a plain shell.
+//! Codex, OpenCode, Pi, ...) or a plain shell.
 //!
 //! Sessions live in Muxen's own agent on each machine (`muxen-agent`,
 //! the `agent/` crate), which Muxen installs when it connects. The agent
@@ -46,6 +46,7 @@ pub const AGENTS: &[AgentKind] = &[
     AgentKind { id: "opencode", name: "OpenCode", command: "opencode", prompt_arg: false },
     AgentKind { id: "gemini", name: "Gemini CLI", command: "gemini", prompt_arg: false },
     AgentKind { id: "amp", name: "Amp", command: "amp", prompt_arg: false },
+    AgentKind { id: "pi", name: "Pi", command: "pi", prompt_arg: true },
     AgentKind { id: "shell", name: "Shell", command: "", prompt_arg: false },
 ];
 

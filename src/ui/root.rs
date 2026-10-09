@@ -164,6 +164,7 @@ pub enum Modal {
     NewSession(Entity<NewSessionDialog>),
     Licenses(Entity<super::about::LicensesDialog>),
     Copy(Entity<super::files::CopyDialog>),
+    Cloud(Entity<super::cloud_dialog::CloudDialog>),
 }
 
 pub struct Notice {
@@ -550,10 +551,19 @@ impl Root {
                 };
                 self.show(Route::Activity, cx);
             }
+            // "settings:<tab>", and "settings:icons" (Appearance, scrolled to the icon styles).
             "settings" => {
-                self.navigate(Route::Settings, window, cx);
-                // "settings:keyboard": scrolled down to the shortcuts.
-                if arg == "keyboard" {
+                use super::settings::SettingsTab;
+                let tab = match arg {
+                    "appearance" | "icons" => SettingsTab::Appearance,
+                    "terminal" => SettingsTab::Terminal,
+                    "github" => SettingsTab::GitHub,
+                    "cloud" => SettingsTab::Cloud,
+                    "keyboard" => SettingsTab::Keyboard,
+                    _ => SettingsTab::General,
+                };
+                self.open_settings_tab(tab, window, cx);
+                if arg == "icons" {
                     cx.spawn(async move |this, cx| {
                         cx.background_executor().timer(Duration::from_millis(400)).await;
                         let _ = this.update(cx, |this, cx| {
@@ -579,6 +589,17 @@ impl Root {
             }
             "add-machine" => self.show_add_machine(window, cx),
             "menu" => self.open_menu(super::menu::MenuTarget::Machine(arg.into()), gpui::point(px(260.), px(160.)), cx),
+            "runner-menu" => self.open_menu(super::menu::MenuTarget::Runner(arg.into()), gpui::point(px(200.), px(560.)), cx),
+            "favorite" => self.set_favorite_machine(arg, true, cx),
+            "cloud" => self.show_cloud_dialog(window, cx),
+            // An icon style ("icons:tiles"), for screenshots.
+            "icons" => super::theme::update_appearance(window, cx, |a, _| a.icon_style = arg.into()),
+            // The first queued job's menu.
+            "job-menu" => {
+                if let Some(id) = self.snapshot.jobs.queued.first().map(|j| j.id) {
+                    self.open_menu(super::menu::MenuTarget::Job(id), gpui::point(px(900.), px(150.)), cx)
+                }
+            }
             "copy" => self.show_copy_files(Some(arg.to_string()).filter(|a| !a.is_empty()), None, window, cx),
             "logs" => {
                 self.navigate(Route::Runner(arg.into()), window, cx);
@@ -651,9 +672,17 @@ impl Root {
 
     /// Settings, with the field to watch an organization ready to type in.
     fn open_github_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(Route::Settings, window, cx);
+        self.open_settings_tab(super::settings::SettingsTab::GitHub, window, cx);
         if let Some(s) = &self.settings {
             s.read(cx).focus_add(window, cx);
+        }
+    }
+
+    /// Settings, on one of its tabs.
+    pub(super) fn open_settings_tab(&mut self, tab: super::settings::SettingsTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(Route::Settings, window, cx);
+        if let Some(s) = &self.settings {
+            s.update(cx, |s, cx| s.show_tab(tab, cx));
         }
     }
 
@@ -692,10 +721,22 @@ impl Root {
     // Commands shared by pages
 
     pub(super) fn show_install_dialog(&mut self, machine_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_install_dialog_with(machine_id, &[], window, cx);
+    }
+
+    /// The Install dialog with extra labels filled in (for a job that needs them).
+    pub(super) fn show_install_dialog_with(&mut self, machine_id: &str, labels: &[String], window: &mut Window, cx: &mut Context<Self>) {
         let engine = self.engine.clone();
         let snapshot = self.snapshot.clone();
         let machine_id = machine_id.to_string();
-        let dialog = cx.new(|cx| InstallDialog::new(engine, snapshot, machine_id, window, cx));
+        let labels = labels.join(", ");
+        let dialog = cx.new(|cx| {
+            let d = InstallDialog::new(engine, snapshot, machine_id, window, cx);
+            if !labels.is_empty() {
+                d.set_labels(labels, cx);
+            }
+            d
+        });
         self.show_modal(Modal::Install(dialog.clone()), window, cx);
         self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
     }
@@ -767,6 +808,22 @@ impl Root {
         }
     }
 
+    /// Powers a cloud machine on or off.
+    pub(super) fn cloud_power(&mut self, machine_id: &str, on: bool, cx: &mut Context<Self>) {
+        match self.engine.cloud_power(machine_id, on) {
+            Ok(op) => self.show_operation(op, cx),
+            Err(e) => self.notify_user(e, true, cx),
+        }
+    }
+
+    /// New cloud machine (a DigitalOcean droplet).
+    pub(super) fn show_cloud_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let engine = self.engine.clone();
+        let dialog = cx.new(|cx| super::cloud_dialog::CloudDialog::new(engine, window, cx));
+        self.show_modal(Modal::Cloud(dialog.clone()), window, cx);
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+    }
+
     pub(super) fn show_add_machine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let engine = self.engine.clone();
         let dialog = cx.new(|cx| AddMachineDialog::new(engine, window, cx));
@@ -778,7 +835,7 @@ impl Root {
         let on_machine = runner.local.is_some();
         let detail = match (&runner.machine_id, on_machine) {
             (Some(_), true) => format!(
-                "{} will be stopped, its service uninstalled, and it will be deregistered from GitHub and removed from fleet.toml.",
+                "{} will be stopped, its service uninstalled, and it will be deregistered from GitHub and removed from config.toml.",
                 runner.name
             ),
             _ => format!("{} will be deregistered from GitHub.", runner.name),
@@ -802,10 +859,32 @@ impl Root {
 
     pub(super) fn confirm_remove_machine(&mut self, machine: &Machine, window: &mut Window, cx: &mut Context<Self>) {
         let machine_id = machine.id.clone();
+        // A cloud machine goes with its droplet.
+        if let Some(c) = &machine.cloud {
+            let detail = format!(
+                "Its droplet and everything on it are deleted, and it leaves Muxen. Push your work first. It has cost about ${:.2} so far.",
+                c.cost_so_far
+            );
+            let dialog = cx.new(|cx| {
+                ConfirmDialog::new(
+                    format!("Destroy {}?", machine.name),
+                    detail,
+                    "Destroy",
+                    None,
+                    move |_, engine| engine.cloud_destroy(&machine_id).map(Some),
+                    self.engine.clone(),
+                    window,
+                    cx,
+                )
+            });
+            self.show_modal(Modal::Confirm(dialog.clone()), window, cx);
+            self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+            return;
+        }
         let dialog = cx.new(|cx| {
             ConfirmDialog::new(
                 format!("Remove {} from the fleet?", machine.name),
-                "It's taken out of fleet.toml. Nothing on the machine changes, and its runners stay registered.".into(),
+                "It's taken out of config.toml. Nothing on the machine changes, and its runners stay registered.".into(),
                 "Remove machine",
                 None,
                 move |_, engine| engine.remove_machine(&machine_id).map(|_| None),
@@ -916,6 +995,26 @@ impl Root {
         self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
     }
 
+    /// Asks before cancelling a job's workflow run (GitHub cancels whole runs).
+    pub(super) fn confirm_cancel_run(&mut self, job_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let s = &self.snapshot;
+        let Some(job) = s.jobs.queued.iter().chain(s.jobs.running.iter()).find(|j| j.id == job_id).cloned() else { return };
+        let dialog = cx.new(|cx| {
+            ConfirmDialog::new(
+                format!("Cancel this {} run?", job.workflow),
+                format!("Every unfinished job in it stops, not just “{}”. You can re-run it on GitHub.", job.name),
+                "Cancel run",
+                None,
+                move |_, engine| engine.cancel_run(job_id).map(Some),
+                self.engine.clone(),
+                window,
+                cx,
+            )
+        });
+        self.show_modal(Modal::Confirm(dialog.clone()), window, cx);
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+    }
+
     pub(super) fn runner_action(&mut self, runner_id: &str, action: RunnerAction, cx: &mut Context<Self>) {
         match self.engine.runner_action(runner_id, action) {
             Ok(op) => self.show_operation(op, cx),
@@ -931,6 +1030,7 @@ impl Root {
             Modal::NewWorkspace(d) => d.read(cx).first_focus(cx),
             Modal::NewSession(d) => d.read(cx).first_focus(cx),
             Modal::Copy(d) => d.read(cx).first_focus(cx),
+            Modal::Cloud(d) => d.read(cx).first_focus(cx),
             Modal::Licenses(d) => d.focus_handle(cx),
         };
         window.focus(&focus);
@@ -944,7 +1044,9 @@ impl Root {
             DialogEvent::Dismissed => {}
             DialogEvent::OperationStarted(op) => self.show_operation(*op, cx),
             DialogEvent::MachineAdded(id) => self.navigate(Route::Machine(id.clone()), window, cx),
-            DialogEvent::OpenSettings => self.navigate(Route::Settings, window, cx),
+            DialogEvent::OpenSettings => self.open_settings_tab(super::settings::SettingsTab::GitHub, window, cx),
+            DialogEvent::OpenCloudSettings => self.open_settings_tab(super::settings::SettingsTab::Cloud, window, cx),
+            DialogEvent::NewCloudMachine => self.show_cloud_dialog(window, cx),
             DialogEvent::CreateWorkspace(req, iso) => self.create_workspace(req.clone(), iso.clone(), window, cx),
             DialogEvent::StartInWorkspace(req, session) => self.start_in_workspace(req.clone(), session.clone(), window, cx),
             DialogEvent::StartSession(req) => {
@@ -1001,13 +1103,32 @@ impl Root {
     }
 
     /// The machines in the sidebar's order (⌘1 is the first).
-    pub(super) fn machine_order(s: &Snapshot) -> Vec<&Machine> {
-        s.machines.iter().filter(|m| m.kind == "runner").chain(s.machines.iter().filter(|m| m.kind != "runner")).collect()
+    /// Favorites first, then machines with runners, then the rest.
+    pub(super) fn machine_order<'a>(s: &'a Snapshot, favorites: &[String]) -> Vec<&'a Machine> {
+        let mut out: Vec<&Machine> = s.machines.iter().collect();
+        out.sort_by_key(|m| (!favorites.contains(&m.id), m.kind != "runner"));
+        out
+    }
+
+    pub(super) fn is_favorite(cx: &App, machine_id: &str) -> bool {
+        cx.global::<super::theme::Appearance>().favorite_machines.iter().any(|f| f == machine_id)
+    }
+
+    /// Stars or unstars a machine.
+    pub(super) fn set_favorite_machine(&mut self, machine_id: &str, favorite: bool, cx: &mut Context<Self>) {
+        super::theme::remember(cx, |a| {
+            a.favorite_machines.retain(|f| f != machine_id);
+            if favorite {
+                a.favorite_machines.push(machine_id.to_string());
+            }
+        });
+        cx.notify();
     }
 
     /// ⌘1…⌘9: the n-th machine in the sidebar (1-based).
     fn go_to_machine(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(id) = Self::machine_order(&self.snapshot).get(n - 1).map(|m| m.id.clone()) {
+        let favorites = cx.global::<super::theme::Appearance>().favorite_machines.clone();
+        if let Some(id) = Self::machine_order(&self.snapshot, &favorites).get(n - 1).map(|m| m.id.clone()) {
             self.navigate(Route::Machine(id), window, cx);
         }
     }
@@ -1119,7 +1240,8 @@ impl Root {
 
         let mut rows: Vec<AnyElement> = Vec::new();
         // Machines with runners first, then the rest; all under one heading.
-        let runner_machines: Vec<&Machine> = Self::machine_order(&s);
+        let favorites = cx.global::<super::theme::Appearance>().favorite_machines.clone();
+        let runner_machines: Vec<&Machine> = Self::machine_order(&s, &favorites);
         let unassigned: Vec<&Runner> = s.runners.iter().filter(|r| r.machine_id.is_none() && matches_runner(r)).collect();
 
         rows.push(self.section_header("Machines", runner_machines.len(), true, cx).into_any_element());
@@ -1216,7 +1338,8 @@ impl Root {
                 ),
             )
             .child(div().id("fleet-list").flex_1().min_h(px(0.)).overflow_y_scroll().pb(px(12.)).children(rows))
-            .child(self.connection_card(&theme, &s, cx))
+            // The "what's happening now" card is hidden for now (connection_card).
+            .child(self.sidebar_footer(&theme, cx))
     }
 
     fn brand(&self, theme: &Theme, s: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1389,7 +1512,10 @@ impl Root {
         // whose width is known before layout. Row chrome: margins, padding, tile, gaps,
         // and the count pill (padding, dot, gap, ~6.7px per mono character).
         let pill_w = 12. + 6. + 4. + count.len() as f32 * 6.7;
-        let trailing = if hint.is_some() { 40. } else if has_runners { 10. + pill_w.max(22.) } else if has_sessions { 32. } else { 0. } + if alert.is_some() { 18. } else { 0. };
+        let favorite = Self::is_favorite(cx, &m.id);
+        let trailing = if hint.is_some() { 40. } else if has_runners { 10. + pill_w.max(22.) } else if has_sessions { 32. } else { 0. }
+            + if alert.is_some() { 18. } else { 0. }
+            + if favorite { 22. } else { 0. };
         let text_w = (self.sidebar_width - 20. - 16. - 30. - 10. - trailing).max(40.);
         div()
             .id(SharedString::from(format!("side-m-{}", m.id)))
@@ -1457,6 +1583,7 @@ impl Root {
                     ),
             )
             .children(alert.map(|(kind, code)| super::sessions::attention_dot(theme, &kind, code)))
+            .when(favorite, |d| d.child(icon("star-filled", 12., theme.warning)))
             .children(hint.map(|k| kit::kbd(theme, k)))
             .when(has_runners || has_sessions, |d| {
                 d.child(
@@ -1559,6 +1686,10 @@ impl Root {
                     .text_color(if r.state == "working" { theme.text_accent } else { theme.text_placeholder })
                     .child(right),
             )
+            .on_mouse_down(MouseButton::Right, {
+                let rid = r.id.clone();
+                super::menu::on_right_click(move || super::menu::MenuTarget::Runner(rid.clone()), cx)
+            })
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Runner(id.clone()), window, cx)))
     }
 
@@ -1642,7 +1773,8 @@ impl Root {
 
     /// What's happening now, in a line: a copy or install under way, else an
     /// agent that needs you or is working, else a GitHub problem, else the
-    /// machines. Clicking opens it (or checks the machines).
+    /// machines. Clicking opens it (or checks the machines). Hidden for now.
+    #[allow(dead_code)]
     fn connection_card(&self, theme: &Theme, s: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
         enum Click {
             Op(u64),
@@ -1711,35 +1843,6 @@ impl Root {
         };
         // Outer and inner padding, border, dot and gap.
         let text_w = self.sidebar_width - 60.;
-        // Settings and About, with the version, under the connection card.
-        let footer_button = |id: &'static str, icon_name: &'static str, label: &'static str, route: Route, cx: &mut Context<Self>| {
-            let active = self.route == route;
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .h(px(26.))
-                .px(px(8.))
-                .rounded(px(7.))
-                .cursor_pointer()
-                .text_size(px(12.5))
-                .text_color(if active { theme.text } else { theme.text_muted })
-                .when(active, |d| d.bg(theme.element_selected))
-                .when(!active, |d| d.hover(|st| st.bg(theme.ghost_hover).text_color(theme.text)))
-                .child(kit::color_icon(theme, icon_name, 13., theme.text_placeholder))
-                .child(label)
-                .on_click(cx.listener(move |this, _, window, cx| this.navigate(route.clone(), window, cx)))
-        };
-        let footer = div()
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .pt(px(8.))
-            .child(footer_button("footer-settings", "settings", "Settings", Route::Settings, cx))
-            .child(footer_button("footer-about", "info", "About", Route::About, cx))
-            .child(div().flex_1())
-            .child(div().pr(px(6.)).font_family(mono_font()).text_size(px(11.)).text_color(theme.text_placeholder).child(format!("v{}", env!("CARGO_PKG_VERSION"))));
         div().flex_none().p(px(10.)).border_t_1().border_color(theme.border_variant).child(
             div()
                 .id("connection")
@@ -1773,7 +1876,39 @@ impl Root {
                     Click::Check => this.engine.trigger_check(None),
                 })),
         )
-        .child(footer)
+    }
+
+    /// Settings and About, with the version, at the bottom of the sidebar.
+    fn sidebar_footer(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let footer_button = |id: &'static str, icon_name: &'static str, label: &'static str, route: Route, cx: &mut Context<Self>| {
+            let active = self.route == route;
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .h(px(26.))
+                .px(px(8.))
+                .rounded(px(7.))
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .text_color(if active { theme.text } else { theme.text_muted })
+                .when(active, |d| d.bg(theme.element_selected))
+                .when(!active, |d| d.hover(|st| st.bg(theme.ghost_hover).text_color(theme.text)))
+                .child(kit::color_icon(theme, icon_name, 13., theme.text_placeholder))
+                .child(label)
+                .on_click(cx.listener(move |this, _, window, cx| this.navigate(route.clone(), window, cx)))
+        };
+        let footer = div()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .pt(px(8.))
+            .child(footer_button("footer-settings", "settings", "Settings", Route::Settings, cx))
+            .child(footer_button("footer-about", "info", "About", Route::About, cx))
+            .child(div().flex_1())
+            .child(div().pr(px(6.)).font_family(mono_font()).text_size(px(11.)).text_color(theme.text_placeholder).child(format!("v{}", env!("CARGO_PKG_VERSION"))));
+        div().flex_none().px(px(10.)).pb(px(10.)).border_t_1().border_color(theme.border_variant).child(footer)
     }
 
     // -----------------------------------------------------------------------
@@ -1841,32 +1976,18 @@ impl Root {
                     .child(div().truncate().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title)),
             )
             .child(div().flex_1())
-            // Each says what it refreshes; when it last did is in its tooltip.
-            .when(s.github.configured, |d| {
-                d.child(
-                    Button::new("sync", if s.github.syncing { "Syncing" } else { "Sync GitHub" })
-                        .icon("agent-github")
-                        .loading(s.github.syncing)
-                        .map(|b| match super::shortcuts::label_for(cx, "sync") {
-                            k if self.show_keys && !k.is_empty() => b.key_hint(k),
-                            _ => b,
-                        })
-                        .tooltip(tip(&format!("Synced {}", format::ago(s.github.last_sync_at)), &super::shortcuts::label_for(cx, "sync")))
-                        .on_click(cx.listener(|this, _, _, _| this.engine.trigger_sync())),
-                )
-            })
+            // GitHub and the machine checks run by themselves; ⇧⌘R, ⌘R and the menu still force them.
             .child(
-                Button::new("check-now", if s.check.running { "Checking" } else { "Check machines" })
+                Button::new("toolbar-add-machine", "Add machine")
                     .style(ButtonStyle::Primary)
-                    .icon("server")
-                    .loading(s.check.running)
-                    .map(|b| match super::shortcuts::label_for(cx, "check") {
+                    .icon("plus")
+                    .map(|b| match super::shortcuts::label_for(cx, "add-machine") {
                         k if self.show_keys && !k.is_empty() => b.key_hint(k),
                         _ => b,
                     })
-                    .tooltip(tip(&format!("Checked {}", format::ago(s.check.finished_at)), &super::shortcuts::label_for(cx, "check")))
-                    .on_click(cx.listener(|this, _, _, _| this.engine.trigger_check(None))),
+                    .on_click(cx.listener(|this, _, window, cx| this.show_add_machine(window, cx))),
             )
+
     }
 
     fn render_notice(&self, theme: &Theme) -> Option<AnyElement> {
@@ -2080,6 +2201,7 @@ impl Render for Root {
             Modal::NewWorkspace(d) => d.clone().into_any_element(),
             Modal::NewSession(d) => d.clone().into_any_element(),
             Modal::Copy(d) => d.clone().into_any_element(),
+            Modal::Cloud(d) => d.clone().into_any_element(),
             Modal::Licenses(d) => d.clone().into_any_element(),
         });
         let notice = self.render_notice(&theme);

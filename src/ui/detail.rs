@@ -15,7 +15,7 @@ impl Root {
         let theme = cx.theme();
         let s = self.snapshot.clone();
         let Some(m) = s.machines.iter().find(|m| m.id == id).cloned() else {
-            return gone(&theme, "This machine is no longer in fleet.toml.").into_any_element();
+            return gone(&theme, "This machine is no longer in config.toml.").into_any_element();
         };
         let p = m.probe.as_ref().filter(|p| p.ok);
         let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(&m.id) && o.kind != "logs");
@@ -65,7 +65,13 @@ impl Root {
                                     .items_center()
                                     .gap(px(10.))
                                     .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(m.name.clone()))
-                                    .child(pill(status_label(&m), theme.machine_status(&m))),
+                                    .child(pill(status_label(&m), theme.machine_status(&m)))
+                                    .child({
+                                        let (mid, favorite) = (m.id.clone(), Root::is_favorite(cx, &m.id));
+                                        Button::icon_only("m-favorite", if favorite { "star-filled" } else { "star" })
+                                            .tooltip(if favorite { "Remove from favorites" } else { "Add to favorites" })
+                                            .on_click(cx.listener(move |this, _, _, cx| this.set_favorite_machine(&mid, !favorite, cx)))
+                                    }),
                             )
                             .child(div().font_family(mono_font()).text_size(px(12.)).text_color(theme.text_muted).child(meta.join("  ·  ")))
                             .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(checked)),
@@ -111,12 +117,15 @@ impl Root {
                         let machine = m.clone();
                         Button::icon_only("m-remove", "trash-2")
                             .style(ButtonStyle::Danger)
-                            .tooltip("Remove from fleet")
+                            .tooltip(if machine.cloud.is_some() { "Destroy" } else { "Remove from fleet" })
                             .on_click(cx.listener(move |this, _, window, cx| this.confirm_remove_machine(&machine, window, cx)))
                     }),
             );
 
         let mut body = page("machine-page", &self.page_scroll).child(header);
+        if let Some(c) = &m.cloud {
+            body = body.child(self.cloud_card(&theme, &m, c, cx));
+        }
 
         if let Some(u) = m.unreachable.as_ref().filter(|_| offline) {
             body = body.child(self.unreachable_card(&theme, &m, u, cx));
@@ -227,6 +236,40 @@ impl Root {
         body.into_any_element()
     }
 
+    /// Where a cloud machine runs, what it costs, and its power.
+    fn cloud_card(&self, theme: &Theme, m: &Machine, c: &crate::fleet::model::CloudInfo, cx: &mut Context<Self>) -> impl IntoElement {
+        let off = m.status == "offline";
+        let idle = c.idle_since.map(|t| (chrono::Utc::now() - t).num_minutes()).filter(|min| *min >= 30).map(|min| format!(" · idle {}", crate::util::short_duration(min as u64 * 60)));
+        let detail = format!(
+            "{} · {} · ${:.3}/h · ${:.2} so far{}",
+            c.region.to_uppercase(),
+            c.size,
+            c.price_hourly,
+            c.cost_so_far,
+            idle.unwrap_or_default()
+        );
+        let (mid, machine) = (m.id.clone(), m.clone());
+        card(theme)
+            .flex_row()
+            .items_center()
+            .gap(px(12.))
+            .px(px(14.))
+            .py(px(12.))
+            .child(kit::color_tile("cloud", 28.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .gap(px(2.))
+                    .child(div().text_size(px(13.)).child(if off { "DigitalOcean · powered off (still billed)" } else { "DigitalOcean" }))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(detail)),
+            )
+            .child(Button::new("m-cloud-power", if off { "Power on" } else { "Power off" }).icon("power").on_click(cx.listener(move |this, _, _, cx| this.cloud_power(&mid, off, cx))))
+            .child(Button::new("m-cloud-destroy", "Destroy…").style(ButtonStyle::Danger).on_click(cx.listener(move |this, _, window, cx| this.confirm_remove_machine(&machine, window, cx))))
+    }
+
     fn machine_runner_row(&self, theme: &Theme, s: &Snapshot, r: &Runner, i: usize, busy: bool, cx: &mut Context<Self>) -> AnyElement {
         let id = r.id.clone();
         let job = r.job_id.and_then(|j| s.jobs.running.iter().find(|x| x.id == j));
@@ -271,6 +314,10 @@ impl Root {
                     ))),
             )
             .child(self.runner_actions(theme, r, busy, "row", cx))
+            .on_mouse_down(gpui::MouseButton::Right, {
+                let rid = r.id.clone();
+                super::menu::on_right_click(move || super::menu::MenuTarget::Runner(rid.clone()), cx)
+            })
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Runner(id.clone()), window, cx)))
             .into_any_element()
     }
@@ -361,7 +408,7 @@ impl Root {
                                     .child(m.name.clone())
                                     .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(mid.clone()), window, cx)))
                             }))
-                            .when(machine.is_none(), |d| d.child("Not in fleet.toml"))
+                            .when(machine.is_none(), |d| d.child("Not in config.toml"))
                             .child("·")
                             .child(format!("State {source}"))
                             .when(!r.declared && r.machine_id.is_some(), |d| d.child("·").child("discovered")),
@@ -433,7 +480,7 @@ impl Root {
                 .child(kv(&theme, "Worker", kit::mono(l.worker_pid.map(|p| format!("running a job · pid {p}")).unwrap_or_else(|| "idle".into()))))
                 .children(l.url.clone().map(|u| kv(&theme, "Config URL", kit::mono(u)))),
             None => card(&theme).p(px(14.)).child(div().text_size(px(12.5)).text_color(theme.text_placeholder).child(
-                if machine.is_some() { "Not found on the machine at the last check." } else { "No machine in fleet.toml runs this runner." },
+                if machine.is_some() { "Not found on the machine at the last check." } else { "No machine in config.toml runs this runner." },
             )),
         };
         let wide = self.content_width >= 900.;

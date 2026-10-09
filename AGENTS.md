@@ -8,7 +8,7 @@ Use the MCP tools when they're connected: start the server with `muxen mcp`, and
 
 1. **Start with `fleet_status`** (`muxen status --json`) and read `attention` first. It lists what's wrong, most severe first, with the `machine_id` or `runner_id` each item is about.
 2. **The state may be stale.** `fleet_status` uses the last machine check. Look at `last_check_at` and each machine's `checked_at`. Call `check_machines` (or `fleet_status` with `refresh: true`) when you need it fresh. Checks are read-only.
-3. **Confirm before changing real things.** `install_runners` and `runner_action` with `stop`, `restart` or `remove` run commands on the user's machines and register or deregister runners on GitHub. Do them when the user asked for exactly that; otherwise say what you'd do and ask. `add_machine` and `remove_machine` only edit `fleet.toml`.
+3. **Confirm before changing real things.** `install_runners` and `runner_action` with `stop`, `restart` or `remove` run commands on the user's machines and register or deregister runners on GitHub. Do them when the user asked for exactly that; otherwise say what you'd do and ask. `add_machine` and `remove_machine` only edit `config.toml`.
 4. **Use the hints.** Errors have a `code`:
    - `not_found`
    - `invalid`
@@ -56,6 +56,7 @@ Use the MCP tools when they're connected: start the server with `muxen mcp`, and
 
 1. Call `list_jobs`. A queued job with `matching_online: 0` has no online runner with all of its labels.
 2. Compare the job's labels with the runners' labels (`list_runners`). The fix is usually to start an offline runner, or to install one with the missing label (`install_runners(labels: [...])`).
+3. To stop a run that shouldn't go on, `cancel_run(job_id)` cancels the job's whole workflow run (GitHub cancels runs, not single jobs). Confirm with the user first.
 
 ## Workspaces: borrowing a machine to work on
 
@@ -114,6 +115,18 @@ The CLI equivalents are `muxen session ls|start|read|send|attach|restart|stop`.
 - Tailscale, when it's on this computer, keeps machines reachable away from home: Muxen uses the local network when the machine is on it and Tailscale otherwise, and switches by itself when the network changes. A machine's `tailnet` (in `get_machine` and `machine_connection`) says whether Tailscale sees it online and whether traffic goes peer-to-peer (`path: "direct"`) or through a slower relay (`"relay"`). An `unreachable.kind` of `"tailscale-off"` means Tailscale is off or signed out on this computer: tell the user to turn it on; Muxen never changes Tailscale's settings.
 - `desktop_screenshot(machine_id)` returns a picture of the machine's screen (Linux with X11, and Macs). `desktop_input(machine_id, events)` clicks, types, scrolls and presses keys there, in that picture's pixels: look first, act, then look again. It's the user's real screen: only when asked, and never type passwords.
 
+## Cloud machines
+
+Muxen can create DigitalOcean droplets in the user's account and make them fleet machines (signed in from Settings › Cloud: an API token, the browser, or doctl).
+
+- `cloud_options` shows the sign-in, regions, sizes with hourly and monthly prices, and the defaults.
+- `cloud_create(name, region?, size?)` creates one, sets it up (the user's account and SSH key; Docker, git, gh; Node with Claude Code and Codex; Tailscale, as the user's settings say) and adds it to the fleet. **It costs money every hour it exists:** tell the user the size and price and get their OK first.
+- `cloud_power(machine_id, "on"|"off")`: a powered-off droplet is still billed.
+- `cloud_destroy(machine_id)` deletes the droplet and everything on it. Confirm first and make sure work there is pushed.
+- A cloud machine's `cloud` field (in `get_machine`) has its region, size, price, cost so far and how long it has been idle.
+
+The CLI equivalents are `muxen cloud options|create|power|destroy|login|logout`.
+
 ## Files
 
 - `list_files(machine_id, path)` lists a folder on any Linux or macOS machine, this computer included.
@@ -123,7 +136,7 @@ The CLI equivalents are `muxen session ls|start|read|send|attach|restart|stop`.
 
 ## Don'ts
 
-- Don't edit `fleet.toml`, `settings.json` or `state.json` by hand while the tools can do it.
+- Don't edit `config.toml` or `state.json` by hand while the tools can do it.
 - Don't pass tokens around. Muxen gets registration tokens itself from the user's `gh` login.
 - Don't use `delete_files: true` unless the user wants the runner's folder gone.
 - Don't leave workspaces behind, and don't turn workspaces on for a machine (`workspace_allow`) unless the user asks.

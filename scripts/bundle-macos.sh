@@ -38,6 +38,15 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc signature so Gatekeeper treats it as one app; replace with a Developer ID to distribute.
-codesign --force --deep --sign - "$app" >/dev/null 2>&1 || echo "warning: codesign failed; the app still runs locally" >&2
+# Signed with the Developer ID when there is one (MUXEN_SIGN_IDENTITY, else the
+# first in the keychain), so the app keeps one identity across builds: macOS
+# keeps its Keychain items (cloud sign-ins) and permissions. Not --deep: the
+# agents inside are already signed with their own identifier, which the
+# permissions on the user's Macs (Screen Recording, Accessibility) belong to.
+identity=${MUXEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -n1)}
+if [ -n "$identity" ]; then
+    codesign --force --timestamp=none --identifier com.lumarylabs.muxen -s "$identity" "$app" >/dev/null 2>&1 || echo "warning: signing with $identity failed" >&2
+else
+    codesign --force --sign - "$app" >/dev/null 2>&1 || echo "warning: codesign failed; the app still runs locally" >&2
+fi
 echo "Built $app"

@@ -16,9 +16,53 @@ use super::colors::{Palette, dim};
 use super::{Geometry, Metrics, PAD_X, PAD_Y, Shared};
 use crate::ui::theme::mono_font;
 
-/// Terminal fonts, first installed wins: Nerd Font builds of SF Mono (prompt
-/// icons render), then SF Mono, then the app's monospace font.
-const FONTS: &[&str] = &["SFMono Nerd Font", "SFMono Nerd Font Mono", "Liga SFMono Nerd Font", "SF Mono"];
+/// The terminal font when none is chosen, and what's used when the chosen
+/// one isn't installed: SF Mono, then Menlo, then the app's monospace font.
+pub const DEFAULT_FONT: &str = "SF Mono";
+const FALLBACKS: &[&str] = &["SF Mono", "Menlo"];
+
+/// The font the user picked (Settings › Terminal; see `set_font`).
+static CHOSEN: std::sync::RwLock<Option<SharedString>> = std::sync::RwLock::new(None);
+
+/// Sets the terminal font (from the user's preferences).
+pub fn set_font(family: &str) {
+    if let Ok(mut c) = CHOSEN.write() {
+        *c = Some(SharedString::from(family.to_string()));
+    }
+}
+
+fn installed(window: &Window) -> &'static [String] {
+    static INSTALLED: OnceLock<Vec<String>> = OnceLock::new();
+    INSTALLED.get_or_init(|| window.text_system().all_font_names())
+}
+
+/// Installed families whose letters are all one width, for the font picker.
+pub fn monospace_families(window: &Window) -> Vec<SharedString> {
+    static MONO: OnceLock<Vec<SharedString>> = OnceLock::new();
+    MONO.get_or_init(|| {
+        let ts = window.text_system();
+        let mut out: Vec<SharedString> = installed(window)
+            .iter()
+            // Hidden system faces (".SF NS Mono") aren't meant to be picked, and
+            // even-width fonts for other scripts or symbols aren't for code.
+            .filter(|name| !name.starts_with('.'))
+            .filter(|name| {
+                let n = name.to_lowercase();
+                ["mono", "code", "courier", "menlo", "monaco", "consol", "hack", "iosevka", "nerd", "term", "fixed", "input", "fira"].iter().any(|w| n.contains(w))
+            })
+            .filter(|name| {
+                let id = ts.resolve_font(&gpui::font(SharedString::from(name.to_string())));
+                let w = |c| ts.advance(id, px(12.), c).map(|s| f32::from(s.width)).ok();
+                matches!((w('i'), w('M'), w('.')), (Some(a), Some(b), Some(c)) if a > 0. && (a - b).abs() < 0.01 && (a - c).abs() < 0.01)
+            })
+            .map(|n| SharedString::from(n.to_string()))
+            .collect();
+        out.sort_by_key(|n| n.to_lowercase());
+        out.dedup();
+        out
+    })
+    .clone()
+}
 
 /// One drawable cell, copied out of the grid so the lock is held briefly.
 struct CellOut {
@@ -50,15 +94,14 @@ pub(super) fn grid(shared: Arc<Shared>, palette: Palette, focused: bool, cursor:
 }
 
 fn base_font(window: &Window) -> Font {
-    static FAMILY: OnceLock<SharedString> = OnceLock::new();
-    let family = FAMILY
-        .get_or_init(|| {
-            let installed = window.text_system().all_font_names();
-            let family = FONTS.iter().find(|f| installed.iter().any(|n| n == *f)).map(|f| SharedString::from(*f)).unwrap_or_else(|| mono_font().into());
-            tracing::debug!("terminal font: {family}");
-            family
-        })
-        .clone();
+    let installed = installed(window);
+    let has = |f: &str| installed.iter().any(|n| n == f);
+    let chosen = CHOSEN.read().ok().and_then(|c| c.clone()).unwrap_or_else(|| DEFAULT_FONT.into());
+    let family = if has(&chosen) {
+        chosen
+    } else {
+        FALLBACKS.iter().find(|f| has(f)).map(|f| SharedString::from(*f)).unwrap_or_else(|| mono_font().into())
+    };
     let mut font = gpui::font(family);
     // Ligatures would merge cells and break the grid.
     font.features = FontFeatures(Arc::new(vec![("calt".into(), 0), ("liga".into(), 0)]));

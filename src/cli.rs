@@ -205,6 +205,42 @@ pub fn jobs(j: &JobsResponse) -> String {
     out
 }
 
+pub fn cloud_options(o: &crate::cloud::CloudOptions) -> String {
+    let mut out = String::new();
+    let method = match o.method.as_str() {
+        "oauth" => "browser sign-in",
+        "doctl" => "doctl",
+        _ => "API token",
+    };
+    match (&o.account, o.signed_in) {
+        (Some(a), _) => out.push_str(&format!("DigitalOcean: {} ({method})\n", a.email)),
+        (None, true) => out.push_str(&format!("DigitalOcean: signed in ({method})\n")),
+        (None, false) => out.push_str("DigitalOcean: not signed in. Run `muxen cloud login --token TOKEN` (or --doctl, --browser).\n"),
+    }
+    if let Some(e) = &o.error {
+        out.push_str(&format!("  {e}\n"));
+    }
+    if !o.regions.is_empty() {
+        out.push_str(&format!("Regions: {} (default {})\n", o.regions.iter().map(|r| r.slug.as_str()).collect::<Vec<_>>().join(", "), o.default_region));
+    }
+    if !o.sizes.is_empty() {
+        out.push_str("Sizes:\n");
+        for s in &o.sizes {
+            let mark = if s.slug == o.default_size { "*" } else { " " };
+            out.push_str(&format!(
+                " {mark} {:<18} {:>2} vCPU  {:>3} GB  {:>4} GB disk  ${:.3}/h  ${:.0}/mo\n",
+                s.slug,
+                s.vcpus,
+                s.memory_mb / 1024,
+                s.disk_gb,
+                s.price_hourly,
+                s.price_monthly
+            ));
+        }
+    }
+    out
+}
+
 pub fn action(r: &ActionResponse) -> String {
     let o = &r.operation;
     let mut out = String::new();

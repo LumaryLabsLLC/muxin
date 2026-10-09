@@ -196,7 +196,7 @@ pub struct Machine {
     pub summary: RunnerSummary,
     pub probe: Option<Probe>,
     pub diagnostics: Vec<Diagnostic>,
-    /// Agents may create workspaces here (fleet.toml `workspaces`, default true).
+    /// Agents may create workspaces here (config.toml `workspaces`, default true).
     pub workspaces_allowed: bool,
     /// Agent CLIs found on the machine ("claude", "codex", ...), from the last session check.
     pub agents: Vec<String>,
@@ -210,6 +210,26 @@ pub struct Machine {
     pub unreachable: Option<Unreachable>,
     /// It on the user's tailnet, as Tailscale last saw it.
     pub tailnet: Option<TailnetDevice>,
+    /// A cloud machine Muxen created: where it runs and what it costs.
+    pub cloud: Option<CloudInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudInfo {
+    /// "digitalocean"
+    pub provider: String,
+    /// The droplet's id there.
+    pub id: u64,
+    pub region: String,
+    pub size: String,
+    /// USD an hour, billed while it exists (powered off too).
+    pub price_hourly: f64,
+    pub created_at: Option<DateTime<Utc>>,
+    /// What it has cost since it was created, in USD.
+    pub cost_so_far: f64,
+    /// Idle (no busy session, job or CPU) since then, as this app has seen it.
+    pub idle_since: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -233,6 +253,8 @@ pub struct Probe {
     pub os: Option<String>,
     pub arch: Option<String>,
     pub os_version: Option<String>,
+    /// "laptop" | "desktop", when the machine says.
+    pub form_factor: Option<String>,
     pub cores: Option<u32>,
     pub cpu_pct: Option<f64>,
     pub mem_total: Option<u64>,
@@ -292,7 +314,7 @@ pub struct Runner {
     pub state: String,
     /// Where `state` came from: "github" (live) | "probe" (last check) | "none"
     pub source: String,
-    /// Listed in fleet.toml (as opposed to discovered on the machine or on GitHub).
+    /// Listed in config.toml (as opposed to discovered on the machine or on GitHub).
     pub declared: bool,
     pub labels: Vec<String>,
     pub github: Option<GitHubRunner>,
@@ -368,6 +390,24 @@ pub struct Job {
     pub matching: Vec<String>,
     /// How many of `matching` are currently online (working or idle).
     pub matching_online: usize,
+}
+
+impl Job {
+    /// Why it hasn't started, in a few words: who can take it, or which of
+    /// its labels no runner has.
+    pub fn waiting_reason(&self, runners: &[Runner]) -> String {
+        if self.matching_online > 0 {
+            return format!("{} runner{} can take it", self.matching_online, if self.matching_online == 1 { "" } else { "s" });
+        }
+        let anyone_has = |label: &str| runners.iter().any(|r| r.labels.iter().any(|l| l.eq_ignore_ascii_case(label)));
+        let missing: Vec<&str> = self.labels.iter().map(String::as_str).filter(|l| !l.eq_ignore_ascii_case("self-hosted") && !anyone_has(l)).collect();
+        match missing.as_slice() {
+            [] if !self.matching.is_empty() => "Its runners are offline".into(),
+            [] => "No runner has all its labels".into(),
+            [one] => format!("No runner has the {one} label"),
+            many => format!("No runner has {}", many.join(", ")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -716,6 +716,16 @@ impl Client {
         }
     }
 
+    /// Cancels a workflow run: every job in it that hasn't finished.
+    pub async fn cancel_run(&self, settings: &GitHubSettings, repo: &str, run_id: u64) -> Result<(), String> {
+        self.configure(settings);
+        let path = format!("/repos/{repo}/actions/runs/{run_id}/cancel");
+        match self.send(reqwest::Method::POST, &path).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(with_hint(explain_doing(ScopeKind::Repo, repo, &e, &data_token_source(self), &format!("Cancelling a run in {repo}")))),
+        }
+    }
+
     /// The newest actions/runner release, e.g. "2.329.0".
     pub async fn latest_runner_release(&self, settings: &GitHubSettings) -> Option<String> {
         self.configure(settings);

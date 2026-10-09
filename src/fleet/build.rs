@@ -92,6 +92,9 @@ pub fn build(input: &Inputs) -> Snapshot {
             }
 
             let (state, source) = match (gh_entry, local, probe_ok) {
+                // GitHub keeps a stopped runner "online" until its session
+                // times out (minutes); the machine's check saw it isn't running.
+                (Some((_, r)), Some(l), _) if !r.busy && local_state(l) == "offline" => ("offline", "probe"),
                 (Some((_, r)), _, _) => (github_state(r), "github"),
                 (None, Some(l), _) => (local_state(l), "probe"),
                 (None, None, Some(_)) => ("offline", "probe"),
@@ -1100,6 +1103,33 @@ mod tests {
         assert!(snap.attention.iter().any(|a| a.id == "stuck-jobs"));
         assert!(snap.attention.iter().any(|a| a.id == "unassigned"));
         assert!(snap.github.live);
+    }
+
+    #[test]
+    fn a_stopped_runner_is_offline_while_github_still_says_online() {
+        let inv = inventory("[[machine]]\nname = \"Studio\"\nhost = \"studio\"\nrunners = [\"s-01\", \"s-02\"]\n");
+        let mut probes = HashMap::new();
+        // s-01 stopped (no listener); s-02 stopped too, but GitHub says it's running a job.
+        probes.insert("studio".to_string(), probe_with(vec![local("s-01", false, false), local("s-02", false, false)]));
+        let mut settings = Settings::default();
+        settings.github.orgs = vec!["acme".into()];
+        let gh = GitHubData {
+            synced_at: Some(Utc::now()),
+            token_source: "gh".into(),
+            scopes: vec![ScopeData {
+                kind: ScopeKind::Org,
+                name: "acme".into(),
+                runners: vec![gh_runner("s-01", "online", false, &["self-hosted"]), gh_runner("s-02", "online", true, &["self-hosted"])],
+                synced_at: Some(Utc::now()),
+                error: None,
+                hint: None,
+            }],
+            ..Default::default()
+        };
+        let snap = run(&inv, &settings, &probes, Some(&gh));
+        let state = |name: &str| snap.runners.iter().find(|r| r.name == name).map(|r| (r.state.clone(), r.source.clone())).unwrap();
+        assert_eq!(state("s-01"), ("offline".into(), "probe".into()));
+        assert_eq!(state("s-02"), ("working".into(), "github".into()));
     }
 
     #[test]

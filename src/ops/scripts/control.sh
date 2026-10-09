@@ -2,7 +2,7 @@
 # Muxen prepends these variables:
 #   OR_ACTION  start | stop | restart | logs | remove
 #   OR_DIR     the runner folder (contains config.sh and .runner)
-#   OR_TOKEN   remove token (remove only)
+#   OR_TOKEN   remove token (remove only; empty skips deregistration)
 #   OR_DELETE  1 to delete the folder after removing
 
 set -u
@@ -10,6 +10,12 @@ say() { printf '%s\n' "$*"; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 [ -n "$OR_DIR" ] || fail "No runner folder given."
+# Removing a runner whose folder is already gone: nothing left to do here.
+if [ "$OR_ACTION" = remove ] && [ ! -e "$OR_DIR" ]; then
+  say "$OR_DIR is already gone."
+  say "✓ Removed"
+  exit 0
+fi
 cd "$OR_DIR" 2>/dev/null || fail "$OR_DIR doesn't exist."
 
 os=$(uname -s)
@@ -112,9 +118,12 @@ case "$OR_ACTION" in
       say "Uninstalling the service…"
       svc uninstall
     fi
-    if [ -f .runner ]; then
+    if [ -f .runner ] && [ -n "$OR_TOKEN" ]; then
       say "Removing the runner from GitHub…"
       ./config.sh remove --token "$OR_TOKEN" || fail "config.sh remove failed."
+    elif [ -f .runner ]; then
+      say "Not removing it from GitHub (no removal token); dropping its registration here."
+      rm -f .runner .credentials .credentials_rsaparams
     fi
     if [ "$OR_DELETE" = 1 ]; then
       # Only ever delete something that looks like a runner folder.
@@ -122,7 +131,8 @@ case "$OR_ACTION" in
         / | "$HOME" | "$HOME/" | "") fail "Refusing to delete $OR_DIR." ;;
       esac
       if [ -f "$OR_DIR/config.sh" ] && [ -d "$OR_DIR/bin" ]; then
-        cd / && rm -rf "$OR_DIR" && say "Deleted $OR_DIR"
+        cd / && rm -rf "$OR_DIR" || fail "Couldn't delete $OR_DIR."
+        say "Deleted $OR_DIR"
       else
         fail "$OR_DIR doesn't look like a runner folder; not deleting it."
       fi

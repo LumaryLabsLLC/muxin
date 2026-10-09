@@ -212,27 +212,13 @@ impl Engine {
         let container = runner.local.as_ref().and_then(|l| l.container.clone());
 
         let plan = match action {
-            RunnerAction::Remove { delete_files } => {
-                let on_machine = machine.as_ref().filter(|(spec, _)| spec.is_checkable() && reachable && dir.is_some());
-                match on_machine {
-                    Some((spec, probe)) => {
-                        let scope = runner_scope(&runner).ok_or_else(|| {
-                            format!("Muxen doesn't know which GitHub org or repo {} is registered with.", runner.name)
-                        })?;
-                        Plan::OnMachine {
-                            spec: spec.clone(),
-                            probe: probe.clone(),
-                            dir: dir.clone().unwrap_or_default(),
-                            container: container.clone(),
-                            scope: Some(scope),
-                            delete_files,
-                        }
-                    }
-                    None if runner.github.is_some() => Plan::GitHubOnly,
-                    None if runner.declared => Plan::InventoryOnly,
-                    None => return Err(format!("{} isn't on a reachable machine or on GitHub, so there's nothing to remove.", runner.name)),
-                }
+            // The last check may be stale (one that ran while the machine
+            // restarted): look again before settling for GitHub alone, which
+            // would leave the runner's service and folder on the machine.
+            RunnerAction::Remove { delete_files } if machine.as_ref().is_some_and(|(spec, _)| spec.is_checkable()) && !(reachable && dir.is_some()) => {
+                Plan::CheckFirst { delete_files }
             }
+            RunnerAction::Remove { delete_files } => self.remove_plan(&runner, delete_files)?,
             _ => {
                 let (spec, probe) = machine.clone().ok_or_else(|| {
                     format!("{} isn't on a machine in config.toml, so Muxen can't control it. It can only be removed from GitHub.", runner.name)
@@ -269,6 +255,31 @@ impl Engine {
             finish(&me, op, result);
         });
         Ok(op)
+    }
+
+    /// How to remove a runner, from what the last check and GitHub said.
+    fn remove_plan(&self, runner: &Runner, delete_files: bool) -> Result<Plan, String> {
+        let snap = self.current();
+        let machine = runner.machine_id.as_deref().and_then(|id| self.machine(id));
+        let reachable = runner.machine_id.as_deref().and_then(|id| snap.machines.iter().find(|m| m.id == id)).is_some_and(|m| m.status == "online");
+        let dir = runner.local.as_ref().map(|l| l.dir.clone());
+        let on_machine = machine.filter(|(spec, _)| spec.is_checkable() && reachable && dir.is_some());
+        Ok(match on_machine {
+            Some((spec, probe)) => {
+                let scope = runner_scope(runner).ok_or_else(|| format!("Muxen doesn't know which GitHub org or repo {} is registered with.", runner.name))?;
+                Plan::OnMachine {
+                    spec,
+                    probe,
+                    dir: dir.unwrap_or_default(),
+                    container: runner.local.as_ref().and_then(|l| l.container.clone()),
+                    scope: Some(scope),
+                    delete_files,
+                }
+            }
+            None if runner.github.is_some() => Plan::GitHubOnly,
+            None if runner.declared => Plan::InventoryOnly,
+            None => return Err(format!("{} isn't on a reachable machine or on GitHub, so there's nothing to remove.", runner.name)),
+        })
     }
 
     /// Cancels the workflow run a queued or running job belongs to (all of
@@ -457,6 +468,8 @@ enum Plan {
     OnMachine { spec: MachineSpec, probe: Option<ProbeResult>, dir: String, container: Option<String>, scope: Option<String>, delete_files: bool },
     /// The machine is gone or unreachable: deregister through the GitHub API.
     GitHubOnly,
+    /// Remove, but check the runner's machine first and plan from that.
+    CheckFirst { delete_files: bool },
     /// Not installed anywhere we can see; just drop it from config.toml.
     InventoryOnly,
 }
@@ -665,6 +678,16 @@ async fn record_installed(engine: &Arc<Engine>, op: u64, req: &InstallRequest, s
 
 async fn run_action(engine: &Arc<Engine>, op: u64, runner: &Runner, action: RunnerAction, plan: Plan) -> Result<(), String> {
     let settings = engine.settings();
+    let plan = match plan {
+        Plan::CheckFirst { delete_files } => {
+            let mid = runner.machine_id.clone().unwrap_or_default();
+            step(engine, op, format!("Checking {mid} first"));
+            engine.run_check(Some(vec![mid])).await;
+            let fresh = engine.current().runners.iter().find(|r| r.id == runner.id).cloned().unwrap_or_else(|| runner.clone());
+            engine.remove_plan(&fresh, delete_files)?
+        }
+        plan => plan,
+    };
     match plan {
         Plan::OnMachine { spec, probe, dir, container, scope, delete_files } => {
             let shell = if container.is_some() { Shell::Sh } else { remote::shell_for(&spec, probe.as_ref()) };
@@ -672,8 +695,18 @@ async fn run_action(engine: &Arc<Engine>, op: u64, runner: &Runner, action: Runn
             let mut token = String::new();
             if let (RunnerAction::Remove { .. }, Some(scope)) = (action, scope.as_deref()) {
                 step(engine, op, format!("Requesting a removal token from GitHub for {scope}"));
-                token = engine.github().remove_token(&settings.github, scope).await?;
-                secrets.push(token.clone());
+                token = match engine.github().remove_token(&settings.github, scope).await {
+                    Ok(t) => t,
+                    // The repo or org is gone (its runners with it), or out of reach: still clean up the machine.
+                    Err(e) if e.contains("wasn't found") => {
+                        engine.op_log(op, format!("! {e} Removing it from the machine only; if GitHub still lists it, remove it there."));
+                        String::new()
+                    }
+                    Err(e) => return Err(e),
+                };
+                if !token.is_empty() {
+                    secrets.push(token.clone());
+                }
             }
             step(engine, op, format!("{} {} on {}", verb(action), runner.name, spec.name));
             let script = match &container {
@@ -693,6 +726,15 @@ async fn run_action(engine: &Arc<Engine>, op: u64, runner: &Runner, action: Runn
             };
             remote::run(engine, op, &spec, shell, script, &secrets, CONTROL_TIMEOUT).await?;
             if let RunnerAction::Remove { .. } = action {
+                // A folder deleted by hand leaves the runner registered: finish that through the API.
+                if let Some(gh) = runner.github.as_ref() {
+                    engine.sync_github().await;
+                    let registered = engine.current().runners.iter().any(|r| r.github.as_ref().is_some_and(|g| g.id == gh.id && g.scope == gh.scope));
+                    if registered {
+                        step(engine, op, format!("Removing {} from GitHub ({})", runner.name, gh.scope));
+                        engine.github().delete_runner(&settings.github, &gh.scope, gh.id).await?;
+                    }
+                }
                 forget_runner(engine, op, runner);
             }
             if action != RunnerAction::Logs {
@@ -705,8 +747,8 @@ async fn run_action(engine: &Arc<Engine>, op: u64, runner: &Runner, action: Runn
             step(engine, op, format!("Removing {} from GitHub ({})", runner.name, gh.scope));
             engine.github().delete_runner(&settings.github, &gh.scope, gh.id).await?;
             engine.op_log(op, format!("✓ {} is no longer registered", runner.name));
-            if runner.machine_id.is_some() {
-                engine.op_log(op, "The runner's files on its machine weren't touched, because Muxen couldn't reach it.");
+            if let Some(mid) = &runner.machine_id {
+                engine.op_log(op, format!("! {mid} couldn't be reached, so {}'s service and folder are still there. Remove them on the machine when it's back.", runner.name));
             }
             forget_runner(engine, op, runner);
             refresh(engine, op, None).await;
@@ -717,6 +759,7 @@ async fn run_action(engine: &Arc<Engine>, op: u64, runner: &Runner, action: Runn
             refresh(engine, op, None).await;
             Ok(())
         }
+        Plan::CheckFirst { .. } => unreachable!("planned above"),
     }
 }
 

@@ -76,7 +76,7 @@ impl Engine {
     pub async fn list_files(self: &Arc<Self>, machine_id: &str, path: &str) -> Result<Listing, String> {
         let (spec, _) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
         if self.demo_world().is_some() {
-            return Err("The demo has no files to show.".into());
+            return Ok(demo_listing(&spec, path));
         }
         let l = self.files_link(&spec).await.ok_or_else(|| format!("Browsing {} needs Muxen's agent there (Linux or macOS).", spec.name))?;
         let r = l.request(json!({ "op": "files", "path": if path.trim().is_empty() { "~" } else { path } }), Duration::from_secs(20)).await?;
@@ -408,5 +408,32 @@ impl WaitOutput for Child {
         }
         let status = self.wait().await.map_err(|e| e.to_string())?;
         Ok((status, err))
+    }
+}
+
+/// A made-up home folder for the demo: a few projects to browse.
+fn demo_listing(spec: &MachineSpec, path: &str) -> Listing {
+    let home = if spec.platform.as_deref().is_some_and(|p| p.starts_with("darwin")) { "/Users/ci" } else { "/home/ci" };
+    let path = path.trim();
+    let abs = match path.strip_prefix('~') {
+        Some(rest) => format!("{home}{rest}"),
+        None if path.is_empty() => home.to_string(),
+        None if !path.starts_with('/') => format!("{home}/{path}"),
+        None => path.to_string(),
+    };
+    let abs = if abs.len() > 1 { abs.trim_end_matches('/').to_string() } else { abs };
+    let (folders, files): (&[&str], &[&str]) = match abs.strip_prefix(home).map(|r| r.trim_start_matches('/')) {
+        Some("") => (&[".config", "code", "Documents", "Downloads", "notes"], &["todo.md"]),
+        Some("code") => (&["api", "checkout", "desktop", "infra", "ios-app", "muxen", "web"], &[]),
+        Some(p) if p.starts_with("code/") && !p["code/".len()..].contains('/') => (&[".github", "docs", "src", "tests"], &["README.md", "package.json"]),
+        _ => (&[], &[]),
+    };
+    let entry = |name: &&str, folder: bool| FileEntry { name: name.to_string(), kind: if folder { "dir" } else { "file" }.into(), folder, size: (!folder).then_some(2048), modified: None };
+    Listing {
+        machine_id: spec.id.clone(),
+        path: abs,
+        home: home.to_string(),
+        entries: folders.iter().map(|n| entry(n, true)).chain(files.iter().map(|n| entry(n, false))).collect(),
+        more: false,
     }
 }

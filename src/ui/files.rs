@@ -262,7 +262,7 @@ impl CopyDialog {
         }).collect();
         let body: AnyElement = match &pane.listing {
             Load::Loading => div().p(px(14.)).flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(kit::spinner(SharedString::from(format!("cp-{tag}-spin")), 12., theme.text_muted)).child("Opening…").into_any_element(),
-            Load::Failed(e) => div().p(px(14.)).flex().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(icon("circle-alert", 14., theme.warning)).child(div().flex_1().child(e.clone())).into_any_element(),
+            Load::Failed(e) => div().p(px(14.)).flex().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(icon("circle-alert", 14., theme.warning)).child(div().flex_1().min_w(px(0.)).child(e.clone())).into_any_element(),
             Load::Ready(l) => {
                 let shown: Vec<&crate::fleet::files::FileEntry> = l.entries.iter().filter(|e| self.show_hidden || !e.name.starts_with('.')).collect();
                 if shown.is_empty() {
@@ -346,7 +346,7 @@ impl CopyDialog {
                         })),
                 )
             })
-            .child(icon(if e.folder { "folder" } else { "file" }, 14., if e.folder { theme.text_accent } else { theme.text_placeholder }))
+            .child(kit::color_icon(&theme, if e.folder { "folder" } else { "file" }, 14., theme.text_placeholder))
             .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(12.5)).text_color(if dim { theme.text_placeholder } else { theme.text }).child(e.name.clone()))
             .child(div().flex_none().font_family(mono_font()).text_size(px(11.)).text_color(theme.text_placeholder).child(meta));
         // A folder opens; a file (on the left) is picked.
@@ -361,10 +361,16 @@ impl CopyDialog {
 }
 
 /// A folder as people say it: ~/x for the home folder.
-fn display(l: &Listing) -> String {
-    match l.path.strip_prefix(&l.home) {
-        Some(rest) if !l.home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => format!("~{rest}"),
-        _ => l.path.clone(),
+/// The listing's folder, as ~/... when it's in the home folder.
+pub(super) fn display(l: &Listing) -> String {
+    tilde(&l.path, &l.home)
+}
+
+/// `path`, as ~/... when it's in `home`.
+pub(super) fn tilde(path: &str, home: &str) -> String {
+    match path.strip_prefix(home) {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => format!("~{rest}"),
+        _ => path.to_string(),
     }
 }
 

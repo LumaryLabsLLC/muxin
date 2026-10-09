@@ -447,7 +447,7 @@ impl Root {
                             .p(px(20.))
                             .max_w(px(420.))
                             .bg(theme.elevated)
-                            .child(icon(if format::is_just_offline(&m) { "power" } else { "unplug" }, 22., theme.text_muted))
+                            .child(kit::color_tile(if format::is_just_offline(&m) { "power" } else { "unplug" }, 36.))
                             .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(title))
                             .child(div().text_size(px(12.5)).text_color(theme.text_muted).text_center().child("Shut down: this session ended. Asleep: it's still there."))
                             .child(
@@ -487,7 +487,7 @@ impl Root {
                             .gap(px(10.))
                             .p(px(20.))
                             .bg(theme.elevated)
-                            .child(icon("unplug", 22., theme.text_muted))
+                            .child(kit::color_tile("unplug", 36.))
                             .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Disconnected"))
                             .child(
                                 div()
@@ -655,7 +655,7 @@ impl Root {
                 .flex_row()
                 .items_center()
                 .gap(px(12.))
-                .child(icon("square-terminal", 16., theme.text_placeholder))
+                .child(kit::color_tile("square-terminal", 28.))
                 .child(div().flex_1().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(text))
                 .child(
                     Button::new("m-session-empty", "New session")
@@ -811,7 +811,7 @@ impl Root {
                 .gap(px(12.))
                 .px(px(14.))
                 .py(px(10.))
-                .child(icon(glyph, 15., theme.text_muted))
+                .child(kit::color_tile(glyph, 22.))
                 .child(div().w(px(130.)).flex_none().text_size(px(12.5)).text_color(theme.text_muted).child(name))
                 .child(
                     div()
@@ -901,7 +901,7 @@ impl Root {
         }
         let mid = m.id.clone();
         let changing = self.conn_changing.contains(&m.id);
-        let (glyph, color, value, detail, direct) = match self.machine_conn.get(&m.id) {
+        let (glyph, value, detail, direct) = match self.machine_conn.get(&m.id) {
             Some(Load::Ready(c)) => {
                 let speed = c.latency_ms.map(|ms| format!(" · {ms} ms")).unwrap_or_default();
                 // Through Tailscale: straight to the machine, or through its relay.
@@ -915,23 +915,21 @@ impl Root {
                 match c.via.as_str() {
                     "direct" => (
                         "zap",
-                        if c.note.is_some() { theme.warning } else { theme.success },
                         format!("Direct{net}{speed}"),
                         c.note.clone().unwrap_or_else(|| format!("QUIC to {}{at}, no ssh in between.", c.address.clone().unwrap_or_default())),
                         true,
                     ),
                     "ssh" => (
                         "network",
-                        if c.direct { theme.warning } else { theme.text_muted },
                         format!("Over ssh{net}{speed}"),
                         c.note.clone().unwrap_or_else(|| "One ssh connection, kept open.".into()),
                         c.direct,
                     ),
-                    _ => ("unplug", theme.text_placeholder, "Not connected".into(), c.note.clone().unwrap_or_else(|| "The agent there didn't answer.".into()), c.direct),
+                    _ => ("unplug", "Not connected".into(), c.note.clone().unwrap_or_else(|| "The agent there didn't answer.".into()), c.direct),
                 }
             }
-            Some(Load::Failed(e)) => ("unplug", theme.error, "Not connected".into(), e.clone(), false),
-            _ => ("network", theme.text_placeholder, "Checking…".into(), String::new(), false),
+            Some(Load::Failed(e)) => ("unplug", "Not connected".into(), e.clone(), false),
+            _ => ("network", "Checking…".into(), String::new(), false),
         };
         // Not on the tailnet (while this computer is): offer to set it up there.
         let offer_tailscale = m.platform.starts_with("linux")
@@ -978,7 +976,7 @@ impl Root {
                     .gap(px(12.))
                     .px(px(14.))
                     .py(px(12.))
-                    .child(icon(glyph, 16., color))
+                    .child(kit::color_tile(glyph, 28.))
                     .child(
                         div()
                             .flex()
@@ -1275,7 +1273,7 @@ fn ended(theme: &Theme, id: &str, cx: &mut Context<Root>) -> AnyElement {
         .justify_center()
         .gap(px(10.))
         .pb(px(80.))
-        .child(div().size(px(44.)).rounded_full().bg(theme.element).flex().items_center().justify_center().child(icon("square-terminal", 20., theme.text_muted)))
+        .child(kit::color_tile("square-terminal", 44.))
         .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("This session has ended"))
         .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(id.to_string()))
         .child(

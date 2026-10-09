@@ -194,7 +194,7 @@ impl Root {
                     .flex_row()
                     .items_center()
                     .gap(px(12.))
-                    .child(icon("box", 16., theme.text_placeholder))
+                    .child(kit::color_tile("box", 28.))
                     .child(div().flex_1().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(
                         "No runners on this machine yet. Install one and it will register with GitHub and start picking up jobs.",
                     ))

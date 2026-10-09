@@ -15,6 +15,7 @@ mod overview;
 mod desktop;
 mod sessions;
 mod settings;
+mod shortcuts;
 mod terminal;
 mod theme;
 mod themes;

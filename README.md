@@ -78,7 +78,7 @@ muxen status
 
   The macOS themes also switch to the system fonts (SF Pro, and SF Mono when it's installed). The choice is saved in `ui.json` next to `fleet.toml`.
 
-Keyboard: ⌘B hide or show the sidebar · ⌘R check now · ⇧⌘R sync GitHub · ⌘N add machine · ⌘T new session · ⌘1 / ⌘2 overview / jobs · ⌘F or `/` search the fleet · ⌘J activity · ⌘[ / ⌘] back / forward · ⌘, settings. On Linux and Windows, use Ctrl instead of ⌘.
+Keyboard: ⌘1…⌘9 go to your machines · ⌃1…⌃4 overview, jobs, workspaces, GitHub (Alt on Linux and Windows) · ⌘J activity · ⌘R check machines · ⇧⌘R sync GitHub · ⌘N add machine · ⌘T new session · ⌘F or `/` search the fleet · ⌘B sidebar · ⌘[ / ⌘] back / forward · ⌘, settings. Hold ⌘ to see them in the app, and change them in Settings › Keyboard. On Linux and Windows, use Ctrl instead of ⌘.
 
 ## The inventory: `fleet.toml`
 

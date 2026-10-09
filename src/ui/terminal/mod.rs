@@ -62,11 +62,12 @@ const CONTEXT: &str = "Terminal";
 /// terminals. On Linux and Windows the app's shortcuts use Ctrl, so those go
 /// to the program too (the app's menu and ⌘ on macOS still work).
 pub fn bind_keys(cx: &mut App) {
-    let mut keys = vec!["escape", "/"];
+    let mut keys: Vec<String> = vec!["escape".into(), "/".into()];
     if !cfg!(target_os = "macos") {
-        keys.extend(["ctrl-r", "ctrl-shift-r", "ctrl-1", "ctrl-2", "ctrl-,", "ctrl-f", "ctrl-[", "ctrl-]", "ctrl-j", "ctrl-n", "ctrl-q"]);
+        keys.extend(super::shortcuts::ctrl_keys(cx));
+        keys.push("ctrl-q".into());
     }
-    cx.bind_keys(keys.into_iter().map(|k| KeyBinding::new(k, NoAction, Some(CONTEXT))));
+    cx.bind_keys(keys.iter().map(|k| KeyBinding::new(k, NoAction, Some(CONTEXT))));
     cx.bind_keys([
         KeyBinding::new("secondary-=", IncreaseFontSize, Some(CONTEXT)),
         KeyBinding::new("secondary-+", IncreaseFontSize, Some(CONTEXT)),

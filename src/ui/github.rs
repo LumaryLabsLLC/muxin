@@ -546,7 +546,7 @@ impl Root {
                     .text_color(if inbox_active { theme.text } else { theme.text_muted })
                     .when(inbox_active, |d| d.bg(theme.element_selected))
                     .when(!inbox_active, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-                    .child(icon("inbox", 14., if inbox_active { theme.text_accent } else { theme.text_placeholder }))
+                    .child(kit::color_tile("inbox", 18.))
                     .child("For you")
                     .child(div().flex_1())
                     .children(waiting.filter(|n| *n > 0).map(|n| kit::pill(n.to_string(), theme.accent)))
@@ -646,7 +646,7 @@ impl Root {
             .cursor_pointer()
             .when(selected, |d| d.bg(theme.element_selected))
             .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-            .child(icon(if private { "lock" } else { "book-open" }, 13., theme.text_placeholder))
+            .child(kit::color_icon(theme, if private { "lock" } else { "book-open" }, 13., theme.text_placeholder))
             .child(
                 div()
                     .flex()
@@ -655,7 +655,7 @@ impl Root {
                     .when(owner_line, |d| d.child(div().w(px(text_w)).truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(owner.to_string()))),
             )
             .child(div().flex_1())
-            .when(local, |d| d.child(icon("laptop", 12., theme.text_accent)))
+            .when(local, |d| d.child(kit::color_icon(theme, "laptop", 12., theme.text_accent)))
             .child(
                 div()
                     .id(SharedString::from(format!("gh-star-{full}")))
@@ -760,7 +760,7 @@ impl Root {
                     ),
             )
             .when(it.comments > 0, |d| {
-                d.child(div().flex().items_center().gap(px(4.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(icon("message-square", 12., theme.text_placeholder)).child(it.comments.to_string()))
+                d.child(div().flex().items_center().gap(px(4.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(kit::color_icon(theme, "message-square", 12., theme.text_placeholder)).child(it.comments.to_string()))
             })
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::GithubItem(repo.clone(), number), window, cx)))
             .on_mouse_down(
@@ -937,7 +937,7 @@ impl Root {
                                     .gap(px(8.))
                                     .text_size(px(11.5))
                                     .text_color(theme.text_placeholder)
-                                    .child(icon("git-branch", 11., theme.text_placeholder))
+                                    .child(kit::color_icon(theme, "git-branch", 11., theme.text_placeholder))
                                     .child(div().font_family(mono_font()).child(c.branch.clone()))
                                     .child(format!("· {sync}"))
                                     .child(if c.dirty == 0 { "· clean".to_string() } else { format!("· {} changed", c.dirty) }),
@@ -1127,7 +1127,7 @@ fn runs_list(theme: &Theme, runs: &[Run]) -> AnyElement {
                             format::ago(Some(r.created_at))
                         ))),
                 )
-                .child(icon("external-link", 12., theme.text_placeholder))
+                .child(kit::color_icon(theme, "external-link", 12., theme.text_placeholder))
                 .on_click(move |_, _, cx| cx.open_url(&url))
                 .into_any_element()
         })

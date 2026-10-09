@@ -41,6 +41,58 @@ pub mod tiles {
     pub const OTHER: (u32, u32) = (0xa7aebb, 0x5f6673);
 }
 
+/// An icon's colors, by what it stands for, so a thing looks the same in
+/// menus, buttons and rows. `None` for small controls (chevrons, close) that
+/// stay quiet.
+pub fn icon_colors(name: &str) -> Option<(u32, u32)> {
+    Some(match name {
+        "terminal" | "square-terminal" => (0x8f95ff, 0x5057e0),
+        "monitor" | "laptop" | "server" | "maximize" | "minimize" | "panel-left" | "panel-right" | "panel-bottom" | "layout-grid" => {
+            (0x6cc8ff, 0x2f7ae4)
+        }
+        "folder" | "folder-open" | "hard-drive" | "box" => (0xffd36b, 0xf09a0b),
+        "file" | "settings" | "gauge" | "cpu" | "memory-stick" | "search" => (0xa3b4d9, 0x5a6d99),
+        "copy" => (0xf0a6fc, 0xb83ad0),
+        "refresh-cw" | "rotate-ccw" | "play" | "check" | "circle-check" => (0x6ee7a0, 0x1c9e55),
+        "plus" => (0xb69cff, 0x7a4ce8),
+        "trash-2" | "circle-x" | "square" => (0xff8080, 0xdc3b33),
+        "power" | "unplug" => (0xff8fb1, 0xd63c6e),
+        "external-link" | "info" | "inbox" | "message-square" | "arrow-up" | "arrow-down" => (0x6cb6ff, 0x2f6fe4),
+        "git-branch" | "git-merge" | "git-pull-request" | "git-pull-request-draft" | "workflow" | "list" | "scroll-text" => {
+            (0xffa95c, 0xea6a2a)
+        }
+        "layers" => tiles::WORKSPACES,
+        "activity" | "clock" => tiles::ACTIVITY,
+        "zap" | "star" | "star-filled" | "circle-alert" | "triangle-alert" => (0xffcc4d, 0xf08c00),
+        "network" | "plug" | "radio" => (0x5ee7f0, 0x0d9cbd),
+        "lock" | "book-open" => tiles::OVERVIEW,
+        "bot" => (0xf472d0, 0xb33fd0),
+        "agent-github" => (0x4a4a50, 0x18181b),
+        _ => return None,
+    })
+}
+
+/// `icon` on its colored tile (see `icon_colors`).
+pub fn color_tile(name: &str, size: f32) -> Div {
+    let (from, to) = icon_colors(name).unwrap_or(tiles::OTHER);
+    tile(name, from, to, size)
+}
+
+/// An icon's own color, readable on this theme: the lighter stop on dark
+/// themes, the deeper one on light themes. Logos keep the text color.
+pub fn tint(theme: &Theme, name: &str) -> Option<Hsla> {
+    if name.starts_with("agent-") {
+        return None;
+    }
+    let (from, to) = icon_colors(name)?;
+    Some(gpui::rgb(if theme.canvas.l < 0.5 { from } else { to }).into())
+}
+
+/// `icon` in its own color, or in `fallback` when it has none.
+pub fn color_icon(theme: &Theme, name: &str, size: f32, fallback: Hsla) -> Svg {
+    icon(name, size, tint(theme, name).unwrap_or(fallback))
+}
+
 /// Logo and tile colors for an agent CLI (see fleet::sessions::AGENTS): the
 /// product's own mark, white on its brand color.
 pub fn agent_look(agent: &str) -> (&'static str, (u32, u32)) {
@@ -50,7 +102,7 @@ pub fn agent_look(agent: &str) -> (&'static str, (u32, u32)) {
         "opencode" => ("agent-opencode", (0x34363c, 0x16171a)),
         "gemini" => ("agent-gemini", (0x4796e3, 0x9a6fd0)),
         "amp" => ("agent-amp", (0xf2704f, 0xc9352b)),
-        "shell" => ("terminal", (0xa7aebb, 0x5f6673)),
+        "shell" => ("terminal", (0x8f95ff, 0x5057e0)),
         _ => ("bot", (0xa7aebb, 0x5f6673)),
     }
 }
@@ -179,7 +231,7 @@ pub fn empty_state(theme: &Theme, icon_name: &str, text: impl Into<SharedString>
         .text_size(px(12.5))
         .text_color(theme.text_placeholder)
         // Icon box matches the first line's height so long text wraps under itself.
-        .child(div().flex_none().h(px(20.)).flex().items_center().child(icon(icon_name, 14., theme.text_placeholder)))
+        .child(div().flex_none().h(px(20.)).flex().items_center().child(color_icon(theme, icon_name, 14., theme.text_placeholder)))
         .child(div().flex_1().min_w(px(0.)).child(text.into()))
 }
 
@@ -312,7 +364,12 @@ impl RenderOnce for Button {
         if self.loading {
             el = el.child(spinner(ElementId::Name(format!("{}-spin", self.id).into()), 13., fg));
         } else if let Some(i) = self.icon {
-            el = el.child(icon(i, if icon_only { 15. } else { 13. }, fg));
+            // Icons carry their own color, except on filled and danger buttons.
+            let color = match self.style {
+                ButtonStyle::Outlined | ButtonStyle::Ghost => tint(&theme, i).unwrap_or(fg),
+                ButtonStyle::Primary | ButtonStyle::Danger => fg,
+            };
+            el = el.child(icon(i, if icon_only { 15. } else { 13. }, color));
         }
         if let Some(label) = self.label {
             el = el.child(label);

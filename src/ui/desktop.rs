@@ -15,7 +15,7 @@ use gpui::{
 };
 use serde_json::{Value, json};
 
-use super::kit::{Button, ButtonStyle, icon, spinner};
+use super::kit::{self, Button, ButtonStyle, spinner};
 use super::theme::ActiveTheme;
 use crate::fleet::Engine;
 use crate::fleet::desktop::{FRAME, INPUT, TILES, keysym};
@@ -25,13 +25,13 @@ const CONTEXT: &str = "Desktop";
 
 /// Keys that would otherwise run Muxen's own shortcuts go to the machine.
 pub fn bind_keys(cx: &mut App) {
-    let mut keys = vec!["escape", "/", "tab", "shift-tab"];
+    let mut keys: Vec<String> = ["escape", "/", "tab", "shift-tab"].map(String::from).to_vec();
     if cfg!(target_os = "macos") {
-        keys.extend(["cmd-r", "cmd-t", "cmd-n", "cmd-f"]);
+        keys.extend(["cmd-r", "cmd-t", "cmd-n", "cmd-f"].map(String::from));
     } else {
-        keys.extend(["ctrl-r", "ctrl-shift-r", "ctrl-1", "ctrl-2", "ctrl-,", "ctrl-f", "ctrl-j", "ctrl-n"]);
+        keys.extend(super::shortcuts::ctrl_keys(cx));
     }
-    cx.bind_keys(keys.into_iter().map(|k| KeyBinding::new(k, NoAction, Some(CONTEXT))));
+    cx.bind_keys(keys.iter().map(|k| KeyBinding::new(k, NoAction, Some(CONTEXT))));
 }
 
 enum State {
@@ -550,7 +550,7 @@ impl Render for DesktopView {
                     .flex_col()
                     .items_center()
                     .gap(px(10.))
-                    .child(icon("power", 28., theme.text_placeholder))
+                    .child(kit::color_tile("power", 44.))
                     .child(div().text_size(px(14.)).text_color(theme.text).child(why))
                     .child(div().text_size(px(12.5)).text_color(theme.text_muted).child("Comes back when it does.")),
             ),
@@ -560,7 +560,7 @@ impl Render for DesktopView {
                     .flex_col()
                     .items_center()
                     .gap(px(10.))
-                    .child(icon("monitor", 28., theme.text_placeholder))
+                    .child(kit::color_tile("monitor", 44.))
                     .child(div().max_w(px(460.)).text_center().text_size(px(13.)).text_color(theme.text_muted).child(why.clone()))
                     .child(Button::new("desktop-retry", "Try again").icon("refresh-cw").on_click(cx.listener(|this, _, window, cx| {
                         this.retries = 0;
@@ -653,10 +653,10 @@ pub fn toolbar(view: &Entity<DesktopView>, extra: Vec<AnyElement>, cx: &App) -> 
                 .flex()
                 .items_center()
                 .gap(px(10.))
-                .child(icon("monitor", 14., theme.text_muted))
+                .child(kit::color_icon(&theme, "monitor", 14., theme.text_muted))
                 .child(div().flex_none().text_size(px(12.5)).text_color(theme.text_muted).child(status))
                 .when(!via.is_empty(), |d| {
-                    d.child(div().flex_none().flex().items_center().gap(px(5.)).text_size(px(12.)).text_color(theme.text_placeholder).child(icon("network", 12., theme.text_placeholder)).child(via))
+                    d.child(div().flex_none().flex().items_center().gap(px(5.)).text_size(px(12.)).text_color(theme.text_placeholder).child(kit::color_icon(&theme, "network", 12., theme.text_placeholder)).child(via))
                 }),
         )
         .child(picker.flex_none())

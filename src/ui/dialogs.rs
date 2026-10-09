@@ -7,10 +7,12 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 
+use super::github::Load;
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, checkbox, icon, label};
 use super::theme::{ActiveTheme, mono_font, Theme};
 use crate::fleet::Engine;
+use crate::fleet::files::Listing;
 use crate::fleet::sessions::{AGENTS, StartSession};
 use crate::fleet::workspaces::{CreateWorkspace, DEFAULT_IMAGE, WorkspaceIsolation};
 use crate::fleet::model::Snapshot;
@@ -68,7 +70,7 @@ fn error_line(theme: &Theme, error: &Option<String>) -> Option<impl IntoElement>
             .text_size(px(12.5))
             .text_color(theme.text)
             .child(icon("circle-alert", 14., theme.error))
-            .child(div().flex_1().child(e.clone()))
+            .child(div().flex_1().min_w(px(0.)).child(e.clone()))
     })
 }
 
@@ -227,7 +229,7 @@ impl Render for AddMachineDialog {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.pick(host.clone(), name.clone(), cx);
                             if !ssh {
-                                this.note = Some(format!("Turn on Remote Login on {name} (Settings › General › Sharing), then add it."));
+                                this.note = Some(format!("Turn on Remote Login on {name}: Settings › General › Sharing."));
                             }
                             cx.notify();
                         }))
@@ -242,7 +244,7 @@ impl Render for AddMachineDialog {
             div().flex().flex_col().gap(px(6.)).child(label(&theme, "On this network")).child(body)
         })
         .children(self.note.clone().map(|n| {
-            div().flex().items_start().gap(px(8.)).text_size(px(12.)).text_color(theme.text_muted).child(icon("info", 13., theme.info)).child(div().flex_1().child(n))
+            div().flex().items_start().gap(px(8.)).text_size(px(12.)).text_color(theme.text_muted).child(icon("info", 13., theme.info)).child(div().flex_1().min_w(px(0.)).child(n))
         }))
         .children(error_line(&theme, &self.error))
         .child(footer(vec![
@@ -269,7 +271,7 @@ fn suggestion(theme: &Theme, id: impl Into<gpui::ElementId>, text: impl Into<Sha
         .text_size(px(12.))
         .font_family(mono_font())
         .text_color(theme.text_muted)
-        .child(icon(icon_name, 12., theme.text_placeholder))
+        .child(kit::color_icon(theme, icon_name, 12., theme.text_placeholder))
         .child(text.into())
 }
 
@@ -404,7 +406,7 @@ impl Render for InstallDialog {
                 .bg(theme.warning.opacity(0.1))
                 .text_size(px(12.5))
                 .child(icon("triangle-alert", 14., theme.warning))
-                .child(div().flex_1().child("Runners register with a GitHub organization or repository. Add one in Settings first."))
+                .child(div().flex_1().min_w(px(0.)).child("Runners register with a GitHub organization or repository. Add one in Settings first."))
                 .child(Button::new("inst-settings", "Settings").on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::OpenSettings))))
                 .into_any_element()
         } else {
@@ -429,7 +431,7 @@ impl Render for InstallDialog {
                         .bg(if selected { theme.accent.opacity(0.12) } else { theme.element })
                         .text_size(px(12.5))
                         .font_family(mono_font())
-                        .child(icon(if sc.contains('/') { "git-branch" } else { "layers" }, 12., if selected { theme.accent } else { theme.text_placeholder }))
+                        .child(kit::color_icon(&theme, if sc.contains('/') { "git-branch" } else { "layers" }, 12., theme.text_placeholder))
                         .child(sc.clone())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.scope = Some(value.clone());
@@ -540,7 +542,7 @@ impl InstallDialog {
                 .border_color(if selected { theme.accent } else { theme.border_variant })
                 .bg(if selected { theme.accent.opacity(0.10) } else { theme.element })
                 .when(!available, |d| d.opacity(0.6))
-                .child(div().pt(px(1.)).child(icon(icon_name, 13., if selected { theme.accent } else { theme.text_placeholder })))
+                .child(kit::color_tile(icon_name, 20.))
                 .child(
                     div()
                         .flex()
@@ -732,7 +734,7 @@ impl NewWorkspaceDialog {
                 .cursor_pointer()
                 .border_color(if selected { theme.accent } else { theme.border_variant })
                 .bg(if selected { theme.accent.opacity(0.10) } else { theme.element })
-                .child(div().pt(px(1.)).child(icon(icon_name, 14., if selected { theme.accent } else { theme.text_placeholder })))
+                .child(kit::color_tile(icon_name, 22.))
                 .child(
                     div()
                         .flex()
@@ -831,7 +833,7 @@ impl Render for NewWorkspaceDialog {
                 .bg(if selected { theme.accent.opacity(0.12) } else { theme.element })
                 .text_size(px(12.5))
                 .child(if id.is_none() {
-                    icon("zap", 12., if selected { theme.accent } else { theme.text_placeholder }).into_any_element()
+                    kit::color_icon(&theme, "zap", 12., theme.text_placeholder).into_any_element()
                 } else {
                     div().size(px(7.)).rounded_full().bg(if online { theme.success } else { theme.text_placeholder }).into_any_element()
                 })
@@ -884,6 +886,10 @@ pub struct NewSessionDialog {
     /// Start in a new workspace (`prefill.workspace`) rather than a folder.
     in_workspace: bool,
     branch: Entity<TextInput>,
+    /// The folders where the Folder field points: (machine, folder) asked
+    /// for, and the last listing that came back (for which machine and folder).
+    folders_asked: Option<(String, String)>,
+    folders: Option<((String, String), Load<Listing>)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -929,7 +935,14 @@ impl NewSessionDialog {
             InputEvent::Cancel => cx.emit(DialogEvent::Dismissed),
             InputEvent::Changed => cx.notify(),
         };
-        let subs = vec![cx.subscribe_in(&cwd, window, on_input), cx.subscribe_in(&prompt, window, on_input), cx.subscribe_in(&branch, window, on_input)];
+        // Typing a folder lists what's in it.
+        let on_folder = move |this: &mut Self, input: &Entity<TextInput>, e: &InputEvent, window: &mut Window, cx: &mut Context<Self>| {
+            if matches!(e, InputEvent::Changed) {
+                this.list_folders(cx);
+            }
+            on_input(this, input, e, window, cx)
+        };
+        let subs = vec![cx.subscribe_in(&cwd, window, on_folder), cx.subscribe_in(&prompt, window, on_input), cx.subscribe_in(&branch, window, on_input)];
         let snapshot = engine.current();
         let machine = machine.or_else(|| session_machines(&snapshot).into_iter().find(|m| m.status == "online").map(|m| m.id.clone()));
         let mut dialog = NewSessionDialog {
@@ -942,10 +955,52 @@ impl NewSessionDialog {
             prefill: Prefill::default(),
             in_workspace: false,
             branch,
+            folders_asked: None,
+            folders: None,
             _subscriptions: subs,
         };
         dialog.agent = dialog.default_agent(&snapshot);
+        dialog.list_folders(cx);
         dialog
+    }
+
+    /// Lists the folder the Folder field points at, on the chosen machine,
+    /// unless that's what's listed already.
+    fn list_folders(&mut self, cx: &mut Context<Self>) {
+        let Some(machine) = self.machine.clone() else { return };
+        if self.without_agent(&self.engine.current()) {
+            self.folders_asked = None;
+            return;
+        }
+        let (dir, _) = folder_query(self.cwd.read(cx).text());
+        let key = (machine.clone(), dir.clone());
+        if self.folders_asked.as_ref() == Some(&key) {
+            return;
+        }
+        self.folders_asked = Some(key.clone());
+        if self.folders.is_none() {
+            self.folders = Some((key.clone(), Load::Loading));
+        }
+        let engine = self.engine.clone();
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.list_files(&machine, &dir).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.folders_asked.as_ref() == Some(&key) {
+                    this.folders = Some((key, result.map_or_else(Load::Failed, Load::Ready)));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Puts `path` in the Folder field (which lists it).
+    fn go_to_folder(&mut self, path: String, cx: &mut Context<Self>) {
+        self.cwd.update(cx, |i, cx| i.set_text(path, cx));
     }
 
     pub fn first_focus(&self, cx: &App) -> FocusHandle {
@@ -1012,7 +1067,7 @@ impl NewSessionDialog {
         let session = StartSession {
             machine_id: machine_id.clone(),
             agent: self.agent.to_string(),
-            cwd: text(&self.cwd, cx).unwrap_or_else(|| "~".into()),
+            cwd: text(&self.cwd, cx).map(|t| if t.len() > 1 { t.trim_end_matches('/').to_string() } else { t }).unwrap_or_else(|| "~".into()),
             title,
             prompt: if self.agent == "shell" { None } else { message },
             cols: 0,
@@ -1046,7 +1101,125 @@ impl NewSessionDialog {
     }
 }
 
+/// What the Folder field points at: the folder to list ("~/code") and the
+/// start of a name in it ("ap" in "~/code/ap").
+fn folder_query(text: &str) -> (String, String) {
+    let t = text.trim();
+    if t.is_empty() || t == "~" {
+        return ("~".into(), String::new());
+    }
+    let (dir, name) = match t.rsplit_once('/') {
+        Some(("", name)) => ("/", name),
+        Some((dir, name)) => (dir, name),
+        // A bare name is in the home folder, where sessions start.
+        None => ("~", t),
+    };
+    (dir.to_string(), name.to_string())
+}
+
+/// `name` inside `dir`, ending in a slash so its folders list next.
+fn folder_path(dir: &str, name: &str) -> String {
+    if dir == "/" { format!("/{name}/") } else { format!("{}/{name}/", dir.trim_end_matches('/')) }
+}
+
 impl NewSessionDialog {
+    /// The folders where the Folder field points: click one to go into it.
+    fn folder_browser(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let asked = self.folders_asked.clone()?;
+        let (shown, load) = self.folders.as_ref()?;
+        // Still showing the last folder while the next one loads: not clickable.
+        let stale = *shown != asked;
+        let (dir, typed) = folder_query(self.cwd.read(cx).text());
+        let quiet = |text: String| div().px(px(2.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(text).into_any_element();
+        let listing = match load {
+            Load::Ready(l) => l,
+            Load::Loading => {
+                return Some(div().flex().items_center().gap(px(6.)).child(kit::spinner("ns-folders", 11., theme.text_placeholder)).child(quiet("Looking…".into())).into_any_element());
+            }
+            Load::Failed(e) => return Some(quiet(e.clone())),
+        };
+        let needle = typed.to_lowercase();
+        let mut found: Vec<&str> = listing
+            .entries
+            .iter()
+            .filter(|e| e.folder && (needle.starts_with('.') || !e.name.starts_with('.')))
+            .map(|e| e.name.as_str())
+            .filter(|n| n.to_lowercase().contains(&needle))
+            .collect();
+        // Names that start with what's typed first.
+        found.sort_by_key(|n| !n.to_lowercase().starts_with(&needle));
+        const SHOWN: usize = 24;
+        let more = found.len().saturating_sub(SHOWN);
+        let chips: Vec<AnyElement> = found
+            .iter()
+            .take(SHOWN)
+            .enumerate()
+            .map(|(i, name)| {
+                let next = folder_path(&dir, name);
+                div()
+                    .id(("ns-dir", i))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .h(px(24.))
+                    .px(px(8.))
+                    .rounded(px(5.))
+                    .bg(theme.element)
+                    .border_1()
+                    .border_color(theme.border_variant)
+                    .font_family(mono_font())
+                    .text_size(px(12.))
+                    .when(stale, |d| d.opacity(0.5))
+                    .when(!stale, |d| d.cursor_pointer().hover(|st| st.bg(theme.element_hover)))
+                    .child(kit::color_icon(theme, "folder", 12., theme.text_placeholder))
+                    .child(name.to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !stale {
+                            this.go_to_folder(next.clone(), cx)
+                        }
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        // Where it is, and the way up.
+        let here = super::files::display(listing);
+        let parent = match listing.path.trim_end_matches('/').rsplit_once('/') {
+            _ if listing.path == "/" => None,
+            Some(("", _)) => Some("/".to_string()),
+            Some((up, _)) => Some(super::files::tilde(up, &listing.home) + "/"),
+            None => None,
+        };
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .h(px(22.))
+            .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("Folders in {here}")))
+            .when(stale, |d| d.child(kit::spinner("ns-folders", 11., theme.text_placeholder)))
+            .children(parent.map(|up| {
+                Button::icon_only("ns-up", "arrow-up").tooltip("Up a folder").disabled(stale).on_click(cx.listener(move |this, _, _, cx| this.go_to_folder(up.clone(), cx)))
+            }));
+        let body = if chips.is_empty() {
+            quiet(if needle.is_empty() { "No folders here.".into() } else { format!("No folder matches \"{typed}\".") })
+        } else {
+            div().flex().flex_wrap().gap(px(6.)).children(chips).into_any_element()
+        };
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .p(px(8.))
+                .rounded(px(7.))
+                .border_1()
+                .border_color(theme.border_variant)
+                .child(header)
+                .child(body)
+                .when(more > 0, |d| d.child(quiet(format!("{more} more: type to narrow them down."))))
+                .into_any_element(),
+        )
+    }
+
     /// New workspace, or a folder that's already there.
     fn where_choice(&self, theme: &Theme, plan: &WorkspacePlan, cx: &mut Context<Self>) -> AnyElement {
         let fresh = if plan.branch.is_some() { "A fresh clone, on its own branch" } else { "A fresh clone of the pull request" };
@@ -1065,7 +1238,7 @@ impl NewSessionDialog {
                 .cursor_pointer()
                 .border_color(if selected { theme.accent } else { theme.border_variant })
                 .bg(if selected { theme.accent.opacity(0.10) } else { theme.element })
-                .child(icon(glyph, 16., if selected { theme.text_accent } else { theme.text_muted }))
+                .child(kit::color_tile(glyph, 26.))
                 .child(
                     div()
                         .flex()
@@ -1167,6 +1340,7 @@ impl Render for NewSessionDialog {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.machine = Some(id.clone());
                     this.agent_picked = false;
+                    this.list_folders(cx);
                     // Find out what's installed there if we don't know yet.
                     let engine = this.engine.clone();
                     let id = id.clone();
@@ -1223,17 +1397,29 @@ impl Render for NewSessionDialog {
             rows.push(div().flex().gap(px(8.)).children(cards).into_any_element());
         }
 
-        // Checkouts of the repository at hand, then workspace folders on this machine.
+        // Checkouts of the repository at hand, then where sessions run on this
+        // machine, then workspace folders there.
         let on_machine = |id: &str| self.machine.as_deref() == Some(id);
-        let folders: Vec<String> = snapshot
+        let mut folders: Vec<String> = Vec::new();
+        for path in snapshot
             .checkouts
             .iter()
             .filter(|c| on_machine(&c.machine_id) && self.prefill.repo.is_some() && c.repo.as_deref().map(str::to_lowercase) == self.prefill.repo.as_deref().map(str::to_lowercase))
             .map(|c| c.path.clone())
+            .chain(snapshot.sessions.iter().filter(|x| on_machine(&x.machine_id) && !matches!(x.cwd.as_str(), "" | "~")).map(|x| x.cwd.clone()))
             .chain(snapshot.workspaces.iter().filter(|w| on_machine(&w.machine_id)).map(|w| w.path.clone()))
-            .take(4)
-            .collect();
+        {
+            if folders.len() < 5 && !folders.contains(&path) {
+                folders.push(path);
+            }
+        }
+        // Shown as ~/... once the machine's home folder is known.
+        let home = match &self.folders {
+            Some(((m, _), Load::Ready(l))) if self.machine.as_ref() == Some(m) => l.home.clone(),
+            _ => String::new(),
+        };
         let folder_chips = div().flex().flex_wrap().gap(px(6.)).children(folders.into_iter().enumerate().map(|(i, path)| {
+            let path = super::files::tilde(&path, &home);
             let value = path.clone();
             div()
                 .id(("ns-folder", i))
@@ -1241,6 +1427,8 @@ impl Render for NewSessionDialog {
                 .px(px(8.))
                 .flex()
                 .items_center()
+                .gap(px(5.))
+                .child(kit::color_icon(&theme, "clock", 11., theme.text_placeholder))
                 .rounded(px(5.))
                 .border_1()
                 .border_color(theme.border_variant)
@@ -1290,7 +1478,7 @@ impl Render for NewSessionDialog {
         .children(self.prefill.workspace.clone().map(|plan| field(&theme, "Where", self.where_choice(&theme, &plan, cx), None)))
         .map(|d| match self.prefill.workspace.clone().filter(|_| self.in_workspace) {
             Some(plan) => d.child(self.workspace_fields(&theme, &plan, machine.as_ref(), cx)),
-            None => d.child(field(&theme, "Folder", div().flex().flex_col().gap(px(8.)).child(self.cwd.clone()).child(folder_chips), None)),
+            None => d.child(field(&theme, "Folder", div().flex().flex_col().gap(px(8.)).child(self.cwd.clone()).child(folder_chips).children(self.folder_browser(&theme, cx)), None)),
         })
         .when(self.agent != "shell", |d| {
             let prepared = self.prefill.message.clone().map(|m| {
@@ -1333,5 +1521,26 @@ impl Render for NewSessionDialog {
                 .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
                 .into_any_element(),
         ]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_folder_field_points_at_a_folder_and_a_name() {
+        let q = |t: &str| folder_query(t);
+        assert_eq!(q(""), ("~".into(), "".into()));
+        assert_eq!(q("~"), ("~".into(), "".into()));
+        assert_eq!(q("~/"), ("~".into(), "".into()));
+        assert_eq!(q("~/code/"), ("~/code".into(), "".into()));
+        assert_eq!(q("~/code/ap"), ("~/code".into(), "ap".into()));
+        assert_eq!(q("co"), ("~".into(), "co".into()));
+        assert_eq!(q("/"), ("/".into(), "".into()));
+        assert_eq!(q("/us"), ("/".into(), "us".into()));
+        assert_eq!(folder_path("~", "code"), "~/code/");
+        assert_eq!(folder_path("/", "usr"), "/usr/");
+        assert_eq!(folder_path("~/code/", "api"), "~/code/api/");
     }
 }

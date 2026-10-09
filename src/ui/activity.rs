@@ -282,7 +282,7 @@ impl Root {
                         })),
                     ),
             )
-            .child(
+            .children(Some(super::shortcuts::label_for(cx, "activity")).filter(|k| !k.is_empty()).map(|keys| {
                 div()
                     .mt(px(18.))
                     .flex()
@@ -291,8 +291,8 @@ impl Root {
                     .text_size(px(12.))
                     .text_color(theme.text_placeholder)
                     .child("Open Activity from anywhere with")
-                    .child(kit::kbd(theme, "⌘J")),
-            )
+                    .child(kit::kbd(theme, keys))
+            }))
             .into_any_element()
     }
 
@@ -596,13 +596,11 @@ fn start_row(
 
 /// The filter matched nothing (but there is other activity).
 fn filtered_empty(theme: &Theme, filter: ActivityFilter) -> AnyElement {
-    let (icon_name, color, title, body) = match filter {
-        ActivityFilter::Failed => ("circle-check", theme.success, "Nothing failed", "Failed operations and agent commands that exit non-zero show up here."),
-        ActivityFilter::Operations => {
-            ("activity", theme.text_muted, "No operations yet", "Runner installs, restarts, log requests and workspace setup show up here.")
-        }
-        ActivityFilter::Agents => ("terminal", theme.text_muted, "No agent commands yet", "Commands agents run in workspaces show up here with their output."),
-        ActivityFilter::All => ("activity", theme.text_muted, "Nothing here", "Activity shows up here as it happens."),
+    let (icon_name, title, body) = match filter {
+        ActivityFilter::Failed => ("circle-check", "Nothing failed", "Failed operations and agent commands that exit non-zero show up here."),
+        ActivityFilter::Operations => ("activity", "No operations yet", "Runner installs, restarts, log requests and workspace setup show up here."),
+        ActivityFilter::Agents => ("terminal", "No agent commands yet", "Commands agents run in workspaces show up here with their output."),
+        ActivityFilter::All => ("activity", "Nothing here", "Activity shows up here as it happens."),
     };
     div()
         .flex_1()
@@ -613,7 +611,7 @@ fn filtered_empty(theme: &Theme, filter: ActivityFilter) -> AnyElement {
         .gap(px(8.))
         .px(px(28.))
         .pb(px(80.))
-        .child(div().size(px(44.)).mb(px(4.)).rounded_full().bg(theme.element).flex().items_center().justify_center().child(icon(icon_name, 20., color)))
+        .child(kit::color_tile(icon_name, 44.).mb(px(4.)))
         .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title))
         .child(div().w(px(340.)).text_center().text_size(px(12.5)).text_color(theme.text_muted).child(body))
         .into_any_element()

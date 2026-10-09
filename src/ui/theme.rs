@@ -139,6 +139,8 @@ pub struct Appearance {
     pub split_ratio: f32,
     /// Machines whose desktop is an item in the sidebar.
     pub desktops: Vec<String>,
+    /// Shortcuts the user changed: id → keys ("" for none). See shortcuts.rs.
+    pub shortcuts: std::collections::BTreeMap<String, String>,
     /// Where to save; None in demo mode.
     #[serde(skip)]
     pub path: Option<PathBuf>,
@@ -159,6 +161,7 @@ impl Default for Appearance {
             github_folded_owners: Vec::new(),
             split_ratio: 0.5,
             desktops: Vec::new(),
+            shortcuts: Default::default(),
             path: None,
         }
     }

@@ -58,6 +58,8 @@ enum Item {
 enum Glyph {
     Icon(&'static str),
     Agent(&'static str),
+    /// The one picked (a plain check).
+    Selected,
     None,
 }
 
@@ -159,14 +161,14 @@ impl Root {
                         }
                         for x in &a.accounts {
                             let label = if x.ok { format!("@{}", x.login) } else { format!("@{} (sign in again)", x.login) };
-                            let glyph = if using(&x.login, None) { Glyph::Icon("check") } else { Glyph::None };
+                            let glyph = if using(&x.login, None) { Glyph::Selected } else { Glyph::None };
                             items.push(Item::Action { label, glyph, action: Action::UseAccount(x.login.clone(), None), danger: false });
                         }
                         if !a.machines.is_empty() {
                             items.push(Item::Note("Signed in on your machines".into()));
                         }
                         for m in &a.machines {
-                            let glyph = if using(&m.login, Some(&m.machine_id)) { Glyph::Icon("check") } else { Glyph::None };
+                            let glyph = if using(&m.login, Some(&m.machine_id)) { Glyph::Selected } else { Glyph::None };
                             let label = format!("@{} · {}", m.login, m.machine);
                             items.push(Item::Action { label, glyph, action: Action::UseAccount(m.login.clone(), Some(m.machine_id.clone())), danger: false });
                         }
@@ -276,11 +278,12 @@ impl Root {
                 Item::Action { label, glyph, action, danger } => {
                     let color = if danger { theme.error } else { theme.text };
                     let glyph = match glyph {
-                        Glyph::Icon(name) => icon(name, 14., if danger { theme.error } else { theme.text_muted }).into_any_element(),
+                        Glyph::Icon(name) => kit::color_tile(name, 18.).into_any_element(),
                         Glyph::Agent(agent) => {
                             let (name, (from, to)) = kit::agent_look(agent);
-                            kit::tile(name, from, to, 16.).into_any_element()
+                            kit::tile(name, from, to, 18.).into_any_element()
                         }
+                        Glyph::Selected => icon("check", 14., theme.accent).into_any_element(),
                         Glyph::None => div().into_any_element(),
                     };
                     div()
@@ -296,7 +299,7 @@ impl Root {
                         .hover(|st| st.bg(theme.element_hover))
                         .text_size(px(13.))
                         .text_color(color)
-                        .child(div().w(px(16.)).flex().justify_center().child(glyph))
+                        .child(div().w(px(18.)).flex().justify_center().child(glyph))
                         .child(label)
                         .on_click(cx.listener(move |this, _, window, cx| this.run_menu_action(action.clone(), window, cx)))
                         .into_any_element()

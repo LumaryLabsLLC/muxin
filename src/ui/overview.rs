@@ -111,7 +111,7 @@ impl Root {
                             .gap(px(6.))
                             .text_size(px(12.))
                             .text_color(theme.text_muted)
-                            .child(icon("gauge", 13., theme.text_accent))
+                            .child(kit::color_icon(theme, "gauge", 13., theme.text_accent))
                             .child("Fleet pulse"),
                     )
                     .child(
@@ -344,7 +344,7 @@ impl Root {
                             .items_center()
                             .gap(px(5.))
                             .text_color(theme.text_placeholder)
-                            .child(icon("clock", 12., theme.text_placeholder))
+                            .child(kit::color_icon(theme, "clock", 12., theme.text_placeholder))
                             .child(p.and_then(|p| p.uptime_sec).map(|u| format!("up {}", format::uptime(u))).unwrap_or_else(|| "—".into())),
                     )
                     .child(div().text_color(diag_color).child(diag)),

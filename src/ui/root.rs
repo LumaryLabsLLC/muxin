@@ -32,6 +32,17 @@ actions!(
         SyncGitHub,
         ShowOverview,
         ShowJobs,
+        ShowWorkspaces,
+        ShowGithub,
+        GoToMachine1,
+        GoToMachine2,
+        GoToMachine3,
+        GoToMachine4,
+        GoToMachine5,
+        GoToMachine6,
+        GoToMachine7,
+        GoToMachine8,
+        GoToMachine9,
         OpenSettings,
         FocusFilter,
         GoBack,
@@ -56,20 +67,12 @@ const SIDEBAR_MAX: f32 = 420.;
 const PULSE_SAMPLES: usize = 64;
 const PULSE_EVERY: Duration = Duration::from_secs(5);
 
+/// The app's shortcuts, as the user has them (see shortcuts.rs), and the
+/// few that don't change.
 pub fn bind_keys(cx: &mut App) {
+    let custom = super::shortcuts::bindings(cx);
+    cx.bind_keys(custom);
     cx.bind_keys([
-        KeyBinding::new("secondary-r", CheckNow, None),
-        KeyBinding::new("secondary-shift-r", SyncGitHub, None),
-        KeyBinding::new("secondary-1", ShowOverview, None),
-        KeyBinding::new("secondary-2", ShowJobs, None),
-        KeyBinding::new("secondary-,", OpenSettings, None),
-        KeyBinding::new("secondary-f", FocusFilter, None),
-        KeyBinding::new("secondary-[", GoBack, None),
-        KeyBinding::new("secondary-]", GoForward, None),
-        KeyBinding::new("secondary-j", ToggleActivity, None),
-        KeyBinding::new("secondary-b", ToggleSidebar, None),
-        KeyBinding::new("secondary-n", AddMachine, None),
-        KeyBinding::new("secondary-t", NewSession, None),
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("escape", Dismiss, Some(WORKSPACE)),
         KeyBinding::new("/", FocusFilter, Some(WORKSPACE)),
@@ -91,7 +94,7 @@ pub fn menus() -> Vec<Menu> {
         Menu {
             name: "Fleet".into(),
             items: vec![
-                MenuItem::action("Check Now", CheckNow),
+                MenuItem::action("Check Machines", CheckNow),
                 MenuItem::action("Sync GitHub", SyncGitHub),
                 MenuItem::separator(),
                 MenuItem::action("Add Machine…", AddMachine),
@@ -103,6 +106,8 @@ pub fn menus() -> Vec<Menu> {
             items: vec![
                 MenuItem::action("Overview", ShowOverview),
                 MenuItem::action("Jobs", ShowJobs),
+                MenuItem::action("Workspaces", ShowWorkspaces),
+                MenuItem::action("GitHub", ShowGithub),
                 MenuItem::action("Activity", ToggleActivity),
                 MenuItem::separator(),
                 MenuItem::action("Back", GoBack),
@@ -199,6 +204,10 @@ pub struct Root {
     sidebar_resizing: bool,
     /// The sidebar is tucked away (the toolbar's button, ⌘B).
     pub(super) sidebar_hidden: bool,
+    /// ⌘ is held down: shortcuts show next to what they do. `keys_soon` shows
+    /// them after a moment, so a quick ⌘C doesn't flash them.
+    pub(super) show_keys: bool,
+    keys_soon: Option<Task<()>>,
     /// Terminals attached to agent sessions, kept while the app runs so
     /// switching pages doesn't drop them.
     pub(super) terminals: HashMap<String, Entity<TerminalView>>,
@@ -339,6 +348,8 @@ impl Root {
             sidebar_width: cx.global::<super::theme::Appearance>().sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX),
             sidebar_resizing: false,
             sidebar_hidden: cx.global::<super::theme::Appearance>().sidebar_hidden,
+            show_keys: false,
+            keys_soon: None,
             terminals: HashMap::new(),
             resuming: HashMap::new(),
             sessions_requested: HashSet::new(),
@@ -355,7 +366,7 @@ impl Root {
             last_notice: None,
             refocus: false,
             context_menu: None,
-            window_active: true,
+            window_active: false,
             ws_ui: WorkspaceUi::default(),
             clipboard_seen: (super::pasteboard_state().map(|s| s.0).unwrap_or(0), String::new()),
             _tasks: vec![updates, ticker, clipboard_out, clipboard_in],
@@ -447,6 +458,12 @@ impl Root {
             let engine = self.engine.clone();
             self.settings = Some(cx.new(|cx| SettingsPage::new(engine, window, cx)));
         }
+        // Leaving Settings while it waits for a shortcut's keys: stop waiting.
+        if self.route != Route::Settings {
+            if let Some(page) = &self.settings {
+                page.update(cx, |p, cx| p.stop_recording(cx));
+            }
+        }
         // A desktop streams only while it's shown: its page, or beside a session.
         let showing = match &self.route {
             Route::Desktop(id) => Some(id.clone()),
@@ -503,7 +520,11 @@ impl Root {
             }
             "size" | "display" => {}
             "session" => self.navigate(Route::Session(arg.into()), window, cx),
-            "new-session" => self.show_new_session(Some(arg.to_string()).filter(|a| !a.is_empty()), window, cx),
+            // "new-session:<machine>", or "new-session:<machine>@<folder>".
+            "new-session" => match arg.split_once('@') {
+                Some((m, folder)) => self.show_new_session_prefilled(Some(m.to_string()), Some(folder.to_string()), Default::default(), window, cx),
+                None => self.show_new_session(Some(arg.to_string()).filter(|a| !a.is_empty()), window, cx),
+            },
             // An issue or pull request handed to an agent: "fix:owner/name#12", or in a new workspace "fix-ws:...".
             "fix" | "fix-ws" => {
                 if let Some((repo, n)) = arg.split_once('#') {
@@ -529,7 +550,27 @@ impl Root {
                 };
                 self.show(Route::Activity, cx);
             }
-            "settings" => self.navigate(Route::Settings, window, cx),
+            "settings" => {
+                self.navigate(Route::Settings, window, cx);
+                // "settings:keyboard": scrolled down to the shortcuts.
+                if arg == "keyboard" {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(Duration::from_millis(400)).await;
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(p) = &this.settings {
+                                p.read(cx).scroll.scroll_to_bottom();
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
+            }
+            // Shortcuts shown, as while ⌘ is held (for screenshots).
+            "keys" => {
+                self.show_keys = true;
+                cx.notify();
+            }
             "machine" => self.navigate(Route::Machine(arg.into()), window, cx),
             "runner" => self.navigate(Route::Runner(arg.into()), window, cx),
             "install" => {
@@ -537,6 +578,7 @@ impl Root {
                 self.show_install_dialog(arg, window, cx);
             }
             "add-machine" => self.show_add_machine(window, cx),
+            "menu" => self.open_menu(super::menu::MenuTarget::Machine(arg.into()), gpui::point(px(260.), px(160.)), cx),
             "copy" => self.show_copy_files(Some(arg.to_string()).filter(|a| !a.is_empty()), None, window, cx),
             "logs" => {
                 self.navigate(Route::Runner(arg.into()), window, cx);
@@ -958,6 +1000,40 @@ impl Root {
         self.navigate(Route::Jobs, window, cx);
     }
 
+    /// The machines in the sidebar's order (⌘1 is the first).
+    pub(super) fn machine_order(s: &Snapshot) -> Vec<&Machine> {
+        s.machines.iter().filter(|m| m.kind == "runner").chain(s.machines.iter().filter(|m| m.kind != "runner")).collect()
+    }
+
+    /// ⌘1…⌘9: the n-th machine in the sidebar (1-based).
+    fn go_to_machine(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = Self::machine_order(&self.snapshot).get(n - 1).map(|m| m.id.clone()) {
+            self.navigate(Route::Machine(id), window, cx);
+        }
+    }
+
+    /// ⌘ or ⌃ went down or up: shortcuts show while one is held.
+    fn modifiers_changed(&mut self, e: &gpui::ModifiersChangedEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // ⌘ (the machines and most shortcuts) or ⌃ (the pages).
+        let held = e.modifiers.platform || e.modifiers.control;
+        if !held {
+            self.keys_soon = None;
+            if self.show_keys {
+                self.show_keys = false;
+                cx.notify();
+            }
+        } else if !self.show_keys && self.keys_soon.is_none() {
+            self.keys_soon = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(350)).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.keys_soon = None;
+                    this.show_keys = true;
+                    cx.notify();
+                });
+            }));
+        }
+    }
+
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate(Route::Settings, window, cx);
     }
@@ -1043,13 +1119,14 @@ impl Root {
 
         let mut rows: Vec<AnyElement> = Vec::new();
         // Machines with runners first, then the rest; all under one heading.
-        let runner_machines: Vec<&Machine> =
-            s.machines.iter().filter(|m| m.kind == "runner").chain(s.machines.iter().filter(|m| m.kind != "runner")).collect();
+        let runner_machines: Vec<&Machine> = Self::machine_order(&s);
         let unassigned: Vec<&Runner> = s.runners.iter().filter(|r| r.machine_id.is_none() && matches_runner(r)).collect();
 
         rows.push(self.section_header("Machines", runner_machines.len(), true, cx).into_any_element());
         let pinned_desktops = cx.global::<super::theme::Appearance>().desktops.clone();
-        for m in &runner_machines {
+        for (n, m) in runner_machines.iter().enumerate() {
+            // While ⌘ is held: the shortcut that goes to it.
+            let hint = if self.show_keys { super::shortcuts::machine_keys(cx, n + 1).map(|k| super::shortcuts::label(&k)) } else { None };
             let runners: Vec<&Runner> = m.runner_ids.iter().filter_map(|id| s.runners.iter().find(|r| &r.id == id)).collect();
             let machine_match = q.is_empty() || m.name.to_lowercase().contains(&q);
             let visible: Vec<&Runner> = runners.iter().copied().filter(|r| machine_match || matches_runner(r)).collect();
@@ -1065,7 +1142,7 @@ impl Root {
             // Collapsed: the machine carries its sessions' unread dot.
             let alert = (!open).then(|| sessions.iter().find_map(|x| x.attention.clone().map(|k| (k, x.exit_code)))).flatten();
             let has_desktop = pinned_desktops.contains(&m.id);
-            rows.push(self.machine_row(&theme, m, open, !sessions.is_empty() || has_desktop, alert, selected_machine.as_deref() == Some(&m.id), cx).into_any_element());
+            rows.push(self.machine_row(&theme, m, open, !sessions.is_empty() || has_desktop, alert, selected_machine.as_deref() == Some(&m.id), hint, cx).into_any_element());
             if open {
                 // Agent sessions first: they're what you come back to.
                 for x in sessions {
@@ -1124,10 +1201,10 @@ impl Root {
                     .gap(px(2.))
                     .px(px(10.))
                     .pt(px(6.))
-                    .child(self.nav_item("nav-overview", "gauge", kit::tiles::OVERVIEW, "Overview", None, Route::Overview, cx))
-                    .child(self.nav_item("nav-jobs", "workflow", kit::tiles::JOBS, "Jobs", Some(s.counts.queued + s.counts.running), Route::Jobs, cx))
-                    .child(self.nav_item("nav-workspaces", "terminal", kit::tiles::WORKSPACES, "Workspaces", Some(s.workspaces.len()), Route::Workspaces, cx))
-                    .child(self.nav_item("nav-github", "agent-github", super::github::TILE, "GitHub", self.gh.waiting(), Route::Github, cx))
+                    .child(self.nav_item("nav-overview", "gauge", kit::tiles::OVERVIEW, "Overview", None, Route::Overview, "overview", cx))
+                    .child(self.nav_item("nav-jobs", "workflow", kit::tiles::JOBS, "Jobs", Some(s.counts.queued + s.counts.running), Route::Jobs, "jobs", cx))
+                    .child(self.nav_item("nav-workspaces", "terminal", kit::tiles::WORKSPACES, "Workspaces", Some(s.workspaces.len()), Route::Workspaces, "workspaces", cx))
+                    .child(self.nav_item("nav-github", "agent-github", super::github::TILE, "GitHub", self.gh.waiting(), Route::Github, "github", cx))
                     .child(self.activity_nav(&theme, running_ops, cx)),
             )
             .child(
@@ -1177,8 +1254,22 @@ impl Root {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn nav_item(&self, id: &'static str, icon_name: &'static str, colors: (u32, u32), text: &'static str, count: Option<usize>, route: Route, cx: &mut Context<Self>) -> impl IntoElement {
+    #[allow(clippy::too_many_arguments)]
+    fn nav_item(
+        &self,
+        id: &'static str,
+        icon_name: &'static str,
+        colors: (u32, u32),
+        text: &'static str,
+        count: Option<usize>,
+        route: Route,
+        shortcut: &'static str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
+        // While ⌘ is held the count gives way to the shortcut.
+        let keys = self.show_keys.then(|| super::shortcuts::label_for(cx, shortcut)).filter(|k| !k.is_empty());
+        let count = count.filter(|_| keys.is_none());
         // A workspace page keeps "Workspaces" highlighted.
         let active = self.route == route
             || (route == Route::Workspaces && matches!(self.route, Route::Workspace(_)))
@@ -1212,6 +1303,7 @@ impl Root {
                     .text_color(theme.text_muted)
                     .child(n.to_string())
             }))
+            .children(keys.map(|k| kit::kbd(&theme, k)))
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(route.clone(), window, cx)))
     }
 
@@ -1234,7 +1326,10 @@ impl Root {
             .child("Activity")
             .child(div().flex_1())
             .when(running > 0, |d| d.child(spinner("nav-activity-spin", 13., theme.accent)))
-            .when(running == 0, |d| d.child(kit::kbd(theme, "⌘J")))
+            .when(running == 0 && self.show_keys, |d| {
+                let keys = super::shortcuts::label_for(cx, "activity");
+                d.when(!keys.is_empty(), |d| d.child(kit::kbd(theme, keys)))
+            })
             .on_click(cx.listener(|this, _, _, cx| this.show(Route::Activity, cx)))
     }
 
@@ -1257,7 +1352,7 @@ impl Root {
             .when(with_add, |d| {
                 d.child(
                     Button::icon_only("sidebar-add-machine", "plus")
-                        .tooltip("Add machine  ⌘N")
+                        .tooltip(tip("Add machine", &super::shortcuts::label_for(cx, "add-machine")))
                         .on_click(cx.listener(|this, _, window, cx| this.show_add_machine(window, cx))),
                 )
             })
@@ -1272,11 +1367,13 @@ impl Root {
         has_sessions: bool,
         alert: Option<(String, Option<i32>)>,
         selected: bool,
+        hint: Option<String>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let id = m.id.clone();
         let toggle_id = m.id.clone();
-        let has_runners = !m.runner_ids.is_empty();
+        // The shortcut takes the place of the runner count and the toggle.
+        let (has_runners, has_sessions) = if hint.is_some() { (false, false) } else { (!m.runner_ids.is_empty(), has_sessions) };
         let (tile_from, tile_to) = format::machine_tile(m);
         let (subtitle, tone) = format::machine_subtitle(m);
         // Runner count: "5/7" while some are working, else the total.
@@ -1292,7 +1389,7 @@ impl Root {
         // whose width is known before layout. Row chrome: margins, padding, tile, gaps,
         // and the count pill (padding, dot, gap, ~6.7px per mono character).
         let pill_w = 12. + 6. + 4. + count.len() as f32 * 6.7;
-        let trailing = if has_runners { 10. + pill_w.max(22.) } else if has_sessions { 32. } else { 0. } + if alert.is_some() { 18. } else { 0. };
+        let trailing = if hint.is_some() { 40. } else if has_runners { 10. + pill_w.max(22.) } else if has_sessions { 32. } else { 0. } + if alert.is_some() { 18. } else { 0. };
         let text_w = (self.sidebar_width - 20. - 16. - 30. - 10. - trailing).max(40.);
         div()
             .id(SharedString::from(format!("side-m-{}", m.id)))
@@ -1360,6 +1457,7 @@ impl Root {
                     ),
             )
             .children(alert.map(|(kind, code)| super::sessions::attention_dot(theme, &kind, code)))
+            .children(hint.map(|k| kit::kbd(theme, k)))
             .when(has_runners || has_sessions, |d| {
                 d.child(
                     div()
@@ -1629,7 +1727,7 @@ impl Root {
                 .text_color(if active { theme.text } else { theme.text_muted })
                 .when(active, |d| d.bg(theme.element_selected))
                 .when(!active, |d| d.hover(|st| st.bg(theme.ghost_hover).text_color(theme.text)))
-                .child(icon(icon_name, 13., if active { theme.text_accent } else { theme.text_placeholder }))
+                .child(kit::color_icon(theme, icon_name, 13., theme.text_placeholder))
                 .child(label)
                 .on_click(cx.listener(move |this, _, window, cx| this.navigate(route.clone(), window, cx)))
         };
@@ -1710,7 +1808,7 @@ impl Root {
             .on_mouse_down(gpui::MouseButton::Left, |e: &gpui::MouseDownEvent, window, _| super::title_bar_press(e, window))
             .child(
                 Button::icon_only("toggle-sidebar", "panel-left")
-                    .tooltip(if self.sidebar_hidden { "Show sidebar  ⌘B" } else { "Hide sidebar  ⌘B" })
+                    .tooltip(tip(if self.sidebar_hidden { "Show sidebar" } else { "Hide sidebar" }, &super::shortcuts::label_for(cx, "sidebar")))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             )
             .child(
@@ -1719,13 +1817,13 @@ impl Root {
                     .gap(px(2.))
                     .child(
                         Button::icon_only("back", "arrow-left")
-                            .tooltip("Back  ⌘[")
+                            .tooltip(tip("Back", &super::shortcuts::label_for(cx, "back")))
                             .disabled(self.back.is_empty())
                             .on_click(cx.listener(|this, _, window, cx| this.go_back(&GoBack, window, cx))),
                     )
                     .child(
                         Button::icon_only("forward", "arrow-right")
-                            .tooltip("Forward  ⌘]")
+                            .tooltip(tip("Forward", &super::shortcuts::label_for(cx, "forward")))
                             .disabled(self.forward.is_empty())
                             .on_click(cx.listener(|this, _, window, cx| this.go_forward(&GoForward, window, cx))),
                     ),
@@ -1743,19 +1841,30 @@ impl Root {
                     .child(div().truncate().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title)),
             )
             .child(div().flex_1())
-            .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!("Updated {}", format::ago(s.updated_at))))
+            // Each says what it refreshes; when it last did is in its tooltip.
+            .when(s.github.configured, |d| {
+                d.child(
+                    Button::new("sync", if s.github.syncing { "Syncing" } else { "Sync GitHub" })
+                        .icon("agent-github")
+                        .loading(s.github.syncing)
+                        .map(|b| match super::shortcuts::label_for(cx, "sync") {
+                            k if self.show_keys && !k.is_empty() => b.key_hint(k),
+                            _ => b,
+                        })
+                        .tooltip(tip(&format!("Synced {}", format::ago(s.github.last_sync_at)), &super::shortcuts::label_for(cx, "sync")))
+                        .on_click(cx.listener(|this, _, _, _| this.engine.trigger_sync())),
+                )
+            })
             .child(
-                Button::icon_only("sync", "refresh-cw")
-                    .loading(s.github.syncing && s.github.configured)
-                    .tooltip("Sync GitHub  ⇧⌘R")
-                    .on_click(cx.listener(|this, _, _, _| this.engine.trigger_sync())),
-            )
-            .child(
-                Button::new("check-now", if s.check.running { "Checking" } else { "Check now" })
+                Button::new("check-now", if s.check.running { "Checking" } else { "Check machines" })
                     .style(ButtonStyle::Primary)
-                    .icon("refresh-cw")
+                    .icon("server")
                     .loading(s.check.running)
-                    .key_hint("⌘R")
+                    .map(|b| match super::shortcuts::label_for(cx, "check") {
+                        k if self.show_keys && !k.is_empty() => b.key_hint(k),
+                        _ => b,
+                    })
+                    .tooltip(tip(&format!("Checked {}", format::ago(s.check.finished_at)), &super::shortcuts::label_for(cx, "check")))
                     .on_click(cx.listener(|this, _, _, _| this.engine.trigger_check(None))),
             )
     }
@@ -1950,7 +2059,12 @@ impl Render for Root {
             self.finish_split_resize(cx);
         }
         self.content_width = f32::from(window.viewport_size().width) - if self.sidebar_hidden { 0. } else { self.sidebar_width } - 56.;
-        self.window_active = window.is_window_active();
+        // Switching away with ⌘ held (⌘Tab): its release never arrives here.
+        let was_active = std::mem::replace(&mut self.window_active, window.is_window_active());
+        if was_active && !self.window_active {
+            self.show_keys = false;
+            self.keys_soon = None;
+        }
         if std::mem::take(&mut self.refocus) {
             window.focus(&self.focus);
         }
@@ -1979,6 +2093,18 @@ impl Render for Root {
             .on_action(cx.listener(Self::sync_github))
             .on_action(cx.listener(Self::show_overview))
             .on_action(cx.listener(Self::show_jobs))
+            .on_action(cx.listener(|this, _: &ShowWorkspaces, window, cx| this.navigate(Route::Workspaces, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowGithub, window, cx| this.navigate(Route::Github, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToMachine1, window, cx| this.go_to_machine(1, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToMachine2, window, cx| this.go_to_machine(2, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToMachine3, window, cx| this.go_to_machine(3, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToMachine4, window, cx| this.go_to_machine(4, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToMachine5, window, cx| this.go_to_machine(5, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToMachine6, window, cx| this.go_to_machine(6, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToMachine7, window, cx| this.go_to_machine(7, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToMachine8, window, cx| this.go_to_machine(8, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToMachine9, window, cx| this.go_to_machine(9, window, cx)))
+            .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::focus_filter))
             .on_action(cx.listener(Self::go_back))
@@ -2100,4 +2226,9 @@ fn route_title(s: &Snapshot, route: &Route) -> (Option<&'static str>, String) {
 /// "build (macos-arm64)" -> "build (macos-arm6…" when longer than `max` characters.
 fn ellipsize(s: &str, max: usize) -> String {
     if s.chars().count() <= max { s.to_string() } else { format!("{}…", s.chars().take(max - 1).collect::<String>()) }
+}
+
+/// A tooltip with its shortcut, when it has one: "Back  ⌘[".
+fn tip(text: &str, keys: &str) -> String {
+    if keys.is_empty() { text.to_string() } else { format!("{text}  {keys}") }
 }

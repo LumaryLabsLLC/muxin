@@ -87,17 +87,7 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(
-                        div()
-                            .size(px(32.))
-                            .flex_none()
-                            .rounded(px(8.))
-                            .bg(theme.accent.opacity(0.14))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon("terminal", 15., theme.text_accent)),
-                    )
+                    .child(kit::tile("terminal", kit::tiles::WORKSPACES.0, kit::tiles::WORKSPACES.1, 32.))
                     .child(
                         div()
                             .flex()
@@ -433,7 +423,7 @@ impl Root {
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.ghost_hover))
                     .when(i > 0, |d| d.border_t_1().border_color(theme.border_variant))
-                    .child(icon("terminal", 13., theme.text_accent))
+                    .child(kit::tile("terminal", kit::tiles::WORKSPACES.0, kit::tiles::WORKSPACES.1, 18.))
                     .child(div().text_size(px(13.)).child(w.name.clone()))
                     .child(div().font_family(mono_font()).text_size(px(11.)).text_color(theme.text_placeholder).child(w.id.clone()))
                     .child(div().flex_1())

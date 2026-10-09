@@ -27,6 +27,12 @@ pub struct SettingsPage {
     /// The login in use: its permissions and organizations (to offer them).
     access: Option<crate::api::AccountsOut>,
     pub scroll: gpui::ScrollHandle,
+    /// A shortcut waiting for its new keys, and what catches them before
+    /// they run anything.
+    recording: Option<&'static str>,
+    catch_keys: Option<Subscription>,
+    /// What the last change did ("Removed from Jobs"), or why it didn't happen.
+    shortcut_note: Option<String>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -85,6 +91,9 @@ impl SettingsPage {
             saved_at: None,
             access: None,
             scroll: gpui::ScrollHandle::new(),
+            recording: None,
+            catch_keys: None,
+            shortcut_note: None,
             _tasks: vec![updates],
             _subscriptions: subs,
         };
@@ -277,7 +286,7 @@ impl SettingsPage {
                             .flex()
                             .items_center()
                             .gap(px(10.))
-                            .child(icon(icon_name, 14., theme.text_muted))
+                            .child(kit::color_tile(icon_name, 20.))
                             .child(div().font_family(mono_font()).text_size(px(13.)).child(name.clone()))
                             .child(div().flex_1().truncate().text_size(px(12.)).text_color(color).child(text))
                             .child(
@@ -340,7 +349,7 @@ impl SettingsPage {
                 .hover(|st| st.bg(theme.element_hover))
                 .font_family(mono_font())
                 .text_size(px(12.))
-                .child(icon("plus", 12., theme.text_muted))
+                .child(kit::color_icon(theme, "plus", 12., theme.text_muted))
                 .child(name.to_string())
                 .on_click(cx.listener(move |this, _, _, cx| this.add_scope(Some(scope.clone()), cx)))
                 .into_any_element()
@@ -594,7 +603,7 @@ impl SettingsPage {
                 .text_color(if selected { theme.text } else { theme.text_muted })
                 .when(selected, |d| d.bg(theme.surface).border_1().border_color(theme.border).shadow_sm())
                 .when(!selected, |d| d.hover(|st| st.text_color(theme.text)))
-                .child(icon(icon_name, 13., if selected { theme.text_accent } else { theme.text_placeholder }))
+                .child(kit::color_icon(theme, icon_name, 13., if selected { theme.text_accent } else { theme.text_placeholder }))
                 .child(label)
                 .on_click(cx.listener(move |_, _, window, cx| theme_mod::update_appearance(window, cx, |a, _| a.mode = mode)))
         };
@@ -782,19 +791,6 @@ impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let terminal_font = super::terminal::font_family(window);
-        let shortcuts = [
-            ("⌘R", "Check now"),
-            ("⇧⌘R", "Sync GitHub"),
-            ("⌘N", "Add machine"),
-            ("⌘1 / ⌘2", "Overview / Jobs"),
-            ("⌘F or /", "Filter the fleet"),
-            ("⌘J", "Toggle activity"),
-            ("⌘B", "Hide or show the sidebar"),
-            ("⌘[ / ⌘]", "Back / forward"),
-            ("⌘,", "Settings"),
-            ("⌘T", "New session"),
-            ("⌘+ / ⌘− / ⌘0", "Terminal text size (in a terminal)"),
-        ];
         div()
             .id("settings-page")
             .size_full()
@@ -817,24 +813,220 @@ impl Render for SettingsPage {
                     .child(self.terminal_section(&theme, terminal_font, cx))
                     .child(self.checks_section(&theme, cx))
                     .child(self.inventory_section(&theme))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(10.))
-                            .child(section_title(&theme, "Keyboard", None))
-                            .child(card(&theme).px(px(14.)).py(px(6.)).children(shortcuts.iter().map(|(k, what)| {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .py(px(5.))
-                                    .text_size(px(12.5))
-                                    .child(div().text_color(theme.text_muted).child(*what))
-                                    .child(kit::kbd(&theme, *k))
-                            }))),
-                    ),
+                    .child(self.keyboard_section(&theme, cx)),
             )
+    }
+}
+
+impl SettingsPage {
+    /// The shortcuts, each one changeable: click its keys, then press new ones.
+    fn keyboard_section(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        use super::shortcuts::{self, ALL};
+        let any_changed = !cx.global::<theme_mod::Appearance>().shortcuts.is_empty();
+        let row = |label: SharedString| div().flex().items_center().gap(px(8.)).min_h(px(34.)).text_size(px(12.5)).child(div().flex_1().text_color(theme.text_muted).child(label));
+
+        // ⌘1…⌘9: one modifier for all nine.
+        let chosen = shortcuts::machine_modifier(cx);
+        let options: Vec<AnyElement> = shortcuts::machine_modifiers()
+            .iter()
+            .map(|(value, shown)| {
+                let on = chosen == *value;
+                div()
+                    .id(SharedString::from(format!("sc-m-{shown}")))
+                    .h(px(24.))
+                    .min_w(px(36.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(if on { theme.accent } else { theme.border_variant })
+                    .bg(if on { theme.accent.opacity(0.12) } else { theme.element })
+                    .cursor_pointer()
+                    .font_family(mono_font())
+                    .text_size(px(12.))
+                    .text_color(if on { theme.text } else { theme.text_muted })
+                    .child(*shown)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_machine_keys(value, cx)))
+                    .into_any_element()
+            })
+            .collect();
+        let machines_label = match shortcuts::machine_keys(cx, 1) {
+            Some(k) => format!("Go to machine 1–9 ({} …)", shortcuts::label(&k)),
+            None => "Go to machine 1–9".to_string(),
+        };
+        let machines = row(machines_label.into()).child(div().flex().gap(px(4.)).children(options));
+
+        let rows: Vec<AnyElement> = ALL
+            .iter()
+            .enumerate()
+            .map(|(i, sc)| {
+                let recording = self.recording == Some(sc.id);
+                let keys = shortcuts::label_for(cx, sc.id);
+                let id = sc.id;
+                let chip = div()
+                    .id(("sc-keys", i))
+                    .h(px(24.))
+                    .min_w(px(72.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.))
+                    .border_1()
+                    .cursor_pointer()
+                    .font_family(mono_font())
+                    .text_size(px(12.))
+                    .map(|d| match (recording, keys.is_empty()) {
+                        (true, _) => d.border_color(theme.accent).bg(theme.accent.opacity(0.12)).text_color(theme.text_accent).child("Press keys…"),
+                        (false, true) => d.border_color(theme.border_variant).bg(theme.element).text_color(theme.text_placeholder).child("None"),
+                        (false, false) => d.border_color(theme.border_variant).bg(theme.element).text_color(theme.text).child(keys.clone()),
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.record(id, cx)));
+                let reset = if shortcuts::changed(cx, sc.id) {
+                    Button::icon_only(("sc-reset", i), "rotate-ccw").tooltip("Back to the default").on_click(cx.listener(move |this, _, _, cx| this.reset_shortcut(id, cx))).into_any_element()
+                } else {
+                    div().w(px(26.)).into_any_element()
+                };
+                row(sc.label.into()).child(chip).child(reset).into_any_element()
+            })
+            .collect();
+        let fixed = row("Terminal text size".into()).child(kit::kbd(theme, "⌘+  ⌘−  ⌘0")).child(div().w(px(26.)));
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(section_title(theme, "Keyboard", None))
+                    .child(div().flex_1())
+                    .when(any_changed, |d| {
+                        d.child(Button::new("sc-reset-all", "Reset all").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, _, cx| this.reset_all_shortcuts(cx))))
+                    }),
+            )
+            .child(div().text_size(px(12.5)).text_color(theme.text_placeholder).child(if cfg!(target_os = "macos") { "Hold ⌘ or ⌃ to see them anywhere." } else { "Hold Ctrl to see them anywhere." }))
+            .children(self.shortcut_note.clone().map(|n| note(theme, "info", theme.info, n)))
+            .child(
+                card(theme)
+                    .px(px(14.))
+                    .py(px(4.))
+                    .child(machines)
+                    .child(div().h(px(1.)).my(px(4.)).bg(theme.border_variant))
+                    .children(rows)
+                    .child(fixed),
+            )
+    }
+
+    /// Waits for the keys of shortcut `id` (or stops waiting, on a second click).
+    fn record(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        if self.recording == Some(id) {
+            self.stop_recording(cx);
+            return;
+        }
+        self.recording = Some(id);
+        self.shortcut_note = None;
+        if self.catch_keys.is_none() {
+            // Before shortcuts run: a key pressed here is recorded, not done.
+            let page = cx.entity().downgrade();
+            self.catch_keys = Some(cx.intercept_keystrokes(move |e, _, cx| {
+                let Some(page) = page.upgrade() else { return };
+                if page.read(cx).recording.is_none() {
+                    return;
+                }
+                cx.stop_propagation();
+                let k = e.keystroke.clone();
+                page.update(cx, |p, cx| p.pressed(&k, cx));
+            }));
+        }
+        cx.notify();
+    }
+
+    pub(super) fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        if self.recording.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// A key pressed while recording: Esc cancels, ⌫ clears, anything with
+    /// ⌘, ⌃ or ⌥ becomes the shortcut (taken from whatever had it).
+    fn pressed(&mut self, k: &gpui::Keystroke, cx: &mut Context<Self>) {
+        use super::shortcuts::{self, MACHINES};
+        let Some(id) = self.recording else { return };
+        let m = &k.modifiers;
+        let plain = !(m.platform || m.control || m.alt || m.shift);
+        match k.key.as_str() {
+            "escape" if plain => self.recording = None,
+            "backspace" | "delete" if plain => {
+                shortcuts::set(cx, id, "");
+                shortcuts::apply(cx);
+                self.recording = None;
+            }
+            _ => match shortcuts::from_press(k) {
+                None => self.shortcut_note = Some(if cfg!(target_os = "macos") { "Add ⌘, ⌃ or ⌥." } else { "Add Ctrl or Alt." }.into()),
+                Some(keys) => match shortcuts::used_by(cx, &keys, id) {
+                    Some((MACHINES, what)) => self.shortcut_note = Some(format!("{} goes to {what}.", shortcuts::label(&keys))),
+                    taken => {
+                        if let Some((other, what)) = taken {
+                            shortcuts::set(cx, other, "");
+                            self.shortcut_note = Some(format!("Taken from {what}."));
+                        }
+                        shortcuts::set(cx, id, &keys);
+                        shortcuts::apply(cx);
+                        self.recording = None;
+                    }
+                },
+            },
+        }
+        cx.notify();
+    }
+
+    fn reset_shortcut(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        use super::shortcuts::{self, ALL, MACHINES};
+        let default = ALL.iter().find(|s| s.id == id).map(|s| s.default).unwrap_or_default();
+        self.shortcut_note = None;
+        match shortcuts::used_by(cx, default, id) {
+            Some((MACHINES, what)) => {
+                self.shortcut_note = Some(format!("{} goes to {what}.", shortcuts::label(default)));
+                cx.notify();
+                return;
+            }
+            Some((other, what)) => {
+                shortcuts::set(cx, other, "");
+                self.shortcut_note = Some(format!("Taken from {what}."));
+            }
+            None => {}
+        }
+        shortcuts::set(cx, id, default);
+        shortcuts::apply(cx);
+        cx.notify();
+    }
+
+    fn reset_all_shortcuts(&mut self, cx: &mut Context<Self>) {
+        theme_mod::remember(cx, |a| a.shortcuts.clear());
+        super::shortcuts::apply(cx);
+        self.recording = None;
+        self.shortcut_note = None;
+        cx.notify();
+    }
+
+    /// The modifier for ⌘1…⌘9; shortcuts on those keys give way.
+    fn set_machine_keys(&mut self, modifier: &'static str, cx: &mut Context<Self>) {
+        use super::shortcuts::{self, MACHINES};
+        shortcuts::set(cx, MACHINES, modifier);
+        let mut freed = Vec::new();
+        for n in 1..=9 {
+            if let Some((other, what)) = shortcuts::machine_keys(cx, n).and_then(|k| shortcuts::used_by(cx, &k, MACHINES)) {
+                shortcuts::set(cx, other, "");
+                freed.push(what);
+            }
+        }
+        shortcuts::apply(cx);
+        self.shortcut_note = (!freed.is_empty()).then(|| format!("Removed from {}.", freed.join(", ")));
+        cx.notify();
     }
 }
 

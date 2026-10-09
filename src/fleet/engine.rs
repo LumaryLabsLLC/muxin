@@ -11,6 +11,8 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::runtime::Handle;
 use tokio::sync::{watch, Notify};
 
+mod roaming;
+
 use super::build::{build, Inputs};
 use super::model::{CheckInfo, InventoryInfo, Operation, Snapshot};
 use super::sessions::{self, DirectSession, MachineSessions, SessionNotice};
@@ -67,6 +69,10 @@ struct State {
     direct: Vec<DirectSession>,
     /// Git checkouts per machine, from the last look (see fleet::code).
     checkouts: HashMap<String, Vec<super::model::Checkout>>,
+    /// Machines on the user's tailnet, as Tailscale last saw them (see roaming.rs).
+    tailnet: HashMap<String, super::model::TailnetDevice>,
+    /// Tailscale on this computer; None until read, or when it isn't installed.
+    tailscale: Option<super::model::TailscaleStatus>,
 }
 
 pub struct Engine {
@@ -133,6 +139,8 @@ impl Engine {
             attention: HashMap::new(),
             direct: Vec::new(),
             checkouts: HashMap::new(),
+            tailnet: persisted.tailnet,
+            tailscale: None,
         };
         let (tx, _) = watch::channel(Arc::new(Snapshot::default()));
         super::direct::init(paths.dir.clone());
@@ -206,6 +214,10 @@ impl Engine {
         self.rt.spawn(async move { me.sessions_loop().await });
         let me = self.clone();
         self.rt.spawn(async move { me.offline_loop().await });
+        let me = self.clone();
+        self.rt.spawn(async move { me.tailnet_loop().await });
+        let me = self.clone();
+        self.rt.spawn(async move { me.network_loop().await });
     }
 
     pub fn subscribe(&self) -> watch::Receiver<Arc<Snapshot>> {
@@ -609,15 +621,28 @@ impl Engine {
         // keep them current, so the next direct connection takes the short way.
         if let Some(mut paired) = super::direct::paired(&link.machine) {
             if let Ok(r) = link.request(serde_json::json!({ "op": "addresses" }), Duration::from_secs(10)).await {
-                let lan: Vec<String> = r["addresses"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
-                if r["ok"].as_bool() == Some(true) && lan != paired.lan {
+                let list = |k: &str| -> Vec<String> { r[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default() };
+                // Agents before 0.2.1 don't report Tailscale addresses: keep what we had.
+                let (lan, tailnet) = (list("addresses"), if r["tailnet"].is_array() { list("tailnet") } else { paired.tailnet.clone() });
+                if r["ok"].as_bool() == Some(true) && (lan != paired.lan || tailnet != paired.tailnet) {
+                    let lan_changed = lan != paired.lan;
                     paired.lan = lan;
+                    paired.tailnet = tailnet;
                     let _ = super::direct::save(&link.machine, Some(paired));
                     // Reconnect the short way, unless this link already is.
-                    if link.transport() != "direct" || link.network() != Some("Local network") {
+                    if lan_changed && (link.transport() != "direct" || link.network() != Some("Local network")) {
                         super::link::reset(&link.machine);
                     }
                 }
+            }
+            // Through Tailscale while the machine may be right here: look again
+            // in a moment, once the dust settles.
+            if link.alive() && link.transport() == "direct" && link.network() != Some("Local network") {
+                let (me, id) = (self.clone(), link.machine.clone());
+                self.rt.spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    me.move_home(&id).await;
+                });
             }
         }
         let mut events = link.subscribe();
@@ -685,8 +710,13 @@ impl Engine {
                     .iter()
                     .filter(|m| m.is_checkable() && !m.is_local() && !st.checking.contains(&m.id))
                     .filter(|m| {
+                        // Tailscale says when a machine on the tailnet is back
+                        // (see roaming.rs); those only need an occasional look.
+                        let watched = st.tailscale.as_ref().is_some_and(|t| t.running) && st.tailnet.contains_key(&m.id);
                         st.probes.get(&m.id).is_some_and(|p| {
-                            !p.ok && super::build::comes_back_by_itself(super::build::unreachable_kind(p.error.as_deref().unwrap_or("")))
+                            !p.ok
+                                && super::build::comes_back_by_itself(super::build::unreachable_kind(p.error.as_deref().unwrap_or("")))
+                                && (!watched || Utc::now() - p.checked_at > chrono::Duration::minutes(3))
                         })
                     })
                     .map(|m| m.id.clone())
@@ -802,15 +832,7 @@ impl Engine {
             // Another process may have checked machines since we last looked;
             // fold those in first so this write doesn't throw them away.
             self.merge_disk_state(&mut st);
-            let persisted = PersistedState {
-                probes: st.probes.clone(),
-                check_started_at: st.check_started_at,
-                check_finished_at: st.check_finished_at,
-            };
-            match persisted.save(&self.paths.state) {
-                Ok(()) => st.state_mtime = mtime(&self.paths.state),
-                Err(e) => tracing::warn!("saving state: {e:#}"),
-            }
+            self.save_state(&mut st);
         }
         self.publish(&mut st);
     }
@@ -833,6 +855,20 @@ impl Engine {
         true
     }
 
+    /// Writes state.json (checks and what Tailscale knows).
+    fn save_state(&self, st: &mut State) {
+        let persisted = PersistedState {
+            probes: st.probes.clone(),
+            tailnet: st.tailnet.clone(),
+            check_started_at: st.check_started_at,
+            check_finished_at: st.check_finished_at,
+        };
+        match persisted.save(&self.paths.state) {
+            Ok(()) => st.state_mtime = mtime(&self.paths.state),
+            Err(e) => tracing::warn!("saving state: {e:#}"),
+        }
+    }
+
     /// Merges state.json into our probes when another process wrote it: per
     /// machine, the newer check wins, and machines we're checking right now are
     /// left alone. Returns true if anything changed.
@@ -853,6 +889,12 @@ impl Engine {
         }
         let mut changed = !newer.is_empty();
         st.probes.extend(newer);
+        for (id, device) in disk.tailnet {
+            if known.contains(id.as_str()) && st.tailnet.get(&id).is_none_or(|d| device.read_at > d.read_at) {
+                st.tailnet.insert(id, device);
+                changed = true;
+            }
+        }
         if disk.check_finished_at > st.check_finished_at {
             st.check_started_at = disk.check_started_at;
             st.check_finished_at = disk.check_finished_at;
@@ -917,6 +959,8 @@ impl Engine {
             github: st.github.as_ref(),
             github_syncing: st.github_syncing,
             token_source: st.token_source.clone(),
+            tailnet: &st.tailnet,
+            tailscale: st.tailscale.as_ref(),
         });
         snapshot.version = st.version;
         snapshot.operations = st.operations.iter().cloned().collect();

@@ -210,6 +210,7 @@ pub fn unreachable_reason(m: &Machine) -> &'static str {
         Some("auth") => "ssh key not accepted",
         Some("unknown-host") => "Host not found",
         Some("host-key") => "Host key changed",
+        Some("tailscale-off") => "Tailscale is off here",
         _ => "Can't connect",
     }
 }

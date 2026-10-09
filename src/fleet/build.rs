@@ -31,6 +31,10 @@ pub struct Inputs<'a> {
     pub github: Option<&'a GitHubData>,
     pub github_syncing: bool,
     pub token_source: String,
+    /// Machines on the user's tailnet, by machine id.
+    pub tailnet: &'a HashMap<String, TailnetDevice>,
+    /// Tailscale on this computer, when it's installed.
+    pub tailscale: Option<&'a TailscaleStatus>,
 }
 
 pub fn build(input: &Inputs) -> Snapshot {
@@ -116,7 +120,10 @@ pub fn build(input: &Inputs) -> Snapshot {
             Some(p) if p.ok => "online",
             Some(_) => "offline",
         };
-        let unreachable = probe.filter(|p| !p.ok && spec.is_checkable()).map(|p| explain_unreachable(spec, p, input.settings.check_interval_minutes > 0));
+        let device = input.tailnet.get(&spec.id);
+        let unreachable = probe
+            .filter(|p| !p.ok && spec.is_checkable())
+            .map(|p| explain_unreachable(spec, p, input.settings.check_interval_minutes > 0, device, input.tailscale));
         machine_diagnostics(&mut diagnostics, spec, probe, unreachable.as_ref());
         diagnostics.sort_by_key(|d| level_rank(&d.level));
 
@@ -148,6 +155,7 @@ pub fn build(input: &Inputs) -> Snapshot {
             sessions_error: None,
             gh: None,
             unreachable,
+            tailnet: device.cloned(),
         });
     }
 
@@ -242,6 +250,7 @@ pub fn build(input: &Inputs) -> Snapshot {
         sessions: Vec::new(),
         notifications: Vec::new(),
         checkouts: Vec::new(),
+        tailscale: input.tailscale.cloned(),
     }
 }
 
@@ -345,7 +354,7 @@ pub fn unreachable_kind(error: &str) -> &'static str {
 
 /// Why a machine can't be reached, in words for people: what probably
 /// happened, and what to do about it when there's something to do.
-pub fn explain_unreachable(spec: &MachineSpec, p: &ProbeResult, retrying: bool) -> Unreachable {
+pub fn explain_unreachable(spec: &MachineSpec, p: &ProbeResult, retrying: bool, device: Option<&TailnetDevice>, tailscale: Option<&TailscaleStatus>) -> Unreachable {
     let error = p.error.clone().unwrap_or_else(|| "The check failed.".into());
     let (name, host) = (spec.name.as_str(), spec.host.trim());
     let kind = if spec.is_local() { "error" } else { unreachable_kind(&error) };
@@ -384,7 +393,40 @@ pub fn explain_unreachable(spec: &MachineSpec, p: &ProbeResult, retrying: bool) 
         ),
         _ => (format!("Can't reach {name}"), "The check over ssh failed; trying it in a terminal shows what ssh says.".to_string(), Some(format!("ssh {host}"))),
     };
-    Unreachable { kind: kind.into(), title, detail, hint, last_seen_at: p.last_seen_at, error }
+    let mut u = Unreachable { kind: kind.into(), title, detail, hint, last_seen_at: p.last_seen_at, error };
+    // What Tailscale knows: whether the machine is really gone, or the way
+    // to it is.
+    let Some(d) = device.filter(|_| !spec.is_local()) else { return u };
+    let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
+    let no_route = matches!(kind, "offline" | "unknown-host");
+    match tailscale {
+        // It's reached through Tailscale away from home, and Tailscale is off here.
+        Some(t) if !t.running && no_route => {
+            let signed_out = t.state == "NeedsLogin";
+            u.kind = "tailscale-off".into();
+            u.title = format!("Tailscale is {} on {here}", if signed_out { "signed out" } else { "off" });
+            u.detail = format!(
+                "{name} isn't answering on this network, and it's on your tailnet as {}. {} Tailscale to reach it from anywhere; if it still doesn't answer, it may be off.",
+                d.name,
+                if signed_out { "Sign in to" } else { "Turn on" }
+            );
+            u.hint = None;
+        }
+        // Tailscale lost it too: it's off or asleep, not a problem on this end.
+        Some(t) if t.running && kind == "offline" && !d.online => {
+            u.detail = format!("It isn't answering, and Tailscale doesn't see it either: it's probably shut down or asleep. {again}");
+            u.last_seen_at = u.last_seen_at.max(d.last_seen_at);
+        }
+        // Tailscale sees it, so it's on: the trouble is ssh, or what's in between.
+        Some(t) if t.running && no_route && d.online => {
+            u.kind = "error".into();
+            u.title = format!("{name} is on, but isn't answering Muxen");
+            u.detail = format!("Tailscale sees it online, but ssh to {host} got no answer, here or over Tailscale. Its ssh server may be off, or a firewall is in the way.");
+            u.hint = Some(format!("ssh {}", d.dns_name));
+        }
+        _ => {}
+    }
+    u
 }
 
 fn summarize<'a>(runners: impl Iterator<Item = &'a Runner>) -> RunnerSummary {
@@ -894,6 +936,8 @@ mod tests {
             github: gh,
             github_syncing: false,
             token_source: "gh".into(),
+            tailnet: &HashMap::new(),
+            tailscale: None,
         })
     }
 
@@ -1027,6 +1071,46 @@ mod tests {
         assert_eq!((m.diagnostics[0].code.as_str(), m.diagnostics[0].level.as_str()), ("unreachable", "warning"));
         assert_eq!(snap.runners[0].state, "unknown");
         assert!(snap.attention.iter().any(|a| a.id == "unreachable" && a.title == "Mini is offline"));
+    }
+
+    #[test]
+    fn tailscale_explains_whats_out_of_reach() {
+        let inv = inventory("[[machine]]\nname = \"Box\"\nhost = \"box\"\n");
+        let spec = inv.machines[0].clone();
+        let timed_out = ProbeResult { ok: false, error: Some("ssh: connect to host box port 22: Operation timed out".into()), ..Default::default() };
+        let device = |online: bool| TailnetDevice {
+            name: "box".into(),
+            dns_name: "box.tail0000.ts.net".into(),
+            ips: vec!["100.100.1.1".into()],
+            os: "linux".into(),
+            online,
+            last_seen_at: (!online).then(|| Utc::now() - chrono::Duration::minutes(3)),
+            path: "idle".into(),
+            relay: None,
+            read_at: Utc::now(),
+        };
+        let tailscale = |state: &str| TailscaleStatus { state: state.into(), running: state == "Running", tailnet: None };
+
+        // Off here: that's the way to fix it.
+        let u = explain_unreachable(&spec, &timed_out, true, Some(&device(true)), Some(&tailscale("Stopped")));
+        assert_eq!(u.kind, "tailscale-off");
+        assert!(u.title.starts_with("Tailscale is off on"), "{}", u.title);
+        let u = explain_unreachable(&spec, &timed_out, true, Some(&device(true)), Some(&tailscale("NeedsLogin")));
+        assert!(u.title.starts_with("Tailscale is signed out"), "{}", u.title);
+
+        // Tailscale lost it too: it's off, and Tailscale's last sighting counts.
+        let u = explain_unreachable(&spec, &timed_out, true, Some(&device(false)), Some(&tailscale("Running")));
+        assert_eq!(u.kind, "offline");
+        assert!(u.detail.contains("Tailscale doesn't see it either"));
+        assert!(u.last_seen_at.is_some());
+
+        // Tailscale sees it: it's on, so the trouble is ssh.
+        let u = explain_unreachable(&spec, &timed_out, true, Some(&device(true)), Some(&tailscale("Running")));
+        assert_eq!(u.kind, "error");
+        assert_eq!(u.hint.as_deref(), Some("ssh box.tail0000.ts.net"));
+
+        // Not on the tailnet: as before.
+        assert_eq!(explain_unreachable(&spec, &timed_out, true, None, Some(&tailscale("Stopped"))).kind, "offline");
     }
 
     #[test]

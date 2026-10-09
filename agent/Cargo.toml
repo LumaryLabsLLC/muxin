@@ -1,6 +1,6 @@
 [package]
 name = "muxen-agent"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2024"
 description = "Runs on each machine Muxen manages: keeps agent sessions alive and lets the app attach to them"
 license = "LicenseRef-Proprietary"

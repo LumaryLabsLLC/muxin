@@ -37,15 +37,22 @@ pub fn redraw<T: alacritty_terminal::event::EventListener>(term: &Term<T>) -> Ve
         out.push_str("\x1b[3J");
     }
     let history = if alt { 0 } else { grid.history_size().min(REDRAW_HISTORY) as i32 };
-    for (n, line) in (-history..rows).enumerate() {
-        if n > 0 {
-            out.push_str("\r\n");
-        }
-        row(&grid[Line(line)], cols, &mut out);
-    }
-
     let content = term.renderable_content();
     let cursor = content.cursor.point;
+    // Down to the last row with something on it (or the cursor), no further:
+    // blank rows below would scroll a smaller terminal, pushing the screen
+    // off its top. The clear above already blanked them.
+    let mut lines: Vec<String> = (-history..rows)
+        .map(|line| {
+            let mut s = String::new();
+            row(&grid[Line(line)], cols, &mut s);
+            s
+        })
+        .collect();
+    let keep = (lines.iter().rposition(|l| !l.is_empty()).map_or(0, |i| i + 1)).max((history + cursor.line.0 + 1).max(0) as usize);
+    lines.truncate(keep);
+    out.push_str(&lines.join("\r\n"));
+
     let _ = write!(out, "\x1b[{};{}H", cursor.line.0 + content.display_offset as i32 + 1, cursor.column.0 + 1);
     for (flag, on) in [
         (TermMode::APP_CURSOR, "\x1b[?1h"),
@@ -214,6 +221,21 @@ mod tests {
         let red = &copy.grid()[Line(1)][Column(0)];
         assert!(red.flags.contains(Flags::BOLD));
         assert_eq!(red.fg, Color::Named(NamedColor::Red));
+    }
+
+    #[test]
+    fn a_smaller_terminal_keeps_the_screen_in_view() {
+        // A session's screen with 36 rows, mostly empty, shown in a terminal
+        // with fewer (the window is smaller than the session was).
+        let feed = |t: &mut Term<VoidListener>, b: &[u8]| Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new().advance(t, b);
+        let mut session = Term::new(Config::default(), &Size(120, 36), VoidListener);
+        feed(&mut session, b"~\r\n> echo hi\r\nhi\r\n~\r\n> ");
+        let mut client = Term::new(Config::default(), &Size(118, 31), VoidListener);
+        feed(&mut client, &redraw(&session));
+        let row = |t: &Term<VoidListener>, l: i32| (0..10).map(|c| t.grid()[Line(l)][Column(c)].c).collect::<String>().trim_end().to_string();
+        assert_eq!((row(&client, 0), row(&client, 2), row(&client, 4)), ("~".into(), "hi".into(), ">".into()));
+        let (a, b) = (session.grid().cursor.point, client.grid().cursor.point);
+        assert_eq!((a.line, a.column), (b.line, b.column));
     }
 
     #[test]

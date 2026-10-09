@@ -148,6 +148,9 @@ pub struct StartSession {
     pub direct: bool,
     /// A command to run instead of the agent's own (direct sessions only).
     pub command: Option<String>,
+    /// Text typed into the terminal once it's up, without pressing Enter: a
+    /// command for the user to look at and run themselves.
+    pub typed: Option<String>,
 }
 
 /// A session without the agent: what to run when its terminal opens.
@@ -284,6 +287,16 @@ impl Engine {
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 let _ = me.control_session(&id, Control::Send { text: &p, enter: true }).await;
+            });
+        }
+
+        // Typed in for the user to run (Enter is theirs to press).
+        if let Some(t) = req.typed.clone().filter(|t| !t.trim().is_empty()) {
+            let me = self.clone();
+            let id = format!("{}/{name}", spec.id);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                let _ = me.control_session(&id, Control::Send { text: &t, enter: false }).await;
             });
         }
 

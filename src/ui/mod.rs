@@ -97,6 +97,20 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
     });
 }
 
+/// Brings up the Tailscale app (to turn it on or sign in). Muxen itself never
+/// changes Tailscale's settings.
+pub(crate) fn open_tailscale() {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").args(["-a", "Tailscale"]).spawn();
+    #[cfg(windows)]
+    let _ = std::process::Command::new(r"C:\Program Files\Tailscale\tailscale-ipn.exe").spawn();
+}
+
+/// Whether `open_tailscale` can do anything here (Linux has no Tailscale app).
+pub(crate) fn can_open_tailscale() -> bool {
+    cfg!(any(target_os = "macos", windows))
+}
+
 /// The built-in display (a MacBook's own screen), when there is one.
 #[cfg(target_os = "macos")]
 fn builtin_display(cx: &App) -> Option<gpui::DisplayId> {

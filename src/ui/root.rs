@@ -197,10 +197,13 @@ pub struct Root {
     pub(super) sidebar_width: f32,
     sidebar_resizing: bool,
     /// The sidebar is tucked away (the toolbar's button, ⌘B).
-    sidebar_hidden: bool,
+    pub(super) sidebar_hidden: bool,
     /// Terminals attached to agent sessions, kept while the app runs so
     /// switching pages doesn't drop them.
     pub(super) terminals: HashMap<String, Entity<TerminalView>>,
+    /// Terminals whose connection dropped, being re-attached: tries so far,
+    /// and whether one is on its way.
+    pub(super) resuming: HashMap<String, (u32, bool)>,
     /// Machines whose sessions a page asked for before discovery finished.
     pub(super) sessions_requested: HashSet<String>,
     /// The GitHub page's data and selection.
@@ -306,6 +309,7 @@ impl Root {
             sidebar_resizing: false,
             sidebar_hidden: cx.global::<super::theme::Appearance>().sidebar_hidden,
             terminals: HashMap::new(),
+            resuming: HashMap::new(),
             sessions_requested: HashSet::new(),
             gh: Default::default(),
             desktops: Default::default(),

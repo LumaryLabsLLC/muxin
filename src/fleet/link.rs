@@ -253,6 +253,12 @@ pub async fn get(spec: &MachineSpec) -> Option<Arc<Link>> {
     }
 }
 
+/// Forget recent failures to connect, so the next use tries again right away
+/// (the network or Tailscale changed).
+pub fn retry_all() {
+    slots().lock().unwrap().retain(|_, slot| matches!(slot, Slot::Up(_)));
+}
+
 /// Drops the machine's link (a new agent was installed, the machine was
 /// removed); the next use connects afresh, right away.
 pub fn reset(machine_id: &str) {

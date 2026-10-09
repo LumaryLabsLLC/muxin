@@ -296,7 +296,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "github_scopes" => ok(api::github_scopes(engine, args(a)?).await?),
         "get_settings" => ok(api::settings(engine)),
         "update_settings" => ok(api::update_settings(engine, args(a)?)?),
-        "list_ssh_hosts" => ok(api::ssh_hosts()),
+        "list_ssh_hosts" => ok(api::ssh_hosts(engine).await),
         "workspace_create" => ok(api::workspace_create(engine, args(a)?, &session.owner(), Surface::Mcp).await?),
         "workspace_list" => ok(api::workspaces_list(engine)),
         "workspace_get" => ok(api::workspace_get(engine, args(a)?, Surface::Mcp)?),
@@ -480,7 +480,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "list_ssh_hosts",
-            "description": "Host aliases from the user's ~/.ssh/config, to suggest as `host` for add_machine.",
+            "description": "Hosts to suggest for add_machine: aliases from the user's ~/.ssh/config, and computers on their Tailscale network (`tailnet`, when Tailscale is on here: each with the `host` to add it by, whether Tailscale sees it online, and `machine_id` when it's already in the fleet). A machine added by its tailnet name is reachable from anywhere.",
             "inputSchema": schema(json!({}), &[]),
             "annotations": annotations("List ssh hosts", true, false, true, false),
         }),

@@ -87,6 +87,7 @@ fn machine(id: &str, platform: &str, cpu: f64, working: usize, disk_free: u64, a
         sessions_error: None,
         gh: None,
         unreachable: None,
+        tailnet: None,
     }
 }
 

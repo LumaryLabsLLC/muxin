@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use futures::stream::{FuturesUnordered, StreamExt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
@@ -23,8 +24,13 @@ use crate::probe;
 
 const ALPN: &[u8] = b"muxen/1";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-/// After a direct connection fails, use ssh for this long before trying again.
-const RETRY_AFTER: Duration = Duration::from_secs(300);
+/// After a direct connection fails, use ssh for this long before trying again
+/// (sooner when the network or Tailscale changes: see `retry_all`).
+const RETRY_AFTER: Duration = Duration::from_secs(60);
+/// Home first: the machine's local-network addresses get this long to answer
+/// before its Tailscale addresses are tried, and they twice as long before
+/// wherever its name leads.
+const HEAD_START: Duration = Duration::from_millis(150);
 
 /// How to reach a paired machine directly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -37,6 +43,9 @@ pub struct Paired {
     /// machine on the same network isn't reached through a VPN or the internet.
     #[serde(default)]
     pub lan: Vec<String>,
+    /// Its Tailscale addresses, for reaching it away from its network.
+    #[serde(default)]
+    pub tailnet: Vec<String>,
 }
 
 static DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -73,6 +82,12 @@ pub fn save(machine_id: &str, entry: Option<Paired>) -> Result<(), String> {
 /// Try the direct connection again right away (after the agent was updated).
 pub fn retry_now(machine_id: &str) {
     failures().lock().unwrap().remove(machine_id);
+}
+
+/// Try every machine's direct connection again right away (the network or
+/// Tailscale changed, so what failed may work now).
+pub fn retry_all() {
+    failures().lock().unwrap().clear();
 }
 
 pub fn fingerprint(der: &[u8]) -> String {
@@ -167,6 +182,82 @@ pub async fn connect(machine_id: &str, p: &Paired) -> Result<quinn::Connection, 
 }
 
 async fn try_connect(p: &Paired) -> Result<quinn::Connection, String> {
+    let config = client_config(p)?;
+    // Every way to the machine at once, home first: its local-network
+    // addresses right away, its Tailscale ones a moment later, then wherever
+    // its name leads (a VPN, the internet). The first to answer wins; the
+    // others are dropped.
+    let parse = |ips: &[String]| -> Vec<SocketAddr> { ips.iter().filter_map(|ip| ip.parse().ok()).map(|ip| SocketAddr::new(ip, p.port)).collect() };
+    let (lan, tailnet) = (parse(&p.lan), parse(&p.tailnet));
+    let mut attempts: FuturesUnordered<Attempt> = FuturesUnordered::new();
+    for a in &lan {
+        attempts.push(attempt(&config, *a, Duration::ZERO, Duration::from_millis(1500), p.port));
+    }
+    for a in tailnet.iter().filter(|a| !lan.contains(a)) {
+        // IPv4 a touch sooner: same path, a shorter address to show.
+        let delay = HEAD_START + if a.is_ipv6() { Duration::from_millis(50) } else { Duration::ZERO };
+        attempts.push(attempt(&config, *a, delay, Duration::from_secs(4), p.port));
+    }
+    let (host, port, config2) = (p.host.clone(), p.port, config.clone());
+    let known: Vec<SocketAddr> = lan.iter().chain(&tailnet).copied().collect();
+    attempts.push(Box::pin(async move {
+        tokio::time::sleep(HEAD_START * 2).await;
+        let mut by_name: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port)).await.map(|a| a.collect()).unwrap_or_default();
+        // IPv4 first: home networks and VPNs route it most reliably.
+        by_name.sort_by_key(|a| a.is_ipv6());
+        by_name.retain(|a| !known.contains(a));
+        let mut last = format!("{host} has no other address");
+        for a in by_name {
+            match attempt(&config2, a, Duration::ZERO, CONNECT_TIMEOUT, port).await {
+                Ok(c) => return Ok(c),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }));
+    let mut errors = Vec::new();
+    while let Some(result) = attempts.next().await {
+        match result {
+            Ok(conn) => return Ok(conn),
+            Err(e) => errors.push(e),
+        }
+    }
+    Err(errors.join("; "))
+}
+
+type Attempt = std::pin::Pin<Box<dyn std::future::Future<Output = Result<quinn::Connection, String>> + Send>>;
+
+/// One try at one address, after `delay`.
+fn attempt(config: &quinn::ClientConfig, addr: SocketAddr, delay: Duration, limit: Duration, port: u16) -> Attempt {
+    let config = config.clone();
+    Box::pin(async move {
+        tokio::time::sleep(delay).await;
+        let ep = endpoint(addr.is_ipv6())?;
+        let connecting = ep.connect_with(config, addr, "muxen-agent").map_err(|e| format!("{addr}: {e}"))?;
+        match tokio::time::timeout(limit, connecting).await {
+            Ok(Ok(conn)) => Ok(conn),
+            Ok(Err(e)) => Err(format!("{addr}: {e}")),
+            Err(_) => Err(format!("{addr}: no answer (is UDP port {port} open?)")),
+        }
+    })
+}
+
+/// Whether the machine answers on its local network right now: for moving a
+/// connection that went through Tailscale back to the short way.
+pub async fn lan_answers(p: &Paired) -> bool {
+    let Ok(config) = client_config(p) else { return false };
+    let mut attempts: FuturesUnordered<Attempt> =
+        p.lan.iter().filter_map(|ip| ip.parse().ok()).map(|ip| attempt(&config, SocketAddr::new(ip, p.port), Duration::ZERO, Duration::from_millis(800), p.port)).collect();
+    while let Some(result) = attempts.next().await {
+        if let Ok(conn) = result {
+            conn.close(0u32.into(), b"just looking");
+            return true;
+        }
+    }
+    false
+}
+
+fn client_config(p: &Paired) -> Result<quinn::ClientConfig, String> {
     let (cert, key) = identity()?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier = PinnedAgent { fingerprint: p.fingerprint.clone(), algorithms: provider.signature_verification_algorithms };
@@ -184,29 +275,7 @@ async fn try_connect(p: &Paired) -> Result<quinn::Connection, String> {
     transport.keep_alive_interval(Some(Duration::from_secs(4)));
     transport.max_idle_timeout(Some(Duration::from_secs(12).try_into().map_err(|_| "bad timeout")?));
     config.transport_config(Arc::new(transport));
-
-    // Its local-network addresses first (quick to answer when we're on the
-    // same network), then wherever its name leads (a VPN, the internet).
-    let mut tries: Vec<(SocketAddr, Duration)> = p.lan.iter().filter_map(|ip| ip.parse().ok()).map(|ip| (SocketAddr::new(ip, p.port), Duration::from_millis(700))).collect();
-    let mut by_name: Vec<SocketAddr> = tokio::net::lookup_host((p.host.as_str(), p.port)).await.map(|a| a.collect()).unwrap_or_default();
-    // IPv4 first: home networks and VPNs route it most reliably.
-    by_name.sort_by_key(|a| a.is_ipv6());
-    let lan: Vec<SocketAddr> = tries.iter().map(|(a, _)| *a).collect();
-    tries.extend(by_name.into_iter().filter(|a| !lan.contains(a)).map(|a| (a, CONNECT_TIMEOUT)));
-    let mut last = format!("{} has no address", p.host);
-    for (addr, limit) in tries {
-        let ep = endpoint(addr.is_ipv6())?;
-        let attempt = async {
-            let connecting = ep.connect_with(config.clone(), addr, "muxen-agent").map_err(|e| e.to_string())?;
-            connecting.await.map_err(|e| e.to_string())
-        };
-        match tokio::time::timeout(limit, attempt).await {
-            Ok(Ok(conn)) => return Ok(conn),
-            Ok(Err(e)) => last = format!("{addr}: {e}"),
-            Err(_) => last = format!("{addr}: no answer (is UDP port {} open?)", p.port),
-        }
-    }
-    Err(last)
+    Ok(config)
 }
 
 /// The machine's address as ssh resolves it (aliases in ~/.ssh/config included).

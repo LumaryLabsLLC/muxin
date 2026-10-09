@@ -29,6 +29,11 @@ pub struct Connection {
     /// How the machine keeps the direct listener running ("systemd", "launchd", "background").
     pub service: Option<String>,
     pub note: Option<String>,
+    /// The machine on the user's tailnet, when it is (with how Tailscale
+    /// reaches it from here: "direct" peer-to-peer, "relay", or "idle").
+    pub tailnet: Option<super::model::TailnetDevice>,
+    /// Tailscale on this computer, when it's installed.
+    pub tailscale: Option<super::model::TailscaleStatus>,
 }
 
 impl Engine {
@@ -46,10 +51,18 @@ impl Engine {
             peer: None,
             service: None,
             note: None,
+            tailnet: None,
+            tailscale: None,
         };
         if self.demo_world().is_some() || !spec.is_checkable() {
             return Ok(out);
         }
+        // What Tailscale says right now (how it reaches the machine changes).
+        self.refresh_tailnet().await;
+        if let Some(m) = self.current().machines.iter().find(|m| m.id == spec.id) {
+            out.tailnet = m.tailnet.clone();
+        }
+        out.tailscale = self.current().tailscale.clone();
         if let Some(l) = link::get(&spec).await {
             let started = Instant::now();
             if l.request(json!({ "op": "ping" }), Duration::from_secs(10)).await.is_ok() {
@@ -62,14 +75,26 @@ impl Engine {
         if out.direct && out.via == "ssh" {
             out.note = Some("Paired, but the direct connection didn't come up; using ssh. The machine's firewall may block its UDP port.".into());
         }
-        // Its local-network address didn't answer, so the connection took the long way.
+        // Its local-network address didn't answer, so the connection took the
+        // long way. Away from home that's expected; but when Tailscale itself
+        // reaches the machine on this network, something here blocked us.
         let lan = paired.as_ref().map(|p| p.lan.clone()).unwrap_or_default();
-        if out.via == "direct" && !lan.is_empty() && out.network.as_deref().is_some_and(|n| n != "Local network") {
+        let long_way = out.via == "direct" && !lan.is_empty() && out.network.as_deref().is_some_and(|n| n != "Local network");
+        let here = out.tailnet.as_ref().is_some_and(|d| d.path == "direct" && same_network(d, &lan));
+        if long_way && (here || out.tailnet.is_none()) {
             out.note = Some(format!(
-                "Its local-network address ({}) didn't answer, so this goes through {}. On a Mac, allow Muxen in System Settings › Privacy & Security › Local Network.",
+                "It's on this network ({}), but didn't answer there, so this goes through {}. On a Mac, allow Muxen in System Settings › Privacy & Security › Local Network.",
                 lan.join(", "),
                 out.network.clone().unwrap_or_default()
             ));
+        }
+        if out.via == "direct" && out.network.as_deref() == Some("Tailscale") {
+            if let Some(d) = out.tailnet.as_ref().filter(|d| d.path == "relay") {
+                out.note = Some(format!(
+                    "Tailscale couldn't connect the two machines directly, so traffic goes through its relay{}: slower, especially the desktop.",
+                    d.relay.as_ref().map(|r| format!(" ({r})")).unwrap_or_default()
+                ));
+            }
         }
         Ok(out)
     }
@@ -106,8 +131,9 @@ impl Engine {
         let fingerprint = reply["fingerprint"].as_str().unwrap_or("").to_string();
         let port = reply["port"].as_u64().unwrap_or(0) as u16;
         let host = direct::resolve_host(&spec).await.unwrap_or_else(|| spec.host.rsplit('@').next().unwrap_or(&spec.host).to_string());
-        let lan = reply["addresses"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
-        direct::save(&spec.id, Some(direct::Paired { fingerprint, host, port, lan }))?;
+        let list = |k: &str| -> Vec<String> { reply[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default() };
+        let (lan, tailnet) = (list("addresses"), list("tailnet"));
+        direct::save(&spec.id, Some(direct::Paired { fingerprint, host, port, lan, tailnet }))?;
         // The listener may take a moment to start.
         for _ in 0..6 {
             link::reset(&spec.id);
@@ -124,4 +150,11 @@ impl Engine {
         }
         Ok(out)
     }
+}
+
+/// Tailscale reaches the machine at one of its local-network addresses: it's
+/// on the same network as this computer.
+fn same_network(d: &super::model::TailnetDevice, lan: &[String]) -> bool {
+    // Tailscale's own direct address isn't in what we keep; it's read fresh.
+    super::tailscale::cached_direct_addr(&d.dns_name).is_some_and(|a| lan.iter().any(|l| a.starts_with(&format!("{l}:"))))
 }

@@ -388,6 +388,10 @@ pub struct MachineSummary {
     /// "unknown-host", "host-key" or "error"; `hint` is a command to try.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unreachable: Option<crate::fleet::model::Unreachable>,
+    /// It on the user's Tailscale network: whether Tailscale sees it online,
+    /// and whether traffic to it goes peer-to-peer or through a relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tailnet: Option<crate::fleet::model::TailnetDevice>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -550,6 +554,27 @@ pub struct SettingsOut {
 pub struct SshHostsResponse {
     /// Host aliases from ~/.ssh/config, usable as `host` in add_machine.
     pub hosts: Vec<String>,
+    /// Computers on the user's tailnet (when Tailscale is installed and on
+    /// here), online ones first.
+    pub tailnet: Vec<TailnetHost>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TailnetHost {
+    /// The device's own name, e.g. "box-SER".
+    pub name: String,
+    /// What to pass as add_machine's `host`: the user's ~/.ssh/config alias
+    /// for it when there is one, else its MagicDNS name (reachable from
+    /// anywhere on the tailnet).
+    pub host: String,
+    pub dns_name: String,
+    /// "linux", "macOS", "windows", ...
+    pub os: String,
+    /// Whether Tailscale sees it online.
+    pub online: bool,
+    /// Already in the fleet, as this machine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -594,6 +619,7 @@ pub fn machine_summary(m: &Machine) -> MachineSummary {
         last_seen_at: m.probe.as_ref().and_then(|p| p.last_seen_at),
         error: m.probe.as_ref().filter(|p| !p.ok).and_then(|p| p.error.clone()),
         unreachable: m.unreachable.clone(),
+        tailnet: m.tailnet.clone(),
     }
 }
 
@@ -977,8 +1003,39 @@ pub fn settings(engine: &Arc<Engine>) -> SettingsOut {
     }
 }
 
-pub fn ssh_hosts() -> SshHostsResponse {
-    SshHostsResponse { hosts: crate::ops::ssh_hosts() }
+pub async fn ssh_hosts(engine: &Arc<Engine>) -> SshHostsResponse {
+    let hosts = crate::ops::ssh_hosts();
+    let mut tailnet = Vec::new();
+    if let Some(t) = crate::fleet::tailscale::status().await.filter(|t| t.running()) {
+        // Where each alias really goes, to list a device under the user's own
+        // name for it.
+        let resolved: Vec<(String, Option<String>)> = futures::future::join_all(hosts.iter().map(|h| async move { (h.clone(), ssh_hostname(h).await) })).await;
+        let snap = engine.current();
+        for p in t.peers.iter().filter(|p| p.is_computer()) {
+            let alias = resolved
+                .iter()
+                .find(|(a, to)| {
+                    let names: Vec<String> = std::iter::once(a.clone()).chain(to.clone()).collect();
+                    t.find(&[], &names).is_some_and(|f| f.dns_name == p.dns_name)
+                })
+                .map(|(a, _)| a.clone());
+            let host = alias.unwrap_or_else(|| p.dns_name.clone());
+            let machine_id = snap
+                .machines
+                .iter()
+                .find(|m| m.tailnet.as_ref().is_some_and(|d| d.dns_name == p.dns_name) || m.host.eq_ignore_ascii_case(&host))
+                .map(|m| m.id.clone());
+            tailnet.push(TailnetHost { name: p.host_name.clone(), host, dns_name: p.dns_name.clone(), os: p.os.clone(), online: p.online, machine_id });
+        }
+        tailnet.sort_by(|a, b| b.online.cmp(&a.online).then(a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())));
+    }
+    SshHostsResponse { hosts, tailnet }
+}
+
+/// The host an ssh alias really connects to (its config's HostName).
+async fn ssh_hostname(alias: &str) -> Option<String> {
+    let out = tokio::time::timeout(Duration::from_secs(3), tokio::process::Command::new("ssh").args(["-G", alias]).output()).await.ok()?.ok()?;
+    String::from_utf8_lossy(&out.stdout).lines().find_map(|l| l.strip_prefix("hostname ").map(|h| h.trim().to_string())).filter(|h| !h.is_empty())
 }
 
 // ---------------------------------------------------------------------------
@@ -2276,6 +2333,7 @@ pub async fn session_start(engine: &Arc<Engine>, req: SessionStartRequest) -> Ap
             // Only the app hosts terminals for sessions without the agent.
             direct: false,
             command: None,
+            typed: None,
         })
         .await
         .map_err(session_error)

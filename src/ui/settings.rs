@@ -651,6 +651,62 @@ impl SettingsPage {
             .child(light_grid)
     }
 
+    /// Tailscale on this computer: whether it's on, and what Muxen uses it for.
+    fn tailscale_section(&self, theme: &Theme) -> Option<impl IntoElement> {
+        let t = self.snapshot.tailscale.clone()?;
+        let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
+        let on_it = self.snapshot.machines.iter().filter(|m| m.tailnet.is_some()).count();
+        let (glyph, color, title, detail) = if t.running {
+            (
+                "circle-check",
+                theme.success,
+                match &t.tailnet {
+                    Some(n) => format!("Connected to {n}'s tailnet"),
+                    None => "Connected to your tailnet".into(),
+                },
+                match on_it {
+                    0 => "None of your machines are on it yet. Machines on your tailnet are reachable from anywhere.".to_string(),
+                    1 => "1 of your machines is on it, so Muxen reaches it from anywhere: on its own network directly, elsewhere through Tailscale.".to_string(),
+                    n => format!("{n} of your machines are on it, so Muxen reaches them from anywhere: on their own network directly, elsewhere through Tailscale."),
+                },
+            )
+        } else if t.state == "NeedsLogin" {
+            ("circle-alert", theme.warning, format!("Tailscale is signed out on {here}"), "Sign in to reach machines on your tailnet away from their network.".to_string())
+        } else {
+            ("circle-alert", theme.warning, format!("Tailscale is off on {here}"), "Turn it on to reach machines on your tailnet away from their network.".to_string())
+        };
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .child(section_title(theme, "Tailscale", None))
+                .child(
+                    card(theme)
+                        .flex_row()
+                        .items_center()
+                        .gap(px(12.))
+                        .px(px(14.))
+                        .py(px(12.))
+                        .child(icon(glyph, 15., color))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .gap(px(2.))
+                                .child(div().text_size(px(13.)).child(title))
+                                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(detail))
+                                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Muxen only reads Tailscale's status; it never changes its settings.")),
+                        )
+                        .when(!t.running && super::can_open_tailscale(), |d| {
+                            d.child(Button::new("ts-open", "Open Tailscale").on_click(|_, _, _| super::open_tailscale()))
+                        }),
+                ),
+        )
+    }
+
     fn inventory_section(&self, theme: &Theme) -> impl IntoElement {
         let path = self.engine.paths().inventory.clone();
         let reveal = path.clone();
@@ -715,6 +771,7 @@ impl Render for SettingsPage {
                     .flex_col()
                     .gap(px(28.))
                     .child(self.github_section(&theme, cx))
+                    .children(self.tailscale_section(&theme))
                     .child(self.appearance_section(&theme, cx))
                     .child(self.terminal_section(&theme, terminal_font, cx))
                     .child(self.checks_section(&theme, cx))

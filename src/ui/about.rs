@@ -7,7 +7,7 @@ use super::kit::{Button, ButtonStyle, card};
 use super::root::{Modal, Root};
 use super::theme::{ActiveTheme, Theme};
 
-const WEBSITE: &str = "https://lumarylabs.com/openrunner";
+const WEBSITE: &str = "https://muxin.dev";
 const COMPANY: &str = "https://lumarylabs.com";
 const EMAIL: &str = "contact@lumarylabs.com";
 
@@ -70,7 +70,7 @@ impl Root {
                 .child(action)
         };
         let links = card(&theme)
-            .child(row(0, "Website", "lumarylabs.com/openrunner", Button::new("about-web", "Open").on_click(|_, _, cx| cx.open_url(WEBSITE)).into_any_element()))
+            .child(row(0, "Website", "muxin.dev", Button::new("about-web", "Open").on_click(|_, _, cx| cx.open_url(WEBSITE)).into_any_element()))
             .child(row(1, "Lumary Labs", "lumarylabs.com", Button::new("about-company", "Open").on_click(|_, _, cx| cx.open_url(COMPANY)).into_any_element()))
             .child(row(
                 2,

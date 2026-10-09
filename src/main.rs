@@ -899,8 +899,17 @@ fn main() -> ExitCode {
                 cli::settings,
             )
         }
-        Some(Command::SshHosts(a)) => run(&runtime, &a, async move |_| Ok(api::ssh_hosts()), |h| {
-            if h.hosts.is_empty() { "No hosts in ~/.ssh/config.\n".into() } else { format!("{}\n", h.hosts.join("\n")) }
+        Some(Command::SshHosts(a)) => run(&runtime, &a, async move |e| Ok(api::ssh_hosts(&e).await), |h| {
+            let mut out = if h.hosts.is_empty() { "No hosts in ~/.ssh/config.\n".to_string() } else { format!("{}\n", h.hosts.join("\n")) };
+            if !h.tailnet.is_empty() {
+                out.push_str("\nOn your tailnet:\n");
+                for t in &h.tailnet {
+                    let state = if t.online { "online" } else { "offline" };
+                    let added = t.machine_id.as_ref().map(|id| format!("  (in your fleet as {id})")).unwrap_or_default();
+                    out.push_str(&format!("{}  {}  {}{added}\n", t.host, t.os, state));
+                }
+            }
+            out
         }),
         Some(Command::Workspace(cmd)) => workspace(cmd, &runtime),
         Some(Command::Session(cmd)) => session(cmd, &runtime),

@@ -34,7 +34,7 @@ Use the MCP tools when they're connected: start the server with `muxen mcp`, and
 
 **"Add my server and put two runners on it."**
 
-1. Call `list_ssh_hosts` to find the user's alias, or ask for `user@host`.
+1. Call `list_ssh_hosts` to find the user's alias, or ask for `user@host`. Its `tailnet` list has the computers on the user's Tailscale network, each with the `host` to add it by; one added that way is reachable from anywhere.
 2. Call `add_machine(name, host)`. Its result includes the first check. If the status is `offline`, the machine isn't reachable with key-based ssh. Show the error and stop.
 3. Make sure a GitHub scope is watched (`fleet_status.github.watching`). If none is, ask which org or repo to use and call `github_scopes(add: [...])`. A failure there usually needs `admin:org`; show the hint.
 4. Call `install_runners(machine_id, count: 2)`. Pass `scope` if more than one org or repo is watched. The default `mode: "auto"` picks a service where possible, else Docker containers (Linux without passwordless sudo), else a background run.sh; the log says which. Use `mode: "docker"` when the user wants isolated runners; only pass `docker_socket: true` if they explicitly want jobs to use Docker and trust the workflows (it's root-equivalent on the host).
@@ -110,7 +110,8 @@ The CLI equivalents are `muxen session ls|start|read|send|attach|restart|stop`.
 
 ## Connections and desktops
 
-- `machine_connection` says how Muxen reaches a machine: `direct` (QUIC), `ssh` (one live ssh connection) or `none`, with a measured round trip. `direct_connection(machine_id, enabled)` pairs for direct connections (it installs a user service on the machine; only when asked).
+- `machine_connection` says how Muxen reaches a machine: `direct` (QUIC), `ssh` (one live ssh connection) or `none`, with a measured round trip and the `network` it goes over ("Local network", "Tailscale", ...). `direct_connection(machine_id, enabled)` pairs for direct connections (it installs a user service on the machine; only when asked).
+- Tailscale, when it's on this computer, keeps machines reachable away from home: Muxen uses the local network when the machine is on it and Tailscale otherwise, and switches by itself when the network changes. A machine's `tailnet` (in `get_machine` and `machine_connection`) says whether Tailscale sees it online and whether traffic goes peer-to-peer (`path: "direct"`) or through a slower relay (`"relay"`). An `unreachable.kind` of `"tailscale-off"` means Tailscale is off or signed out on this computer: tell the user to turn it on; Muxen never changes Tailscale's settings.
 - `desktop_screenshot(machine_id)` returns a picture of the machine's screen (Linux with X11 so far). `desktop_input(machine_id, events)` clicks, types, scrolls and presses keys there, in that picture's pixels: look first, act, then look again. It's the user's real screen: only when asked, and never type passwords.
 
 ## Don'ts

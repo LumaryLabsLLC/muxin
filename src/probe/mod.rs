@@ -139,6 +139,30 @@ pub async fn probe(spec: &MachineSpec, remembered: Option<Shell>) -> ProbeResult
         other => other.map(|out| (out, shell)),
     };
 
+    // The usual host didn't answer from this network, but the machine is on
+    // the tailnet: try it there, and keep using that while it works.
+    let result = match result {
+        Err(e) if !spec.is_local() && matches!(crate::fleet::build::unreachable_kind(&e.to_string()), "offline" | "unknown-host") => {
+            match crate::fleet::tailscale::ssh_fallback(&spec.id) {
+                Some(address) => {
+                    crate::fleet::tailscale::use_ssh_fallback(&spec.id, true);
+                    match run(spec, shell).await {
+                        Ok(out) => {
+                            tracing::info!("{} answers over Tailscale ({address}), not at {}", spec.name, spec.host.trim());
+                            Ok((out, shell))
+                        }
+                        Err(_) => {
+                            crate::fleet::tailscale::use_ssh_fallback(&spec.id, false);
+                            Err(e)
+                        }
+                    }
+                }
+                None => Err(e),
+            }
+        }
+        other => other,
+    };
+
     match result {
         Ok((stdout, shell)) => {
             let mut r = parse(&stdout);
@@ -265,6 +289,11 @@ pub fn ssh_args(spec: &MachineSpec) -> Vec<String> {
         args.extend(["-l".into(), user.to_string()]);
     }
     args.extend(spec.ssh_options.iter().cloned());
+    // Away from home, through Tailscale, when the usual host only works there
+    // (ssh's config still supplies the user, key and port).
+    if let Some(address) = crate::fleet::tailscale::ssh_override(&spec.id) {
+        args.extend(["-o".into(), format!("HostName={address}")]);
+    }
     args.push(spec.host.trim().to_string());
     args
 }

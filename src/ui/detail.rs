@@ -575,6 +575,7 @@ impl Root {
         let (glyph, color) = match u.kind.as_str() {
             "offline" => ("power", theme.text_muted),
             "refused" => ("unplug", theme.warning),
+            "tailscale-off" => ("network", theme.warning),
             "auth" | "host-key" => ("lock", theme.error),
             _ => ("circle-alert", theme.error),
         };
@@ -661,6 +662,9 @@ impl Root {
                         )
                     }),
             )
+            .when(u.kind == "tailscale-off" && super::can_open_tailscale(), |d| {
+                d.child(Button::new("m-offline-tailscale", "Open Tailscale").style(ButtonStyle::Primary).on_click(|_, _, _| super::open_tailscale()))
+            })
             .child(
                 Button::new("m-offline-check", "Check again")
                     .icon("refresh-cw")

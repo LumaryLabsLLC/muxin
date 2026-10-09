@@ -3,6 +3,7 @@
 //! sidebar rows that list them under their machine.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{AnyElement, ClipboardItem, Context, Focusable, FontWeight, SharedString, Window, div, prelude::*, px};
 
@@ -80,7 +81,24 @@ impl Root {
     }
 
     /// Starts a session sized to the page, then opens it.
-    pub(super) fn start_session(&mut self, mut req: StartSession, window: &mut Window, cx: &mut Context<Self>) {
+    /// Columns and rows a session's terminal gets in this window (its share of
+    /// the width when the desktop is beside it).
+    fn terminal_fit(&self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> (u16, u16) {
+        let viewport = window.viewport_size();
+        let sidebar = if self.sidebar_hidden { 0. } else { self.sidebar_width };
+        let mut width = f32::from(viewport.width) - sidebar;
+        if self.split.contains(id) {
+            width *= self.split_ratio;
+        }
+        TerminalView::fit(width, f32::from(viewport.height) - CHROME_HEIGHT, window, cx)
+    }
+
+    pub(super) fn start_session(&mut self, req: StartSession, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_session_then(req, None, window, cx);
+    }
+
+    /// Starts a session, then shows `then` (what to do in it), if any.
+    pub(super) fn start_session_then(&mut self, mut req: StartSession, then: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let viewport = window.viewport_size();
         let (cols, rows) = TerminalView::fit(f32::from(viewport.width) - self.sidebar_width, f32::from(viewport.height) - CHROME_HEIGHT, window, cx);
         req.cols = cols;
@@ -99,6 +117,9 @@ impl Root {
                 Ok(s) => {
                     this.notice = None;
                     this.navigate(Route::Session(s.id), window, cx);
+                    if let Some(t) = then {
+                        this.notify_user(t, false, cx);
+                    }
                 }
                 Err(e) => this.notify_user(e, true, cx),
             });
@@ -126,7 +147,8 @@ impl Root {
             let agent = self.snapshot.sessions.iter().find(|s| s.id == id).map(|s| s.agent.clone()).unwrap_or_default();
             cx.new(|cx| TerminalView::replay(&demo_screen(&agent), window, cx))
         } else if let Some(link) = link {
-            let size = (120, 36);
+            // The size it will have, so the session is redrawn for it exactly.
+            let size = self.terminal_fit(id, window, cx);
             let (io, output) = attach_over_link(&self.engine, link, name, size);
             cx.new(|cx| TerminalView::remote(io, output, size, window, cx))
         } else {
@@ -165,6 +187,51 @@ impl Root {
         window.focus(&view.focus_handle(cx));
         self.terminals.insert(id.to_string(), view);
         self.refresh_machine_sessions(id.split('/').next().unwrap_or_default());
+    }
+
+    /// Re-attaches a terminal whose connection dropped, a few times over about
+    /// ten seconds. True while it's still trying.
+    fn resume_terminal(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        const TRIES: u32 = 8;
+        let (tries, waiting) = self.resuming.entry(id.to_string()).or_insert((0, false));
+        if *tries >= TRIES {
+            return false;
+        }
+        if *waiting {
+            return true;
+        }
+        *tries += 1;
+        *waiting = true;
+        let delay = Duration::from_millis(300 * *tries as u64).min(Duration::from_secs(2));
+        let (engine, sid) = (self.engine.clone(), id.to_string());
+        let machine = id.split('/').next().unwrap_or_default().to_string();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            // The machine's connection first (it may be coming back the other
+            // way), so the terminal goes over it.
+            let job = engine.runtime().spawn({
+                let engine = engine.clone();
+                async move {
+                    match engine.machine(&machine) {
+                        Some((spec, _)) => crate::fleet::link::get(&spec).await.is_some(),
+                        None => false,
+                    }
+                }
+            });
+            let linked = job.await.unwrap_or(false);
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some((_, waiting)) = this.resuming.get_mut(&sid) {
+                    *waiting = false;
+                }
+                // Still cut off (and still on screen): attach again.
+                if linked && this.terminals.get(&sid).is_some_and(|t| t.read(cx).exited()) {
+                    this.open_terminal(&sid, window, cx);
+                }
+                cx.notify();
+            });
+        });
+        self.track(task);
+        true
     }
 
     pub(super) fn refresh_machine_sessions(&self, machine_id: &str) {
@@ -353,6 +420,16 @@ impl Root {
                 }
             })));
 
+        // Cut off while the machine is up (another network, a hiccup): attach
+        // again by itself for a while before calling it disconnected.
+        let resuming = if detached && !exited && info.persistent && offline.is_none() {
+            self.resume_terminal(&info.id, window, cx)
+        } else {
+            if !detached {
+                self.resuming.remove(&info.id);
+            }
+            false
+        };
         let sid3 = info.id.clone();
         let body = div()
             .relative()
@@ -384,7 +461,27 @@ impl Root {
                     ),
                 )
             })
-            .when(detached && !exited && info.persistent && offline.is_none(), |d| {
+            .when(resuming, |d| {
+                d.child(
+                    div().absolute().inset_0().bg(theme.scrim.opacity(0.5)).flex().items_center().justify_center().child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(14.))
+                            .py(px(8.))
+                            .rounded(px(8.))
+                            .bg(theme.elevated)
+                            .border_1()
+                            .border_color(theme.border_variant)
+                            .text_size(px(12.5))
+                            .text_color(theme.text_muted)
+                            .child(spinner("session-resume", 13., theme.text_muted))
+                            .child("Reconnecting…"),
+                    ),
+                )
+            })
+            .when(detached && !exited && info.persistent && offline.is_none() && !resuming, |d| {
                 d.child(
                     div().absolute().inset_0().bg(theme.scrim).flex().items_center().justify_center().child(
                         card(&theme)
@@ -404,7 +501,10 @@ impl Root {
                                 Button::new("session-reconnect", "Reconnect")
                                     .icon("plug")
                                     .style(ButtonStyle::Primary)
-                                    .on_click(cx.listener(move |this, _, window, cx| this.open_terminal(&sid3, window, cx))),
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.resuming.remove(&sid3);
+                                        this.open_terminal(&sid3, window, cx)
+                                    })),
                             ),
                     ),
                 )
@@ -801,7 +901,13 @@ impl Root {
         let (glyph, color, value, detail, direct) = match self.machine_conn.get(&m.id) {
             Some(Load::Ready(c)) => {
                 let speed = c.latency_ms.map(|ms| format!(" · {ms} ms")).unwrap_or_default();
-                let net = c.network.clone().map(|n| format!(" · {n}")).unwrap_or_default();
+                // Through Tailscale: straight to the machine, or through its relay.
+                let path = match (c.network.as_deref(), c.tailnet.as_ref().map(|d| d.path.as_str())) {
+                    (Some("Tailscale"), Some("direct")) => " · peer-to-peer",
+                    (Some("Tailscale"), Some("relay")) => " · through a relay",
+                    _ => "",
+                };
+                let net = c.network.clone().map(|n| format!(" · {n}{path}")).unwrap_or_default();
                 let at = c.peer.clone().map(|p| format!(" ({p})")).unwrap_or_default();
                 match c.via.as_str() {
                     "direct" => (
@@ -823,6 +929,18 @@ impl Root {
             }
             Some(Load::Failed(e)) => ("unplug", theme.error, "Not connected".into(), e.clone(), false),
             _ => ("network", theme.text_placeholder, "Checking…".into(), String::new(), false),
+        };
+        // Not on the tailnet (while this computer is): offer to set it up there.
+        let offer_tailscale = m.platform.starts_with("linux")
+            && matches!(self.machine_conn.get(&m.id), Some(Load::Ready(c)) if c.tailnet.is_none() && c.tailscale.as_ref().is_some_and(|t| t.running));
+        // Whether it's reachable away from its own network.
+        let tailnet_line = match self.machine_conn.get(&m.id) {
+            Some(Load::Ready(c)) => match (&c.tailnet, &c.tailscale) {
+                (Some(d), _) => Some(format!("On your tailnet as {}, so it's reachable from anywhere.", d.name)),
+                (None, Some(t)) if t.running => Some("Not on your tailnet, so Muxen reaches it only on its own network.".to_string()),
+                _ => None,
+            },
+            _ => None,
         };
         let button = if direct {
             Button::new("m-direct-off", "Use ssh only").style(ButtonStyle::Ghost).loading(changing).on_click(cx.listener({
@@ -866,8 +984,15 @@ impl Root {
                             .min_w(px(0.))
                             .gap(px(2.))
                             .child(div().text_size(px(13.)).text_color(theme.text).child(value))
-                            .when(!detail.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(detail))),
+                            .when(!detail.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(detail)))
+                            .children(tailnet_line.map(|t| div().text_size(px(11.5)).text_color(theme.text_placeholder).child(t))),
                     )
+                    .when(offer_tailscale, |d| {
+                        d.child(Button::new("m-tailscale", "Set up Tailscale").style(ButtonStyle::Ghost).on_click(cx.listener({
+                            let mid = mid.clone();
+                            move |this, _, window, cx| this.setup_tailscale(&mid, window, cx)
+                        })))
+                    })
                     // Seeing the desktop: Linux (X11) machines so far.
                     .when(m.platform.starts_with("linux"), |d| {
                         d.child(Button::new("m-desktop", "Show desktop").icon("monitor").on_click(cx.listener({
@@ -1006,6 +1131,22 @@ impl Root {
         };
         self.notify_user("Follow the steps in the terminal: copy the code, then open github.com/login/device.", false, cx);
         self.start_session(req, window, cx);
+    }
+
+    /// Opens a shell on a Linux machine with Tailscale's install command typed
+    /// in, for the user to run: it asks for their password there, then shows
+    /// a link to sign in to their tailnet.
+    pub(super) fn setup_tailscale(&mut self, machine_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let req = StartSession {
+            machine_id: machine_id.to_string(),
+            agent: "shell".into(),
+            cwd: "~".into(),
+            title: Some("Set up Tailscale".into()),
+            typed: Some("curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up".into()),
+            ..Default::default()
+        };
+        let then = "Tailscale's install command is typed in: press Enter to run it. It asks for your password there, then shows a link to sign in to your tailnet.";
+        self.start_session_then(req, Some(then.into()), window, cx);
     }
 
     /// Where the GitHub login in use lives: the machine chosen for it, else this computer.

@@ -382,6 +382,9 @@ fn valid_name(s: &str) -> bool {
 #[serde(rename_all = "camelCase", default)]
 pub struct PersistedState {
     pub probes: HashMap<String, ProbeResult>,
+    /// Machines on the user's tailnet, as Tailscale last saw them (kept for
+    /// when Tailscale is off).
+    pub tailnet: HashMap<String, crate::fleet::model::TailnetDevice>,
     pub check_started_at: Option<DateTime<Utc>>,
     pub check_finished_at: Option<DateTime<Utc>>,
 }

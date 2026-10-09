@@ -8,7 +8,7 @@ use gpui::{
 };
 
 use super::input::{InputEvent, TextInput};
-use super::kit::{Button, ButtonStyle, checkbox, icon, label};
+use super::kit::{self, Button, ButtonStyle, checkbox, icon, label};
 use super::theme::{ActiveTheme, mono_font, Theme};
 use crate::fleet::Engine;
 use crate::fleet::sessions::{AGENTS, StartSession};
@@ -83,6 +83,8 @@ pub struct AddMachineDialog {
     name: Entity<TextInput>,
     host: Entity<TextInput>,
     hosts: Vec<String>,
+    /// Computers on the user's tailnet that aren't in the fleet yet.
+    tailnet: Vec<crate::api::TailnetHost>,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -102,7 +104,21 @@ impl AddMachineDialog {
             }
         };
         let subs = vec![cx.subscribe_in(&name, window, on_input), cx.subscribe_in(&host, window, on_input)];
-        AddMachineDialog { engine, name, host, hosts: ssh_hosts(), error: None, _subscriptions: subs }
+        // The tailnet takes a moment (Tailscale, and where each alias goes).
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { crate::api::ssh_hosts(&engine).await }
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(found) = job.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.tailnet = found.tailnet.into_iter().filter(|t| t.machine_id.is_none()).collect();
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        AddMachineDialog { engine, name, host, hosts: ssh_hosts(), tailnet: Vec::new(), error: None, _subscriptions: subs }
     }
 
     pub fn first_focus(&self, cx: &App) -> FocusHandle {
@@ -136,7 +152,9 @@ impl Render for AddMachineDialog {
                 .on_click(cx.listener(|this, _, _, cx| this.pick("local".into(), crate::config::local_hostname(), cx)))
                 .into_any_element(),
         ];
-        for (i, h) in self.hosts.iter().take(12).enumerate() {
+        // A tailnet computer shows once, below, under the user's alias for it.
+        let on_tailnet: Vec<&str> = self.tailnet.iter().map(|t| t.host.as_str()).collect();
+        for (i, h) in self.hosts.iter().filter(|h| !on_tailnet.contains(&h.as_str())).take(12).enumerate() {
             let host = h.clone();
             suggestions.push(
                 suggestion(&theme, SharedString::from(format!("sugg-{i}")), h.clone(), "terminal")
@@ -159,6 +177,35 @@ impl Render for AddMachineDialog {
                 .child(label(&theme, "Suggestions"))
                 .child(div().flex().flex_wrap().gap(px(6.)).children(suggestions)),
         )
+        .when(!self.tailnet.is_empty(), |d| {
+            let chips: Vec<AnyElement> = self
+                .tailnet
+                .iter()
+                .take(16)
+                .enumerate()
+                .map(|(i, t)| {
+                    let glyph = match t.os.to_ascii_lowercase().as_str() {
+                        "macos" => "laptop",
+                        "windows" => "monitor",
+                        _ => "server",
+                    };
+                    let (host, name) = (t.host.clone(), t.name.clone());
+                    suggestion(&theme, SharedString::from(format!("sugg-ts-{i}")), t.host.clone(), glyph)
+                        .child(kit::dot(if t.online { theme.success } else { theme.text_placeholder }, 6.))
+                        .on_click(cx.listener(move |this, _, _, cx| this.pick(host.clone(), name.clone(), cx)))
+                        .into_any_element()
+                })
+                .collect();
+            d.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(label(&theme, "On your tailnet"))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Added by its tailnet name, a machine is reachable from anywhere."))
+                    .child(div().flex().flex_wrap().gap(px(6.)).children(chips)),
+            )
+        })
         .children(error_line(&theme, &self.error))
         .child(footer(vec![
             Button::new("am-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
@@ -934,6 +981,7 @@ impl NewSessionDialog {
             rows: 0,
             direct,
             command: self.prefill.command.as_ref().map(|(c, _)| c.clone()),
+            typed: None,
         };
         match self.prefill.workspace.clone().filter(|_| self.in_workspace) {
             Some(plan) => {

@@ -3,7 +3,7 @@
 //! browsers over SSE. Keep `web/src/types.ts` in sync with this file.
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +31,42 @@ pub struct Snapshot {
     pub notifications: Vec<super::sessions::SessionNotice>,
     /// Git checkouts found on the machines, by repository then machine.
     pub checkouts: Vec<Checkout>,
+    /// Tailscale on this computer; None when it isn't installed.
+    pub tailscale: Option<TailscaleStatus>,
+}
+
+/// Tailscale on this computer.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TailscaleStatus {
+    /// Tailscale's state: "Running", "Stopped", "NeedsLogin", ...
+    pub state: String,
+    pub running: bool,
+    /// The tailnet's name, e.g. "you@example.com".
+    pub tailnet: Option<String>,
+}
+
+/// A machine as Tailscale sees it, when it's on the user's tailnet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TailnetDevice {
+    /// Its MagicDNS name's first part ("box").
+    pub name: String,
+    /// Its full MagicDNS name ("box.tail1234.ts.net").
+    pub dns_name: String,
+    pub ips: Vec<String>,
+    pub os: String,
+    /// Whether Tailscale sees it online.
+    pub online: bool,
+    /// When Tailscale last heard from it, while it's offline.
+    pub last_seen_at: Option<DateTime<Utc>>,
+    /// How Tailscale reaches it from here: "direct" (peer-to-peer), "relay"
+    /// (through a Tailscale relay, slower), or "idle" (no traffic lately).
+    pub path: String,
+    /// The relay's region code (e.g. "mia"), when relayed.
+    pub relay: Option<String>,
+    /// When Muxen read this from Tailscale.
+    pub read_at: DateTime<Utc>,
 }
 
 /// A git checkout on one of the machines.
@@ -172,6 +208,8 @@ pub struct Machine {
     pub gh: Option<GhCli>,
     /// Why it can't be reached, when `status` is "offline".
     pub unreachable: Option<Unreachable>,
+    /// It on the user's tailnet, as Tailscale last saw it.
+    pub tailnet: Option<TailnetDevice>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -217,7 +255,8 @@ pub struct Probe {
 #[serde(rename_all = "camelCase")]
 pub struct Unreachable {
     /// "offline" (no answer: shut down, asleep, off the network) | "refused" |
-    /// "auth" | "unknown-host" | "host-key" | "error"
+    /// "auth" | "unknown-host" | "host-key" | "tailscale-off" (this computer's
+    /// Tailscale is off or signed out, and the machine is on the tailnet) | "error"
     pub kind: String,
     /// e.g. "Beelink is offline".
     pub title: String,

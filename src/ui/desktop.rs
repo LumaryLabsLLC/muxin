@@ -45,7 +45,9 @@ enum Msg {
     Ready(Arc<Remote>, u32, u32, String),
     /// The screen picture changed (see `Canvas`).
     Changed,
-    Ended(String),
+    /// The stream ended: why, and whether it may well work again in a moment
+    /// (the connection dropped, as opposed to the machine saying no).
+    Ended(String, bool),
 }
 
 /// The machine's screen as last received: patches land here as they arrive,
@@ -57,6 +59,9 @@ struct Canvas {
     /// BGRA, as GPUI draws images.
     data: Vec<u8>,
 }
+
+/// Tries at picking a dropped stream back up before saying it ended.
+const RETRIES: u32 = 6;
 
 /// Frame widths to choose from; `NATIVE` is the screen's own size.
 pub const NATIVE: u32 = 16384;
@@ -107,6 +112,10 @@ pub struct DesktopView {
     frames: u64,
     /// Why the machine can't be reached ("Beelink is offline"), while it can't.
     offline: Option<String>,
+    /// Picking a dropped stream back up: tries so far, and the next one.
+    resuming: bool,
+    retries: u32,
+    retry: Option<Task<()>>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -138,6 +147,9 @@ impl DesktopView {
             scroll_rest: 0.,
             frames: 0,
             offline: None,
+            resuming: false,
+            retries: 0,
+            retry: None,
             _tasks: Vec::new(),
         };
         view.start(window, cx);
@@ -173,6 +185,7 @@ impl DesktopView {
         let back = self.offline.is_some() && offline.is_none();
         self.offline = offline;
         if back && !matches!(self.state, State::Live) {
+            self.retries = 0;
             self.start(window, cx);
         }
         cx.notify();
@@ -209,11 +222,11 @@ impl DesktopView {
         let rt = engine.runtime().clone();
         rt.spawn(async move {
             let Some((spec, _)) = engine.machine(&machine_id) else {
-                let _ = tx.unbounded_send(Msg::Ended("That machine is gone.".into()));
+                let _ = tx.unbounded_send(Msg::Ended("That machine is gone.".into(), false));
                 return;
             };
             let Some(link) = crate::fleet::link::get(&spec).await else {
-                let _ = tx.unbounded_send(Msg::Ended(format!("Can't reach the agent on {}.", spec.name)));
+                let _ = tx.unbounded_send(Msg::Ended(format!("Can't reach the agent on {}.", spec.name), true));
                 return;
             };
             let network = link.network();
@@ -229,12 +242,12 @@ impl DesktopView {
                 }
                 Ok(r) => {
                     link.close_channel(channel);
-                    let _ = tx.unbounded_send(Msg::Ended(r["error"].as_str().unwrap_or("The machine can't show its desktop.").to_string()));
+                    let _ = tx.unbounded_send(Msg::Ended(r["error"].as_str().unwrap_or("The machine can't show its desktop.").to_string(), false));
                     return;
                 }
                 Err(e) => {
                     link.close_channel(channel);
-                    let _ = tx.unbounded_send(Msg::Ended(e));
+                    let _ = tx.unbounded_send(Msg::Ended(e, true));
                     return;
                 }
             }
@@ -252,7 +265,7 @@ impl DesktopView {
                     return;
                 }
             }
-            let _ = tx.unbounded_send(Msg::Ended("The desktop stream stopped.".into()));
+            let _ = tx.unbounded_send(Msg::Ended("The desktop stream stopped.".into(), true));
         });
 
         let feed = cx.spawn_in(window, async move |this, cx| {
@@ -268,6 +281,8 @@ impl DesktopView {
                                 this.remote = Some(remote);
                                 this.size = (w, h);
                                 this.state = State::Live;
+                                this.retries = 0;
+                                this.resuming = false;
                                 let (via, width) = via.split_once('|').unwrap_or((&via, "0"));
                                 this.via = via.to_string();
                                 this.chosen = width.parse().unwrap_or(0);
@@ -287,9 +302,27 @@ impl DesktopView {
                                     }
                                 }
                             }
-                            Msg::Ended(why) => {
-                                this.state = State::Ended(why);
+                            Msg::Ended(why, may_return) => {
                                 this.remote = None;
+                                // The connection dropped (another network, a
+                                // moment's hiccup): pick the stream back up.
+                                if may_return && this.offline.is_none() && this.retries < RETRIES {
+                                    this.retries += 1;
+                                    this.resuming = true;
+                                    this.state = State::Connecting;
+                                    let delay = Duration::from_millis(500 * this.retries as u64).min(Duration::from_secs(3));
+                                    this.retry = Some(cx.spawn_in(window, async move |this, cx| {
+                                        cx.background_executor().timer(delay).await;
+                                        let _ = this.update_in(cx, |this, window, cx| {
+                                            if this.resuming && this.offline.is_none() {
+                                                this.start(window, cx);
+                                            }
+                                        });
+                                    }));
+                                } else {
+                                    this.resuming = false;
+                                    this.state = State::Ended(why);
+                                }
                             }
                         }
                     }
@@ -310,6 +343,7 @@ impl DesktopView {
             return why.clone();
         }
         match &self.state {
+            State::Connecting if self.resuming => "Reconnecting…".into(),
             State::Connecting => "Connecting…".into(),
             State::Live if self.frame.is_none() => "Waiting for the first frame…".into(),
             State::Live => format!("Live · {}×{}", self.size.0, self.size.1),
@@ -508,9 +542,15 @@ impl Render for DesktopView {
                     .child(icon("monitor", 28., theme.text_placeholder))
                     .child(div().max_w(px(460.)).text_center().text_size(px(13.)).text_color(theme.text_muted).child(why.clone()))
                     .child(Button::new("desktop-retry", "Try again").icon("refresh-cw").on_click(cx.listener(|this, _, window, cx| {
+                        this.retries = 0;
                         this.start(window, cx);
                         cx.notify();
                     }))),
+            ),
+            (State::Connecting, None) if self.resuming && self.frame.is_some() => Some(
+                div().flex().items_center().gap(px(10.)).child(spinner("desktop-resume", 16., theme.text_muted)).child(
+                    div().text_size(px(13.)).text_color(theme.text_muted).child("Reconnecting…"),
+                ),
             ),
             _ if self.frame.is_none() => Some(
                 div().flex().items_center().gap(px(10.)).child(spinner("desktop-wait", 16., theme.text_muted)).child(

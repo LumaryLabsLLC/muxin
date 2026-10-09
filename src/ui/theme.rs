@@ -89,7 +89,7 @@ impl Theme {
         match (m.status.as_str(), m.unreachable.as_ref().map(|u| u.kind.as_str())) {
             ("online", _) => self.success,
             ("offline", Some("offline")) => self.text_placeholder,
-            ("offline", Some("refused")) => self.warning,
+            ("offline", Some("refused" | "tailscale-off")) => self.warning,
             ("offline", _) => self.error,
             _ => self.text_placeholder,
         }

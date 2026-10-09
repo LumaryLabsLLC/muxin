@@ -8,6 +8,7 @@ pub mod engine;
 pub mod model;
 pub mod report;
 pub mod sessions;
+pub mod tailscale;
 pub mod workspaces;
 
 pub use engine::Engine;

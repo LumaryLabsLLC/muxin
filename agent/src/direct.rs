@@ -206,17 +206,28 @@ pub fn pair(req: &Value) -> Value {
         let _ = std::fs::write(dir().join("port"), p.to_string());
     }
     let service = install_service();
-    json!({ "ok": true, "fingerprint": fingerprint(cert.as_ref()), "port": port(), "service": service.0, "note": service.1, "addresses": lan_addresses() })
+    json!({ "ok": true, "fingerprint": fingerprint(cert.as_ref()), "port": port(), "service": service.0, "note": service.1, "addresses": lan_addresses(), "tailnet": tailnet_addresses() })
 }
 
 /// This machine's addresses on its local networks (not loopback, Docker
 /// bridges or VPN tunnels), for apps on the same network to connect directly.
 pub fn lan_addresses() -> Vec<String> {
-    let mut found = Vec::new();
+    addresses().0
+}
+
+/// Its addresses on a Tailscale network (100.64.0.0/10 on a Tailscale
+/// interface, fd7a:115c:a1e0::/48), for apps elsewhere on the tailnet.
+pub fn tailnet_addresses() -> Vec<String> {
+    addresses().1
+}
+
+/// (local network, tailnet) addresses.
+fn addresses() -> (Vec<String>, Vec<String>) {
+    let (mut lan, mut tailnet) = (Vec::new(), Vec::new());
     unsafe {
         let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
         if libc::getifaddrs(&mut list) != 0 {
-            return found;
+            return (lan, tailnet);
         }
         let mut cur = list;
         while !cur.is_null() {
@@ -226,29 +237,54 @@ pub fn lan_addresses() -> Vec<String> {
                 continue;
             }
             let name = std::ffi::CStr::from_ptr(ifa.ifa_name).to_string_lossy();
-            if ["docker", "br-", "veth", "virbr", "tailscale", "utun", "wg", "zt", "lo", "awdl", "llw", "bridge"].iter().any(|p| name.starts_with(p)) {
-                continue;
-            }
             let ip: Option<std::net::IpAddr> = match (*ifa.ifa_addr).sa_family as i32 {
                 libc::AF_INET => {
                     let a = &*(ifa.ifa_addr as *const libc::sockaddr_in);
                     Some(std::net::Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr)).into())
                 }
+                libc::AF_INET6 => {
+                    let a = &*(ifa.ifa_addr as *const libc::sockaddr_in6);
+                    Some(std::net::Ipv6Addr::from(a.sin6_addr.s6_addr).into())
+                }
                 _ => None,
             };
-            if let Some(std::net::IpAddr::V4(v4)) = ip {
-                if v4.is_private() && !found.contains(&v4.to_string()) {
-                    found.push(v4.to_string());
+            let Some(ip) = ip else { continue };
+            let tunnel = name.starts_with("tailscale") || name.starts_with("utun");
+            if is_tailnet(ip) && (tunnel || ip.is_ipv6()) {
+                if !tailnet.contains(&ip.to_string()) {
+                    tailnet.push(ip.to_string());
+                }
+                continue;
+            }
+            if ["docker", "br-", "veth", "virbr", "tailscale", "utun", "wg", "zt", "lo", "awdl", "llw", "bridge"].iter().any(|p| name.starts_with(p)) {
+                continue;
+            }
+            if let std::net::IpAddr::V4(v4) = ip {
+                if v4.is_private() && !lan.contains(&v4.to_string()) {
+                    lan.push(v4.to_string());
                 }
             }
         }
         libc::freeifaddrs(list);
     }
-    found
+    // IPv4 first: it's what Tailscale's MagicDNS hands out first too.
+    tailnet.sort_by_key(|a| a.contains(':'));
+    (lan, tailnet)
+}
+
+fn is_tailnet(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 100 && (o[1] & 0xc0) == 64
+        }
+        std::net::IpAddr::V6(v6) => v6.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
+    }
 }
 
 /// `muxen-agent migrate`, run after an update: the direct-connection service
-/// from before the rename (OpenRunner) becomes Muxen's.
+/// from before the rename (OpenRunner) becomes Muxen's, and an installed one
+/// is brought up to date.
 pub fn migrate() -> i32 {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let old_unit = home.join(".config/systemd/user/openrunner-agent.service");
@@ -262,6 +298,7 @@ pub fn migrate() -> i32 {
         let _ = run("launchctl", &["bootout", &format!("gui/{uid}/com.lumarylabs.openrunner-agent")]);
         let _ = std::fs::remove_file(&old_plist);
     } else {
+        refresh_unit();
         return 0;
     }
     if dir().join("trusted").exists() {
@@ -285,6 +322,28 @@ fn exe() -> String {
     std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| home_dir().join("bin/muxen-agent").display().to_string())
 }
 
+/// The systemd unit for `listen`. KillMode=process: restarting it (an update,
+/// pairing again) restarts only the listener. The session server it may have
+/// started, and every session in it, keeps running.
+fn systemd_unit() -> String {
+    format!(
+        "[Unit]\nDescription=Muxen agent (direct connections)\n\n[Service]\nExecStart={} listen\nRestart=always\nRestartSec=3\nKillMode=process\n\n[Install]\nWantedBy=default.target\n",
+        exe()
+    )
+}
+
+/// Brings an installed systemd unit up to date (without restarting it), so the
+/// restart after an update already leaves sessions alone.
+fn refresh_unit() {
+    let Ok(home) = std::env::var("HOME") else { return };
+    let path = PathBuf::from(home).join(format!(".config/systemd/user/{SERVICE}.service"));
+    let Ok(current) = std::fs::read_to_string(&path) else { return };
+    let wanted = systemd_unit();
+    if current != wanted && std::fs::write(&path, wanted).is_ok() {
+        let _ = run("systemctl", &["--user", "daemon-reload"]);
+    }
+}
+
 /// Runs `listen` as a service of this user: (how, a note when it couldn't).
 fn install_service() -> (&'static str, Option<String>) {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -300,6 +359,7 @@ fn install_service() -> (&'static str, Option<String>) {
   <key>ProgramArguments</key><array><string>{}</string><string>listen</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>AbandonProcessGroup</key><true/>
   <key>StandardErrorPath</key><string>{}</string>
 </dict></plist>
 "#,
@@ -318,11 +378,7 @@ fn install_service() -> (&'static str, Option<String>) {
     } else if run("systemctl", &["--user", "show-environment"]) {
         let unit_dir = PathBuf::from(&home).join(".config/systemd/user");
         let _ = std::fs::create_dir_all(&unit_dir);
-        let body = format!(
-            "[Unit]\nDescription=Muxen agent (direct connections)\n\n[Service]\nExecStart={} listen\nRestart=always\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n",
-            exe()
-        );
-        if std::fs::write(unit_dir.join(format!("{SERVICE}.service")), body).is_ok()
+        if std::fs::write(unit_dir.join(format!("{SERVICE}.service")), systemd_unit()).is_ok()
             && run("systemctl", &["--user", "daemon-reload"])
             && run("systemctl", &["--user", "enable", "--now", &format!("{SERVICE}.service")])
         {
@@ -362,4 +418,23 @@ fn remove_service() {
         let _ = run("systemctl", &["--user", "daemon-reload"]);
     }
     let _ = run("pkill", &["-f", "muxen-agent listen"]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn knows_tailnet_addresses() {
+        assert!(is_tailnet("100.123.240.0".parse().unwrap()));
+        assert!(is_tailnet("100.64.0.1".parse().unwrap()));
+        assert!(!is_tailnet("100.128.0.1".parse().unwrap()));
+        assert!(!is_tailnet("192.168.1.4".parse().unwrap()));
+        assert!(is_tailnet("fd7a:115c:a1e0::c530:f001".parse().unwrap()));
+        assert!(!is_tailnet("fd7a:115c:a1e1::1".parse().unwrap()));
+        // Whatever this machine has, never both kinds for one address.
+        let (lan, tailnet) = addresses();
+        println!("lan {lan:?} tailnet {tailnet:?}");
+        assert!(lan.iter().all(|a| !tailnet.contains(a)));
+    }
 }

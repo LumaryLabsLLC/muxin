@@ -19,7 +19,7 @@ And it lets agents **borrow a machine as a work environment**: an [agent workspa
 ## Install
 
 ```sh
-git clone https://github.com/LumaryLabsLLC/openrunner && cd openrunner
+git clone https://github.com/LumaryLabsLLC/muxin && cd muxin
 cargo build --release
 ./target/release/muxen            # opens the window
 ```

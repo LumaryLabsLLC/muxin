@@ -299,7 +299,13 @@ impl Root {
     fn feed_row(&self, theme: &Theme, e: &Entry, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let item = e.item();
         let (status, title, subtitle) = match e {
-            Entry::Op(o) => (op_status_icon(theme, o), o.title.clone(), format!("{} · {}", kind_label(&o.kind), format::ago(Some(o.started_at)))),
+            Entry::Op(o) => {
+                let when = match (&o.progress, o.status.as_str()) {
+                    (Some(p), "running") => progress_text(p),
+                    _ => format::ago(Some(o.started_at)),
+                };
+                (op_status_icon(theme, o), o.title.clone(), format!("{} · {when}", kind_label(&o.kind)))
+            }
             Entry::Command(w, _, c) => (
                 command_icon(theme, c),
                 c.command.clone(),
@@ -332,7 +338,11 @@ impl Root {
                     .min_w(px(0.))
                     .gap(px(2.))
                     .child(div().truncate().text_size(px(12.5)).when(is_command, |d| d.font_family(mono_font())).child(title))
-                    .child(div().truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(subtitle)),
+                    .child(div().truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(subtitle))
+                    .children(match e {
+                        Entry::Op(o) if o.status == "running" => o.progress.as_ref().map(|p| div().pt(px(3.)).child(progress_bar(theme, p))),
+                        _ => None,
+                    }),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.activity_selected = Some(item.clone());
@@ -358,6 +368,24 @@ impl Root {
             ),
             None => format!("Running for {}", format::elapsed(op.started_at)),
         };
+        // A copy under way: how far, and a way to stop it.
+        let progress = op.progress.clone().filter(|_| op.status == "running").map(|p| {
+            let id = op.id;
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(14.))
+                .pt(px(10.))
+                .child(div().flex_1().child(progress_bar(theme, &p)))
+                .child(div().flex_none().font_family(mono_font()).text_size(px(11.5)).text_color(theme.text_muted).child(progress_text(&p)))
+                .when(op.cancellable, |d| {
+                    d.child(Button::new("op-stop", "Stop").icon("x").on_click(cx.listener(move |this, _, _, cx| {
+                        this.engine.cancel_op(id);
+                        cx.notify()
+                    })))
+                })
+        });
         let lines: Vec<AnyElement> = op.log.iter().map(|l| log_line(theme, l)).collect();
         let meta = div()
             .flex()
@@ -384,7 +412,7 @@ impl Root {
                     .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Runner(id.clone()), window, cx)))
             }))
             .into_any_element();
-        let body = div()
+        let log = div()
             .id(SharedString::from(format!("op-log-{}", op.id)))
             .flex_1()
             .min_h(px(0.))
@@ -398,8 +426,8 @@ impl Root {
             .when_some(op.error.clone().filter(|e| !op.log.iter().any(|l| l.contains(e.as_str()))), |d, e| {
                 d.child(div().mt(px(6.)).flex().gap(px(6.)).text_color(theme.error).child(icon("circle-x", 13., theme.error)).child(e))
             })
-            .when(op.log.is_empty() && op.status == "running", |d| d.child(div().text_color(theme.text_placeholder).child("Waiting for output…")))
-            .into_any_element();
+            .when(op.log.is_empty() && op.status == "running", |d| d.child(div().text_color(theme.text_placeholder).child("Waiting for output…")));
+        let body = div().flex_1().min_h(px(0.)).flex().flex_col().children(progress).child(log).into_any_element();
         detail_frame(theme, op_status_icon(theme, op), op.title.clone(), meta, copy_text, body)
     }
 }
@@ -508,6 +536,7 @@ fn kind_label(kind: &str) -> &'static str {
         "remove" => "remove",
         "workspace" => "workspace",
         "machine" => "machine",
+        "copy" => "copy",
         _ => "operation",
     }
 }
@@ -595,4 +624,25 @@ fn mcp_add_command() -> String {
     let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "muxen".into());
     let exe = if exe.contains(' ') { format!("'{exe}'") } else { exe };
     format!("claude mcp add muxen -- {exe} mcp")
+}
+
+/// "45 MB of 120 MB · 6.1 MB/s"
+fn progress_text(p: &crate::fleet::model::OpProgress) -> String {
+    let done = format::bytes(p.done);
+    let amount = match p.total {
+        Some(t) if t > 0 => format!("{done} of {}", format::bytes(t)),
+        _ => done,
+    };
+    match p.rate {
+        Some(r) if r > 0. => format!("{amount} · {}/s", format::bytes(r as u64)),
+        _ => amount,
+    }
+}
+
+fn progress_bar(theme: &Theme, p: &crate::fleet::model::OpProgress) -> gpui::Div {
+    let fraction = match p.total {
+        Some(t) if t > 0 => p.done as f32 / t as f32,
+        _ => 0.,
+    };
+    kit::meter(theme, fraction, theme.accent)
 }

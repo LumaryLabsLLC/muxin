@@ -85,6 +85,10 @@ pub struct AddMachineDialog {
     hosts: Vec<String>,
     /// Computers on the user's tailnet that aren't in the fleet yet.
     tailnet: Vec<crate::api::TailnetHost>,
+    /// Computers on this network that aren't in the fleet yet; still looking while None.
+    network: Option<Vec<crate::fleet::discover::NetworkHost>>,
+    /// What to do before a picked machine can be added (a Mac with Remote Login off).
+    note: Option<String>,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -113,12 +117,13 @@ impl AddMachineDialog {
             if let Ok(found) = job.await {
                 let _ = this.update(cx, |this, cx| {
                     this.tailnet = found.tailnet.into_iter().filter(|t| t.machine_id.is_none()).collect();
+                    this.network = Some(found.network);
                     cx.notify();
                 });
             }
         })
         .detach();
-        AddMachineDialog { engine, name, host, hosts: ssh_hosts(), tailnet: Vec::new(), error: None, _subscriptions: subs }
+        AddMachineDialog { engine, name, host, hosts: ssh_hosts(), tailnet: Vec::new(), network: None, note: None, error: None, _subscriptions: subs }
     }
 
     pub fn first_focus(&self, cx: &App) -> FocusHandle {
@@ -137,6 +142,7 @@ impl AddMachineDialog {
     }
 
     fn pick(&mut self, host: String, name: String, cx: &mut Context<Self>) {
+        self.note = None;
         self.host.update(cx, |h, cx| h.set_text(host, cx));
         if self.name.read(cx).text().trim().is_empty() {
             self.name.update(cx, |n, cx| n.set_text(name, cx));
@@ -206,6 +212,41 @@ impl Render for AddMachineDialog {
                     .child(div().flex().flex_wrap().gap(px(6.)).children(chips)),
             )
         })
+        .child({
+            // What's on this network (Bonjour): ready to add, or a Mac that needs Remote Login.
+            let chips: Vec<AnyElement> = self
+                .network
+                .iter()
+                .flatten()
+                .take(16)
+                .enumerate()
+                .map(|(i, n)| {
+                    let (host, name, ssh) = (n.host.clone(), n.name.clone(), n.ssh);
+                    let label = if ssh { n.host.clone() } else { format!("{} · Remote Login off", n.name) };
+                    suggestion(&theme, SharedString::from(format!("sugg-net-{i}")), label, if n.mac { "laptop" } else { "server" })
+                        .when(!ssh, |d| d.text_color(theme.text_placeholder))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.pick(host.clone(), name.clone(), cx);
+                            if !ssh {
+                                this.note = Some(format!(
+                                    "Turn on Remote Login on {name} first: System Settings › General › Sharing › Remote Login. Then add it here."
+                                ));
+                            }
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                })
+                .collect();
+            let body = match &self.network {
+                None => div().flex().items_center().gap(px(6.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(kit::spinner("net-spin", 11., theme.text_placeholder)).child("Looking on this network…").into_any_element(),
+                Some(n) if n.is_empty() => div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Nothing else found. A Mac shows up here once Remote Login is on (System Settings › General › Sharing).").into_any_element(),
+                Some(_) => div().flex().flex_wrap().gap(px(6.)).children(chips).into_any_element(),
+            };
+            div().flex().flex_col().gap(px(6.)).child(label(&theme, "On this network")).child(body)
+        })
+        .children(self.note.clone().map(|n| {
+            div().flex().items_start().gap(px(8.)).text_size(px(12.)).text_color(theme.text_muted).child(icon("info", 13., theme.info)).child(div().flex_1().child(n))
+        }))
         .children(error_line(&theme, &self.error))
         .child(footer(vec![
             Button::new("am-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),

@@ -557,6 +557,10 @@ pub struct SshHostsResponse {
     /// Computers on the user's tailnet (when Tailscale is installed and on
     /// here), online ones first.
     pub tailnet: Vec<TailnetHost>,
+    /// Computers on this local network that aren't in the fleet yet: ones
+    /// advertising ssh (`ssh: true`, add by `host`), and Macs with Remote
+    /// Login off (`ssh: false`: it needs turning on there first).
+    pub network: Vec<crate::fleet::discover::NetworkHost>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1005,6 +1009,8 @@ pub fn settings(engine: &Arc<Engine>) -> SettingsOut {
 
 pub async fn ssh_hosts(engine: &Arc<Engine>) -> SshHostsResponse {
     let hosts = crate::ops::ssh_hosts();
+    // Listening on the local network takes a moment; do it meanwhile.
+    let listening = tokio::task::spawn_blocking(|| crate::fleet::discover::browse(Duration::from_millis(2500)));
     let mut tailnet = Vec::new();
     if let Some(t) = crate::fleet::tailscale::status().await.filter(|t| t.running()) {
         // Where each alias really goes, to list a device under the user's own
@@ -1029,7 +1035,25 @@ pub async fn ssh_hosts(engine: &Arc<Engine>) -> SshHostsResponse {
         }
         tailnet.sort_by(|a, b| b.online.cmp(&a.online).then(a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())));
     }
-    SshHostsResponse { hosts, tailnet }
+    // What's on this network, minus this computer, the fleet, and the tailnet's list.
+    let me = crate::config::local_hostname().to_ascii_lowercase();
+    // This computer by its address too: its Bonjour name can differ from its hostname.
+    let my_ip = std::net::UdpSocket::bind("0.0.0.0:0").and_then(|s| s.connect("1.1.1.1:53").and_then(|_| s.local_addr())).map(|a| a.ip().to_string()).ok();
+    let snap = engine.current();
+    let short = |s: &str| s.trim_end_matches('.').trim_end_matches(".local").to_ascii_lowercase();
+    let network = listening
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| short(&n.host) != me && short(&n.name) != me && !my_ip.as_ref().is_some_and(|ip| n.addresses.contains(ip)))
+        .filter(|n| {
+            !snap.machines.iter().any(|m| {
+                short(&m.host) == short(&n.host) || m.probe.as_ref().and_then(|p| p.hostname.as_deref()).is_some_and(|h| short(h) == short(&n.host) || short(h) == short(&n.name))
+            })
+        })
+        .filter(|n| !tailnet.iter().any(|t| t.name.eq_ignore_ascii_case(&n.name) || short(&t.dns_name).split('.').next() == Some(short(&n.host).as_str())))
+        .collect();
+    SshHostsResponse { hosts, tailnet, network }
 }
 
 /// The host an ssh alias really connects to (its config's HostName).
@@ -2819,4 +2843,122 @@ pub async fn checkouts(engine: &Arc<Engine>, req: CheckoutsRequest) -> ApiResult
 pub async fn checkout_git(engine: &Arc<Engine>, req: GitRequest) -> ApiResult<GitOut> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
     engine.checkout_git(&m.id, &req.path, &req.action).await.map(|output| GitOut { output }).map_err(|e| ApiError::new("operation_failed", e))
+}
+
+// ---------------------------------------------------------------------------
+// Files: browsing folders on machines, and copying between them.
+
+#[derive(Debug, Deserialize)]
+pub struct ListFilesRequest {
+    pub machine_id: String,
+    /// A folder: "~", "~/build", "/srv/data". Default: the home folder.
+    #[serde(default)]
+    pub path: String,
+}
+
+pub async fn list_files(engine: &Arc<Engine>, req: ListFilesRequest) -> ApiResult<crate::fleet::files::Listing> {
+    let s = engine.current();
+    let m = find_machine(&s, &req.machine_id)?;
+    engine.list_files(&m.id, &req.path).await.map_err(ApiError::invalid)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CopyFilesRequest {
+    /// The machine with the files.
+    pub from: String,
+    /// Files and folders on it ("~/build/app.tar.gz", "/srv/data/reports").
+    pub paths: Vec<String>,
+    /// The machine to copy them to.
+    pub to: String,
+    /// The folder there (made if missing). Files with the same names are replaced.
+    pub to_dir: String,
+    /// Wait for the copy to finish (default true).
+    #[serde(default = "yes")]
+    pub wait: bool,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CopyFilesResponse {
+    /// One per source folder.
+    pub operations: Vec<OperationOut>,
+    pub finished: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+}
+
+/// Splits "~/build/app" into ("~/build", "app"); a bare name is in the home folder.
+pub fn split_path(path: &str) -> Result<(String, String), String> {
+    let p = path.trim().trim_end_matches('/');
+    if p.is_empty() || p == "~" {
+        return Err("Name a file or folder to copy, not a whole home folder.".into());
+    }
+    match p.rsplit_once('/') {
+        Some(("", name)) => Ok(("/".into(), name.into())),
+        Some((dir, name)) => Ok((dir.into(), name.into())),
+        None => Ok(("~".into(), p.into())),
+    }
+}
+
+pub async fn copy_files(engine: &Arc<Engine>, req: CopyFilesRequest, surface: Surface, mut on_line: impl FnMut(&str)) -> ApiResult<CopyFilesResponse> {
+    let s = engine.current();
+    let from = find_machine(&s, &req.from)?.id.clone();
+    let to = find_machine(&s, &req.to)?.id.clone();
+    if req.paths.is_empty() {
+        return Err(ApiError::invalid("Give at least one path to copy."));
+    }
+    // One copy per folder the files are in.
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for p in &req.paths {
+        let (dir, name) = split_path(p).map_err(ApiError::invalid)?;
+        match groups.iter_mut().find(|(d, _)| *d == dir) {
+            Some((_, names)) => names.push(name),
+            None => groups.push((dir, vec![name])),
+        }
+    }
+    let mut ids = Vec::new();
+    for (dir, names) in groups {
+        let copy = crate::fleet::files::CopyRequest { from: from.clone(), dir, names, to: to.clone(), to_dir: req.to_dir.clone() };
+        ids.push(engine.copy_files(copy).map_err(ApiError::invalid)?);
+    }
+    let timeout = Duration::from_secs(req.timeout_secs.unwrap_or(3600).max(1));
+    let mut operations = Vec::new();
+    for id in &ids {
+        let op = if req.wait {
+            wait_operation(engine, *id, timeout, &mut on_line).await
+        } else {
+            engine.current().operations.iter().find(|o| o.id == *id).cloned()
+        }
+        .ok_or_else(|| ApiError::new("internal", format!("Operation {id} disappeared.")))?;
+        operations.push(op);
+    }
+    let finished = operations.iter().all(|o| o.status != "running");
+    let response = CopyFilesResponse {
+        operations: operations.iter().map(|o| operation_out(o, DEFAULT_TAIL)).collect(),
+        finished,
+        next: (!finished).then(|| {
+            surface.say(
+                "Still copying. Poll get_operation with each operation id until status isn't \"running\"; cancel_operation stops one.".to_string(),
+                "Still copying in the background; this command stopped waiting.",
+            )
+        }),
+    };
+    if let Some(failed) = operations.iter().find(|o| o.status == "failed") {
+        return Err(ApiError {
+            code: "operation_failed",
+            message: failed.error.clone().unwrap_or_else(|| "The copy failed.".into()),
+            hint: None,
+            details: serde_json::to_value(&response).ok(),
+        });
+    }
+    Ok(response)
+}
+
+/// Stops a running operation that can be stopped (a copy).
+pub fn cancel_operation(engine: &Arc<Engine>, req: OperationRequest) -> ApiResult<OperationOut> {
+    if !engine.cancel_op(req.operation_id) {
+        return Err(ApiError::invalid(format!("Operation {} isn't running, or can't be stopped.", req.operation_id)));
+    }
+    operation(engine, req)
 }

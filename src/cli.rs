@@ -644,3 +644,42 @@ pub fn checkouts(r: &[crate::fleet::model::Checkout]) -> String {
         .collect();
     table(&["MACHINE", "FOLDER", "REPOSITORY", "BRANCH", "SYNC", "CHANGES"], &rows)
 }
+
+pub fn listing(l: &crate::fleet::files::Listing) -> String {
+    let mut out = String::new();
+    let shown = match l.path.strip_prefix(&l.home) {
+        Some(rest) if !l.home.is_empty() => format!("~{rest}"),
+        _ => l.path.clone(),
+    };
+    let _ = writeln!(out, "{}:{shown}", l.machine_id);
+    if l.entries.is_empty() {
+        out.push_str("(empty)\n");
+    }
+    let rows: Vec<Vec<String>> = l
+        .entries
+        .iter()
+        .map(|e| {
+            let name = if e.folder { format!("{}/", e.name) } else if e.kind == "link" { format!("{}@", e.name) } else { e.name.clone() };
+            let modified = e.modified.and_then(|t| chrono::DateTime::from_timestamp(t, 0)).map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
+            vec![name, e.size.map(util::bytes).unwrap_or_default(), modified]
+        })
+        .collect();
+    if !rows.is_empty() {
+        out.push_str(&table(&["NAME", "SIZE", "MODIFIED"], &rows));
+    }
+    if l.more {
+        out.push_str("(more not shown)\n");
+    }
+    out
+}
+
+pub fn copied(r: &crate::api::CopyFilesResponse) -> String {
+    let mut out = String::new();
+    for o in &r.operations {
+        let _ = writeln!(out, "{}: {}", o.title, o.status);
+    }
+    if let Some(n) = &r.next {
+        let _ = writeln!(out, "{n}");
+    }
+    out
+}

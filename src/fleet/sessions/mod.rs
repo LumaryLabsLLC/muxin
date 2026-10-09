@@ -230,7 +230,28 @@ impl Engine {
             },
         };
         self.set_sessions(&spec.id, found.clone());
+        // Working now: look again once it should have gone quiet, rather than
+        // only trusting the agent to say so.
+        if found.sessions.iter().any(|s| s.busy) {
+            self.settle_sessions(&spec.id);
+        }
         Ok(found)
+    }
+
+    /// One more look at a machine's sessions a moment after a busy one should
+    /// have gone quiet (one pending look per machine).
+    fn settle_sessions(self: &Arc<Self>, machine_id: &str) {
+        static PENDING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+        let pending = PENDING.get_or_init(Default::default);
+        if !pending.lock().unwrap().insert(machine_id.to_string()) {
+            return;
+        }
+        let (me, id) = (self.clone(), machine_id.to_string());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(BUSY_WINDOW_SECS as u64 + 1)).await;
+            pending.lock().unwrap().remove(&id);
+            let _ = me.refresh_sessions(&id).await;
+        });
     }
 
     /// Starts an agent (or shell) in a new session and returns it.
@@ -569,7 +590,8 @@ pub(crate) fn parse_discovery(spec: &MachineSpec, reply: &Value) -> MachineSessi
             cwd: s["cwd"].as_str().unwrap_or("").to_string(),
             status: if running { "running".into() } else { "exited".into() },
             exit_code: s["exit_code"].as_i64().map(|c| c as i32),
-            busy: running && last_output.is_some_and(|a| now - a <= BUSY_WINDOW_SECS),
+            // The same rule as the agent's (its "sessions" event comes when this turns false).
+            busy: running && last_output.is_some_and(|a| now - a < BUSY_WINDOW_SECS),
             attention: None,
             clients: s["clients"].as_u64().unwrap_or(0) as u32,
             created_at: ts(&s["created"]),

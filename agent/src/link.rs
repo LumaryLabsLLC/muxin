@@ -74,6 +74,12 @@ enum Sink {
     Session(UnixStream),
     /// The desktop: a `screen` process (its stdin takes input).
     Desktop(std::process::ChildStdin, std::process::Child),
+    /// Files going out (a tar stream; ACKs let more through).
+    Pack(Arc<crate::files::Credit>),
+    /// Files coming in (fed to tar -x).
+    Unpack(crate::files::Unpack),
+    /// The clipboard: a `clip` process (its stdin takes what the app copied).
+    Clip(std::process::ChildStdin, std::process::Child),
 }
 
 impl Sink {
@@ -87,6 +93,13 @@ impl Sink {
                 let _ = child.kill();
                 let _ = child.wait();
             }
+            Sink::Pack(credit) => credit.close(),
+            Sink::Clip(stdin, mut child) => {
+                drop(stdin);
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            Sink::Unpack(u) => u.stop(),
         }
     }
 }
@@ -135,6 +148,16 @@ pub fn serve(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>) -> 
         let written = match map.get_mut(&channel) {
             Some(Sink::Session(s)) if kind == proto::DATA || kind == proto::RESIZE => proto::write_frame(s, kind, &payload),
             Some(Sink::Desktop(stdin, _)) if kind == crate::desktop::INPUT => proto::write_frame(stdin, kind, &payload).and_then(|_| stdin.flush()),
+            Some(Sink::Pack(credit)) if kind == crate::files::ACK => {
+                credit.ack(payload.get(..8).map(|b| u64::from_be_bytes(b.try_into().unwrap_or_default())).unwrap_or(0));
+                Ok(())
+            }
+            Some(Sink::Unpack(u)) if kind == proto::DATA => u.write(&payload),
+            Some(Sink::Clip(stdin, _)) if kind == crate::clipboard::CLIP => proto::write_frame(stdin, kind, &payload).and_then(|_| stdin.flush()),
+            Some(Sink::Unpack(u)) if kind == crate::files::END => {
+                u.end();
+                Ok(())
+            }
             _ => Ok(()),
         };
         if written.is_err() {
@@ -155,6 +178,9 @@ fn handle(req: &Value, out: &Out, attached: &Attached) -> Value {
         "sh" => run_script(req),
         "attach" => attach(req, out, attached),
         "desktop" => desktop(req, out, attached),
+        "files" => crate::files::list(req),
+        "clipboard" => clipboard(req, out, attached),
+        "pack" | "unpack" => files(req, out, attached),
         "watch" => {
             let out = out.clone();
             thread::spawn(move || watch(out));
@@ -343,6 +369,70 @@ fn desktop(req: &Value, out: &Out, attached: &Attached) -> Value {
     let mut reply = info;
     reply["ok"] = json!(true);
     reply
+}
+
+/// Shares this machine's clipboard on the request's channel (see clipboard.rs):
+/// text copied here goes to the app, text the app sends is pasted here.
+fn clipboard(req: &Value, out: &Out, attached: &Attached) -> Value {
+    let channel = req["channel"].as_u64().unwrap_or(0) as u32;
+    if channel == CONTROL {
+        return json!({ "ok": false, "error": "the clipboard needs a channel" });
+    }
+    let Ok(exe) = std::env::current_exe() else { return json!({ "ok": false, "error": "can't find the agent" }) };
+    let mut cmd = Command::new(exe);
+    cmd.arg("clip").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    if cfg!(target_os = "linux") {
+        match crate::desktop::session_env() {
+            Some(env) => {
+                cmd.envs(env);
+            }
+            None => return json!({ "ok": false, "error": "No desktop session here, so no clipboard." }),
+        }
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return json!({ "ok": false, "error": format!("couldn't start sharing the clipboard: {e}") }),
+    };
+    let (Some(stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let _ = child.kill();
+        return json!({ "ok": false, "error": "couldn't start sharing the clipboard" });
+    };
+    attached.lock().unwrap().insert(channel, Sink::Clip(stdin, child));
+    let (out, attached) = (out.clone(), attached.clone());
+    thread::spawn(move || {
+        while let Ok((kind, text)) = proto::read_frame(&mut stdout) {
+            if send(&out, channel, kind, &text).is_err() {
+                break;
+            }
+        }
+        if let Some(s) = attached.lock().unwrap().remove(&channel) {
+            s.close();
+            let _ = send(&out, channel, CLOSE, &[]);
+        }
+    });
+    json!({ "ok": true })
+}
+
+/// Starts one end of a copy on the request's channel (see files.rs).
+fn files(req: &Value, out: &Out, attached: &Attached) -> Value {
+    let channel = req["channel"].as_u64().unwrap_or(0) as u32;
+    if channel == CONTROL {
+        return json!({ "ok": false, "error": "a copy needs a channel" });
+    }
+    let o = out.clone();
+    let send: crate::files::Send = Arc::new(move |c, kind, payload| send(&o, c, kind, payload));
+    let started = if req["op"] == "pack" {
+        crate::files::pack(req, send).map(|(reply, credit)| (reply, Sink::Pack(credit)))
+    } else {
+        crate::files::unpack(req, send).map(|(reply, u)| (reply, Sink::Unpack(u)))
+    };
+    match started {
+        Ok((reply, sink)) => {
+            attached.lock().unwrap().insert(channel, sink);
+            reply
+        }
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
 }
 
 /// Tells the app when sessions change (one starts or ends, starts or stops

@@ -253,6 +253,8 @@ pub struct Settings {
     pub code_folders: Vec<String>,
     /// Repositories the user starred in Muxen ("owner/name"), in the order added.
     pub favorite_repos: Vec<String>,
+    /// Text copied here can be pasted on the machines (Linux desktops, Macs), and back.
+    pub share_clipboard: bool,
 }
 
 /// Common places people keep code, a few levels deep, plus repos sitting right in the home folder.
@@ -280,7 +282,14 @@ pub struct GitHubSettings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { github: GitHubSettings::default(), github_poll_seconds: 20, check_interval_minutes: 15, code_folders: default_code_folders(), favorite_repos: Vec::new() }
+        Settings {
+            github: GitHubSettings::default(),
+            github_poll_seconds: 20,
+            check_interval_minutes: 15,
+            code_folders: default_code_folders(),
+            favorite_repos: Vec::new(),
+            share_clipboard: true,
+        }
     }
 }
 

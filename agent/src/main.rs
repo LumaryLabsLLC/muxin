@@ -17,6 +17,8 @@
 #[cfg(unix)]
 mod client;
 #[cfg(unix)]
+mod clipboard;
+#[cfg(unix)]
 mod daemon;
 #[cfg(unix)]
 mod detect;
@@ -24,6 +26,8 @@ mod detect;
 mod desktop;
 #[cfg(unix)]
 mod direct;
+#[cfg(unix)]
+mod files;
 #[cfg(unix)]
 mod link;
 #[cfg(unix)]
@@ -59,6 +63,7 @@ fn main() {
         Some("migrate") => direct::migrate(),
         #[cfg(unix)]
         Some("screen") => desktop::run(&args[1..]),
+        Some("clip") => clipboard::run(),
         #[cfg(unix)]
         Some("attach") => match args.get(1) {
             Some(name) => client::attach(name),

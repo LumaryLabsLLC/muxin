@@ -24,6 +24,7 @@ icons!(
     "agent-claude", "agent-codex", "agent-gemini", "agent-opencode", "agent-amp", "agent-github",
     "circle-dot", "git-pull-request", "git-pull-request-draft", "git-merge", "message-square", "lock", "star",
     "arrow-down", "arrow-up", "book-open", "star-filled", "maximize", "minimize", "panel-right", "panel-left",
+    "folder", "file",
 );
 
 const FONTS: &[&[u8]] = &[

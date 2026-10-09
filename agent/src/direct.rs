@@ -139,10 +139,18 @@ async fn accept_loop() -> Result<(), String> {
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
     let mut transport = quinn::TransportConfig::default();
     transport.keep_alive_interval(Some(Duration::from_secs(4)));
+    // Everything to a machine shares one stream (terminals, the desktop,
+    // copies): let a lot be in flight, or a slow Wi-Fi round trip caps it at
+    // a few MB/s (quinn's default is 1.25 MB per stream).
+    transport.stream_receive_window(quinn::VarInt::from_u32(16 << 20));
+    transport.receive_window(quinn::VarInt::from_u32(32 << 20));
+    transport.send_window(32 << 20);
     transport.max_idle_timeout(Some(Duration::from_secs(12).try_into().map_err(|_| "bad timeout")?));
     config.transport_config(Arc::new(transport));
     let addr = SocketAddr::from((Ipv6Addr::UNSPECIFIED, port()));
-    let endpoint = quinn::Endpoint::server(config, addr).map_err(|e| format!("can't listen on UDP port {}: {e}", addr.port()))?;
+    let socket = udp_socket(addr).map_err(|e| format!("can't listen on UDP port {}: {e}", addr.port()))?;
+    let endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), Some(config), socket, Arc::new(quinn::TokioRuntime))
+        .map_err(|e| format!("can't listen on UDP port {}: {e}", addr.port()))?;
     eprintln!("muxen-agent {} listening on UDP {}", crate::VERSION, addr.port());
     // Stopped (an update, a restart): tell connected apps right away, so they
     // reconnect instead of waiting for silence.
@@ -168,6 +176,20 @@ async fn accept_loop() -> Result<(), String> {
 }
 
 /// Runs a link (the same code as `muxen-agent link`) over a QUIC stream.
+/// The listener's UDP socket: IPv6 and IPv4 both, with big buffers (Linux's
+/// default receive buffer drops a copy's bursts).
+fn udp_socket(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let s = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+    if addr.is_ipv6() {
+        let _ = s.set_only_v6(false);
+    }
+    let _ = s.set_send_buffer_size(4 << 20);
+    let _ = s.set_recv_buffer_size(4 << 20);
+    s.bind(&addr.into())?;
+    Ok(s.into())
+}
+
 async fn bridge(mut send: quinn::SendStream, mut recv: quinn::RecvStream) {
     let Ok((ours, theirs)) = UnixStream::pair() else { return };
     let Ok(theirs_out) = theirs.try_clone() else { return };

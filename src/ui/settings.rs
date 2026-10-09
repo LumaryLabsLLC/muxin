@@ -563,7 +563,16 @@ impl SettingsPage {
                     .py(px(6.))
                     .child(row("Font", div().font_family(mono_font()).text_size(px(12.5)).child(family).into_any_element(), None))
                     .child(row("Text size", size_control, Some("⌘+ / ⌘− in a terminal")))
-                    .child(row("Line height", presets, None)),
+                    .child(row("Line height", presets, None))
+                    .child(row(
+                        "Cursor",
+                        kit::checkbox(theme, "term-blink", a.terminal_cursor_blink, "Blink", |on, _, cx| {
+                            let on = *on;
+                            theme_mod::update_terminal(cx, |a| a.terminal_cursor_blink = on)
+                        })
+                        .into_any_element(),
+                        Some("While the terminal has focus"),
+                    )),
             )
             .child(preview)
     }
@@ -707,6 +716,40 @@ impl SettingsPage {
         )
     }
 
+    /// Sharing the clipboard with the machines.
+    fn clipboard_section(&self, theme: &Theme) -> impl IntoElement {
+        let on = self.engine.settings().share_clipboard;
+        let sharing: Vec<String> = self.snapshot.machines.iter().filter(|m| crate::fleet::clipboard::sharing(&m.id)).map(|m| m.name.clone()).collect();
+        let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
+        let status = match (on, sharing.as_slice()) {
+            (false, _) => "Off.".to_string(),
+            (true, []) => "No machine with a desktop is connected right now.".to_string(),
+            (true, names) => format!("Shared with {} now.", names.join(", ")),
+        };
+        let engine = self.engine.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(section_title(theme, "Clipboard", None))
+            .child(
+                card(theme)
+                    .px(px(14.))
+                    .py(px(12.))
+                    .gap(px(6.))
+                    .child(kit::checkbox(theme, "share-clipboard", on, "Share the clipboard with your machines", move |on, _, cx| {
+                        let mut s = engine.settings();
+                        s.share_clipboard = *on;
+                        let _ = engine.update_settings(s);
+                        cx.refresh_windows();
+                    }))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!(
+                        "Text copied on {here} can be pasted on your Linux desktops and Macs, and what's copied there lands here. Passwords from password managers stay on {here}."
+                    )))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_muted).child(status)),
+            )
+    }
+
     fn inventory_section(&self, theme: &Theme) -> impl IntoElement {
         let path = self.engine.paths().inventory.clone();
         let reveal = path.clone();
@@ -772,6 +815,7 @@ impl Render for SettingsPage {
                     .gap(px(28.))
                     .child(self.github_section(&theme, cx))
                     .children(self.tailscale_section(&theme))
+                    .child(self.clipboard_section(&theme))
                     .child(self.appearance_section(&theme, cx))
                     .child(self.terminal_section(&theme, terminal_font, cx))
                     .child(self.checks_section(&theme, cx))

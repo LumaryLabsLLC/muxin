@@ -34,7 +34,7 @@ Use the MCP tools when they're connected: start the server with `muxen mcp`, and
 
 **"Add my server and put two runners on it."**
 
-1. Call `list_ssh_hosts` to find the user's alias, or ask for `user@host`. Its `tailnet` list has the computers on the user's Tailscale network, each with the `host` to add it by; one added that way is reachable from anywhere.
+1. Call `list_ssh_hosts` to find the user's alias, or ask for `user@host`. Its `tailnet` list has the computers on the user's Tailscale network, each with the `host` to add it by; one added that way is reachable from anywhere. Its `network` list has computers on the local network that aren't in the fleet; `ssh: false` is a Mac with Remote Login off, which the user turns on in System Settings › General › Sharing before it can be added.
 2. Call `add_machine(name, host)`. Its result includes the first check. If the status is `offline`, the machine isn't reachable with key-based ssh. Show the error and stop.
 3. Make sure a GitHub scope is watched (`fleet_status.github.watching`). If none is, ask which org or repo to use and call `github_scopes(add: [...])`. A failure there usually needs `admin:org`; show the hint.
 4. Call `install_runners(machine_id, count: 2)`. Pass `scope` if more than one org or repo is watched. The default `mode: "auto"` picks a service where possible, else Docker containers (Linux without passwordless sudo), else a background run.sh; the log says which. Use `mode: "docker"` when the user wants isolated runners; only pass `docker_socket: true` if they explicitly want jobs to use Docker and trust the workflows (it's root-equivalent on the host).
@@ -113,6 +113,13 @@ The CLI equivalents are `muxen session ls|start|read|send|attach|restart|stop`.
 - `machine_connection` says how Muxen reaches a machine: `direct` (QUIC), `ssh` (one live ssh connection) or `none`, with a measured round trip and the `network` it goes over ("Local network", "Tailscale", ...). `direct_connection(machine_id, enabled)` pairs for direct connections (it installs a user service on the machine; only when asked).
 - Tailscale, when it's on this computer, keeps machines reachable away from home: Muxen uses the local network when the machine is on it and Tailscale otherwise, and switches by itself when the network changes. A machine's `tailnet` (in `get_machine` and `machine_connection`) says whether Tailscale sees it online and whether traffic goes peer-to-peer (`path: "direct"`) or through a slower relay (`"relay"`). An `unreachable.kind` of `"tailscale-off"` means Tailscale is off or signed out on this computer: tell the user to turn it on; Muxen never changes Tailscale's settings.
 - `desktop_screenshot(machine_id)` returns a picture of the machine's screen (Linux with X11 so far). `desktop_input(machine_id, events)` clicks, types, scrolls and presses keys there, in that picture's pixels: look first, act, then look again. It's the user's real screen: only when asked, and never type passwords.
+
+## Files
+
+- `list_files(machine_id, path)` lists a folder on any Linux or macOS machine, this computer included.
+- `copy_files(from, paths, to, to_dir)` copies files and folders from one machine to another, through Muxen, so the machines don't need to reach each other. Files with the same names in `to_dir` are replaced: `list_files` it first, and confirm with the user before overwriting. It waits by default; with `wait: false`, poll `get_operation`, and `cancel_operation` stops a copy.
+- The CLI equivalents are `muxen files <machine>:<folder>` and `muxen cp <machine>:<path>... <machine>:<folder>`.
+- Text copied on the user's Mac is shared with machines that have a desktop, and back, when the user has that on (Settings › Clipboard). Don't rely on it to move data; use `copy_files`.
 
 ## Don'ts
 

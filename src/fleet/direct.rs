@@ -157,16 +157,45 @@ fn failures() -> &'static Mutex<HashMap<String, Instant>> {
     FAILED.get_or_init(Default::default)
 }
 
+static V4: OnceLock<quinn::Endpoint> = OnceLock::new();
+static V6: OnceLock<quinn::Endpoint> = OnceLock::new();
+
+/// Moves the endpoints to fresh sockets (their connections come along). On
+/// macOS a socket made before the user allowed Local Network access stays
+/// cut off from the local network; a new one isn't.
+pub fn fresh_sockets() {
+    for (cell, bind) in [(&V4, "0.0.0.0:0"), (&V6, "[::]:0")] {
+        if let Some(e) = cell.get() {
+            if let Ok(socket) = udp_socket(bind.parse().expect("valid address")) {
+                if let Err(err) = e.rebind(socket) {
+                    tracing::debug!("couldn't move to a fresh socket: {err}");
+                }
+            }
+        }
+    }
+}
+
 /// One client endpoint per address family, shared by every connection.
 fn endpoint(v6: bool) -> Result<quinn::Endpoint, String> {
-    static V4: OnceLock<quinn::Endpoint> = OnceLock::new();
-    static V6: OnceLock<quinn::Endpoint> = OnceLock::new();
     let (cell, bind) = if v6 { (&V6, "[::]:0") } else { (&V4, "0.0.0.0:0") };
     if let Some(e) = cell.get() {
         return Ok(e.clone());
     }
-    let e = quinn::Endpoint::client(bind.parse().expect("valid address")).map_err(|e| e.to_string())?;
+    let socket = udp_socket(bind.parse().expect("valid address")).map_err(|e| e.to_string())?;
+    let e = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime)).map_err(|e| e.to_string())?;
     Ok(cell.get_or_init(|| e).clone())
+}
+
+/// A UDP socket with room for bursts. macOS gives UDP a 9 KB send buffer, so a
+/// copy's packets were dropped on the way out and the connection slowed to a
+/// crawl; Linux's default receive buffer is small too.
+fn udp_socket(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let s = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+    let _ = s.set_send_buffer_size(4 << 20);
+    let _ = s.set_recv_buffer_size(4 << 20);
+    s.bind(&addr.into())?;
+    Ok(s.into())
 }
 
 /// Opens a direct connection to a paired machine (or says why not).
@@ -273,6 +302,12 @@ fn client_config(p: &Paired) -> Result<quinn::ClientConfig, String> {
     let mut config = quinn::ClientConfig::new(Arc::new(crypto));
     let mut transport = quinn::TransportConfig::default();
     transport.keep_alive_interval(Some(Duration::from_secs(4)));
+    // Everything to a machine shares one stream (terminals, the desktop,
+    // copies): let a lot be in flight, or a slow Wi-Fi round trip caps it at
+    // a few MB/s (quinn's default is 1.25 MB per stream).
+    transport.stream_receive_window(quinn::VarInt::from_u32(16 << 20));
+    transport.receive_window(quinn::VarInt::from_u32(32 << 20));
+    transport.send_window(32 << 20);
     transport.max_idle_timeout(Some(Duration::from_secs(12).try_into().map_err(|_| "bad timeout")?));
     config.transport_config(Arc::new(transport));
     Ok(config)

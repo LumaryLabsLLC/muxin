@@ -66,6 +66,11 @@ enum Command {
     Settings(SettingsArgs),
     /// Host aliases from ~/.ssh/config, for add-machine
     SshHosts(AgentArgs),
+    /// What's in a folder on a machine: `muxen files beelink:~/build`
+    #[command(alias = "ls")]
+    Files(FilesArgs),
+    /// Copy files and folders between machines: `muxen cp beelink:~/build/app.tar.gz mac-studio:~/Downloads`
+    Cp(CpArgs),
     /// Agent workspaces: persistent work environments on your machines
     #[command(alias = "ws", subcommand)]
     Workspace(WorkspaceCommand),
@@ -359,6 +364,27 @@ struct DesktopInputArgs {
     machine: String,
     /// The events, as JSON
     events: String,
+}
+
+#[derive(Args)]
+struct FilesArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// <machine>[:<folder>], e.g. beelink:~/build (default: the home folder)
+    target: String,
+}
+
+#[derive(Args)]
+struct CpArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// <machine>:<path>... <machine>:<folder>: files and folders on one machine,
+    /// then the folder to copy them into (made if missing; same names are replaced)
+    #[arg(required = true, num_args = 2..)]
+    paths: Vec<String>,
+    /// Start the copy and return without waiting for it
+    #[arg(long)]
+    no_wait: bool,
 }
 
 #[derive(Args)]
@@ -901,6 +927,13 @@ fn main() -> ExitCode {
         }
         Some(Command::SshHosts(a)) => run(&runtime, &a, async move |e| Ok(api::ssh_hosts(&e).await), |h| {
             let mut out = if h.hosts.is_empty() { "No hosts in ~/.ssh/config.\n".to_string() } else { format!("{}\n", h.hosts.join("\n")) };
+            if !h.network.is_empty() {
+                out.push_str("\nOn this network:\n");
+                for n in &h.network {
+                    let note = if n.ssh { "" } else { "  (a Mac with Remote Login off: turn it on in System Settings › General › Sharing)" };
+                    out.push_str(&format!("{}  {}{note}\n", n.host, n.name));
+                }
+            }
             if !h.tailnet.is_empty() {
                 out.push_str("\nOn your tailnet:\n");
                 for t in &h.tailnet {
@@ -917,6 +950,12 @@ fn main() -> ExitCode {
         Some(Command::Checkouts(a)) => checkouts(a, &runtime),
         Some(Command::Git(cmd)) => git(cmd, &runtime),
         Some(Command::Desktop(cmd)) => desktop(cmd, &runtime),
+        Some(Command::Files(a)) => {
+            let (machine, path) = a.target.split_once(':').map(|(m, p)| (m.to_string(), p.to_string())).unwrap_or((a.target.clone(), String::new()));
+            let req = api::ListFilesRequest { machine_id: machine, path };
+            run(&runtime, &a.agent, async move |e| api::list_files(&e, req).await, cli::listing)
+        }
+        Some(Command::Cp(a)) => cp(a, &runtime),
         Some(Command::Connection(a)) => {
             let machine = a.machine.clone();
             match a.direct.as_deref() {
@@ -983,6 +1022,37 @@ fn open(args: OpenArgs, runtime: &tokio::runtime::Runtime) -> u8 {
 
 /// Runs one agent-facing command: JSON or human output on stdout, errors with a
 /// code (0 ok, 1 failed, 2 bad input / not found).
+/// `muxen cp <machine>:<path>... <machine>:<folder>`
+fn cp(a: CpArgs, runtime: &tokio::runtime::Runtime) -> u8 {
+    let place = |s: &str| s.split_once(':').map(|(m, p)| (m.to_string(), p.to_string()));
+    let (dest, sources) = a.paths.split_last().expect("clap requires two");
+    let Some((to, to_dir)) = place(dest) else {
+        eprintln!("error: the destination is <machine>:<folder>, e.g. mac-studio:~/Downloads");
+        return 2;
+    };
+    let mut from: Option<String> = None;
+    let mut paths = Vec::new();
+    for s in sources {
+        match place(s) {
+            Some((m, p)) if from.as_ref().is_none_or(|f| *f == m) => {
+                from = Some(m);
+                paths.push(p);
+            }
+            Some(_) => {
+                eprintln!("error: copy from one machine at a time");
+                return 2;
+            }
+            None => {
+                eprintln!("error: \"{s}\" needs its machine: <machine>:<path>, e.g. beelink:~/build/app.tar.gz");
+                return 2;
+            }
+        }
+    }
+    let req = api::CopyFilesRequest { from: from.unwrap_or_default(), paths, to, to_dir, wait: !a.no_wait, timeout_secs: None };
+    let json = a.agent.json;
+    run(runtime, &a.agent, async move |e| api::copy_files(&e, req, api::Surface::Cli, |line| if !json { eprintln!("{line}") }).await, cli::copied)
+}
+
 fn run<T: Serialize>(
     runtime: &tokio::runtime::Runtime,
     args: &AgentArgs,

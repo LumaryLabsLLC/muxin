@@ -30,6 +30,7 @@ pub struct ContextMenu {
 enum Action {
     NewTerminal(String),
     ShowDesktop(String),
+    CopyFiles(String),
     NewAgent(String, &'static str),
     Check(String),
     InstallRunner(String),
@@ -81,6 +82,9 @@ impl Root {
                     }
                     if m.platform.starts_with("linux") {
                         items.push(act("Show desktop", "monitor", Action::ShowDesktop(id.clone())));
+                    }
+                    if !m.platform.starts_with("windows") {
+                        items.push(act("Copy files…", "folder", Action::CopyFiles(id.clone())));
                     }
                     items.push(Item::Separator);
                     items.push(act("Check now", "refresh-cw", Action::Check(id.clone())));
@@ -188,6 +192,7 @@ impl Root {
             }
             Action::NewAgent(machine, agent) => self.show_new_session_with(Some(machine), Some(agent), window, cx),
             Action::ShowDesktop(machine) => self.navigate(Route::Desktop(machine), window, cx),
+            Action::CopyFiles(machine) => self.show_copy_files(Some(machine), None, window, cx),
             Action::Check(machine) => self.engine.trigger_check(Some(machine)),
             Action::InstallRunner(machine) => self.show_install_dialog(&machine, window, cx),
             Action::Remove(machine) => {

@@ -158,6 +158,7 @@ pub enum Modal {
     NewWorkspace(Entity<NewWorkspaceDialog>),
     NewSession(Entity<NewSessionDialog>),
     Licenses(Entity<super::about::LicensesDialog>),
+    Copy(Entity<super::files::CopyDialog>),
 }
 
 pub struct Notice {
@@ -232,6 +233,8 @@ pub struct Root {
     last_notice: Option<u64>,
     window_active: bool,
     pub(super) ws_ui: WorkspaceUi,
+    /// This computer's clipboard as last seen (see watch_clipboard).
+    clipboard_seen: (i64, String),
     _tasks: Vec<Task<()>>,
     pub(super) _subscriptions: Vec<Subscription>,
 }
@@ -269,6 +272,34 @@ impl Root {
             }
         });
         // Relative times ("2m ago", running job timers) tick once a second.
+        // The shared clipboard: what's copied here goes to the machines, what's
+        // copied there lands here (see fleet::clipboard).
+        let clipboard_out = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(400)).await;
+                if this.update(cx, |this, cx| this.watch_clipboard(cx)).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut copied_there = crate::fleet::clipboard::subscribe();
+        let clipboard_in = cx.spawn(async move |this, cx| {
+            loop {
+                match copied_there.recv().await {
+                    Ok(text) => {
+                        let alive = this.update(cx, |this, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                            this.clipboard_seen = (super::pasteboard_state().map(|s| s.0).unwrap_or(0), text);
+                        });
+                        if alive.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => break,
+                }
+            }
+        });
         let ticker = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
@@ -326,7 +357,8 @@ impl Root {
             context_menu: None,
             window_active: true,
             ws_ui: WorkspaceUi::default(),
-            _tasks: vec![updates, ticker],
+            clipboard_seen: (super::pasteboard_state().map(|s| s.0).unwrap_or(0), String::new()),
+            _tasks: vec![updates, ticker, clipboard_out, clipboard_in],
             _subscriptions: subscriptions,
         };
         ws.record_pulse();
@@ -500,6 +532,7 @@ impl Root {
                 self.show_install_dialog(arg, window, cx);
             }
             "add-machine" => self.show_add_machine(window, cx),
+            "copy" => self.show_copy_files(Some(arg.to_string()).filter(|a| !a.is_empty()), None, window, cx),
             "logs" => {
                 self.navigate(Route::Runner(arg.into()), window, cx);
                 // Give the first machine check a moment, so the runner's folder is known.
@@ -618,6 +651,73 @@ impl Root {
         let dialog = cx.new(|cx| InstallDialog::new(engine, snapshot, machine_id, window, cx));
         self.show_modal(Modal::Install(dialog.clone()), window, cx);
         self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+    }
+
+    /// The Copy files dialog. Without a start: from this computer to `machine`
+    /// (or the other way round when `machine` is this computer).
+    pub(super) fn show_copy_files(&mut self, machine: Option<String>, start: Option<super::files::CopyStart>, window: &mut Window, cx: &mut Context<Self>) {
+        let s = &self.snapshot;
+        let local = s.machines.iter().find(|m| m.local).map(|m| m.id.clone());
+        let start = start.or_else(|| {
+            let target = machine.clone().or_else(|| s.machines.iter().find(|m| !m.local && !m.host.is_empty()).map(|m| m.id.clone()))?;
+            let (from, to) = match &local {
+                Some(l) if *l == target => (l.clone(), s.machines.iter().find(|m| !m.local && !m.host.is_empty()).map(|m| m.id.clone()).unwrap_or_else(|| l.clone())),
+                Some(l) => (l.clone(), target),
+                None => (target.clone(), target),
+            };
+            Some(super::files::CopyStart { from, from_dir: "~".into(), selected: Vec::new(), to, to_dir: "~".into() })
+        });
+        let Some(start) = start else {
+            self.notify_user("Add a machine first.", true, cx);
+            return;
+        };
+        let engine = self.engine.clone();
+        let dialog = cx.new(|cx| super::files::CopyDialog::new(engine, start, window, cx));
+        self.show_modal(Modal::Copy(dialog.clone()), window, cx);
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+    }
+
+    /// Files dropped from the Finder on a machine: copy them there.
+    pub(super) fn copy_dropped(&mut self, machine_id: &str, paths: &[std::path::PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let Some(local) = self.snapshot.machines.iter().find(|m| m.local).map(|m| m.id.clone()) else {
+            self.notify_user("Add this computer to the fleet (host \"local\") to copy files from it.", true, cx);
+            return;
+        };
+        let Some(dir) = paths.first().and_then(|p| p.parent()).map(|p| p.display().to_string()) else { return };
+        // Things from one folder at a time (the Finder drops them that way).
+        let selected: Vec<String> = paths
+            .iter()
+            .filter(|p| p.parent().map(|d| d.display().to_string()) == Some(dir.clone()))
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        let start = super::files::CopyStart { from: local, from_dir: dir, selected, to: machine_id.to_string(), to_dir: "~".into() };
+        self.show_copy_files(None, Some(start), window, cx);
+    }
+
+    /// Offers what was just copied on this computer to the machines sharing
+    /// the clipboard (not a password manager's copies).
+    fn watch_clipboard(&mut self, cx: &mut Context<Self>) {
+        if self.engine.is_demo() || !self.engine.settings().share_clipboard {
+            return;
+        }
+        match super::pasteboard_state() {
+            Some((count, private)) => {
+                if count == self.clipboard_seen.0 {
+                    return;
+                }
+                self.clipboard_seen.0 = count;
+                if private {
+                    return;
+                }
+            }
+            // No change counter here: compare the text.
+            None => {}
+        }
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
+        if text != self.clipboard_seen.1 {
+            crate::fleet::clipboard::local_changed(&text);
+            self.clipboard_seen.1 = text;
+        }
     }
 
     pub(super) fn show_add_machine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -783,6 +883,7 @@ impl Root {
             Modal::Confirm(d) => d.focus_handle(cx),
             Modal::NewWorkspace(d) => d.read(cx).first_focus(cx),
             Modal::NewSession(d) => d.read(cx).first_focus(cx),
+            Modal::Copy(d) => d.read(cx).first_focus(cx),
             Modal::Licenses(d) => d.focus_handle(cx),
         };
         window.focus(&focus);
@@ -1186,6 +1287,12 @@ impl Root {
         div()
             .id(SharedString::from(format!("side-m-{}", m.id)))
             .group("machine-row")
+            // Files from the Finder dropped here are copied to the machine.
+            .when(!m.host.is_empty() && !m.platform.starts_with("windows"), |d| {
+                let (mid, accent) = (m.id.clone(), theme.accent);
+                d.drag_over::<gpui::ExternalPaths>(move |st, _, _, _| st.bg(accent.opacity(0.18)))
+                    .on_drop(cx.listener(move |this, paths: &gpui::ExternalPaths, window, cx| this.copy_dropped(&mid, paths.paths(), window, cx)))
+            })
             .flex()
             .items_center()
             .gap(px(10.))
@@ -1425,13 +1532,36 @@ impl Root {
         super::theme::save_sidebar_width(cx, self.sidebar_width);
     }
 
+    /// How fresh things are: GitHub's live runner status when an org or repo
+    /// is watched (or when GitHub needs fixing), else the last machine check.
+    /// Clicking opens Settings, or checks the machines now.
     fn connection_card(&self, theme: &Theme, s: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
-        let (color, title) = github_status(theme, s);
-        let detail = match (s.check.running, s.check.next_at) {
+        let checked = match (s.check.running, s.check.next_at) {
             (true, _) => "Checking machines…".to_string(),
             (false, Some(next)) => format!("Checked {} · next {}", format::ago(s.check.finished_at), format::until(next)),
             (false, None) if s.check.finished_at.is_some() => format!("Checked {}", format::ago(s.check.finished_at)),
             _ => "Machines not checked yet".into(),
+        };
+        let github_matters = s.github.configured || (s.github.token_source.is_empty() && !s.demo);
+        let (color, title, detail, check_now) = if github_matters {
+            let (color, title) = github_status(theme, s);
+            (color, title, checked, false)
+        } else {
+            let offline = s.machines.iter().filter(|m| m.status == "offline").count();
+            let color = if offline > 0 { theme.warning } else if s.check.finished_at.is_some() { theme.success } else { theme.text_placeholder };
+            let title = match (s.check.running, s.check.finished_at, offline) {
+                (true, _, _) => "Checking machines…".to_string(),
+                (_, None, _) => "Machines not checked yet".to_string(),
+                (_, Some(t), 0) => format!("Machines checked {}", format::ago(Some(t))),
+                (_, Some(_), 1) => "1 machine is offline".to_string(),
+                (_, Some(_), n) => format!("{n} machines are offline"),
+            };
+            let detail = match s.check.next_at {
+                _ if s.check.running => "Read-only: resources, runners, reachability".to_string(),
+                Some(next) => format!("Next check {} · click to check now", format::until(next)),
+                None => "Automatic checks are off · click to check now".to_string(),
+            };
+            (color, title, detail, true)
         };
         // Outer and inner padding, border, dot and gap.
         let text_w = self.sidebar_width - 60.;
@@ -1489,7 +1619,13 @@ impl Root {
                         .child(div().w(px(text_w)).truncate().text_size(px(12.5)).text_color(theme.text).child(title))
                         .child(div().w(px(text_w)).truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(detail)),
                 )
-                .on_click(cx.listener(|this, _, window, cx| this.navigate(Route::Settings, window, cx))),
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if check_now {
+                        this.engine.trigger_check(None);
+                    } else {
+                        this.navigate(Route::Settings, window, cx)
+                    }
+                })),
         )
         .child(footer)
     }
@@ -1715,6 +1851,7 @@ impl Render for Root {
             Modal::Confirm(d) => d.clone().into_any_element(),
             Modal::NewWorkspace(d) => d.clone().into_any_element(),
             Modal::NewSession(d) => d.clone().into_any_element(),
+            Modal::Copy(d) => d.clone().into_any_element(),
             Modal::Licenses(d) => d.clone().into_any_element(),
         });
         let notice = self.render_notice(&theme);

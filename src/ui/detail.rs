@@ -90,6 +90,15 @@ impl Root {
                             .disabled(m.host.is_empty() || offline)
                             .on_click(cx.listener(move |this, _, window, cx| this.show_new_session(Some(mid.clone()), window, cx)))
                     })
+                    .when(!m.platform.starts_with("windows"), |d| {
+                        let mid = m.id.clone();
+                        d.child(
+                            Button::new("m-copy", "Copy files")
+                                .icon("folder")
+                                .disabled(m.host.is_empty() || offline)
+                                .on_click(cx.listener(move |this, _, window, cx| this.show_copy_files(Some(mid.clone()), None, window, cx))),
+                        )
+                    })
                     .child({
                         let mid = m.id.clone();
                         Button::new("m-check", "Check")

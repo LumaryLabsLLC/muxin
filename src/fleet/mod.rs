@@ -1,10 +1,13 @@
 pub mod build;
+pub mod clipboard;
 pub mod code;
 pub mod connection;
+pub mod discover;
 pub mod desktop;
 pub mod direct;
 pub mod link;
 pub mod engine;
+pub mod files;
 pub mod model;
 pub mod report;
 pub mod sessions;

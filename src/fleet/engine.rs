@@ -73,6 +73,8 @@ struct State {
     tailnet: HashMap<String, super::model::TailnetDevice>,
     /// Tailscale on this computer; None until read, or when it isn't installed.
     tailscale: Option<super::model::TailscaleStatus>,
+    /// Stop flags of the operations that can be cancelled.
+    cancels: HashMap<u64, Arc<std::sync::atomic::AtomicBool>>,
 }
 
 pub struct Engine {
@@ -141,6 +143,7 @@ impl Engine {
             checkouts: HashMap::new(),
             tailnet: persisted.tailnet,
             tailscale: None,
+            cancels: HashMap::new(),
         };
         let (tx, _) = watch::channel(Arc::new(Snapshot::default()));
         super::direct::init(paths.dir.clone());
@@ -241,6 +244,17 @@ impl Engine {
             let mut st = self.state.lock().unwrap();
             st.settings_mtime = mtime(&self.paths.settings);
             let scopes_changed = st.settings.github != new.github;
+            if st.settings.share_clipboard != new.share_clipboard {
+                if new.share_clipboard {
+                    for m in st.inventory.machines.iter().filter(|m| !m.is_local()) {
+                        if let Some(l) = super::link::current(&m.id) {
+                            self.rt.spawn(super::clipboard::share(l));
+                        }
+                    }
+                } else {
+                    super::clipboard::stop_all();
+                }
+            }
             let favorites_only = Settings { favorite_repos: new.favorite_repos.clone(), ..st.settings.clone() } == new;
             st.settings = new.clone();
             if scopes_changed && new.github.orgs.is_empty() && new.github.repos.is_empty() {
@@ -365,6 +379,8 @@ impl Engine {
             finished_at: None,
             log: Vec::new(),
             error: None,
+            progress: None,
+            cancellable: false,
         });
         // Drop the oldest finished operations.
         while st.operations.len() > MAX_OPERATIONS {
@@ -403,10 +419,56 @@ impl Engine {
         }
     }
 
+    /// Makes an operation stoppable; the flag turns true when it's cancelled.
+    pub(crate) fn op_cancellable(&self, id: u64) -> Arc<std::sync::atomic::AtomicBool> {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut st = self.state.lock().unwrap();
+        st.cancels.insert(id, flag.clone());
+        if let Some(op) = st.operations.iter_mut().find(|o| o.id == id) {
+            op.cancellable = true;
+        }
+        self.publish(&mut st);
+        flag
+    }
+
+    /// Asks a running operation to stop. False when it can't be (or already ended).
+    pub fn cancel_op(&self, id: u64) -> bool {
+        let st = self.state.lock().unwrap();
+        match st.cancels.get(&id) {
+            Some(flag) => {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// How far along an operation is. Publishing is coalesced.
+    pub(crate) fn op_progress(self: &Arc<Self>, id: u64, progress: super::model::OpProgress) {
+        let mut st = self.state.lock().unwrap();
+        let Some(op) = st.operations.iter_mut().find(|o| o.id == id) else { return };
+        op.progress = Some(progress);
+        let due = st.last_publish.is_none_or(|t| t.elapsed() >= OP_PUBLISH_INTERVAL);
+        if due {
+            self.publish(&mut st);
+        } else if !st.publish_scheduled {
+            st.publish_scheduled = true;
+            let me = self.clone();
+            self.rt.spawn(async move {
+                tokio::time::sleep(OP_PUBLISH_INTERVAL).await;
+                let mut st = me.state.lock().unwrap();
+                st.publish_scheduled = false;
+                me.publish(&mut st);
+            });
+        }
+    }
+
     pub(crate) fn op_finish(&self, id: u64, result: Result<(), String>) {
         let mut st = self.state.lock().unwrap();
+        st.cancels.remove(&id);
         if let Some(op) = st.operations.iter_mut().find(|o| o.id == id) {
             op.finished_at = Some(Utc::now());
+            op.cancellable = false;
             match result {
                 Ok(()) => op.status = "succeeded".into(),
                 Err(e) => {
@@ -617,6 +679,11 @@ impl Engine {
     /// Refreshes a machine's sessions whenever its agent says they changed
     /// (one started or ended, started or stopped printing, rang the bell).
     async fn follow_link(self: Arc<Self>, link: Arc<super::link::Link>) {
+        // The shared clipboard rides along (machines with a desktop; not this computer).
+        let share = self.state.lock().unwrap().settings.share_clipboard;
+        if share && self.machine(&link.machine).is_some_and(|(spec, _)| !spec.is_local()) {
+            self.rt.spawn(super::clipboard::share(link.clone()));
+        }
         // A paired machine's local addresses change (DHCP, another network):
         // keep them current, so the next direct connection takes the short way.
         if let Some(mut paired) = super::direct::paired(&link.machine) {
@@ -686,7 +753,8 @@ impl Engine {
         loop {
             tokio::time::sleep(sessions::REFRESH_EVERY).await;
             let ids = self.machines_with_sessions();
-            let mut pending: FuturesUnordered<_> = ids.iter().map(|id| self.refresh_sessions(id)).collect();
+            // A slow machine doesn't hold up the rest for long.
+            let mut pending: FuturesUnordered<_> = ids.iter().map(|id| tokio::time::timeout(Duration::from_secs(15), self.refresh_sessions(id))).collect();
             while pending.next().await.is_some() {}
         }
     }

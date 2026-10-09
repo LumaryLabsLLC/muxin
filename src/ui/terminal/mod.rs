@@ -11,6 +11,7 @@ mod render;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
@@ -37,14 +38,20 @@ use colors::Palette;
 pub struct Metrics {
     pub size: f32,
     pub line_height: f32,
+    pub blink: bool,
 }
 
 impl Metrics {
     pub fn current(cx: &App) -> Metrics {
         let a = cx.global::<Appearance>();
-        Metrics { size: a.terminal_font_size, line_height: a.terminal_line_height }
+        Metrics { size: a.terminal_font_size, line_height: a.terminal_line_height, blink: a.terminal_cursor_blink }
     }
 }
+
+/// How long the cursor stays on, then off, while it blinks; and how long it
+/// stays on after a key press (so it's there while you type).
+const BLINK: Duration = Duration::from_millis(530);
+const BLINK_REST: Duration = Duration::from_millis(600);
 
 actions!(terminal, [IncreaseFontSize, DecreaseFontSize, ResetFontSize]);
 const PAD_X: f32 = 12.;
@@ -198,6 +205,9 @@ pub struct TerminalView {
     /// The button held in mouse-reporting mode, and the last cell reported.
     pressed: Option<(u8, (usize, usize))>,
     scroll_rest: f32,
+    /// The blinking cursor's phase, and the last key press (which shows it).
+    cursor_on: bool,
+    typed_at: Instant,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -318,6 +328,23 @@ impl TerminalView {
             cx.on_focus_in(&focus, window, |this, _, cx| this.report_focus(true, cx)),
             cx.on_focus_out(&focus, window, |this, _, _, cx| this.report_focus(false, cx)),
         ];
+        // Blinks while focused in the active window; steady otherwise.
+        let blink = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(BLINK).await;
+                let alive = this.update_in(cx, |this: &mut Self, window, cx| {
+                    let blinking = Metrics::current(cx).blink && window.is_window_active() && this.focus.is_focused(window);
+                    let on = !blinking || this.typed_at.elapsed() < BLINK_REST || !this.cursor_on;
+                    if on != this.cursor_on {
+                        this.cursor_on = on;
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        });
         TerminalView {
             shared: Arc::new(Shared { term, backend, geometry: Mutex::new(Geometry::default()) }),
             focus,
@@ -325,7 +352,9 @@ impl TerminalView {
             selecting: false,
             pressed: None,
             scroll_rest: 0.,
-            _tasks: vec![events],
+            cursor_on: true,
+            typed_at: Instant::now(),
+            _tasks: vec![events, blink],
             _subscriptions: subscriptions,
         }
     }
@@ -384,6 +413,11 @@ impl TerminalView {
     // Keyboard
 
     fn key_down(&mut self, e: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.typed_at = Instant::now();
+        if !self.cursor_on {
+            self.cursor_on = true;
+            cx.notify();
+        }
         let ks = &e.keystroke;
         if ks.modifiers.platform || (!cfg!(target_os = "macos") && ks.modifiers.control && ks.modifiers.shift) {
             let handled = match ks.key.as_str() {
@@ -587,6 +621,6 @@ impl Render for TerminalView {
             .on_action(cx.listener(|_, _: &IncreaseFontSize, _, cx| theme_mod::update_terminal(cx, |a| a.terminal_font_size += 1.)))
             .on_action(cx.listener(|_, _: &DecreaseFontSize, _, cx| theme_mod::update_terminal(cx, |a| a.terminal_font_size -= 1.)))
             .on_action(cx.listener(|_, _: &ResetFontSize, _, cx| theme_mod::update_terminal(cx, |a| a.terminal_font_size = theme_mod::TERMINAL_FONT_SIZE)))
-            .child(render::grid(self.shared.clone(), palette, focused, Metrics::current(cx)))
+            .child(render::grid(self.shared.clone(), palette, focused, self.cursor_on || !focused, Metrics::current(cx)))
     }
 }

@@ -1,20 +1,26 @@
-# Muxen
+<p align="center">
+  <img src="assets/brand/icon-512.png" width="128" height="128" alt="Muxen">
+</p>
 
-A fast, native dashboard for your own fleet of self-hosted GitHub Actions runners, built to be run by you **or by your AI agents**.
+<h1 align="center">Muxen</h1>
 
-Point it at the machines you own (a Mac Studio under the desk, a NUC, a Linux box, a Windows laptop) and Muxen shows:
+<p align="center">One app for all your machines, run by you <b>or by your AI agents</b>.<br>
+<a href="https://muxin.dev">muxin.dev</a></p>
 
-- which runners are working, idle or offline;
-- what each machine's CPU, memory, disk and uptime look like;
-- which jobs are queued, and which of them no runner can take.
+Point it at the machines you own (a Mac Studio under the desk, a NUC, a Linux box, a few MacBooks, a Windows laptop) and Muxen becomes the hub for all of them:
 
-It can also set the machines up. It installs runners, registers them with GitHub, and can start, stop, restart, inspect or remove them.
+- **Agent sessions:** Claude Code, Codex, OpenCode, Gemini CLI, Amp or a shell on any machine, in a real terminal, still running after you close the app.
+- **Desktops:** see a Linux machine's screen live and use it, beside an agent's terminal or in its own window.
+- **Files and clipboard:** copy files and folders between any two machines, and copy on your Mac to paste on a machine (and back).
+- **GitHub:** your inbox, repositories, issues and pull requests, with one click to hand an issue to an agent on the machine you pick.
+- **Self-hosted runners:** which runners are working, idle or offline, which jobs no runner can take, and installing, starting, stopping or removing runners.
+- **Health:** CPU, memory, disk and uptime, and a plain answer when a machine is offline or unreachable.
 
-And it lets agents **borrow a machine as a work environment**: an [agent workspace](#agent-workspaces) is a persistent folder (optionally a git checkout) on one of your machines where an agent runs commands, edits files and syncs code.
+Agents can also **borrow a machine as a work environment**: an [agent workspace](#agent-workspaces) is a persistent folder (optionally a git checkout) on one of your machines where an agent runs commands, edits files and syncs code.
 
 - **Native and fast.** The window is built with [GPUI](https://www.gpui.rs), the GPU-accelerated UI framework behind the Zed editor. It runs on macOS, Linux and Windows.
 - **Agent-first.** Every capability is available as an MCP server (`muxen mcp`) and as scriptable commands with `--json`. Claude Code, Codex and other agents can check the fleet, explain problems and fix them.
-- **Uses what you already have.** Machines are reached with your system `ssh`, so your keys, agent and `~/.ssh/config` aliases just work. GitHub access uses your `gh` login.
+- **Uses what you already have.** Machines are first reached with your system `ssh`, so your keys, agent and `~/.ssh/config` aliases just work; after that Muxen talks to its own small agent there, directly or through [Tailscale](#tailscale-and-moving-between-networks). GitHub access uses your `gh` login.
 
 ## Install
 
@@ -59,8 +65,10 @@ muxen status
 ## The app
 
 - **Overview:** a *fleet pulse* chart of how busy your online runners are, counts of working, idle, offline and queued, what needs attention (with a button that fixes or explains each item), and a card per machine with live CPU, memory and disk.
-- **Machines and runners:** install runners on a machine, and start, stop, restart, show logs for or remove each one.
-- **Agent sessions (⌘T):** a real terminal on any machine running Claude Code, Codex, OpenCode, Gemini CLI, Amp or a shell. Sessions are listed under their machine in the sidebar (a spinner while the agent works, a colored dot when it wants you) and keep running when you close the app.
+- **Machines and runners:** install runners on a machine, and start, stop, restart, show logs for or remove each one. A machine that's off or out of reach says so in plain words (offline, Remote Login off, ssh key not accepted, Tailscale off on this Mac, …), with when it was last seen and what to do; Muxen picks it back up by itself when it returns.
+- **Adding machines (⌘N):** suggestions from your `~/.ssh/config`, your Tailscale network, and this network (machines advertising ssh over Bonjour, and Macs that would be addable once Remote Login is on).
+- **Agent sessions (⌘T):** a real terminal on any machine running Claude Code, Codex, OpenCode, Gemini CLI, Amp or a shell. Sessions are listed under their machine in the sidebar (a spinner while the agent works, a colored dot when it wants you) and keep running when you close the app. Terminal font size, line height and a blinking cursor are in Settings.
+- **Copy files:** a two-pane dialog to copy files and folders from one machine to another (see [Files and the clipboard](#files-and-the-clipboard)); or drop files from the Finder onto a machine in the sidebar.
 - **Activity (⌘J):** one timeline of everything happening on the fleet: operations started in the app (with live output) and every command agents ran in workspaces, filterable by kind or failures.
 - **Workspaces:** see what agents are doing on your machines (every command, its exit code and output), review a workspace's git changes, copy a shell command to step in, or destroy it.
 - **Jobs:** queued and running self-hosted jobs, and which queued jobs no online runner can take.
@@ -70,15 +78,16 @@ muxen status
 
   The macOS themes also switch to the system fonts (SF Pro, and SF Mono when it's installed). The choice is saved in `ui.json` next to `fleet.toml`.
 
-Keyboard: ⌘R check now · ⇧⌘R sync GitHub · ⌘N add machine · ⌘T new session · ⌘1 / ⌘2 overview / jobs · ⌘F or `/` search the fleet · ⌘J activity · ⌘[ / ⌘] back / forward · ⌘, settings. On Linux and Windows, use Ctrl instead of ⌘.
+Keyboard: ⌘B hide or show the sidebar · ⌘R check now · ⇧⌘R sync GitHub · ⌘N add machine · ⌘T new session · ⌘1 / ⌘2 overview / jobs · ⌘F or `/` search the fleet · ⌘J activity · ⌘[ / ⌘] back / forward · ⌘, settings. On Linux and Windows, use Ctrl instead of ⌘.
 
 ## The inventory: `fleet.toml`
 
 Muxen keeps its files in `~/.config/muxen/`, or in `$MUXEN_HOME` if that's set. Run `muxen paths` to see where they are.
 
 - `fleet.toml` lists your machines. You can edit it by hand. Muxen also edits it when you add machines or install runners, and keeps your comments when it does.
-- `settings.json` holds the watched GitHub orgs and repos, and the polling intervals.
-- `state.json` holds the last machine check.
+- `settings.json` holds the watched GitHub orgs and repos, the polling intervals, and whether the clipboard is shared.
+- `state.json` holds the last machine check, and what Tailscale last said about each machine.
+- `direct.json` holds the machines paired for direct connections, and their addresses.
 
 ```toml
 [[machine]]
@@ -156,7 +165,13 @@ The MCP server has these tools:
 | `runner_action` | Starts, stops, restarts or removes a runner, or reads its logs. |
 | `get_operation`, `list_operations` | Progress and output of long operations. |
 | `github_scopes` | Watches or unwatches orgs and repos, with access checks. |
-| `get_settings`, `update_settings`, `list_ssh_hosts` | Settings, and the hosts from your `~/.ssh/config`. |
+| `get_settings`, `update_settings` | Settings. |
+| `list_ssh_hosts` | Hosts to add: your `~/.ssh/config`, your Tailscale network, and this network. |
+| `list_files`, `copy_files`, `cancel_operation` | Browse a folder on a machine; copy files and folders between machines; stop a copy. |
+| `machine_connection`, `direct_connection` | How a machine is reached (direct, ssh, which network, Tailscale's view); pair it for direct connections. |
+| `desktop_screenshot`, `desktop_input` | Look at a Linux machine's screen; click, type and scroll there. |
+| `session_list`, `session_start`, `session_read`, `session_send`, `session_stop` | Agent sessions on the machines. |
+| `github_inbox`, `github_repos`, `github_repo`, `github_item`, `local_checkouts`, `git_sync`, … | The user's GitHub, and git checkouts on the machines. |
 | `workspace_create`, `workspace_list`, `workspace_get` | Check out a machine as a work environment; see what exists. |
 | `workspace_exec` | Runs a command in a workspace (or starts it in the background). |
 | `workspace_read_file`, `workspace_write_file`, `workspace_list_files` | Work with a workspace's files. |
@@ -194,7 +209,10 @@ muxen install <machine-id> [--scope acme] [--count N | --name a --name b] [--lab
 muxen runner <start|stop|restart|logs|remove> <runner-id> [--delete-files]
 muxen watch <org|owner/repo>... / unwatch ...
 muxen settings [--poll 20] [--scan-repos 10] [--check-interval 15]
-muxen ssh-hosts
+muxen ssh-hosts                          # ~/.ssh/config, your tailnet, and this network
+muxen files <machine>[:<folder>]         # what's in a folder (alias: ls)
+muxen cp <machine>:<path>... <machine>:<folder>   # copy between machines
+muxen connection <machine> [--direct on|off]
 muxen check [--json]                     # one-shot full report
 muxen workspace …                        # agent workspaces, see below (alias: ws)
 ```
@@ -325,6 +343,36 @@ muxen desktop input beelink '[{"type":"click","x":100,"y":200},{"type":"text","t
 
 AI agents get the same: `machine_connection`, `direct_connection`, `desktop_screenshot` (an image they can look at) and `desktop_input`.
 
+**When the connection drops** (another network, a hiccup, the machine's agent restarting), terminals and the desktop pick themselves back up ("Reconnecting…") instead of stopping. A machine that's shut down is noticed within seconds and shown as offline.
+
+## Tailscale and moving between networks
+
+If [Tailscale](https://tailscale.com) is on your Mac, Muxen uses it to keep machines reachable away from home, with nothing to set up: it only reads Tailscale's status and never changes its settings.
+
+- **Home network first.** A paired machine is tried on its local-network address first, and through its Tailscale address a moment later; the first to answer wins. At home that's the local network; at a café it's Tailscale.
+- **Moving.** When your Mac changes networks, connections that no longer work are rebuilt the best way from where you are, and ones that went through Tailscale move back to the local network when you're home again. Open terminals and desktops carry on.
+- **ssh too.** If a machine's host only works at home (a local IP in `fleet.toml` or your ssh config), ssh goes to its tailnet address instead when the usual one doesn't answer.
+- **Offline answers.** Tailscale's view tells Muxen when a machine is back, whether Tailscale lost it too, or that Tailscale is off on this Mac (with **Open Tailscale**).
+- **The Connection card** says which way it goes (Local network, or Tailscale peer-to-peer or through a relay), whether the machine is on your tailnet, and offers **Set up Tailscale** on Linux machines that aren't (the install command, typed in a shell there for you to run).
+- **Adding machines:** the Add machine dialog lists the computers on your tailnet; one added by its tailnet name is reachable from anywhere.
+
+## Files and the clipboard
+
+**Copying files.** **Copy files** on a machine's page (or its right-click menu) opens two panes: the machine with the files on the left, where they go on the right, each a folder you can browse. Pick files and folders, pick a folder, copy. Dropping files from the Finder onto a machine in the sidebar opens it ready to send them there.
+
+- Files go through Muxen as a tar stream between the two machines' agents, so the machines never need to reach each other or share ssh keys. Folders come along whole, with permissions and links. Your Mac is a machine like the others, so this uploads and downloads too.
+- Files with the same names in the destination folder are replaced; the dialog says so first.
+- Progress, speed and **Stop** are in Activity.
+- Both ends hold back to what the other can take, so a slow machine doesn't pile data up anywhere.
+
+```sh
+muxen files beelink:~/build
+muxen cp beelink:~/build/app.tar.gz adibs-macbook-pro:~/Downloads
+muxen cp adibs-macbook-pro:~/Projects/site beelink:~/www --no-wait
+```
+
+**Shared clipboard.** Text you copy on your Mac can be pasted on your Linux desktops and other Macs, and what you copy there lands on your Mac (and on the other machines). Passwords copied from password managers (marked private on the clipboard) stay on your Mac. Turn it off in Settings › Clipboard.
+
 ## How checks and installs work
 
 - **Checks are read-only.** A small script is sent over `ssh` (`sh` on macOS and Linux, PowerShell on Windows), or run directly for `host = "local"`. It reports CPU, memory, disk, uptime and load, and finds the installed runners, their versions, their services and whether they're running. Checks run on a schedule (every 15 minutes by default) or on request.
@@ -348,7 +396,8 @@ cargo run -- status --demo --json
 
 Source layout:
 
-- `src/fleet`: the engine and snapshot model.
+- `agent/`: the agent that runs on each machine (sessions, the live link, direct connections, desktops, files, clipboard).
+- `src/fleet`: the engine and snapshot model; `link.rs` and `direct.rs` (connections), `tailscale.rs` and `engine/roaming.rs` (moving between networks), `files.rs`, `clipboard.rs`, `discover.rs` (machines on this network).
 - `src/probe`: machine checks.
 - `src/github`: the GitHub API client.
 - `src/ops`: installs and runner control.

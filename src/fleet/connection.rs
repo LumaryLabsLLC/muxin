@@ -82,11 +82,19 @@ impl Engine {
         let long_way = out.via == "direct" && !lan.is_empty() && out.network.as_deref().is_some_and(|n| n != "Local network");
         let here = out.tailnet.as_ref().is_some_and(|d| d.path == "direct" && same_network(d, &lan));
         if long_way && (here || out.tailnet.is_none()) {
-            out.note = Some(format!(
-                "It's on this network ({}), but didn't answer there, so this goes through {}. On a Mac, allow Muxen in System Settings › Privacy & Security › Local Network.",
-                lan.join(", "),
-                out.network.clone().unwrap_or_default()
-            ));
+            // Try the short way now (on a fresh socket if need be), then say
+            // what's what.
+            self.move_home(machine_id).await;
+            if let Some(l) = link::current(machine_id).filter(|l| l.network() == Some("Local network")) {
+                out.network = l.network().map(str::to_string);
+                out.peer = l.peer().map(|a| a.ip().to_string());
+            } else {
+                out.note = Some(format!(
+                    "It's on this network ({}), but didn't answer there, so this goes through {}. On a Mac, check that Muxen is allowed in System Settings › Privacy & Security › Local Network, then quit and reopen Muxen.",
+                    lan.join(", "),
+                    out.network.clone().unwrap_or_default()
+                ));
+            }
         }
         if out.via == "direct" && out.network.as_deref() == Some("Tailscale") {
             if let Some(d) = out.tailnet.as_ref().filter(|d| d.path == "relay") {

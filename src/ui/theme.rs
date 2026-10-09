@@ -129,6 +129,8 @@ pub struct Appearance {
     /// Terminal text size in points, and line height as a multiple of it.
     pub terminal_font_size: f32,
     pub terminal_line_height: f32,
+    /// The terminal cursor blinks (while the terminal has focus).
+    pub terminal_cursor_blink: bool,
     /// The GitHub page's repository list: grouped by owner, and the groups
     /// toggled from how they start (owners start open, "shared with you" folded).
     pub github_group_by_owner: bool,
@@ -150,6 +152,7 @@ impl Default for Appearance {
             sidebar_hidden: false,
             terminal_font_size: TERMINAL_FONT_SIZE,
             terminal_line_height: TERMINAL_LINE_HEIGHT,
+            terminal_cursor_blink: true,
             github_group_by_owner: false,
             github_folded_owners: Vec::new(),
             split_ratio: 0.5,

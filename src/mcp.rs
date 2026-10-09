@@ -27,7 +27,7 @@ and the machine/runner they're about. Ids: machines are slugs like \"mac-studio\
 \"<machine-id>/<runner-name>\", or \"github/<name>\" for a runner GitHub knows but no machine lists.
 
 Read-only: fleet_status, get_machine, list_runners, list_jobs, check_machines (runs a read-only \
-check over ssh), get_operation, list_operations, get_settings, list_ssh_hosts.
+check over ssh), get_operation, list_operations, get_settings, list_ssh_hosts, list_files.
 Changes things: add_machine / remove_machine edit fleet.toml only. install_runners and \
 runner_action run commands on real machines and register or deregister runners on GitHub; \
 confirm with the user before stopping, removing or installing unless they asked for exactly that.
@@ -292,6 +292,9 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "install_runners" => ok(api::install_runners(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "runner_action" => ok(api::runner_action(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "get_operation" => ok(api::operation(engine, args(a)?)?),
+        "cancel_operation" => ok(api::cancel_operation(engine, args(a)?)?),
+        "list_files" => ok(api::list_files(engine, args(a)?).await?),
+        "copy_files" => ok(api::copy_files(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "list_operations" => ok(json!({ "operations": api::operations(engine) })),
         "github_scopes" => ok(api::github_scopes(engine, args(a)?).await?),
         "get_settings" => ok(api::settings(engine)),
@@ -447,6 +450,34 @@ pub fn tools() -> Vec<Value> {
             "annotations": annotations("Get operation", true, false, true, false),
         }),
         json!({
+            "name": "cancel_operation",
+            "description": "Stops a running operation that can be stopped (a copy_files copy).",
+            "inputSchema": schema(json!({ "operation_id": { "type": "integer" } }), &["operation_id"]),
+            "annotations": annotations("Cancel operation", false, false, true, false),
+        }),
+        json!({
+            "name": "list_files",
+            "description": "What's in a folder on one of the user's machines (this computer included): names, file sizes, modified times; folders first. Linux and macOS machines.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string" },
+                "path": { "type": "string", "description": "A folder, e.g. \"~\", \"~/build\", \"/srv/data\". Default: the home folder." }
+            }), &["machine_id"]),
+            "annotations": annotations("List files", true, false, true, false),
+        }),
+        json!({
+            "name": "copy_files",
+            "description": "Copies files and folders from one of the user's machines to another (this computer included), through Muxen: the machines don't need to reach each other. Folders come along whole, with permissions. Files with the same names in the destination folder are replaced, so check it with list_files first and confirm with the user before overwriting. Waits by default and returns the operation(s) with a log; with wait=false poll get_operation, and cancel_operation stops a copy.",
+            "inputSchema": schema(json!({
+                "from": { "type": "string", "description": "Machine with the files." },
+                "paths": { "type": "array", "items": { "type": "string" }, "description": "Files or folders on it, e.g. [\"~/build/app.tar.gz\", \"~/reports\"]." },
+                "to": { "type": "string", "description": "Machine to copy them to." },
+                "to_dir": { "type": "string", "description": "Folder there (made if missing), e.g. \"~/Downloads\"." },
+                "wait": { "type": "boolean", "description": "Wait for it to finish (default true)." },
+                "timeout_secs": { "type": "integer", "minimum": 1, "description": "How long to wait (default 3600)." }
+            }), &["from", "paths", "to", "to_dir"]),
+            "annotations": annotations("Copy files", false, true, false, false),
+        }),
+        json!({
             "name": "list_operations",
             "description": "Operations this server has run (installs, starts, stops, logs, removals), newest first, without their output.",
             "inputSchema": schema(json!({}), &[]),
@@ -480,7 +511,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "list_ssh_hosts",
-            "description": "Hosts to suggest for add_machine: aliases from the user's ~/.ssh/config, and computers on their Tailscale network (`tailnet`, when Tailscale is on here: each with the `host` to add it by, whether Tailscale sees it online, and `machine_id` when it's already in the fleet). A machine added by its tailnet name is reachable from anywhere.",
+            "description": "Hosts to suggest for add_machine: aliases from the user's ~/.ssh/config; computers on their Tailscale network (`tailnet`, when Tailscale is on here: each with the `host` to add it by, whether Tailscale sees it online, and `machine_id` when it's already in the fleet; a machine added by its tailnet name is reachable from anywhere); and computers on this local network that aren't in the fleet (`network`: `ssh: false` means a Mac with Remote Login off, which the user turns on in System Settings › General › Sharing). Listens on the network for a few seconds.",
             "inputSchema": schema(json!({}), &[]),
             "annotations": annotations("List ssh hosts", true, false, true, false),
         }),
@@ -790,7 +821,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 47);
+        assert_eq!(tools.len(), 50);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

@@ -43,8 +43,9 @@ pub(super) struct Frame {
     bounds: Bounds<Pixels>,
 }
 
-pub(super) fn grid(shared: Arc<Shared>, palette: Palette, focused: bool, metrics: Metrics) -> impl IntoElement {
-    canvas(move |bounds, window, cx| prepaint(&shared, &palette, focused, metrics, bounds, window, cx), |_, frame, window, cx| paint(frame, window, cx))
+/// `cursor`: draw the cursor (false in a blink's off phase).
+pub(super) fn grid(shared: Arc<Shared>, palette: Palette, focused: bool, cursor: bool, metrics: Metrics) -> impl IntoElement {
+    canvas(move |bounds, window, cx| prepaint(&shared, &palette, focused, cursor, metrics, bounds, window, cx), |_, frame, window, cx| paint(frame, window, cx))
         .size_full()
 }
 
@@ -78,7 +79,7 @@ pub(super) fn family(window: &Window) -> SharedString {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepaint(shared: &Shared, palette: &Palette, focused: bool, m: Metrics, bounds: Bounds<Pixels>, window: &mut Window, _cx: &mut App) -> Frame {
+fn prepaint(shared: &Shared, palette: &Palette, focused: bool, show_cursor: bool, m: Metrics, bounds: Bounds<Pixels>, window: &mut Window, _cx: &mut App) -> Frame {
     let (cell_w, line_h) = cell_size(window, m);
     let cols = ((f32::from(bounds.size.width) - 2. * PAD_X) / cell_w).floor().max(2.) as usize;
     let rows = ((f32::from(bounds.size.height) - 2. * PAD_Y) / line_h).floor().max(1.) as usize;
@@ -124,7 +125,7 @@ fn prepaint(shared: &Shared, palette: &Palette, focused: bool, m: Metrics, bound
                 bg = Some(palette.selection);
             }
             let is_cursor = indexed.point == cur.point;
-            if is_cursor && focused && cur.shape == CursorShape::Block {
+            if is_cursor && focused && show_cursor && cur.shape == CursorShape::Block {
                 bg = Some(palette.cursor);
                 fg = palette.bg;
             }
@@ -149,7 +150,7 @@ fn prepaint(shared: &Shared, palette: &Palette, focused: bool, m: Metrics, bound
             });
         }
         let cursor_row = cur.point.line.0 + offset;
-        let cursor = (cur.shape != CursorShape::Hidden && cursor_row >= 0 && cursor_row < screen_rows)
+        let cursor = (show_cursor && cur.shape != CursorShape::Hidden && cursor_row >= 0 && cursor_row < screen_rows)
             .then(|| (cursor_row as usize, cur.point.column.0, cur.shape, term.grid()[cur.point].flags.contains(Flags::WIDE_CHAR)));
         (cells, cursor)
     };

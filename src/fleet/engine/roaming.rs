@@ -169,6 +169,7 @@ impl Engine {
     }
 
     fn network_changed(self: &Arc<Self>) {
+        direct::fresh_sockets();
         tailscale::invalidate();
         tailscale::reset_ssh_routes();
         direct::retry_all();
@@ -196,7 +197,7 @@ impl Engine {
 
     /// A direct connection that went through Tailscale (or the internet) while
     /// the machine answers on this network too: move it the short way.
-    pub(super) async fn move_home(self: &Arc<Self>, id: &str) {
+    pub(crate) async fn move_home(self: &Arc<Self>, id: &str) {
         let Some(l) = link::current(id) else { return };
         if l.transport() != "direct" || l.network() == Some("Local network") {
             return;
@@ -206,7 +207,18 @@ impl Engine {
             return;
         }
         if !direct::lan_answers(&paired).await {
-            return;
+            // Tailscale itself goes the local way, so the machine is right
+            // here: this app's socket may predate its Local Network access.
+            let here = self.current().machines.iter().find(|m| m.id == id).and_then(|m| m.tailnet.clone()).is_some_and(|d| {
+                tailscale::cached_direct_addr(&d.dns_name).is_some_and(|a| paired.lan.iter().any(|l| a.starts_with(&format!("{l}:"))))
+            });
+            if !here {
+                return;
+            }
+            direct::fresh_sockets();
+            if !direct::lan_answers(&paired).await {
+                return;
+            }
         }
         let Some((spec, _)) = self.machine(id) else { return };
         moves().lock().unwrap().insert(id.to_string(), Instant::now());

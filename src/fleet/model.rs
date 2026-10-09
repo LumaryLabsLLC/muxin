@@ -408,6 +408,22 @@ pub struct Operation {
     /// Output lines, with secrets masked.
     pub log: Vec<String>,
     pub error: Option<String>,
+    /// How far along it is, for operations that move data (copies).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<OpProgress>,
+    /// It can be stopped (cancel_operation).
+    pub cancellable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpProgress {
+    /// Bytes done so far.
+    pub done: u64,
+    /// Bytes in all, when known.
+    pub total: Option<u64>,
+    /// Bytes per second, lately.
+    pub rate: Option<f64>,
 }
 
 /// A work environment an agent checked out on a fleet machine: a folder

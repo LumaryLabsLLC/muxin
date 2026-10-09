@@ -58,6 +58,18 @@ pub struct Droplet {
     pub created_at: String,
 }
 
+/// The account's bill so far this month, as DigitalOcean reports it (USD).
+#[derive(Debug, Clone, Serialize)]
+pub struct Balance {
+    /// Usage this month, before credits and payments.
+    pub month_to_date_usage: f64,
+    /// What's owed for this month so far (usage less credits).
+    pub month_to_date_balance: f64,
+    /// Balance carried on the account (negative is credit).
+    pub account_balance: f64,
+    pub generated_at: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SshKey {
     pub id: u64,
@@ -109,6 +121,19 @@ impl Client {
             team: a["team"]["name"].as_str().map(str::to_string),
             droplet_limit: a["droplet_limit"].as_u64().unwrap_or(0) as u32,
             status: a["status"].as_str().unwrap_or_default().to_string(),
+        })
+    }
+
+    /// Needs the billing:read permission.
+    pub async fn balance(&self) -> Result<Balance, String> {
+        let v = self.call(Method::GET, "/customers/my/balance", None).await?;
+        // Amounts come as strings ("11.21").
+        let amount = |k: &str| v[k].as_str().and_then(|s| s.parse().ok()).or_else(|| v[k].as_f64()).unwrap_or(0.);
+        Ok(Balance {
+            month_to_date_usage: amount("month_to_date_usage"),
+            month_to_date_balance: amount("month_to_date_balance"),
+            account_balance: amount("account_balance"),
+            generated_at: v["generated_at"].as_str().map(str::to_string),
         })
     }
 

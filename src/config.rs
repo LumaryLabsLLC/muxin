@@ -311,6 +311,15 @@ pub struct CloudRef {
     pub created_at: String,
 }
 
+/// A cloud machine Muxen destroyed, kept so this month's costs still count it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DestroyedCloud {
+    pub name: String,
+    pub cloud: CloudRef,
+    pub destroyed_at: DateTime<Utc>,
+}
+
 fn yes() -> bool {
     true
 }
@@ -619,6 +628,8 @@ pub struct PersistedState {
     /// Cloud machines' power ("active", "off", ...) as the provider last
     /// reported it, by machine id.
     pub droplets: HashMap<String, String>,
+    /// Cloud machines destroyed lately (for this month's costs).
+    pub cloud_history: Vec<DestroyedCloud>,
     pub check_started_at: Option<DateTime<Utc>>,
     pub check_finished_at: Option<DateTime<Utc>>,
 }

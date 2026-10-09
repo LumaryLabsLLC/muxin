@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use super::inventory_edit;
 use super::NewMachine;
 use crate::cloud::digitalocean::{Client, same_key};
-use crate::cloud::{CloudCreate, CloudOptions, TAILSCALE_KEY, auth, nearest_region, secrets, setup};
+use crate::cloud::{CloudCreate, CloudOptions, TAILSCALE_KEY, auth, nearest_region, secrets, setup, usage};
 use crate::config::{CloudRef, MachineSpec};
 use crate::fleet::Engine;
 
@@ -259,6 +259,9 @@ impl Engine {
     pub fn cloud_destroy(self: &Arc<Self>, machine_id: &str) -> Result<u64, String> {
         let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in the fleet anymore.")?;
         let cloud = spec.cloud.clone().ok_or_else(|| format!("{} isn't a cloud machine Muxen created.", spec.name))?;
+        if self.machine_busy(&spec.id) {
+            return Err("An operation is still running on this machine. Wait for it to finish.".into());
+        }
         let op = self.begin_op("cloud-destroy", format!("Destroy {}", spec.name), Some(spec.id.clone()), None);
         let me = self.clone();
         self.runtime().spawn(async move {
@@ -266,6 +269,8 @@ impl Engine {
                 let client = me.do_client().await?;
                 me.op_log(op, format!("▸ Deleting droplet {} from DigitalOcean", cloud.id));
                 client.delete_droplet(cloud.id).await?;
+                // Its cost this month still counts.
+                me.record_destroyed(&spec.id, crate::config::DestroyedCloud { name: spec.name.clone(), cloud: cloud.clone(), destroyed_at: Utc::now() });
                 me.op_log(op, format!("▸ Removing {} from config.toml", spec.name));
                 me.remove_machine(&spec.id)?;
                 // Its address may be reused by someone else's droplet.
@@ -355,6 +360,94 @@ impl Engine {
         self.run_check(Some(vec![spec.id.clone()])).await;
         self.op_log(op, if on { format!("✓ {} is on", spec.name) } else { format!("✓ {} is off (DigitalOcean still bills for it until it's destroyed)", spec.name) });
         Ok(())
+    }
+
+    /// What the cloud machines cost: each one (destroyed ones this month
+    /// too), the totals, and the account's bill when the sign-in may read it.
+    pub async fn cloud_usage(self: &Arc<Self>) -> usage::CloudUsage {
+        let now = Utc::now();
+        let month = usage::month_start(now);
+        let snap = self.current();
+        let mut machines = Vec::new();
+        let mut if_kept = 0.;
+        for m in &snap.machines {
+            let Some(c) = &m.cloud else { continue };
+            let created = c.created_at.unwrap_or(now);
+            if_kept += usage::month_if_kept(c.price_hourly, created, now);
+            machines.push(usage::UsageLine {
+                machine_id: Some(m.id.clone()),
+                name: m.name.clone(),
+                region: c.region.clone(),
+                size: c.size.clone(),
+                power: c.power.clone(),
+                price_hourly: c.price_hourly,
+                price_monthly: usage::monthly_price(c.price_hourly),
+                created_at: c.created_at,
+                destroyed_at: None,
+                this_month: usage::cost_in_month(c.price_hourly, created, None, month, now),
+                since_created: usage::cost_since(c.price_hourly, created, None, now),
+            });
+        }
+        let hourly_now = machines.iter().map(|l| l.price_hourly).sum::<f64>();
+        for h in self.cloud_history() {
+            let created = DateTime::parse_from_rfc3339(&h.cloud.created_at).map(|t| t.with_timezone(&Utc)).unwrap_or(h.destroyed_at);
+            let this_month = usage::cost_in_month(h.cloud.price_hourly, created, Some(h.destroyed_at), month, now);
+            if this_month <= 0. {
+                continue;
+            }
+            if_kept += this_month;
+            machines.push(usage::UsageLine {
+                machine_id: None,
+                name: h.name.clone(),
+                region: h.cloud.region.clone(),
+                size: h.cloud.size.clone(),
+                power: Some("destroyed".into()),
+                price_hourly: h.cloud.price_hourly,
+                price_monthly: usage::monthly_price(h.cloud.price_hourly),
+                created_at: Some(created),
+                destroyed_at: Some(h.destroyed_at),
+                this_month,
+                since_created: usage::cost_since(h.cloud.price_hourly, created, Some(h.destroyed_at), now),
+            });
+        }
+        let this_month = machines.iter().map(|l| l.this_month).sum::<f64>();
+
+        let (mut account, mut account_error, mut account_needs_sign_in) = (None, None, false);
+        if self.demo_world().is_none() {
+            let method = self.settings().cloud.digitalocean_auth;
+            match self.do_client().await {
+                Ok(client) => match client.balance().await {
+                    Ok(b) => account = Some(b),
+                    // Not allowed to read the bill: say what would allow it, and what DigitalOcean said.
+                    Err(e) if e.contains("refused") => {
+                        let said = e.trim_start_matches("DigitalOcean refused: ").trim_end_matches(" (the token may be read-only)").to_string();
+                        let granted = (method == "oauth").then(|| auth::granted_scopes(&self.paths().dir)).flatten();
+                        account_needs_sign_in = method == "oauth" && granted.as_deref().is_none_or(|g| !g.split_whitespace().any(|s| s == "billing:read"));
+                        account_error = Some(match method.as_str() {
+                            // It says "not authorized" even with billing:read granted, at least for a new account.
+                            "oauth" if !account_needs_sign_in => "DigitalOcean isn't sharing the bill yet; a new account may not have one.".to_string(),
+                            "oauth" => format!("Sign in again so Muxen can read your DigitalOcean bill. ({said})"),
+                            "doctl" => format!("doctl's token can't read billing; it needs billing:read. ({said})"),
+                            _ => format!("This API token can't read billing; it needs billing:read. ({said})"),
+                        });
+                    }
+                    Err(e) => account_error = Some(e),
+                },
+                Err(_) => account_error = Some("Not signed in to DigitalOcean.".into()),
+            }
+        }
+        usage::CloudUsage {
+            currency: "USD",
+            month: now.format("%Y-%m").to_string(),
+            hourly_now: (hourly_now * 100_000.).round() / 100_000.,
+            this_month: usage::round2(this_month),
+            month_if_kept: usage::round2(if_kept),
+            machines,
+            account,
+            account_error,
+            account_needs_sign_in,
+            billing: usage::BILLING,
+        }
     }
 
     /// Watches cloud machines for idleness (every 10 minutes) and does what

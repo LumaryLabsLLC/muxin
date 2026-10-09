@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use gpui::{AnyElement, App, Context, Entity, Focusable, SharedString, Subscription, Task, Window, div, prelude::*, px};
 
 mod cloud;
+mod shell;
 
 pub(super) use cloud::regular_size;
 
@@ -71,6 +72,8 @@ pub struct SettingsPage {
     pub scroll: gpui::ScrollHandle,
     tab: SettingsTab,
     cloud: cloud::CloudState,
+    /// The `muxen` command in the PATH.
+    shell: shell::ShellState,
     /// A shortcut waiting for its new keys, and what catches them before
     /// they run anything.
     recording: Option<&'static str>,
@@ -139,6 +142,7 @@ impl SettingsPage {
             scroll: gpui::ScrollHandle::new(),
             tab: SettingsTab::default(),
             cloud: cloud_state,
+            shell: shell::ShellState::default(),
             recording: None,
             catch_keys: None,
             shortcut_note: None,
@@ -148,6 +152,7 @@ impl SettingsPage {
         if !page.snapshot.demo {
             page.load_access(cx);
         }
+        page.load_shell(cx);
         page
     }
 
@@ -959,6 +964,7 @@ impl Render for SettingsPage {
         let body = div().w_full().max_w(px(760.)).flex().flex_col().gap(px(28.));
         let body = match self.tab {
             SettingsTab::General => body
+                .child(self.shell_section(&theme, cx))
                 .child(self.clipboard_section(&theme))
                 .children(self.tailscale_section(&theme))
                 .child(self.checks_section(&theme, false, cx))
@@ -966,7 +972,7 @@ impl Render for SettingsPage {
             SettingsTab::Appearance => body.child(self.appearance_section(&theme, cx)),
             SettingsTab::Terminal => body.child(self.terminal_section(&theme, super::terminal::font_family(window), super::terminal::monospace_families(window), cx)),
             SettingsTab::GitHub => body.child(self.github_section(&theme, cx)).child(self.checks_section(&theme, true, cx)),
-            SettingsTab::Cloud => body.child(self.cloud_section(&theme, cx)),
+            SettingsTab::Cloud => body.child(self.cloud_usage_section(&theme, cx)).child(self.cloud_section(&theme, cx)),
             SettingsTab::Keyboard => body.child(self.keyboard_section(&theme, cx)),
         };
         div()

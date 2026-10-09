@@ -75,6 +75,8 @@ struct State {
     tailscale: Option<super::model::TailscaleStatus>,
     /// Cloud machines' power as the provider last reported it ("active", "off", ...).
     droplets: HashMap<String, String>,
+    /// Cloud machines destroyed lately (see config::DestroyedCloud).
+    cloud_history: Vec<crate::config::DestroyedCloud>,
     /// Stop flags of the operations that can be cancelled.
     cancels: HashMap<u64, Arc<std::sync::atomic::AtomicBool>>,
 }
@@ -146,6 +148,7 @@ impl Engine {
             tailnet: persisted.tailnet,
             tailscale: None,
             droplets: persisted.droplets,
+            cloud_history: persisted.cloud_history,
             cancels: HashMap::new(),
         };
         let (tx, _) = watch::channel(Arc::new(Snapshot::default()));
@@ -498,6 +501,21 @@ impl Engine {
             self.save_state(&mut st);
             self.publish(&mut st);
         }
+    }
+
+    /// Remembers a destroyed cloud machine for this month's costs (and the
+    /// next one's, for a while), and forgets its power state.
+    pub(crate) fn record_destroyed(&self, machine_id: &str, entry: crate::config::DestroyedCloud) {
+        let mut st = self.state.lock().unwrap();
+        st.droplets.remove(machine_id);
+        let keep_from = entry.destroyed_at - chrono::Duration::days(400);
+        st.cloud_history.retain(|e| e.destroyed_at > keep_from && e.cloud.id != entry.cloud.id);
+        st.cloud_history.push(entry);
+        self.save_state(&mut st);
+    }
+
+    pub(crate) fn cloud_history(&self) -> Vec<crate::config::DestroyedCloud> {
+        self.state.lock().unwrap().cloud_history.clone()
     }
 
     /// True while another operation is changing this machine.
@@ -957,6 +975,7 @@ impl Engine {
             probes: st.probes.clone(),
             tailnet: st.tailnet.clone(),
             droplets: st.droplets.clone(),
+            cloud_history: st.cloud_history.clone(),
             check_started_at: st.check_started_at,
             check_finished_at: st.check_finished_at,
         };

@@ -8,6 +8,7 @@ mod github;
 mod mcp;
 mod ops;
 mod probe;
+mod shell_command;
 #[cfg(feature = "gui")]
 mod ui;
 mod util;
@@ -104,6 +105,26 @@ enum Command {
     Init(InitArgs),
     /// Print where Muxen keeps its files
     Paths(CommonArgs),
+    /// Put `muxen` in your PATH (macOS: /usr/local/bin, Linux: ~/.local/bin,
+    /// Windows: this folder in your user PATH), or take it out
+    ShellCommand(ShellCommandArgs),
+}
+
+#[derive(Args)]
+struct ShellCommandArgs {
+    /// status (the default), install or remove
+    #[arg(value_enum, default_value = "status")]
+    action: ShellCommandAction,
+    /// Print machine-readable JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ShellCommandAction {
+    Status,
+    Install,
+    Remove,
 }
 
 #[derive(Args, Clone)]
@@ -360,6 +381,8 @@ struct GhRepoArgs {
 enum CloudCommand {
     /// The account, regions, sizes and defaults for a new machine
     Options(AgentArgs),
+    /// What the cloud machines cost: now, this month, by the month's end, and the account's bill
+    Usage(AgentArgs),
     /// Create a droplet, set it up, and add it to the fleet (it costs money while it exists)
     Create(CloudCreateArgs),
     /// Delete a cloud machine's droplet and remove it from the fleet
@@ -1090,6 +1113,40 @@ fn main() -> ExitCode {
             println!("state       {}", display_path(&p.state));
             0
         }
+        Some(Command::ShellCommand(args)) => {
+            let result = match args.action {
+                ShellCommandAction::Status => Ok(shell_command::status()),
+                ShellCommandAction::Install => shell_command::install(),
+                ShellCommandAction::Remove => shell_command::remove(),
+            };
+            match (result, args.json) {
+                (Ok(s), true) => {
+                    println!("{}", serde_json::to_string_pretty(&s).unwrap_or_default());
+                    0
+                }
+                (Ok(s), false) => {
+                    let line = match s.state {
+                        "installed" => format!("muxen is installed: {}", s.path),
+                        "missing" => format!("Not installed (it would go in {}). Run `muxen shell-command install`.", s.path),
+                        "other" => format!("{} is something else{}", s.path, s.target.as_deref().map(|t| format!(" (-> {t})")).unwrap_or_default()),
+                        _ => "Not available here.".to_string(),
+                    };
+                    println!("{line}");
+                    if let Some(note) = s.note {
+                        println!("{note}");
+                    }
+                    0
+                }
+                (Err(e), true) => {
+                    println!("{}", serde_json::json!({ "error": { "code": "operation_failed", "message": e } }));
+                    1
+                }
+                (Err(e), false) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            }
+        }
     };
     ExitCode::from(code)
 }
@@ -1399,6 +1456,7 @@ fn github(cmd: GithubCommand, runtime: &tokio::runtime::Runtime) -> u8 {
 fn cloud(cmd: CloudCommand, runtime: &tokio::runtime::Runtime) -> u8 {
     match cmd {
         CloudCommand::Options(a) => run(runtime, &a, async move |e| Ok::<_, api::ApiError>(api::cloud_options(&e).await), cli::cloud_options),
+        CloudCommand::Usage(a) => run(runtime, &a, async move |e| Ok::<_, api::ApiError>(api::cloud_usage(&e).await), cli::cloud_usage),
         CloudCommand::Create(a) => {
             let req = api::CloudCreateRequest {
                 name: a.name,

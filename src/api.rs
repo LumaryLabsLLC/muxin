@@ -422,6 +422,10 @@ pub struct CloudOut {
     pub created_at: Option<DateTime<Utc>>,
     /// USD since it was created.
     pub cost_so_far: f64,
+    /// USD this month (UTC).
+    pub this_month: f64,
+    /// The most it costs in a month, in USD.
+    pub price_monthly: f64,
     pub idle_since: Option<DateTime<Utc>>,
     /// "on", "off" (still billed) or "starting", as last seen; null until known.
     pub power: Option<String>,
@@ -664,7 +668,9 @@ pub fn machine_summary(m: &Machine) -> MachineSummary {
             size: c.size.clone(),
             price_hourly: c.price_hourly,
             created_at: c.created_at,
-            cost_so_far: (c.cost_so_far * 100.).round() / 100.,
+            cost_so_far: c.cost_so_far,
+            this_month: c.this_month,
+            price_monthly: c.price_monthly,
             idle_since: c.idle_since,
             power: c.power.clone(),
         }),
@@ -1243,6 +1249,13 @@ pub async fn runner_action(engine: &Arc<Engine>, req: RunnerActionRequest, surfa
 /// The DigitalOcean account, regions, sizes and defaults for a new cloud machine.
 pub async fn cloud_options(engine: &Arc<Engine>) -> crate::cloud::CloudOptions {
     engine.cloud_options().await
+}
+
+/// What the cloud machines cost: each one, this month, by the month's end,
+/// and the DigitalOcean account's bill when the sign-in may read it.
+pub async fn cloud_usage(engine: &Arc<Engine>) -> crate::cloud::usage::CloudUsage {
+    freshen(engine).await;
+    engine.cloud_usage().await
 }
 
 #[derive(Debug, Deserialize)]

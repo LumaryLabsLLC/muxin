@@ -4,6 +4,7 @@
 use gpui::{AnyElement, App, Context, Entity, SharedString, Window, div, prelude::*, px};
 
 use super::SettingsPage;
+use crate::cloud::usage::CloudUsage;
 use crate::cloud::{CloudOptions, TAILSCALE_KEY, secrets};
 use crate::config::CloudSettings;
 use crate::ui::github::Load;
@@ -13,6 +14,8 @@ use crate::ui::theme::{Theme, mono_font};
 
 pub(super) struct CloudState {
     options: Option<Load<CloudOptions>>,
+    /// What the cloud machines cost (see cloud::usage).
+    usage: Option<CloudUsage>,
     token: Entity<TextInput>,
     tailscale_key: Entity<TextInput>,
     busy: bool,
@@ -36,7 +39,7 @@ impl CloudState {
                 }
             }),
         ];
-        (CloudState { options: None, token, tailscale_key, busy: false, message: None }, subs)
+        (CloudState { options: None, usage: None, token, tailscale_key, busy: false, message: None }, subs)
     }
 }
 
@@ -51,6 +54,10 @@ impl SettingsPage {
             let engine = engine.clone();
             async move { engine.cloud_options().await }
         });
+        let usage = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.cloud_usage().await }
+        });
         let task = cx.spawn(async move |this, cx| {
             if let Ok(options) = job.await {
                 let _ = this.update(cx, |this, cx| {
@@ -58,8 +65,145 @@ impl SettingsPage {
                     cx.notify()
                 });
             }
+            if let Ok(usage) = usage.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.cloud.usage = Some(usage);
+                    cx.notify()
+                });
+            }
         });
         self._tasks.push(task);
+    }
+
+    /// What the cloud machines cost: now, this month, by its end, each one,
+    /// and the account's bill when Muxen may read it.
+    pub(super) fn cloud_usage_section(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let body: AnyElement = match &self.cloud.usage {
+            None => div().p(px(14.)).flex().items_center().gap(px(6.)).text_size(px(12.5)).text_color(theme.text_muted).child(kit::spinner("cloud-usage", 12., theme.text_muted)).child("Adding it up…").into_any_element(),
+            Some(u) => {
+                let now = chrono::Utc::now();
+                let month_end = crate::cloud::usage::month_start(now)
+                    .checked_add_months(chrono::Months::new(1))
+                    .map(|t| (t - chrono::Duration::days(1)).format("%b %-d").to_string())
+                    .unwrap_or_default();
+                let live = u.machines.iter().filter(|m| m.machine_id.is_some()).count();
+                let stat = |label: String, value: String, sub: String| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .gap(px(2.))
+                        .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(label))
+                        .child(div().font_family(mono_font()).text_size(px(15.)).child(value))
+                        .child(div().truncate().text_size(px(11.5)).text_color(theme.text_muted).child(sub))
+                };
+                let bill = match (&u.account, &u.account_error) {
+                    (Some(b), _) => stat("DigitalOcean bill".into(), format!("${:.2}", b.month_to_date_usage), "this month, whole account".into()),
+                    _ => stat("DigitalOcean bill".into(), "—".into(), if u.account_needs_sign_in { "needs one more permission".into() } else { "not shared yet".into() }),
+                };
+                let rows: Vec<AnyElement> = u
+                    .machines
+                    .iter()
+                    .map(|m| {
+                        let (word, color) = match m.power.as_deref() {
+                            Some("on") => ("on", theme.success),
+                            Some("off") => ("off · still billed", theme.warning),
+                            Some("starting") => ("starting", theme.text_muted),
+                            Some("destroyed") => ("destroyed", theme.text_placeholder),
+                            _ => ("—", theme.text_placeholder),
+                        };
+                        let place = crate::cloud::region_city(&m.region).map(str::to_string).unwrap_or_else(|| m.region.to_uppercase());
+                        let gone = m.machine_id.is_none();
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .px(px(14.))
+                            .py(px(9.))
+                            .border_t_1()
+                            .border_color(theme.border_variant)
+                            .when(gone, |d| d.opacity(0.6))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .child(div().flex().items_center().gap(px(8.)).text_size(px(12.5)).child(m.name.clone()).child(div().text_size(px(11.5)).text_color(color).child(word)))
+                                    .child(div().truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("{place} · {}", crate::cloud::size_label(&m.size)))),
+                            )
+                            .child(div().w(px(90.)).flex_none().font_family(mono_font()).text_size(px(12.)).text_color(theme.text_muted).child(if gone { "—".to_string() } else { format!("${:.3}/h", m.price_hourly) }))
+                            .child(div().w(px(110.)).flex_none().flex().justify_end().font_family(mono_font()).text_size(px(12.5)).child(format!("${:.2}", m.this_month)))
+                            .into_any_element()
+                    })
+                    .collect();
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(16.))
+                            .px(px(14.))
+                            .py(px(12.))
+                            .child(stat("Now".into(), format!("${:.3}/h", u.hourly_now), format!("{live} machine{}, on or off", if live == 1 { "" } else { "s" })))
+                            .child(stat("This month".into(), format!("${:.2}", u.this_month), "so far".into()))
+                            .child(stat(format!("By {month_end}"), format!("${:.2}", u.month_if_kept), "if they're kept".into()))
+                            .child(bill),
+                    )
+                    .when(!rows.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(12.))
+                                .px(px(14.))
+                                .pt(px(8.))
+                                .pb(px(6.))
+                                .border_t_1()
+                                .border_color(theme.border_variant)
+                                .text_size(px(11.))
+                                .text_color(theme.text_placeholder)
+                                .child(div().flex_1().child("Machine"))
+                                .child(div().w(px(90.)).flex_none().child("Rate"))
+                                .child(div().w(px(110.)).flex_none().flex().justify_end().child("This month")),
+                        )
+                        .children(rows)
+                    })
+                    .when_some(u.account_error.clone().filter(|_| u.account.is_none()), |d, e| {
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .px(px(14.))
+                                .py(px(10.))
+                                .border_t_1()
+                                .border_color(theme.border_variant)
+                                .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(12.)).text_color(theme.text_muted).child(e))
+                                .child(if u.account_needs_sign_in {
+                                    Button::new("do-sign-in-again", "Sign in again").loading(self.cloud.busy).on_click(cx.listener(|this, _, _, cx| this.cloud_connect("oauth", cx)))
+                                } else {
+                                    Button::new("do-billing", "Open billing").icon("external-link").on_click(|_, _, cx| cx.open_url("https://cloud.digitalocean.com/account/billing"))
+                                }),
+                        )
+                    })
+                    // A column, so the sentence wraps (wrapping text in a row mis-measures).
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .px(px(14.))
+                            .py(px(10.))
+                            .border_t_1()
+                            .border_color(theme.border_variant)
+                            .child(div().w_full().min_w(px(0.)).text_size(px(12.)).text_color(theme.text_muted).child(u.billing)),
+                    )
+                    .into_any_element()
+            }
+        };
+        div().flex().flex_col().gap(px(10.)).child(section_title(theme, "Usage and cost", None)).child(card(theme).child(body)).into_any_element()
     }
 
     fn cloud_connect(&mut self, method: &'static str, cx: &mut Context<Self>) {

@@ -5,6 +5,7 @@ pub mod auth;
 pub mod digitalocean;
 pub mod secrets;
 pub mod setup;
+pub mod usage;
 
 use serde::{Deserialize, Serialize};
 
@@ -81,6 +82,40 @@ pub fn city_of_slug(regions: &[Region], slug: &str) -> Option<String> {
     Some(r.name.trim_end_matches(|c: char| c.is_ascii_digit() || c == ' ').trim().to_string())
 }
 
+/// A region's city from its slug alone ("nyc3" → "New York"), for when the
+/// region list isn't at hand.
+pub fn region_city(slug: &str) -> Option<&'static str> {
+    let prefix = slug.trim_end_matches(|c: char| c.is_ascii_digit());
+    Some(match prefix {
+        "nyc" => "New York",
+        "sfo" => "San Francisco",
+        "tor" => "Toronto",
+        "atl" => "Atlanta",
+        "ric" => "Richmond",
+        "mkc" => "Kansas City",
+        "mem" => "Memphis",
+        "lon" => "London",
+        "ams" => "Amsterdam",
+        "fra" => "Frankfurt",
+        "blr" => "Bangalore",
+        "sgp" => "Singapore",
+        "syd" => "Sydney",
+        _ => return None,
+    })
+}
+
+/// A size slug in words: "s-2vcpu-4gb" → "2 vCPU · 4 GB" (the slug itself
+/// when it doesn't say).
+pub fn size_label(slug: &str) -> String {
+    let parts: Vec<&str> = slug.split('-').collect();
+    let cpu = parts.iter().find_map(|p| p.strip_suffix("vcpu"));
+    let mem = parts.iter().find_map(|p| p.strip_suffix("gb").filter(|n| n.chars().all(|c| c.is_ascii_digit())));
+    match (cpu, mem) {
+        (Some(c), Some(m)) => format!("{c} vCPU · {m} GB"),
+        _ => slug.to_string(),
+    }
+}
+
 /// The region nearest this computer, by its UTC offset, among `available`.
 pub fn nearest_region(offset_hours: i32, available: &[String]) -> Option<String> {
     let preferences: &[&str] = match offset_hours {
@@ -99,6 +134,16 @@ pub fn nearest_region(offset_hours: i32, available: &[String]) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regions_and_sizes_in_words() {
+        assert_eq!(region_city("nyc3"), Some("New York"));
+        assert_eq!(region_city("mkc1"), Some("Kansas City"));
+        assert_eq!(region_city("zzz1"), None);
+        assert_eq!(size_label("s-1vcpu-1gb"), "1 vCPU · 1 GB");
+        assert_eq!(size_label("s-2vcpu-4gb-amd"), "2 vCPU · 4 GB");
+        assert_eq!(size_label("gpu-h100x1-80gb"), "gpu-h100x1-80gb");
+    }
 
     #[test]
     fn one_choice_per_city() {

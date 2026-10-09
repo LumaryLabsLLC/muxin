@@ -293,6 +293,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "runner_action" => ok(api::runner_action(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "cancel_run" => ok(api::cancel_run(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "cloud_options" => ok(api::cloud_options(engine).await),
+        "cloud_usage" => ok(api::cloud_usage(engine).await),
         "cloud_create" => ok(api::cloud_create(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "cloud_destroy" => ok(api::cloud_destroy(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "cloud_power" => ok(api::cloud_power(engine, args(a)?, Surface::Mcp, |_| {}).await?),
@@ -450,6 +451,12 @@ pub fn tools() -> Vec<Value> {
             "description": "The user's DigitalOcean sign-in, regions, sizes (with hourly and monthly prices) and the defaults for a new cloud machine. Read-only.",
             "inputSchema": schema(json!({}), &[]),
             "annotations": annotations("Cloud options", true, false, true, true),
+        }),
+        json!({
+            "name": "cloud_usage",
+            "description": "What the user's cloud machines cost: each droplet's hourly rate, monthly cap, cost this month and since it was created (destroyed ones this month too), the totals now / this month / by the month's end, and the DigitalOcean account's month-to-date bill when the sign-in may read it. Droplets are billed while they exist, powered off too; only destroying one stops the charges. Read-only.",
+            "inputSchema": schema(json!({}), &[]),
+            "annotations": annotations("Cloud usage", true, false, true, true),
         }),
         json!({
             "name": "cloud_create",
@@ -867,7 +874,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 55);
+        assert_eq!(tools.len(), 56);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

@@ -121,11 +121,12 @@ Muxen can create DigitalOcean droplets in the user's account and make them fleet
 
 - `cloud_options` shows the sign-in, regions, sizes with hourly and monthly prices, and the defaults.
 - `cloud_create(name, region?, size?)` creates one, sets it up (the user's account and SSH key; Docker, git, gh; Node with Claude Code and Codex; Tailscale, as the user's settings say) and adds it to the fleet. **It costs money every hour it exists:** tell the user the size and price and get their OK first.
-- `cloud_power(machine_id, "on"|"off")`: a powered-off droplet is still billed.
+- `cloud_power(machine_id, "on"|"off")`: a powered-off droplet is still billed. Only `cloud_destroy` stops the charges.
+- `cloud_usage` says what they cost: each one's hourly rate, monthly cap, this month and since created (destroyed ones this month too), the totals, and the account's DigitalOcean bill when the sign-in may read it.
 - `cloud_destroy(machine_id)` deletes the droplet and everything on it. Confirm first and make sure work there is pushed.
 - A cloud machine's `cloud` field (in `get_machine`) has its region, size, price, cost so far and how long it has been idle.
 
-The CLI equivalents are `muxen cloud options|create|power|destroy|login|logout`.
+The CLI equivalents are `muxen cloud options|create|usage|power|destroy|login|logout`.
 
 ## Files
 

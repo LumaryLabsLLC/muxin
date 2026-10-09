@@ -45,6 +45,8 @@ cargo build --release --no-default-features
 
 There's nothing else to set up. Fonts and icons are compiled into the binary.
 
+To run `muxen` from a terminal, use **Settings › General › Command line › Install**, or `muxen shell-command install`. On macOS it links `/usr/local/bin/muxen` to the app (macOS asks for your password when that folder needs it), on Linux `~/.local/bin/muxen`, and on Windows it adds Muxen's folder to your user PATH. `muxen shell-command remove` takes it out again.
+
 To get a real app with the Muxen icon:
 
 - **macOS:** `./scripts/bundle-macos.sh` builds `dist/Muxen.app` (ad-hoc signed). Drag it to Applications. Agents can still use the binary inside it: `Muxen.app/Contents/MacOS/muxen mcp`.
@@ -380,12 +382,13 @@ muxen cp adibs-macbook-pro:~/Projects/site beelink:~/www --no-wait
 
 Need a machine you don't have? Muxen can make one in your DigitalOcean account. Connect in **Settings › Cloud** with an API token (kept in the macOS Keychain), the browser sign-in, or `doctl`'s login. Then pick **New cloud machine…** in the Add machine dialog: a name, a region (the nearest is preselected) and a size with its price. Muxen creates the droplet with your user and SSH key, installs what you chose (Docker, git and the GitHub CLI; Node with Claude Code and Codex; Tailscale), and adds it to your fleet. Then it's like any other machine: terminals, agent sessions, files, workspaces.
 
-Its page shows what it costs, with **Power off** (DigitalOcean still bills a droplet that's off) and **Destroy**. Settings › Cloud also says what happens when one sits idle: nothing, a reminder, power off, or destroy, after the hours you choose.
+DigitalOcean bills a droplet by the second while it exists, **powered on or off**, up to its monthly price; only destroying it stops the charges. Each cloud machine's page shows its rate, what it has cost this month and since it was created, and what this month comes to if you keep it, with **Power on/off** and **Destroy**. **Settings › Cloud › Usage and cost** adds them up: what you're paying per hour now, this month so far (machines destroyed this month included), the month's total if nothing changes, and your whole DigitalOcean bill this month (when Muxen may read it: sign in again in the browser, or use a token with `billing:read`). Settings › Cloud also says what happens when one sits idle: nothing, a reminder, power off, or destroy, after the hours you choose.
 
 ```sh
 muxen cloud login --token dop_v1_...
 muxen cloud options
 muxen cloud create dev-1 --size s-2vcpu-4gb
+muxen cloud usage                     # what they cost
 muxen cloud destroy dev-1
 ```
 

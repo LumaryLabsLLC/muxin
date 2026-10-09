@@ -205,6 +205,39 @@ pub fn jobs(j: &JobsResponse) -> String {
     out
 }
 
+pub fn cloud_usage(u: &crate::cloud::usage::CloudUsage) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Now ${:.3}/h · this month ${:.2} · by the month's end ${:.2} if kept", u.hourly_now, u.this_month, u.month_if_kept);
+    match (&u.account, &u.account_error) {
+        (Some(b), _) => {
+            let _ = writeln!(out, "DigitalOcean bill this month: ${:.2} (balance ${:.2})", b.month_to_date_usage, b.month_to_date_balance);
+        }
+        (None, Some(e)) => {
+            let _ = writeln!(out, "DigitalOcean bill: {e}");
+        }
+        _ => {}
+    }
+    if !u.machines.is_empty() {
+        let _ = writeln!(out, "\n{:<20} {:<10} {:<6} {:<16} {:>9} {:>7} {:>11} {:>10}", "MACHINE", "POWER", "REGION", "SIZE", "RATE", "CAP", "THIS MONTH", "SINCE NEW");
+        for m in &u.machines {
+            let _ = writeln!(
+                out,
+                "{:<20} {:<10} {:<6} {:<16} {:>9} {:>7} {:>11} {:>10}",
+                m.name,
+                m.power.as_deref().unwrap_or("?"),
+                m.region,
+                m.size,
+                format!("${:.3}/h", m.price_hourly),
+                format!("${:.0}/mo", m.price_monthly),
+                format!("${:.2}", m.this_month),
+                format!("${:.2}", m.since_created)
+            );
+        }
+    }
+    let _ = writeln!(out, "\n{}", u.billing);
+    out
+}
+
 pub fn cloud_options(o: &crate::cloud::CloudOptions) -> String {
     let mut out = String::new();
     let method = match o.method.as_str() {

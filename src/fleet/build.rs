@@ -167,8 +167,9 @@ pub fn build(input: &Inputs) -> Snapshot {
             unreachable,
             tailnet: device.cloned(),
             cloud: spec.cloud.as_ref().map(|c| {
+                use crate::cloud::usage;
                 let created_at = DateTime::parse_from_rfc3339(&c.created_at).ok().map(|t| t.with_timezone(&Utc));
-                let hours = created_at.map(|t| (input.now - t).num_minutes().max(0) as f64 / 60.).unwrap_or(0.);
+                let created = created_at.unwrap_or(input.now);
                 crate::fleet::model::CloudInfo {
                     provider: c.provider.clone(),
                     id: c.id,
@@ -176,7 +177,9 @@ pub fn build(input: &Inputs) -> Snapshot {
                     size: c.size.clone(),
                     price_hourly: c.price_hourly,
                     created_at,
-                    cost_so_far: (hours.ceil() * c.price_hourly * 100.).round() / 100.,
+                    cost_so_far: usage::cost_since(c.price_hourly, created, None, input.now),
+                    this_month: usage::cost_in_month(c.price_hourly, created, None, usage::month_start(input.now), input.now),
+                    price_monthly: usage::monthly_price(c.price_hourly),
                     idle_since: crate::ops::cloud::idle_since(&spec.id),
                     power: if status == "online" {
                         Some("on".into())

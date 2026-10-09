@@ -228,6 +228,10 @@ pub struct CloudInfo {
     pub created_at: Option<DateTime<Utc>>,
     /// What it has cost since it was created, in USD.
     pub cost_so_far: f64,
+    /// What it has cost this month (UTC), in USD.
+    pub this_month: f64,
+    /// The most it costs in a month (DigitalOcean caps it), in USD.
+    pub price_monthly: f64,
     /// Idle (no busy session, job or CPU) since then, as this app has seen it.
     pub idle_since: Option<DateTime<Utc>>,
     /// "on", "off" or "starting", as last seen; None until known.

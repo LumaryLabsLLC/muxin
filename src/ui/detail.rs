@@ -245,50 +245,93 @@ impl Root {
             "cloud-power-off" => Some(false),
             _ => None,
         });
-        let title = match powering {
-            Some(true) => "DigitalOcean · powering on…",
-            Some(false) => "DigitalOcean · shutting down…",
-            None if off => "DigitalOcean · powered off (still billed)",
-            None => "DigitalOcean",
-        };
         let power_label = match powering {
             Some(true) => "Powering on…",
             Some(false) => "Shutting down…",
             None if off => "Power on",
             None => "Power off",
         };
-        let idle = c.idle_since.map(|t| (chrono::Utc::now() - t).num_minutes()).filter(|min| *min >= 30).map(|min| format!(" · idle {}", crate::util::short_duration(min as u64 * 60)));
-        let detail = format!(
-            "{} · {} · ${:.3}/h · ${:.2} so far{}",
-            c.region.to_uppercase(),
-            c.size,
-            c.price_hourly,
-            c.cost_so_far,
-            idle.unwrap_or_default()
-        );
+        use crate::cloud::usage;
+        let now = chrono::Utc::now();
+        let idle = c.idle_since.map(|t| (now - t).num_minutes()).filter(|min| *min >= 30).map(|min| format!(" · idle {}", crate::util::short_duration(min as u64 * 60)));
+        let state = match powering {
+            Some(true) => ("Powering on…".to_string(), theme.text_muted),
+            Some(false) => ("Shutting down…".to_string(), theme.text_muted),
+            None if off => ("Powered off · still billed".to_string(), theme.warning),
+            None => (format!("Running{}", idle.unwrap_or_default()), theme.text_placeholder),
+        };
+        let place = crate::cloud::region_city(&c.region).map(str::to_string).unwrap_or_else(|| c.region.to_uppercase());
+        let title = format!("DigitalOcean · {place} · {}", crate::cloud::size_label(&c.size));
+        let created = c.created_at.unwrap_or(now);
+        let month_end = usage::month_start(now).checked_add_months(chrono::Months::new(1)).map(|t| (t - chrono::Duration::days(1)).format("%b %-d").to_string()).unwrap_or_default();
+        let if_kept = usage::month_if_kept(c.price_hourly, created, now);
+        let age = crate::util::short_duration((now - created).num_seconds().max(0) as u64);
+        let stat = |label: &'static str, value: String, sub: String| {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.))
+                .gap(px(2.))
+                .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(label))
+                .child(div().font_family(mono_font()).text_size(px(15.)).child(value))
+                .child(div().truncate().text_size(px(11.5)).text_color(theme.text_muted).child(sub))
+        };
+        let note = if off {
+            ("triangle-alert", theme.warning, "Powering off doesn't stop the charges: DigitalOcean bills a droplet until it's destroyed.".to_string())
+        } else {
+            ("info", theme.text_placeholder, format!("Billed by the second while it exists, on or off, up to ${:.2} a month. Destroy it to stop the charges.", c.price_monthly))
+        };
         let (mid, machine) = (m.id.clone(), m.clone());
         card(theme)
-            .flex_row()
-            .items_center()
-            .gap(px(12.))
-            .px(px(14.))
-            .py(px(12.))
-            .child({
-                let (from, to) = format::machine_tile(m);
-                kit::tile(format::machine_icon(m), from, to, 28.)
-            })
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .gap(px(2.))
-                    .child(div().text_size(px(13.)).child(title))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(detail)),
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(14.))
+                    .py(px(12.))
+                    .child({
+                        let (from, to) = format::machine_tile(m);
+                        kit::tile(format::machine_icon(m), from, to, 28.)
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .gap(px(2.))
+                            .child(div().truncate().text_size(px(13.)).child(title))
+                            .child(div().text_size(px(11.5)).text_color(state.1).child(state.0)),
+                    )
+                    .child(Button::new("m-cloud-power", power_label).icon("power").disabled(busy).on_click(cx.listener(move |this, _, _, cx| this.cloud_power(&mid, off, cx))))
+                    .child(Button::new("m-cloud-destroy", "Destroy…").style(ButtonStyle::Danger).disabled(busy).on_click(cx.listener(move |this, _, window, cx| this.confirm_remove_machine(&machine, window, cx)))),
             )
-            .child(Button::new("m-cloud-power", power_label).icon("power").disabled(busy).on_click(cx.listener(move |this, _, _, cx| this.cloud_power(&mid, off, cx))))
-            .child(Button::new("m-cloud-destroy", "Destroy…").style(ButtonStyle::Danger).disabled(busy).on_click(cx.listener(move |this, _, window, cx| this.confirm_remove_machine(&machine, window, cx))))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(16.))
+                    .px(px(14.))
+                    .py(px(12.))
+                    .border_t_1()
+                    .border_color(theme.border_variant)
+                    .child(stat("Rate", format!("${:.3}/h", c.price_hourly), format!("up to ${:.2} a month", c.price_monthly)))
+                    .child(stat("This month", format!("${:.2}", c.this_month), format!("about ${if_kept:.2} by {month_end} if kept")))
+                    .child(stat("Since created", format!("${:.2}", c.cost_so_far), format!("created {age} ago"))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(14.))
+                    .py(px(10.))
+                    .border_t_1()
+                    .border_color(theme.border_variant)
+                    .child(icon(note.0, 13., note.1))
+                    .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(12.)).text_color(if off { theme.warning } else { theme.text_muted }).child(note.2)),
+            )
     }
 
     fn machine_runner_row(&self, theme: &Theme, s: &Snapshot, r: &Runner, i: usize, busy: bool, cx: &mut Context<Self>) -> AnyElement {

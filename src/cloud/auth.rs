@@ -28,7 +28,7 @@ const CLIENT_ID: &str = "df4228c4a87c9e8d950e0a519d5f41796c0131356c188e5dcabe2e1
 const CALLBACK_PATH: &str = "/digitalocean";
 
 /// What Muxen asks to do in the account, and nothing more.
-const SCOPES: &str = "account:read regions:read sizes:read ssh_key:read ssh_key:create droplet:create droplet:read droplet:update droplet:delete actions:read";
+const SCOPES: &str = "account:read regions:read sizes:read ssh_key:read ssh_key:create droplet:create droplet:read droplet:update droplet:delete actions:read billing:read";
 
 fn client_id() -> Option<&'static str> {
     Some(option_env!("MUXEN_DO_CLIENT_ID").unwrap_or(CLIENT_ID)).filter(|id| !id.is_empty())
@@ -45,6 +45,15 @@ struct OAuthTokens {
     refresh_token: String,
     /// Unix seconds.
     expires_at: i64,
+    /// What DigitalOcean granted, space-separated ("" from before Muxen kept it).
+    #[serde(default)]
+    scope: String,
+}
+
+/// The permissions the browser sign-in was granted, when Muxen knows them.
+pub fn granted_scopes(dir: &std::path::Path) -> Option<String> {
+    let tokens: OAuthTokens = serde_json::from_str(&secrets::get(dir, OAUTH)?).ok()?;
+    Some(tokens.scope).filter(|s| !s.is_empty())
 }
 
 /// A token for the API, by the chosen method.
@@ -185,6 +194,8 @@ async fn exchange(params: &[(&str, &str)]) -> Result<OAuthTokens, String> {
         refresh_token: String,
         #[serde(default)]
         expires_in: i64,
+        #[serde(default)]
+        scope: String,
     }
     let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
     let url = reqwest::Url::parse_with_params("https://cloud.digitalocean.com/v1/oauth/token", params).map_err(|e| e.to_string())?;
@@ -193,7 +204,7 @@ async fn exchange(params: &[(&str, &str)]) -> Result<OAuthTokens, String> {
         return Err(format!("DigitalOcean didn't accept the sign-in ({}). Sign in again.", resp.status()));
     }
     let a: Answer = resp.json().await.map_err(|e| format!("Unexpected answer from DigitalOcean: {e}"))?;
-    Ok(OAuthTokens { access_token: a.access_token, refresh_token: a.refresh_token, expires_at: chrono::Utc::now().timestamp() + a.expires_in.max(60) })
+    Ok(OAuthTokens { access_token: a.access_token, refresh_token: a.refresh_token, expires_at: chrono::Utc::now().timestamp() + a.expires_in.max(60), scope: a.scope })
 }
 
 /// The browser sign-in: opens DigitalOcean's consent page (`open`), waits up

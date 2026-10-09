@@ -1343,15 +1343,6 @@ impl Root {
     }
 
     fn brand(&self, theme: &Theme, s: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
-        // What it's looking after: "2 machines · 3 runners · 1 session".
-        let count = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
-        let mut summary = vec![count(s.machines.len(), "machine")];
-        if s.counts.runners > 0 {
-            summary.push(count(s.counts.runners, "runner"));
-        }
-        if !s.sessions.is_empty() {
-            summary.push(count(s.sessions.len(), "session"));
-        }
         // GPUI 0.2 only ellipsizes text whose width is known before layout.
         let text_w = self.sidebar_width - 74. - if s.demo { 48. } else { 0. };
         div()
@@ -1370,8 +1361,7 @@ impl Root {
                     .flex()
                     .flex_col()
                     .min_w(px(0.))
-                    .child(div().w(px(text_w)).truncate().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Muxen"))
-                    .child(div().w(px(text_w)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(summary.join(" · "))),
+                    .child(div().w(px(text_w)).truncate().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Muxen")),
             )
             .when(s.demo, |d| d.child(div().flex_1()).child(kit::pill("demo", theme.warning)))
     }

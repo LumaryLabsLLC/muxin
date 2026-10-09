@@ -199,8 +199,17 @@ impl Engine {
     /// the machine answers on this network too: move it the short way.
     pub(crate) async fn move_home(self: &Arc<Self>, id: &str) {
         let Some(l) = link::current(id) else { return };
-        if l.transport() != "direct" || l.network() == Some("Local network") {
+        // Direct over the local network already: nothing shorter.
+        if l.transport() == "direct" && l.network() == Some("Local network") {
             return;
+        }
+        // Over ssh while paired: the direct way may answer now (a Mac whose
+        // Local Network access was just allowed, a firewall opened).
+        if l.transport() == "ssh" {
+            if direct::paired(id).is_none() {
+                return;
+            }
+            direct::retry_now(id);
         }
         let Some(paired) = direct::paired(id).filter(|p| !p.lan.is_empty()) else { return };
         if moves().lock().unwrap().get(id).is_some_and(|t| t.elapsed() < MOVE_HOME_PAUSE) {
@@ -221,7 +230,9 @@ impl Engine {
             }
         }
         let Some((spec, _)) = self.machine(id) else { return };
-        moves().lock().unwrap().insert(id.to_string(), Instant::now());
+        if l.transport() != "ssh" {
+            moves().lock().unwrap().insert(id.to_string(), Instant::now());
+        }
         tracing::info!("{} answers on the local network; moving its connection there", spec.name);
         link::reset(id);
         let _ = link::get(&spec).await;

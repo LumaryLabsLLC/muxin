@@ -671,6 +671,14 @@ impl Root {
                         )
                     }),
             )
+            .when(u.kind == "auth", |d| {
+                let mid = m.id.clone();
+                d.child(
+                    Button::new("m-offline-access", "Set up access")
+                        .style(ButtonStyle::Primary)
+                        .on_click(cx.listener(move |this, _, window, cx| this.setup_ssh_access(&mid, window, cx))),
+                )
+            })
             .when(u.kind == "tailscale-off" && super::can_open_tailscale(), |d| {
                 d.child(Button::new("m-offline-tailscale", "Open Tailscale").style(ButtonStyle::Primary).on_click(|_, _, _| super::open_tailscale()))
             })

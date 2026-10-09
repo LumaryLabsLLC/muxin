@@ -1,6 +1,6 @@
 [package]
 name = "muxen-agent"
-version = "0.2.4"
+version = "0.2.6"
 edition = "2024"
 description = "Runs on each machine Muxen manages: keeps agent sessions alive and lets the app attach to them"
 license = "LicenseRef-Proprietary"
@@ -20,7 +20,12 @@ rcgen = { version = "0.13", default-features = false, features = ["crypto", "rin
 ring = "0.17"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync", "signal"] }
 
-# The desktop view (`screen`): X11 capture and input, JPEG frames.
+# The desktop view (`screen`): X11 capture and input on Linux, JPEG frames.
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["xtest", "shm", "xfixes"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 jpeg-encoder = "0.6"
+
+[build-dependencies]
+cc = "1"

@@ -29,6 +29,8 @@ mod direct;
 #[cfg(unix)]
 mod files;
 #[cfg(unix)]
+mod gui;
+#[cfg(unix)]
 mod link;
 #[cfg(unix)]
 mod proto;

@@ -72,14 +72,14 @@ fn read_frame(r: &mut impl Read) -> io::Result<(u32, u8, Vec<u8>)> {
 enum Sink {
     /// A terminal attached to a session (the session server connection).
     Session(UnixStream),
-    /// The desktop: a `screen` process (its stdin takes input).
-    Desktop(std::process::ChildStdin, std::process::Child),
+    /// The desktop: a `screen` program (its stdin takes input).
+    Desktop(Program),
     /// Files going out (a tar stream; ACKs let more through).
     Pack(Arc<crate::files::Credit>),
     /// Files coming in (fed to tar -x).
     Unpack(crate::files::Unpack),
-    /// The clipboard: a `clip` process (its stdin takes what the app copied).
-    Clip(std::process::ChildStdin, std::process::Child),
+    /// The clipboard: a `clip` program (its stdin takes what the app copied).
+    Clip(Program),
 }
 
 impl Sink {
@@ -88,23 +88,66 @@ impl Sink {
             Sink::Session(s) => {
                 let _ = s.shutdown(std::net::Shutdown::Both);
             }
-            Sink::Desktop(stdin, mut child) => {
-                drop(stdin);
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+            Sink::Desktop(p) | Sink::Clip(p) => p.close(),
             Sink::Pack(credit) => credit.close(),
-            Sink::Clip(stdin, mut child) => {
-                drop(stdin);
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+
             Sink::Unpack(u) => u.stop(),
         }
     }
 }
 
 type Attached = Arc<Mutex<HashMap<u32, Sink>>>;
+
+/// A program run for a channel (`screen`, `clip`): here, or in the logged-in
+/// session through the background service (see gui.rs).
+struct Program {
+    input: Box<dyn Write + Send>,
+    stop: Stop,
+}
+
+enum Stop {
+    Child(std::process::Child),
+    Socket(std::os::unix::net::UnixStream),
+}
+
+impl Program {
+    /// Starts `muxen-agent <args>`; returns it and what it prints.
+    fn start(args: &[String], env: Vec<(String, String)>) -> Result<(Program, Box<dyn Read + Send>), String> {
+        if crate::gui::needed() {
+            let stream = crate::gui::connect(args)?;
+            let reader = stream.try_clone().map_err(|e| e.to_string())?;
+            let writer = stream.try_clone().map_err(|e| e.to_string())?;
+            return Ok((Program { input: Box::new(writer), stop: Stop::Socket(stream) }, Box::new(reader)));
+        }
+        let exe = std::env::current_exe().map_err(|_| "can't find the agent".to_string())?;
+        let log = std::fs::OpenOptions::new().create(true).append(true).open(crate::home_dir().join("screen.log"));
+        let mut cmd = Command::new(exe);
+        cmd.args(args).envs(env).stdin(Stdio::piped()).stdout(Stdio::piped());
+        match log {
+            Ok(l) => cmd.stderr(l),
+            Err(_) => cmd.stderr(Stdio::null()),
+        };
+        let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            let _ = child.kill();
+            return Err("couldn't start it".into());
+        };
+        Ok((Program { input: Box::new(stdin), stop: Stop::Child(child) }, Box::new(stdout)))
+    }
+
+    fn close(self) {
+        drop(self.input);
+        match self.stop {
+            Stop::Child(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            Stop::Socket(s) => {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+        }
+    }
+}
 
 pub fn run() -> i32 {
     serve(Box::new(io::stdin()), Box::new(io::stdout()))
@@ -147,13 +190,13 @@ pub fn serve(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>) -> 
         }
         let written = match map.get_mut(&channel) {
             Some(Sink::Session(s)) if kind == proto::DATA || kind == proto::RESIZE => proto::write_frame(s, kind, &payload),
-            Some(Sink::Desktop(stdin, _)) if kind == crate::desktop::INPUT => proto::write_frame(stdin, kind, &payload).and_then(|_| stdin.flush()),
+            Some(Sink::Desktop(p)) if kind == crate::desktop::INPUT => crate::gui::write(&mut p.input, kind, &payload),
             Some(Sink::Pack(credit)) if kind == crate::files::ACK => {
                 credit.ack(payload.get(..8).map(|b| u64::from_be_bytes(b.try_into().unwrap_or_default())).unwrap_or(0));
                 Ok(())
             }
             Some(Sink::Unpack(u)) if kind == proto::DATA => u.write(&payload),
-            Some(Sink::Clip(stdin, _)) if kind == crate::clipboard::CLIP => proto::write_frame(stdin, kind, &payload).and_then(|_| stdin.flush()),
+            Some(Sink::Clip(p)) if kind == crate::clipboard::CLIP => crate::gui::write(&mut p.input, kind, &payload),
             Some(Sink::Unpack(u)) if kind == crate::files::END => {
                 u.end();
                 Ok(())
@@ -325,38 +368,32 @@ fn desktop(req: &Value, out: &Out, attached: &Attached) -> Value {
     let Some(env) = crate::desktop::session_env() else {
         return json!({ "ok": false, "error": "No graphical session found here (nobody logged in to a desktop?)." });
     };
-    let Ok(exe) = std::env::current_exe() else { return json!({ "ok": false, "error": "can't find the agent" }) };
     let arg = |k: &str, d: u64| req[k].as_u64().unwrap_or(d).to_string();
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(crate::home_dir().join("screen.log"));
-    let mut cmd = Command::new(exe);
     let mode = if req["tiles"].as_bool() == Some(true) { "tiles" } else { "frames" };
-    cmd.arg("screen").args([arg("fps", 30), arg("quality", 75), arg("max_width", 1920), mode.to_string()]).envs(env).stdin(Stdio::piped()).stdout(Stdio::piped());
-    match log {
-        Ok(l) => cmd.stderr(l),
-        Err(_) => cmd.stderr(Stdio::null()),
-    };
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
+    let args = vec!["screen".to_string(), arg("fps", 30), arg("quality", 75), arg("max_width", 1920), mode.to_string()];
+    let (program, mut frames) = match Program::start(&args, env) {
+        Ok(p) => p,
         Err(e) => return json!({ "ok": false, "error": format!("couldn't start capturing the screen: {e}") }),
     };
-    let (Some(stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
-        let _ = child.kill();
-        return json!({ "ok": false, "error": "couldn't start capturing the screen" });
-    };
     // Its first word: the frame size, or why it can't.
-    let info = match proto::read_frame(&mut stdout) {
-        Ok((crate::desktop::HELLO, p)) => serde_json::from_slice::<Value>(&p).unwrap_or(Value::Null),
-        _ => json!({ "error": "the screen capture stopped right away" }),
-    };
+    let info = crate::gui::read_hello(&mut frames);
     if let Some(e) = info["error"].as_str() {
-        let _ = child.kill();
-        let _ = child.wait();
+        program.close();
         return json!({ "ok": false, "error": e });
     }
-    attached.lock().unwrap().insert(channel, Sink::Desktop(stdin, child));
+    attached.lock().unwrap().insert(channel, Sink::Desktop(program));
+    relay(out, attached, channel, frames);
+    let mut reply = info;
+    reply["ok"] = json!(true);
+    reply
+}
+
+/// What a channel's program prints goes to the app, frame by frame, until it
+/// stops; then the channel closes.
+fn relay(out: &Out, attached: &Attached, channel: u32, mut from: Box<dyn Read + Send>) {
     let (out, attached) = (out.clone(), attached.clone());
     thread::spawn(move || {
-        while let Ok((kind, frame)) = proto::read_frame(&mut stdout) {
+        while let Ok((kind, frame)) = proto::read_frame(&mut from) {
             if send(&out, channel, kind, &frame).is_err() {
                 break;
             }
@@ -366,9 +403,6 @@ fn desktop(req: &Value, out: &Out, attached: &Attached) -> Value {
             let _ = send(&out, channel, CLOSE, &[]);
         }
     });
-    let mut reply = info;
-    reply["ok"] = json!(true);
-    reply
 }
 
 /// Shares this machine's clipboard on the request's channel (see clipboard.rs):
@@ -378,38 +412,15 @@ fn clipboard(req: &Value, out: &Out, attached: &Attached) -> Value {
     if channel == CONTROL {
         return json!({ "ok": false, "error": "the clipboard needs a channel" });
     }
-    let Ok(exe) = std::env::current_exe() else { return json!({ "ok": false, "error": "can't find the agent" }) };
-    let mut cmd = Command::new(exe);
-    cmd.arg("clip").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-    if cfg!(target_os = "linux") {
-        match crate::desktop::session_env() {
-            Some(env) => {
-                cmd.envs(env);
-            }
-            None => return json!({ "ok": false, "error": "No desktop session here, so no clipboard." }),
-        }
-    }
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
+    let Some(env) = crate::desktop::session_env() else {
+        return json!({ "ok": false, "error": "No desktop session here, so no clipboard." });
+    };
+    let (program, from) = match Program::start(&["clip".to_string()], env) {
+        Ok(p) => p,
         Err(e) => return json!({ "ok": false, "error": format!("couldn't start sharing the clipboard: {e}") }),
     };
-    let (Some(stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
-        let _ = child.kill();
-        return json!({ "ok": false, "error": "couldn't start sharing the clipboard" });
-    };
-    attached.lock().unwrap().insert(channel, Sink::Clip(stdin, child));
-    let (out, attached) = (out.clone(), attached.clone());
-    thread::spawn(move || {
-        while let Ok((kind, text)) = proto::read_frame(&mut stdout) {
-            if send(&out, channel, kind, &text).is_err() {
-                break;
-            }
-        }
-        if let Some(s) = attached.lock().unwrap().remove(&channel) {
-            s.close();
-            let _ = send(&out, channel, CLOSE, &[]);
-        }
-    });
+    attached.lock().unwrap().insert(channel, Sink::Clip(program));
+    relay(out, attached, channel, from);
     json!({ "ok": true })
 }
 

@@ -324,7 +324,7 @@ impl Root {
         let machine = host.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| info.machine_id.clone());
         let machine_id = info.machine_id.clone();
         // Desktops: Linux (X11) machines so far.
-        let desktop_capable = info.persistent && s.machines.iter().any(|m| m.id == info.machine_id && m.platform.starts_with("linux"));
+        let desktop_capable = info.persistent && s.machines.iter().any(|m| m.id == info.machine_id && format::has_desktop(m) && !m.local);
         let split = self.split.contains(&info.id);
         let terminal = self.terminals.get(id).cloned();
         let detached = terminal.as_ref().is_some_and(|t| t.read(cx).exited());
@@ -449,9 +449,7 @@ impl Root {
                             .bg(theme.elevated)
                             .child(icon(if format::is_just_offline(&m) { "power" } else { "unplug" }, 22., theme.text_muted))
                             .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(title))
-                            .child(div().text_size(px(12.5)).text_color(theme.text_muted).text_center().child(
-                                "If it was shut down or restarted, this session ended with it. If it's only asleep or off the network, the session is still there when it's back.",
-                            ))
+                            .child(div().text_size(px(12.5)).text_color(theme.text_muted).text_center().child("Shut down: this session ended. Asleep: it's still there."))
                             .child(
                                 Button::new("session-offline-check", "Check again")
                                     .icon("refresh-cw")
@@ -512,7 +510,12 @@ impl Root {
 
         let panel = self.split_desktop(&info.id).map(|view| {
             let (pop, close) = (machine_id.clone(), info.id.clone());
+            let to_sidebar = info.id.clone();
             let extra = vec![
+                Button::icon_only("split-sidebar", "panel-left")
+                    .tooltip("Move to the sidebar")
+                    .on_click(cx.listener(move |this, _, window, cx| this.desktop_to_sidebar(&to_sidebar, window, cx)))
+                    .into_any_element(),
                 Button::icon_only("split-window", "external-link")
                     .tooltip("Open in a window")
                     .on_click(cx.listener(move |this, _, window, cx| this.pop_out_desktop(&pop, window, cx)))
@@ -921,7 +924,7 @@ impl Root {
                         "network",
                         if c.direct { theme.warning } else { theme.text_muted },
                         format!("Over ssh{net}{speed}"),
-                        c.note.clone().unwrap_or_else(|| "One ssh connection kept open. A direct connection is faster to set up and needed for seeing the desktop.".into()),
+                        c.note.clone().unwrap_or_else(|| "One ssh connection, kept open.".into()),
                         c.direct,
                     ),
                     _ => ("unplug", theme.text_placeholder, "Not connected".into(), c.note.clone().unwrap_or_else(|| "The agent there didn't answer.".into()), c.direct),
@@ -936,8 +939,8 @@ impl Root {
         // Whether it's reachable away from its own network.
         let tailnet_line = match self.machine_conn.get(&m.id) {
             Some(Load::Ready(c)) => match (&c.tailnet, &c.tailscale) {
-                (Some(d), _) => Some(format!("On your tailnet as {}, so it's reachable from anywhere.", d.name)),
-                (None, Some(t)) if t.running => Some("Not on your tailnet, so Muxen reaches it only on its own network.".to_string()),
+                (Some(d), _) => Some(format!("On your tailnet as {}.", d.name)),
+                (None, Some(t)) if t.running => Some("Not on your tailnet: reachable only on its network.".to_string()),
                 _ => None,
             },
             _ => None,
@@ -993,8 +996,8 @@ impl Root {
                             move |this, _, window, cx| this.setup_tailscale(&mid, window, cx)
                         })))
                     })
-                    // Seeing the desktop: Linux (X11) machines so far.
-                    .when(m.platform.starts_with("linux"), |d| {
+                    // Seeing the desktop: Linux (X11) and Macs.
+                    .when(format::has_desktop(m), |d| {
                         d.child(Button::new("m-desktop", "Show desktop").icon("monitor").on_click(cx.listener({
                             let mid = mid.clone();
                             move |this, _, window, cx| this.navigate(Route::Desktop(mid.clone()), window, cx)
@@ -1133,6 +1136,44 @@ impl Root {
         self.start_session(req, window, cx);
     }
 
+    /// Gives a machine this computer's ssh key: a terminal here with
+    /// `ssh-copy-id` typed in (making a key first if there's none), for the
+    /// user to run and type their password for that machine once.
+    pub(super) fn setup_ssh_access(&mut self, machine_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((spec, _)) = self.engine.machine(machine_id) else { return };
+        let Some(local) = self.snapshot.machines.iter().find(|m| m.local).map(|m| m.id.clone()) else {
+            let cmd = format!("ssh-copy-id {}", spec.host.trim());
+            cx.write_to_clipboard(ClipboardItem::new_string(cmd));
+            self.notify_user("Copied. Run it in Terminal, then check again.", false, cx);
+            return;
+        };
+        let job = self.engine.runtime().spawn({
+            let spec = spec.clone();
+            async move { crate::probe::ssh_key_for(&spec).await }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let key = job.await.ok().flatten();
+            let host = spec.host.trim().to_string();
+            let typed = match key {
+                Some(k) => format!("ssh-copy-id -i {k} {host}"),
+                None => format!("ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N '' && ssh-copy-id -i ~/.ssh/id_ed25519.pub {host}"),
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                let req = StartSession {
+                    machine_id: local,
+                    agent: "shell".into(),
+                    cwd: "~".into(),
+                    title: Some(format!("Set up access to {}", spec.name)),
+                    typed: Some(typed),
+                    ..Default::default()
+                };
+                let then = format!("Press Enter and type your password for {}, then check again.", spec.name);
+                this.start_session_then(req, Some(then), window, cx);
+            });
+        });
+        self.track(task);
+    }
+
     /// Opens a shell on a Linux machine with Tailscale's install command typed
     /// in, for the user to run: it asks for their password there, then shows
     /// a link to sign in to their tailnet.
@@ -1145,7 +1186,7 @@ impl Root {
             typed: Some("curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up".into()),
             ..Default::default()
         };
-        let then = "Tailscale's install command is typed in: press Enter to run it. It asks for your password there, then shows a link to sign in to your tailnet.";
+        let then = "Press Enter to install Tailscale, then follow the sign-in link.";
         self.start_session_then(req, Some(then.into()), window, cx);
     }
 

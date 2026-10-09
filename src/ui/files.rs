@@ -416,9 +416,6 @@ impl Render for CopyDialog {
                 }
             }))
             .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Copy files"))
-            .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(
-                "Pick files and folders on one machine and a folder on another. They go through Muxen, so the machines don't need to reach each other.",
-            ))
             .child(
                 div()
                     .flex()

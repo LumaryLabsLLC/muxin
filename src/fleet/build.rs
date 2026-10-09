@@ -358,46 +358,38 @@ pub fn explain_unreachable(spec: &MachineSpec, p: &ProbeResult, retrying: bool, 
     let error = p.error.clone().unwrap_or_else(|| "The check failed.".into());
     let (name, host) = (spec.name.as_str(), spec.host.trim());
     let kind = if spec.is_local() { "error" } else { unreachable_kind(&error) };
-    let again = if retrying { "Muxen keeps checking and reconnects when it's back." } else { "Check again once it's back." };
+    let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
+    let again = if retrying { "Reconnects when it's back." } else { "Check again when it's back." };
     let (title, detail, hint) = match kind {
-        "offline" => (
-            format!("{name} is offline"),
-            format!("It isn't answering: it may be shut down, asleep, or on a network this computer can't reach. {again}"),
-            None,
-        ),
-        "refused" => (
-            format!("{name} isn't accepting connections"),
-            format!("It's on the network, but its ssh server turned the connection away. It may still be starting up, or Remote Login (ssh) is off there. {again}"),
-            None,
-        ),
-        "auth" => (
-            format!("{name} didn't accept your ssh key"),
-            "It's on, but ssh wanted a password or refused the key. Muxen needs ssh to work without a password prompt.".to_string(),
-            Some(format!("ssh-copy-id {host}")),
-        ),
-        "unknown-host" => (
-            format!("Can't find {name}"),
-            format!("This computer can't look up \"{host}\". Check the name (or your ssh config), or join the network or VPN it's on."),
-            None,
-        ),
-        "host-key" => (
-            format!("{name}'s ssh identity changed"),
-            "Its host key isn't the one this computer saved. That's expected after reinstalling its system; otherwise something may be in the way. Remove the old key from known_hosts (ssh shows the line), then connect once to accept the new one.".to_string(),
-            Some(format!("ssh {host}")),
-        ),
+        "offline" => (format!("{name} is offline"), format!("Shut down, asleep, or off the network. {again}"), None),
+        "refused" => (format!("{name} isn't accepting connections"), "Starting up, or Remote Login (ssh) is off.".to_string(), None),
+        "auth" => {
+            // "adib@box.local: Permission denied (...)": who ssh signed in as.
+            let user = error
+                .lines()
+                .find_map(|l| l.split_once(": Permission denied"))
+                .and_then(|(who, _)| who.rsplit_once('@'))
+                .map(|(u, _)| u.trim().to_string())
+                .filter(|u| !u.is_empty() && !u.contains(' '));
+            (
+                format!("{name} doesn't know {here} yet"),
+                match user {
+                    Some(u) => format!("Set up access once with your password for {u} there."),
+                    None => "Set up access once with your password there.".to_string(),
+                },
+                Some(format!("ssh-copy-id -i {} {host}", crate::probe::default_ssh_key().unwrap_or_else(|| "~/.ssh/id_ed25519.pub".into()))),
+            )
+        }
+        "unknown-host" => (format!("Can't find {name}"), format!("Check \"{host}\", or join its network or VPN."), None),
+        "host-key" => (format!("{name}'s ssh identity changed"), "Expected after a reinstall: remove its old key from known_hosts.".to_string(), Some(format!("ssh {host}"))),
         _ if spec.is_local() => (format!("Couldn't check {name}"), error.clone(), None),
-        _ if error.to_ascii_lowercase().starts_with("timed out after") => (
-            format!("{name} didn't finish the check"),
-            "ssh connected, but the check took too long. The machine may be very busy, or the connection is poor.".to_string(),
-            Some(format!("ssh {host}")),
-        ),
-        _ => (format!("Can't reach {name}"), "The check over ssh failed; trying it in a terminal shows what ssh says.".to_string(), Some(format!("ssh {host}"))),
+        _ if error.to_ascii_lowercase().starts_with("timed out after") => (format!("{name} didn't finish the check"), "Very busy, or a poor connection.".to_string(), Some(format!("ssh {host}"))),
+        _ => (format!("Can't reach {name}"), "Try ssh in a terminal to see why.".to_string(), Some(format!("ssh {host}"))),
     };
     let mut u = Unreachable { kind: kind.into(), title, detail, hint, last_seen_at: p.last_seen_at, error };
     // What Tailscale knows: whether the machine is really gone, or the way
     // to it is.
     let Some(d) = device.filter(|_| !spec.is_local()) else { return u };
-    let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
     let no_route = matches!(kind, "offline" | "unknown-host");
     match tailscale {
         // It's reached through Tailscale away from home, and Tailscale is off here.
@@ -405,23 +397,19 @@ pub fn explain_unreachable(spec: &MachineSpec, p: &ProbeResult, retrying: bool, 
             let signed_out = t.state == "NeedsLogin";
             u.kind = "tailscale-off".into();
             u.title = format!("Tailscale is {} on {here}", if signed_out { "signed out" } else { "off" });
-            u.detail = format!(
-                "{name} isn't answering on this network, and it's on your tailnet as {}. {} Tailscale to reach it from anywhere; if it still doesn't answer, it may be off.",
-                d.name,
-                if signed_out { "Sign in to" } else { "Turn on" }
-            );
+            u.detail = format!("{} it to reach {name} from anywhere.", if signed_out { "Sign in to" } else { "Turn on" });
             u.hint = None;
         }
         // Tailscale lost it too: it's off or asleep, not a problem on this end.
         Some(t) if t.running && kind == "offline" && !d.online => {
-            u.detail = format!("It isn't answering, and Tailscale doesn't see it either: it's probably shut down or asleep. {again}");
+            u.detail = format!("Tailscale doesn't see it either. {again}");
             u.last_seen_at = u.last_seen_at.max(d.last_seen_at);
         }
         // Tailscale sees it, so it's on: the trouble is ssh, or what's in between.
         Some(t) if t.running && no_route && d.online => {
             u.kind = "error".into();
-            u.title = format!("{name} is on, but isn't answering Muxen");
-            u.detail = format!("Tailscale sees it online, but ssh to {host} got no answer, here or over Tailscale. Its ssh server may be off, or a firewall is in the way.");
+            u.title = format!("{name} is on, but not answering");
+            u.detail = "Its ssh may be off, or a firewall is in the way.".to_string();
             u.hint = Some(format!("ssh {}", d.dns_name));
         }
         _ => {}
@@ -705,16 +693,17 @@ fn attention(
             id: "github-token".into(),
             level: "warning".into(),
             title: "Connect GitHub".into(),
-            detail: "Sign in with `gh auth login` (or set GITHUB_TOKEN) to see live runner status and queued jobs.".into(),
+            detail: "Sign in to see your repositories, issues and runners.".into(),
             action: action("Sign in with GitHub", "gh-sign-in", None),
         });
-    } else if !github.configured {
+    } else if !github.configured && !runners.is_empty() {
+        // Only worth it with runners to watch.
         let who = github.detected.first().cloned().unwrap_or_else(|| "your runners".into());
         out.push(Attention {
             id: "github-setup".into(),
             level: "warning".into(),
             title: format!("Watch {who} on GitHub live"),
-            detail: "Runner state now comes from the last check. Add the organization in Settings (it uses your gh login) for live status and jobs.".into(),
+            detail: "Add its organization for live runner status and jobs.".into(),
             action: action("Add organization", "settings", Some("github".into())),
         });
     }
@@ -1111,6 +1100,20 @@ mod tests {
 
         // Not on the tailnet: as before.
         assert_eq!(explain_unreachable(&spec, &timed_out, true, None, Some(&tailscale("Stopped"))).kind, "offline");
+    }
+
+    #[test]
+    fn says_who_ssh_signed_in_as() {
+        let inv = inventory("[[machine]]\nname = \"Hub\"\nhost = \"Hub.local\"\n");
+        let p = ProbeResult {
+            ok: false,
+            error: Some("Warning: Permanently added 'hub.local' (ED25519) to the list of known hosts.\nadib@hub.local: Permission denied (publickey,password).".into()),
+            ..Default::default()
+        };
+        let u = explain_unreachable(&inv.machines[0], &p, true, None, None);
+        assert_eq!(u.kind, "auth");
+        assert!(u.detail.contains("password for adib"), "{}", u.detail);
+        assert!(u.hint.unwrap().starts_with("ssh-copy-id -i "));
     }
 
     #[test]

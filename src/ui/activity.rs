@@ -627,7 +627,7 @@ fn mcp_add_command() -> String {
 }
 
 /// "45 MB of 120 MB · 6.1 MB/s"
-fn progress_text(p: &crate::fleet::model::OpProgress) -> String {
+pub(super) fn progress_text(p: &crate::fleet::model::OpProgress) -> String {
     let done = format::bytes(p.done);
     let amount = match p.total {
         Some(t) if t > 0 => format!("{done} of {}", format::bytes(t)),
@@ -639,7 +639,7 @@ fn progress_text(p: &crate::fleet::model::OpProgress) -> String {
     }
 }
 
-fn progress_bar(theme: &Theme, p: &crate::fleet::model::OpProgress) -> gpui::Div {
+pub(super) fn progress_bar(theme: &Theme, p: &crate::fleet::model::OpProgress) -> gpui::Div {
     let fraction = match p.total {
         Some(t) if t > 0 => p.done as f32 / t as f32,
         _ => 0.,

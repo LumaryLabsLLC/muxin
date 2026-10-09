@@ -112,7 +112,7 @@ The CLI equivalents are `muxen session ls|start|read|send|attach|restart|stop`.
 
 - `machine_connection` says how Muxen reaches a machine: `direct` (QUIC), `ssh` (one live ssh connection) or `none`, with a measured round trip and the `network` it goes over ("Local network", "Tailscale", ...). `direct_connection(machine_id, enabled)` pairs for direct connections (it installs a user service on the machine; only when asked).
 - Tailscale, when it's on this computer, keeps machines reachable away from home: Muxen uses the local network when the machine is on it and Tailscale otherwise, and switches by itself when the network changes. A machine's `tailnet` (in `get_machine` and `machine_connection`) says whether Tailscale sees it online and whether traffic goes peer-to-peer (`path: "direct"`) or through a slower relay (`"relay"`). An `unreachable.kind` of `"tailscale-off"` means Tailscale is off or signed out on this computer: tell the user to turn it on; Muxen never changes Tailscale's settings.
-- `desktop_screenshot(machine_id)` returns a picture of the machine's screen (Linux with X11 so far). `desktop_input(machine_id, events)` clicks, types, scrolls and presses keys there, in that picture's pixels: look first, act, then look again. It's the user's real screen: only when asked, and never type passwords.
+- `desktop_screenshot(machine_id)` returns a picture of the machine's screen (Linux with X11, and Macs). `desktop_input(machine_id, events)` clicks, types, scrolls and presses keys there, in that picture's pixels: look first, act, then look again. It's the user's real screen: only when asked, and never type passwords.
 
 ## Files
 

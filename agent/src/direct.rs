@@ -108,6 +108,8 @@ impl ClientCertVerifier for PairedApps {
 
 /// `muxen-agent listen`: serves links over QUIC until stopped.
 pub fn listen() -> i32 {
+    // Programs that need the logged-in session start here (see gui.rs).
+    crate::gui::serve();
     let runtime = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
         Ok(r) => r,
         Err(e) => {
@@ -364,6 +366,12 @@ fn refresh_unit() {
     if current != wanted && std::fs::write(&path, wanted).is_ok() {
         let _ = run("systemctl", &["--user", "daemon-reload"]);
     }
+}
+
+/// Starts the background service (installing it when needed), for what has
+/// to run in the logged-in session (see gui.rs).
+pub fn start_service() {
+    let _ = install_service();
 }
 
 /// Runs `listen` as a service of this user: (how, a note when it couldn't).

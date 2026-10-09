@@ -208,7 +208,6 @@ impl Render for AddMachineDialog {
                     .flex_col()
                     .gap(px(6.))
                     .child(label(&theme, "On your tailnet"))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Added by its tailnet name, a machine is reachable from anywhere."))
                     .child(div().flex().flex_wrap().gap(px(6.)).children(chips)),
             )
         })
@@ -228,9 +227,7 @@ impl Render for AddMachineDialog {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.pick(host.clone(), name.clone(), cx);
                             if !ssh {
-                                this.note = Some(format!(
-                                    "Turn on Remote Login on {name} first: System Settings › General › Sharing › Remote Login. Then add it here."
-                                ));
+                                this.note = Some(format!("Turn on Remote Login on {name} (Settings › General › Sharing), then add it."));
                             }
                             cx.notify();
                         }))
@@ -239,7 +236,7 @@ impl Render for AddMachineDialog {
                 .collect();
             let body = match &self.network {
                 None => div().flex().items_center().gap(px(6.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(kit::spinner("net-spin", 11., theme.text_placeholder)).child("Looking on this network…").into_any_element(),
-                Some(n) if n.is_empty() => div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Nothing else found. A Mac shows up here once Remote Login is on (System Settings › General › Sharing).").into_any_element(),
+                Some(n) if n.is_empty() => div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Nothing else found. Macs show up once Remote Login is on.").into_any_element(),
                 Some(_) => div().flex().flex_wrap().gap(px(6.)).children(chips).into_any_element(),
             };
             div().flex().flex_col().gap(px(6.)).child(label(&theme, "On this network")).child(body)

@@ -326,7 +326,9 @@ Muxen first reaches a machine with `ssh`, installs its small agent there, and fr
 - **Direct**: on a machine's page, **Connect directly** pairs the app with its agent (each trusts only the other's certificate, swapped over ssh) and runs the agent's listener as a user service there (systemd or launchd) on UDP port 47821. Muxen then connects over QUIC, falling back to ssh whenever the direct connection is down.
 - `MUXEN_NO_LINK=1` turns all of this off: one ssh connection per request, as before.
 
-**Desktop.** On a Linux machine with an X11 desktop, **Show desktop** (on its page, or its right-click menu) shows its screen live and sends your mouse and keyboard to it; ⌘ works as Ctrl there.
+**Desktop.** On a Linux machine with an X11 desktop, or a Mac, **Show desktop** (on its page, or its right-click menu) shows its screen live and sends your mouse and keyboard to it. On Linux ⌘ works as Ctrl; on a Mac it stays ⌘. An open desktop is listed under its machine in the sidebar (and keeps streaming while you look elsewhere); close it there.
+
+- **Macs** ask once, on their own screen, to allow `muxen-agent` under Privacy & Security › Screen Recording (to see it) and Accessibility (to control it). The screen goes over ssh to the agent's background service in your session there, so no other network permission is needed. Release builds sign the agent with a Developer ID, so the permissions survive updates.
 
 - Pick 720p, 1080p, 1440p, 4K or Native from the bar above it. On a local network it starts at the screen's own resolution, further away at 1080p.
 - **Open in window** gives it a window of its own (put it on another screen, or full screen).

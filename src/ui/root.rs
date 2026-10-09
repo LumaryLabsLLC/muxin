@@ -453,7 +453,12 @@ impl Root {
             Route::Session(sid) if self.split.contains(sid) => sid.split('/').next().map(str::to_string),
             _ => None,
         };
-        self.desktops.retain(|id, _| Some(id) == showing.as_ref());
+        // Desktops in the sidebar keep streaming, so going back is instant.
+        if let Route::Desktop(id) = self.route.clone() {
+            self.pin_desktop(&id, cx);
+        }
+        let pinned = cx.global::<super::theme::Appearance>().desktops.clone();
+        self.desktops.retain(|id, _| Some(id) == showing.as_ref() || pinned.contains(id));
         if let (Some(id), Route::Session(_)) = (&showing, &self.route) {
             if !self.desktops.contains_key(id) {
                 let (engine, mid) = (self.engine.clone(), id.clone());
@@ -1043,6 +1048,7 @@ impl Root {
         let unassigned: Vec<&Runner> = s.runners.iter().filter(|r| r.machine_id.is_none() && matches_runner(r)).collect();
 
         rows.push(self.section_header("Machines", runner_machines.len(), true, cx).into_any_element());
+        let pinned_desktops = cx.global::<super::theme::Appearance>().desktops.clone();
         for m in &runner_machines {
             let runners: Vec<&Runner> = m.runner_ids.iter().filter_map(|id| s.runners.iter().find(|r| &r.id == id)).collect();
             let machine_match = q.is_empty() || m.name.to_lowercase().contains(&q);
@@ -1058,11 +1064,15 @@ impl Root {
             let open = !self.collapsed.contains(&m.id) || !q.is_empty();
             // Collapsed: the machine carries its sessions' unread dot.
             let alert = (!open).then(|| sessions.iter().find_map(|x| x.attention.clone().map(|k| (k, x.exit_code)))).flatten();
-            rows.push(self.machine_row(&theme, m, open, !sessions.is_empty(), alert, selected_machine.as_deref() == Some(&m.id), cx).into_any_element());
+            let has_desktop = pinned_desktops.contains(&m.id);
+            rows.push(self.machine_row(&theme, m, open, !sessions.is_empty() || has_desktop, alert, selected_machine.as_deref() == Some(&m.id), cx).into_any_element());
             if open {
                 // Agent sessions first: they're what you come back to.
                 for x in sessions {
                     rows.push(self.session_row(&theme, x, selected_session.as_deref() == Some(&x.id), cx).into_any_element());
+                }
+                if has_desktop {
+                    rows.push(self.desktop_row(&theme, m, self.route == Route::Desktop(m.id.clone()), cx).into_any_element());
                 }
                 for r in visible {
                     rows.push(self.runner_row(&theme, &s, r, selected_runner.as_deref() == Some(&r.id), cx).into_any_element());
@@ -1532,36 +1542,74 @@ impl Root {
         super::theme::save_sidebar_width(cx, self.sidebar_width);
     }
 
-    /// How fresh things are: GitHub's live runner status when an org or repo
-    /// is watched (or when GitHub needs fixing), else the last machine check.
-    /// Clicking opens Settings, or checks the machines now.
+    /// What's happening now, in a line: a copy or install under way, else an
+    /// agent that needs you or is working, else a GitHub problem, else the
+    /// machines. Clicking opens it (or checks the machines).
     fn connection_card(&self, theme: &Theme, s: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
-        let checked = match (s.check.running, s.check.next_at) {
-            (true, _) => "Checking machines…".to_string(),
-            (false, Some(next)) => format!("Checked {} · next {}", format::ago(s.check.finished_at), format::until(next)),
-            (false, None) if s.check.finished_at.is_some() => format!("Checked {}", format::ago(s.check.finished_at)),
-            _ => "Machines not checked yet".into(),
-        };
-        let github_matters = s.github.configured || (s.github.token_source.is_empty() && !s.demo);
-        let (color, title, detail, check_now) = if github_matters {
+        enum Click {
+            Op(u64),
+            Session(String),
+            Settings,
+            Check,
+        }
+        let machine_name = |id: &str| s.machines.iter().find(|m| m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.to_string());
+        let who = |x: &crate::fleet::sessions::SessionInfo| if x.agent_name.is_empty() { "A session".to_string() } else { x.agent_name.clone() };
+        let running: Vec<&crate::fleet::model::Operation> = s.operations.iter().filter(|o| o.status == "running" && o.kind != "logs").collect();
+        let needs_you = s.sessions.iter().find(|x| matches!(x.attention.as_deref(), Some("bell" | "waiting")));
+        let working: Vec<&crate::fleet::sessions::SessionInfo> = s.sessions.iter().filter(|x| x.busy && x.status == "running").collect();
+        let github_trouble = s.github.configured && (!s.github.live || s.github.scopes.iter().any(|sc| sc.error.is_some()));
+        let mut progress = None;
+        let (color, title, detail, click) = if let Some(op) = running.first() {
+            progress = op.progress.clone();
+            let detail = match (&op.progress, running.len()) {
+                (Some(p), 1) => super::activity::progress_text(p),
+                (Some(p), n) => format!("{} · {} more", super::activity::progress_text(p), n - 1),
+                (None, 1) => "Running…".to_string(),
+                (None, n) => format!("{} more running", n - 1),
+            };
+            (theme.accent, op.title.clone(), detail, Click::Op(op.id))
+        } else if let Some(x) = needs_you {
+            (theme.warning, format!("{} on {} needs you", who(x), machine_name(&x.machine_id)), x.title.clone(), Click::Session(x.id.clone()))
+        } else if let Some(x) = working.first() {
+            let title = match working.len() {
+                1 => format!("{} is working on {}", who(x), machine_name(&x.machine_id)),
+                n => format!("{n} agents are working"),
+            };
+            (theme.accent, title, x.title.clone(), Click::Session(x.id.clone()))
+        } else if github_trouble {
             let (color, title) = github_status(theme, s);
-            (color, title, checked, false)
+            (color, title, "Runner status from GitHub".to_string(), Click::Settings)
         } else {
+            let total = s.machines.iter().filter(|m| !m.host.is_empty()).count();
             let offline = s.machines.iter().filter(|m| m.status == "offline").count();
-            let color = if offline > 0 { theme.warning } else if s.check.finished_at.is_some() { theme.success } else { theme.text_placeholder };
-            let title = match (s.check.running, s.check.finished_at, offline) {
-                (true, _, _) => "Checking machines…".to_string(),
-                (_, None, _) => "Machines not checked yet".to_string(),
-                (_, Some(t), 0) => format!("Machines checked {}", format::ago(Some(t))),
-                (_, Some(_), 1) => "1 machine is offline".to_string(),
-                (_, Some(_), n) => format!("{n} machines are offline"),
+            // Off or asleep, versus on but needing something (a key, Remote Login, ...).
+            let off = s.machines.iter().filter(|m| format::is_just_offline(m)).count();
+            let stuck = offline - off;
+            let title = match (total, offline) {
+                (0, _) => "No machines yet".to_string(),
+                (1, 0) => "Your machine is online".to_string(),
+                (n, 0) => format!("All {n} machines online"),
+                (n, _) => {
+                    let mut parts = vec![format!("{} online", n - offline)];
+                    if off > 0 {
+                        parts.push(format!("{off} offline"));
+                    }
+                    if stuck > 0 {
+                        parts.push(format!("{stuck} can't connect"));
+                    }
+                    parts.join(" · ")
+                }
             };
-            let detail = match s.check.next_at {
-                _ if s.check.running => "Read-only: resources, runners, reachability".to_string(),
-                Some(next) => format!("Next check {} · click to check now", format::until(next)),
-                None => "Automatic checks are off · click to check now".to_string(),
+            let detail = if s.check.running {
+                "Checking…".to_string()
+            } else {
+                match s.check.finished_at {
+                    Some(t) => format!("Checked {}", format::ago(Some(t))),
+                    None => "Not checked yet".to_string(),
+                }
             };
-            (color, title, detail, true)
+            let color = if offline > 0 { theme.warning } else if total > 0 { theme.success } else { theme.text_placeholder };
+            (color, title, detail, Click::Check)
         };
         // Outer and inner padding, border, dot and gap.
         let text_w = self.sidebar_width - 60.;
@@ -1617,14 +1665,14 @@ impl Root {
                         .min_w(px(0.))
                         .gap(px(2.))
                         .child(div().w(px(text_w)).truncate().text_size(px(12.5)).text_color(theme.text).child(title))
-                        .child(div().w(px(text_w)).truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(detail)),
+                        .child(div().w(px(text_w)).truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(detail))
+                        .children(progress.map(|p| div().w(px(text_w)).pt(px(3.)).child(super::activity::progress_bar(theme, &p)))),
                 )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if check_now {
-                        this.engine.trigger_check(None);
-                    } else {
-                        this.navigate(Route::Settings, window, cx)
-                    }
+                .on_click(cx.listener(move |this, _, window, cx| match &click {
+                    Click::Op(id) => this.show_operation(*id, cx),
+                    Click::Session(id) => this.navigate(Route::Session(id.clone()), window, cx),
+                    Click::Settings => this.navigate(Route::Settings, window, cx),
+                    Click::Check => this.engine.trigger_check(None),
                 })),
         )
         .child(footer)
@@ -1759,7 +1807,7 @@ impl Root {
             Button::new("desktop-close", "Close")
                 .style(ButtonStyle::Ghost)
                 .icon("x")
-                .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(close.clone()), window, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| this.close_desktop(&close, window, cx)))
                 .into_any_element(),
         ];
         div()
@@ -1771,8 +1819,74 @@ impl Root {
             .into_any_element()
     }
 
+    /// Lists a machine's desktop in the sidebar, under the machine.
+    fn pin_desktop(&mut self, machine_id: &str, cx: &mut Context<Self>) {
+        if !cx.global::<super::theme::Appearance>().desktops.iter().any(|d| d == machine_id) {
+            let id = machine_id.to_string();
+            super::theme::remember(cx, |a| a.desktops.push(id));
+        }
+    }
+
+    /// Closes a desktop: out of the sidebar, its stream stopped.
+    pub(super) fn close_desktop(&mut self, machine_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let id = machine_id.to_string();
+        super::theme::remember(cx, |a| a.desktops.retain(|d| *d != id));
+        self.desktops.remove(machine_id);
+        if self.route == Route::Desktop(machine_id.to_string()) {
+            self.navigate(Route::Machine(machine_id.to_string()), window, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// The desktop beside a session's terminal becomes its own item in the
+    /// sidebar (the same stream: nothing reconnects).
+    pub(super) fn desktop_to_sidebar(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let machine = session_id.split('/').next().unwrap_or_default().to_string();
+        self.pin_desktop(&machine, cx);
+        self.split.remove(session_id);
+        self.navigate(Route::Desktop(machine), window, cx);
+    }
+
+    /// A desktop's item in the sidebar, under its machine.
+    fn desktop_row(&self, theme: &Theme, m: &Machine, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let (open, close) = (m.id.clone(), m.id.clone());
+        let (from, to) = format::machine_tile(m);
+        div()
+            .id(SharedString::from(format!("side-d-{}", m.id)))
+            .group("desktop-row")
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(26.))
+            .mx(px(10.))
+            .pl(px(22.))
+            .pr(px(8.))
+            .rounded(px(7.))
+            .cursor_pointer()
+            .when(selected, |d| d.bg(theme.element_selected))
+            .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+            .child(kit::tile("monitor", from, to, 16.))
+            .child(div().flex_1().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child("Desktop"))
+            .child(
+                div()
+                    .id(SharedString::from(format!("side-d-x-{}", m.id)))
+                    .invisible()
+                    .group_hover("desktop-row", |st| st.visible())
+                    .child(icon("x", 12., theme.text_placeholder))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close_desktop(&close, window, cx)
+                    })),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Desktop(open.clone()), window, cx)))
+    }
+
     /// Moves a machine's desktop into a window of its own (and out of this one).
     pub(super) fn pop_out_desktop(&mut self, machine_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let id = machine_id.to_string();
+        super::theme::remember(cx, |a| a.desktops.retain(|d| *d != id));
+        self.desktops.remove(machine_id);
         let name = self.snapshot.machines.iter().find(|m| m.id == machine_id).map(|m| m.name.clone()).unwrap_or_else(|| machine_id.to_string());
         super::desktop::open_window(self.engine.clone(), machine_id.to_string(), name, cx);
         match self.route.clone() {

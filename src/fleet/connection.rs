@@ -73,7 +73,13 @@ impl Engine {
             }
         }
         if out.direct && out.via == "ssh" {
-            out.note = Some("Paired, but the direct connection didn't come up; using ssh. The machine's firewall may block its UDP port.".into());
+            // A Mac blocks the agent's network until Local Network access is allowed there.
+            let mac = self.current().machines.iter().any(|m| m.id == spec.id && m.platform.starts_with("darwin"));
+            out.note = Some(if mac {
+                format!("On {}, allow muxen-agent under Privacy & Security › Local Network.", spec.name)
+            } else {
+                "Direct didn't connect (UDP 47821 blocked?), so it's ssh.".into()
+            });
         }
         // Its local-network address didn't answer, so the connection took the
         // long way. Away from home that's expected; but when Tailscale itself
@@ -89,19 +95,12 @@ impl Engine {
                 out.network = l.network().map(str::to_string);
                 out.peer = l.peer().map(|a| a.ip().to_string());
             } else {
-                out.note = Some(format!(
-                    "It's on this network ({}), but didn't answer there, so this goes through {}. On a Mac, check that Muxen is allowed in System Settings › Privacy & Security › Local Network, then quit and reopen Muxen.",
-                    lan.join(", "),
-                    out.network.clone().unwrap_or_default()
-                ));
+                out.note = Some("Not reachable on this network: allow Muxen in Privacy & Security › Local Network, then reopen it.".into());
             }
         }
         if out.via == "direct" && out.network.as_deref() == Some("Tailscale") {
             if let Some(d) = out.tailnet.as_ref().filter(|d| d.path == "relay") {
-                out.note = Some(format!(
-                    "Tailscale couldn't connect the two machines directly, so traffic goes through its relay{}: slower, especially the desktop.",
-                    d.relay.as_ref().map(|r| format!(" ({r})")).unwrap_or_default()
-                ));
+                out.note = Some(format!("Relayed by Tailscale{}: slower.", d.relay.as_ref().map(|r| format!(" ({r})")).unwrap_or_default()));
             }
         }
         Ok(out)

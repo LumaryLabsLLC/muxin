@@ -80,7 +80,7 @@ impl Root {
                     for a in AGENTS.iter().filter(|a| a.id != "shell" && m.agents.iter().any(|i| i == a.id)) {
                         items.push(Item::Action { label: format!("New {} session…", a.name), glyph: Glyph::Agent(a.id), action: Action::NewAgent(id.clone(), a.id), danger: false });
                     }
-                    if m.platform.starts_with("linux") {
+                    if super::format::has_desktop(m) && !m.local {
                         items.push(act("Show desktop", "monitor", Action::ShowDesktop(id.clone())));
                     }
                     if !m.platform.starts_with("windows") {

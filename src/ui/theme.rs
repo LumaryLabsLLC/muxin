@@ -137,6 +137,8 @@ pub struct Appearance {
     pub github_folded_owners: Vec<String>,
     /// A session page split with a desktop: the terminal's share of the width.
     pub split_ratio: f32,
+    /// Machines whose desktop is an item in the sidebar.
+    pub desktops: Vec<String>,
     /// Where to save; None in demo mode.
     #[serde(skip)]
     pub path: Option<PathBuf>,
@@ -156,6 +158,7 @@ impl Default for Appearance {
             github_group_by_owner: false,
             github_folded_owners: Vec::new(),
             split_ratio: 0.5,
+            desktops: Vec::new(),
             path: None,
         }
     }

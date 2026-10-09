@@ -745,7 +745,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "desktop_screenshot",
-            "description": "A picture of a machine's screen (Linux machines with an X11 desktop, so far). Coordinates for desktop_input are in its pixels.",
+            "description": "A picture of a machine's screen (Linux with an X11 desktop, or a Mac on a direct connection). Coordinates for desktop_input are in its pixels.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
             "annotations": annotations("Desktop screenshot", true, false, false, false),
         }),

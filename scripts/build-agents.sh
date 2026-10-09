@@ -21,6 +21,18 @@ case "$(uname -s)" in
   Darwin)
     build aarch64-apple-darwin darwin-aarch64 build
     build x86_64-apple-darwin darwin-x86_64 build
+    # Signed with a stable identity, a Mac keeps the agent's Screen Recording
+    # and Accessibility permissions across updates (an ad-hoc signature
+    # changes with every build, and the permissions go with it).
+    identity=${MUXEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -n1)}
+    if [ -n "$identity" ]; then
+      for f in "$out"/muxen-agent-darwin-*; do
+        codesign --force --timestamp=none --identifier com.lumarylabs.muxen-agent -s "$identity" "$f"
+      done
+      echo "▸ signed the macOS agents ($identity)"
+    else
+      echo "▸ no Developer ID certificate: the macOS agents are ad-hoc signed"
+    fi
     ;;
 esac
 build x86_64-unknown-linux-musl linux-x86_64 zigbuild

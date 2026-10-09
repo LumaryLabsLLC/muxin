@@ -3611,10 +3611,11 @@ dependencies = [
 
 [[package]]
 name = "muxen-agent"
-version = "0.2.4"
+version = "0.2.6"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "cc",
  "jpeg-encoder",
  "libc",
  "portable-pty",

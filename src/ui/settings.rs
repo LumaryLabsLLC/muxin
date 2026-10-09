@@ -674,15 +674,15 @@ impl SettingsPage {
                     None => "Connected to your tailnet".into(),
                 },
                 match on_it {
-                    0 => "None of your machines are on it yet. Machines on your tailnet are reachable from anywhere.".to_string(),
-                    1 => "1 of your machines is on it, so Muxen reaches it from anywhere: on its own network directly, elsewhere through Tailscale.".to_string(),
-                    n => format!("{n} of your machines are on it, so Muxen reaches them from anywhere: on their own network directly, elsewhere through Tailscale."),
+                    0 => "None of your machines are on it yet.".to_string(),
+                    1 => "1 machine on it, reachable from anywhere.".to_string(),
+                    n => format!("{n} machines on it, reachable from anywhere."),
                 },
             )
         } else if t.state == "NeedsLogin" {
-            ("circle-alert", theme.warning, format!("Tailscale is signed out on {here}"), "Sign in to reach machines on your tailnet away from their network.".to_string())
+            ("circle-alert", theme.warning, format!("Tailscale is signed out on {here}"), "Sign in to reach machines away from home.".to_string())
         } else {
-            ("circle-alert", theme.warning, format!("Tailscale is off on {here}"), "Turn it on to reach machines on your tailnet away from their network.".to_string())
+            ("circle-alert", theme.warning, format!("Tailscale is off on {here}"), "Turn it on to reach machines away from home.".to_string())
         };
         Some(
             div()
@@ -706,8 +706,7 @@ impl SettingsPage {
                                 .min_w(px(0.))
                                 .gap(px(2.))
                                 .child(div().text_size(px(13.)).child(title))
-                                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(detail))
-                                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Muxen only reads Tailscale's status; it never changes its settings.")),
+                                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(detail)),
                         )
                         .when(!t.running && super::can_open_tailscale(), |d| {
                             d.child(Button::new("ts-open", "Open Tailscale").on_click(|_, _, _| super::open_tailscale()))
@@ -743,9 +742,7 @@ impl SettingsPage {
                         let _ = engine.update_settings(s);
                         cx.refresh_windows();
                     }))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!(
-                        "Text copied on {here} can be pasted on your Linux desktops and Macs, and what's copied there lands here. Passwords from password managers stay on {here}."
-                    )))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("Copy on {here}, paste on your machines, and back. Passwords stay here.")))
                     .child(div().text_size(px(11.5)).text_color(theme.text_muted).child(status)),
             )
     }

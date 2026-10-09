@@ -270,6 +270,32 @@ async fn run(spec: &MachineSpec, shell: Shell) -> Result<String, RunError> {
     Ok(stdout)
 }
 
+/// The public key ssh offers by default (the first of its default identities
+/// that exists here), as "~/.ssh/id_ed25519.pub".
+pub fn default_ssh_key() -> Option<String> {
+    let ssh = dirs::home_dir()?.join(".ssh");
+    ["id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk"]
+        .iter()
+        .find(|k| ssh.join(format!("{k}.pub")).is_file() && ssh.join(k).is_file())
+        .map(|k| format!("~/.ssh/{k}.pub"))
+}
+
+/// The public key ssh offers this machine (its config's IdentityFile, else a
+/// default one), as a path like "~/.ssh/id_ed25519.pub".
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub async fn ssh_key_for(spec: &MachineSpec) -> Option<String> {
+    let home = dirs::home_dir()?;
+    let out = tokio::process::Command::new("ssh").arg("-G").args(ssh_args(spec)).output().await.ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix("identityfile ").map(|p| p.trim().to_string()))
+        .find(|p| {
+            let full = p.strip_prefix("~/").map(|rest| home.join(rest)).unwrap_or_else(|| p.into());
+            full.is_file() && std::path::PathBuf::from(format!("{}.pub", full.display())).is_file()
+        })
+        .map(|p| format!("{p}.pub"))
+}
+
 pub fn ssh_args(spec: &MachineSpec) -> Vec<String> {
     let mut args: Vec<String> = [
         "-T",

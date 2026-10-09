@@ -97,6 +97,11 @@ pub fn diagnostics_summary(m: &Machine) -> (String, &'static str) {
     }
 }
 
+/// Whether Muxen can show the machine's desktop (Linux with X11, macOS).
+pub fn has_desktop(m: &Machine) -> bool {
+    m.platform.starts_with("linux") || m.platform.starts_with("darwin")
+}
+
 /// Gradient for a machine's icon tile, by OS.
 pub fn machine_tile(m: &Machine) -> (u32, u32) {
     use super::kit::tiles;

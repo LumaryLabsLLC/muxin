@@ -42,7 +42,7 @@ enum State {
 
 enum Msg {
     /// The stream is up: its channel, frame size, and how it travels.
-    Ready(Arc<Remote>, u32, u32, String),
+    Ready(Arc<Remote>, u32, u32, String, Option<String>),
     /// The screen picture changed (see `Canvas`).
     Changed,
     /// The stream ended: why, and whether it may well work again in a moment
@@ -112,6 +112,10 @@ pub struct DesktopView {
     frames: u64,
     /// Why the machine can't be reached ("Beelink is offline"), while it can't.
     offline: Option<String>,
+    /// The machine is a Mac (⌘ stays ⌘).
+    mac: bool,
+    /// What the machine says about the stream (e.g. view only).
+    note: Option<String>,
     /// Picking a dropped stream back up: tries so far, and the next one.
     resuming: bool,
     retries: u32,
@@ -147,11 +151,14 @@ impl DesktopView {
             scroll_rest: 0.,
             frames: 0,
             offline: None,
+            mac: false,
+            note: None,
             resuming: false,
             retries: 0,
             retry: None,
             _tasks: Vec::new(),
         };
+        view.mac = view.engine.current().machines.iter().any(|m| m.id == view.machine && m.platform.starts_with("darwin"));
         view.start(window, cx);
         // Follow the machine: say so when it goes offline, and pick the stream
         // back up when it returns.
@@ -225,6 +232,10 @@ impl DesktopView {
                 let _ = tx.unbounded_send(Msg::Ended("That machine is gone.".into(), false));
                 return;
             };
+            if engine.is_demo() {
+                let _ = tx.unbounded_send(Msg::Ended("The demo has no desktops to show.".into(), false));
+                return;
+            }
             let Some(link) = crate::fleet::link::get(&spec).await else {
                 let _ = tx.unbounded_send(Msg::Ended(format!("Can't reach the agent on {}.", spec.name), true));
                 return;
@@ -238,7 +249,8 @@ impl DesktopView {
             match link.request(request, Duration::from_secs(20)).await {
                 Ok(r) if r["ok"].as_bool() == Some(true) => {
                     let (w, h) = (r["width"].as_u64().unwrap_or(0) as u32, r["height"].as_u64().unwrap_or(0) as u32);
-                    let _ = tx.unbounded_send(Msg::Ready(Arc::new(Remote { link: link.clone(), channel }), w, h, format!("{via}|{width}")));
+                    let note = r["note"].as_str().map(str::to_string);
+                    let _ = tx.unbounded_send(Msg::Ready(Arc::new(Remote { link: link.clone(), channel }), w, h, format!("{via}|{width}"), note));
                 }
                 Ok(r) => {
                     link.close_channel(channel);
@@ -277,7 +289,8 @@ impl DesktopView {
                 let alive = this.update_in(cx, |this, window, cx| {
                     for msg in batch {
                         match msg {
-                            Msg::Ready(remote, w, h, via) => {
+                            Msg::Ready(remote, w, h, via, note) => {
+                                this.note = note;
                                 this.remote = Some(remote);
                                 this.size = (w, h);
                                 this.state = State::Live;
@@ -346,7 +359,10 @@ impl DesktopView {
             State::Connecting if self.resuming => "Reconnecting…".into(),
             State::Connecting => "Connecting…".into(),
             State::Live if self.frame.is_none() => "Waiting for the first frame…".into(),
-            State::Live => format!("Live · {}×{}", self.size.0, self.size.1),
+            State::Live => match &self.note {
+                Some(n) => format!("Live · {}×{} · {n}", self.size.0, self.size.1),
+                None => format!("Live · {}×{}", self.size.0, self.size.1),
+            },
             State::Ended(why) => why.clone(),
         }
     }
@@ -415,10 +431,15 @@ impl DesktopView {
 
     /// Tells the machine about modifier keys pressed or let go.
     fn modifiers(&mut self, m: Modifiers) {
-        // ⌘ works as Ctrl there (copy, paste, ... as on a Mac).
-        let ctrl = |m: &Modifiers| m.control || m.platform;
-        for (now, before, sym) in [(m.shift, self.held.shift, 0xffe1u32), (ctrl(&m), ctrl(&self.held), 0xffe3), (m.alt, self.held.alt, 0xffe9)] {
-            if now != before {
+        // On a Mac ⌘ is ⌘; elsewhere it works as Ctrl (copy, paste, ... as on a Mac).
+        let keys: [(bool, bool, u32); 4] = if self.mac {
+            [(m.shift, self.held.shift, 0xffe1), (m.control, self.held.control, 0xffe3), (m.alt, self.held.alt, 0xffe9), (m.platform, self.held.platform, 0xffeb)]
+        } else {
+            let ctrl = |m: &Modifiers| m.control || m.platform;
+            [(m.shift, self.held.shift, 0xffe1), (ctrl(&m), ctrl(&self.held), 0xffe3), (m.alt, self.held.alt, 0xffe9), (false, false, 0)]
+        };
+        for (now, before, sym) in keys {
+            if now != before && sym != 0 {
                 self.send(json!({ "t": "key", "keysym": sym, "down": now }));
             }
         }
@@ -531,7 +552,7 @@ impl Render for DesktopView {
                     .gap(px(10.))
                     .child(icon("power", 28., theme.text_placeholder))
                     .child(div().text_size(px(14.)).text_color(theme.text).child(why))
-                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child("The desktop comes back here when the machine does.")),
+                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child("Comes back when it does.")),
             ),
             (State::Ended(why), None) => Some(
                 div()

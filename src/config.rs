@@ -420,10 +420,10 @@ pub fn default_inventory() -> String {
         r#"# Muxen: your settings and machines. Settings and the app's look go in
 # [settings] and [ui], which Muxen adds when you change them.
 #
-# Each [[machine]] is a computer that hosts self-hosted GitHub Actions runners,
-# or one you just want to keep an eye on. Muxen checks machines over SSH
-# (or directly when host = "local") and reads CPU, memory, disk, uptime and
-# which runners are installed and running. Checks are read-only.
+# Each [[machine]] is a computer Muxen connects to: for agent sessions, its
+# desktop, files, workspaces, or the GitHub Actions runners on it. Muxen
+# checks machines over SSH (or directly when host = "local") and reads CPU,
+# memory, disk, uptime and which runners are installed. Checks are read-only.
 #
 # Runners installed in the usual places (~/actions-runner*, ~/runners/*,
 # /opt/actions-runner*, C:\actions-runner*) are discovered automatically.
@@ -435,19 +435,19 @@ host = "local"
 # runners = ["{runner}-01"]
 
 # [[machine]]
-# name = "Mac Studio"
-# host = "ci@mac-studio.local"        # anything `ssh` accepts, including ~/.ssh/config aliases
-# runners = ["mac-studio-01", "mac-studio-02"]
+# name = "Forge"
+# host = "ci@forge.local"             # anything `ssh` accepts, including ~/.ssh/config aliases
+# runners = ["forge-01", "forge-02"]
 # runner_dirs = ["/Volumes/Fast/runners/*"]   # extra places to look for runners
 
 # [[machine]]
-# name = "Windows NUC"
-# host = "nuc"
-# shell = "powershell"                # auto-detected when omitted
+# name = "Beacon"
+# host = "deploy@beacon"
+# id = "beacon"                       # keeps its id (and history) if you rename it
 
 # [[machine]]
-# name = "StudioNAS"                  # no runners: listed under "Other machines"
-# host = "nas"
+# name = "Vault"                      # no runners: listed under "Other machines"
+# host = "vault"
 "#,
         runner = slug(&host),
     )

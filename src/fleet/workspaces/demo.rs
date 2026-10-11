@@ -108,9 +108,9 @@ pub(super) fn seed(world: &World) -> Vec<WorkspaceRecord> {
     let api = WorkspaceInfo {
         id: api_id.into(),
         name: "api".into(),
-        machine_id: "ubuntu-nuc".into(),
-        machine_name: "Ubuntu NUC".into(),
-        host: "nuc-ubuntu".into(),
+        machine_id: "beacon".into(),
+        machine_name: "Beacon".into(),
+        host: "beacon".into(),
         platform: "linux-x64".into(),
         path: demo_path("linux-x64", api_id),
         repo: Some("acme/api".into()),
@@ -155,9 +155,9 @@ pub(super) fn seed(world: &World) -> Vec<WorkspaceRecord> {
     let desk = WorkspaceInfo {
         id: desk_id.into(),
         name: "desktop".into(),
-        machine_id: "mac-studio".into(),
-        machine_name: "Mac Studio".into(),
-        host: "ci@mac-studio.local".into(),
+        machine_id: "forge".into(),
+        machine_name: "Forge".into(),
+        host: "ci@forge.local".into(),
         platform: "darwin-arm64".into(),
         path: demo_path("darwin-arm64", desk_id),
         repo: Some("acme/desktop".into()),
@@ -188,9 +188,9 @@ pub(super) fn seed(world: &World) -> Vec<WorkspaceRecord> {
     let web = WorkspaceInfo {
         id: web_id.into(),
         name: "web".into(),
-        machine_id: "ubuntu-nuc".into(),
-        machine_name: "Ubuntu NUC".into(),
-        host: "nuc-ubuntu".into(),
+        machine_id: "beacon".into(),
+        machine_name: "Beacon".into(),
+        host: "beacon".into(),
         platform: "linux-x64".into(),
         path: demo_path("linux-x64", web_id),
         repo: Some("acme/web".into()),
@@ -326,9 +326,9 @@ async fn respond(w: &World, info: &WorkspaceInfo, cmd: &str, cwd: &str) -> (Stri
         "uname" => return ok(if linux { "Linux" } else { "Darwin" }),
         "uname -a" => {
             return ok(if linux {
-                "Linux nuc-ubuntu 6.8.0-45-generic #45-Ubuntu SMP PREEMPT_DYNAMIC x86_64 x86_64 x86_64 GNU/Linux"
+                "Linux beacon 6.8.0-45-generic #45-Ubuntu SMP PREEMPT_DYNAMIC x86_64 x86_64 x86_64 GNU/Linux"
             } else {
-                "Darwin mac-studio.local 25.1.0 Darwin Kernel Version 25.1.0 arm64"
+                "Darwin forge.local 25.1.0 Darwin Kernel Version 25.1.0 arm64"
             })
         }
         "env" | "printenv" => return ok(&format!("HOME=/home/ci\nSHELL=/bin/bash\nMUXEN_WORKSPACE={}\nNO_COLOR=1\nPWD={here}", info.id)),

@@ -206,12 +206,12 @@ async fn demo_flow() {
     assert!(engine.workspace_exec(&info.id, "ls", ExecOptions { cwd: Some("../..".into()), ..Default::default() }).await.is_err());
 
     // The asleep laptop can't host one; workspaces can be turned off per machine.
-    let err = engine.create_workspace(CreateWorkspace { machine: Some("laravel-macbook".into()), ..Default::default() }).await.unwrap_err();
+    let err = engine.create_workspace(CreateWorkspace { machine: Some("harbor".into()), ..Default::default() }).await.unwrap_err();
     assert!(err.contains("unreachable"), "{err}");
-    engine.set_workspaces_allowed("ubuntu-nuc", false).unwrap();
-    let err = engine.create_workspace(CreateWorkspace { machine: Some("ubuntu-nuc".into()), ..Default::default() }).await.unwrap_err();
+    engine.set_workspaces_allowed("beacon", false).unwrap();
+    let err = engine.create_workspace(CreateWorkspace { machine: Some("beacon".into()), ..Default::default() }).await.unwrap_err();
     assert!(err.contains("turned off"), "{err}");
-    engine.set_workspaces_allowed("ubuntu-nuc", true).unwrap();
+    engine.set_workspaces_allowed("beacon", true).unwrap();
 
     engine.destroy_workspace(&info.id, false).await.unwrap();
     assert!(!engine.workspaces().iter().any(|w| w.id == info.id));
@@ -420,7 +420,7 @@ async fn demo_docker_flow() {
     let docker = |image: Option<&str>| WorkspaceIsolation { isolation: Some("docker".into()), image: image.map(str::to_string), docker_socket: false };
 
     let info = engine
-        .create_workspace_with(CreateWorkspace { machine: Some("ubuntu-nuc".into()), repo: Some("acme/web".into()), ..Default::default() }, docker(Some("node:22")))
+        .create_workspace_with(CreateWorkspace { machine: Some("beacon".into()), repo: Some("acme/web".into()), ..Default::default() }, docker(Some("node:22")))
         .await
         .unwrap();
     assert_eq!((info.isolation.as_str(), info.image.as_deref()), ("docker", Some("node:22")));
@@ -430,7 +430,7 @@ async fn demo_docker_flow() {
     assert_eq!(r.stdout, "/workspace", "commands run inside the container");
 
     // The default image, and the validation errors agents can hit.
-    let plain = engine.create_workspace_with(CreateWorkspace { machine: Some("ubuntu-nuc".into()), ..Default::default() }, docker(None)).await.unwrap();
+    let plain = engine.create_workspace_with(CreateWorkspace { machine: Some("beacon".into()), ..Default::default() }, docker(None)).await.unwrap();
     assert_eq!(plain.image.as_deref(), Some(DEFAULT_IMAGE));
     let err = engine
         .create_workspace_with(CreateWorkspace::default(), WorkspaceIsolation { isolation: Some("vm".into()), ..Default::default() })
@@ -444,7 +444,10 @@ async fn demo_docker_flow() {
     assert!(err.contains("only applies to docker"), "{err}");
     let err = engine.create_workspace_with(CreateWorkspace::default(), docker(Some("node 22"))).await.unwrap_err();
     assert!(err.contains("isn't a docker image"), "{err}");
-    let err = engine.create_workspace_with(CreateWorkspace { machine: Some("windows-nuc".into()), ..Default::default() }, docker(None)).await.unwrap_err();
+    // The demo has no Windows machine; this one only exists for tests.
+    let id = engine.add_machine(crate::ops::NewMachine { name: "Test Windows".into(), host: "test-windows".into() }).unwrap();
+    engine.run_check(Some(vec![id.clone()])).await;
+    let err = engine.create_workspace_with(CreateWorkspace { machine: Some(id), ..Default::default() }, docker(None)).await.unwrap_err();
     assert!(err.contains("Windows"), "{err}");
 
     engine.destroy_workspace(&info.id, false).await.unwrap();

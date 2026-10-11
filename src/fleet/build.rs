@@ -900,7 +900,7 @@ fn attention(
                 format!("{unassigned} GitHub runners aren't in config.toml")
             },
             detail: format!(
-                "{} {} registered on GitHub but no machine lists {}. Add {} to a [[machine]]'s runners to track {}.",
+                "{} {} registered on GitHub but no machine lists {}. Add {} to a machine's runners in config.toml to track {}.",
                 names.join(", "),
                 if unassigned == 1 { "is" } else { "are" },
                 if unassigned == 1 { "it" } else { "them" },

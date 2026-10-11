@@ -19,7 +19,7 @@ Point it at the machines you own (a Mac Studio under the desk, a NUC, a Linux bo
 Agents can also **borrow a machine as a work environment**: an [agent workspace](#agent-workspaces) is a persistent folder (optionally a git checkout) on one of your machines where an agent runs commands, edits files and syncs code.
 
 - **Native and fast.** The window is built with [GPUI](https://www.gpui.rs), the GPU-accelerated UI framework behind the Zed editor. It runs on macOS, Linux and Windows.
-- **Agent-first.** Every capability is available as an MCP server (`muxen mcp`) and as scriptable commands with `--json`. Claude Code, Codex and other agents can check the fleet, explain problems and fix them.
+- **Agent-first.** Every capability is available as an MCP server (`muxen mcp`) and as scriptable commands with `--json`. Claude Code, Codex and other agents can check your machines, explain problems and fix them.
 - **Uses what you already have.** Machines are first reached with your system `ssh`, so your keys, agent and `~/.ssh/config` aliases just work; after that Muxen talks to its own small agent there, directly or through [Tailscale](#tailscale-and-moving-between-networks). GitHub access uses your `gh` login.
 
 ## Install
@@ -56,8 +56,8 @@ To get a real app with the Muxen icon:
 ## Quick start
 
 ```sh
-muxen --demo                       # explore a simulated fleet first; nothing real is touched
-muxen                              # your fleet: starts with this computer in config.toml
+muxen --demo                       # explore simulated machines first; nothing real is touched
+muxen                              # your machines: starts with this computer in config.toml
 muxen add-machine --name "Mac Studio" --host ci@mac-studio.local
 muxen watch acme                   # live runner status and jobs for the acme org
 muxen install mac-studio --count 2 # two runners, registered with acme, as services
@@ -66,12 +66,12 @@ muxen status
 
 ## The app
 
-- **Overview:** a *fleet pulse* chart of how busy your online runners are, counts of working, idle, offline and queued, what needs attention (with a button that fixes or explains each item), and a card per machine with live CPU, memory and disk.
+- **Overview:** the day in one line (machines online, agents working, runners busy), a few notices for what needs a look (each with a button that fixes or explains it), a card per machine with what's running on it (its agents, desktop and runners) and live CPU, memory and disk, and every agent session across your machines. The Jobs page shows how busy your runners have been over the last few minutes.
 - **Machines and runners:** install runners on a machine, and start, stop, restart, show logs for or remove each one. A machine that's off or out of reach says so in plain words (offline, Remote Login off, ssh key not accepted, Tailscale off on this Mac, …), with when it was last seen and what to do; Muxen picks it back up by itself when it returns.
 - **Adding machines (⌘N):** suggestions from your `~/.ssh/config`, your Tailscale network, and this network (machines advertising ssh over Bonjour, and Macs that would be addable once Remote Login is on).
-- **Agent sessions (⌘T):** a real terminal on any machine running Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell. Sessions are listed under their machine in the sidebar (a spinner while the agent works, a colored dot when it wants you) and keep running when you close the app. Terminal font size, line height and a blinking cursor are in Settings.
+- **Agent sessions (⌘T):** a real terminal on any machine running Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell. Sessions are listed under their machine in the sidebar (a spinner while the agent works, a colored dot when it wants you), with its open desktop and one line for its runners, and keep running when you close the app. Terminal font size, line height and a blinking cursor are in Settings.
 - **Copy files:** a two-pane dialog to copy files and folders from one machine to another (see [Files and the clipboard](#files-and-the-clipboard)); or drop files from the Finder onto a machine in the sidebar.
-- **Activity (⌘J):** one timeline of everything happening on the fleet: operations started in the app (with live output) and every command agents ran in workspaces, filterable by kind or failures.
+- **Activity (⌘J):** one timeline of everything happening on your machines: operations started in the app (with live output) and every command agents ran in workspaces, filterable by kind or failures.
 - **Workspaces:** see what agents are doing on your machines (every command, its exit code and output), review a workspace's git changes, copy a shell command to step in, or destroy it.
 - **Jobs:** queued and running self-hosted jobs, and which queued jobs no online runner can take.
 - **Appearance:** follow the system, or pin light or dark, each with its own theme. Built-in themes:
@@ -80,7 +80,7 @@ muxen status
 
   The macOS themes also switch to the system fonts (SF Pro, and SF Mono when it's installed). The choice is saved in `config.toml` (`[ui]`).
 
-Keyboard: ⌘P goes to any machine, session or desktop by name, and ⇧⌘P (or ⌘P then `>`) runs any command, including **Theme: Choose…**, which previews each theme as you move through the list · ⌘1…⌘9 go to your machines · ⌃1…⌃4 overview, jobs, workspaces, GitHub (Alt on Linux and Windows) · ⌘J activity · ⌘R check machines · ⇧⌘R sync GitHub · ⌘N add machine · ⌘T new session · ⌘F or `/` search the fleet · ⌘B sidebar · ⌘[ / ⌘] back / forward · ⌘, settings. Hold ⌘ to see them in the app, and change them in Settings › Keyboard. On Linux and Windows, use Ctrl instead of ⌘.
+Keyboard: ⌘P goes to any machine, session or desktop by name, and ⇧⌘P (or ⌘P then `>`) runs any command, including **Theme: Choose…**, which previews each theme as you move through the list · ⌘1…⌘9 go to your machines · ⌃1…⌃4 overview, jobs, workspaces, GitHub (Alt on Linux and Windows) · ⌘J activity · ⌘R check machines · ⇧⌘R sync GitHub · ⌘N add machine · ⌘T new session · ⌘F or `/` search your machines and sessions · ⌘B sidebar · ⌘[ / ⌘] back / forward · ⌘, settings. Hold ⌘ to see them in the app, and change them in Settings › Keyboard. On Linux and Windows, use Ctrl instead of ⌘.
 
 ## Your settings: `config.toml`
 
@@ -152,13 +152,13 @@ args = ["mcp"]
 { "mcpServers": { "muxen": { "command": "/path/to/muxen", "args": ["mcp"] } } }
 ```
 
-Add `"--demo"` after `"mcp"` to let an agent practice on the simulated fleet.
+Add `"--demo"` after `"mcp"` to let an agent practice on the simulated machines.
 
 The MCP server has these tools:
 
 | Tool | What it does |
 | --- | --- |
-| `fleet_status` | Counts, GitHub state, every machine, and the `attention` list. Start here. |
+| `status` | Counts, GitHub state, every machine, and the `attention` list. Start here. |
 | `get_machine` | One machine's resources, runners and diagnostics, with hints. |
 | `list_runners` | Runners, optionally filtered by machine or state. |
 | `list_jobs` | Queued and running jobs, including which ones no runner can take. |
@@ -383,7 +383,7 @@ muxen cp adibs-macbook-pro:~/Projects/site beelink:~/www --no-wait
 
 ## Cloud machines
 
-Need a machine you don't have? Muxen can make one in your DigitalOcean account. Connect in **Settings › Cloud** with an API token (kept in the macOS Keychain), the browser sign-in, or `doctl`'s login. Then pick **New cloud machine…** in the Add machine dialog: a name, a region (the nearest is preselected) and a size with its price. Muxen creates the droplet with your user and SSH key, installs what you chose (Docker, git and the GitHub CLI; Node with Claude Code and Codex; Tailscale), and adds it to your fleet. Then it's like any other machine: terminals, agent sessions, files, workspaces.
+Need a machine you don't have? Muxen can make one in your DigitalOcean account. Connect in **Settings › Cloud** with an API token (kept in the macOS Keychain), the browser sign-in, or `doctl`'s login. Then pick **New cloud machine…** in the Add machine dialog: a name, a region (the nearest is preselected) and a size with its price. Muxen creates the droplet with your user and SSH key, installs what you chose (Docker, git and the GitHub CLI; Node with Claude Code and Codex; Tailscale), and adds it to your machines. Then it's like any other machine: terminals, agent sessions, files, workspaces.
 
 DigitalOcean bills a droplet by the second while it exists, **powered on or off**, up to its monthly price; only destroying it stops the charges. Each cloud machine's page shows its rate, what it has cost this month and since it was created, and what this month comes to if you keep it, with **Power on/off** and **Destroy**. **Settings › Cloud › Usage and cost** adds them up: what you're paying per hour now, this month so far (machines destroyed this month included), the month's total if nothing changes, and your whole DigitalOcean bill this month (when Muxen may read it: sign in again in the browser, or use a token with `billing:read`). Settings › Cloud also says what happens when one sits idle: nothing, a reminder, power off, or destroy, after the hours you choose.
 
@@ -412,7 +412,7 @@ muxen cloud destroy dev-1
 
 ```sh
 cargo test                 # unit + demo-mode integration tests
-cargo run -- --demo        # the window, simulated fleet
+cargo run -- --demo        # the window, simulated machines
 cargo run -- status --demo --json
 ```
 

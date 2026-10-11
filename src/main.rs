@@ -26,8 +26,9 @@ use crate::api::{ApiError, ApiResult};
 use crate::config::{Paths, display_path};
 use crate::fleet::Engine;
 
-/// A fast native dashboard for your fleet of self-hosted GitHub Actions runners,
-/// built to be driven by AI agents too (`muxen mcp`, or any command with --json).
+/// One app for all your machines: agent sessions, desktops, files, GitHub,
+/// workspaces and self-hosted runners. Agents can drive it too (`muxen mcp`,
+/// or any command with --json).
 #[derive(Parser)]
 #[command(name = "muxen", version, about, args_conflicts_with_subcommands = true)]
 struct Cli {
@@ -42,7 +43,7 @@ struct Cli {
 enum Command {
     /// Open the dashboard window (the default)
     Open(OpenArgs),
-    /// Fleet overview: counts, GitHub state, machines, and what needs attention
+    /// Overview: your machines, GitHub state, and what needs attention
     Status(StatusArgs),
     /// List machines with resources and runner summaries
     Machines(AgentArgs),
@@ -101,7 +102,7 @@ enum Command {
     Session(SessionCommand),
     /// Run the MCP server on stdio for AI agents (Claude Code, Codex, ...)
     Mcp(McpArgs),
-    /// Check every machine once and print a fleet report
+    /// Check every machine once and print a report
     Check(CheckArgs),
     /// Write a starter config.toml
     Init(InitArgs),
@@ -151,7 +152,7 @@ struct OpenArgs {
     #[command(flatten)]
     common: CommonArgs,
 
-    /// Run against a simulated fleet instead of your real machines
+    /// Run against simulated machines instead of your real ones
     #[arg(long)]
     demo: bool,
 
@@ -168,7 +169,7 @@ struct AgentArgs {
     #[command(flatten)]
     common: CommonArgs,
 
-    /// Use a simulated fleet (safe to experiment with; nothing touches real machines or GitHub)
+    /// Use simulated machines (safe to experiment with; nothing touches real machines or GitHub)
     #[arg(long)]
     demo: bool,
 
@@ -397,9 +398,9 @@ enum CloudCommand {
     Options(AgentArgs),
     /// What the cloud machines cost: now, this month, by the month's end, and the account's bill
     Usage(AgentArgs),
-    /// Create a droplet, set it up, and add it to the fleet (it costs money while it exists)
+    /// Create a droplet, set it up, and add it to your machines (it costs money while it exists)
     Create(CloudCreateArgs),
-    /// Delete a cloud machine's droplet and remove it from the fleet
+    /// Delete a cloud machine's droplet and remove it from Muxen
     Destroy(CloudMachineArgs),
     /// Power a cloud machine on or off (DigitalOcean still bills it while off)
     Power(CloudPowerArgs),
@@ -887,7 +888,7 @@ struct WsShellArgs {
     #[command(flatten)]
     common: CommonArgs,
 
-    /// Use a simulated fleet (prints the command instead of running it)
+    /// Use simulated machines (prints the command instead of running it)
     #[arg(long)]
     demo: bool,
 
@@ -924,7 +925,7 @@ struct McpArgs {
     #[command(flatten)]
     common: CommonArgs,
 
-    /// Serve a simulated fleet
+    /// Serve simulated machines
     #[arg(long)]
     demo: bool,
 
@@ -938,7 +939,7 @@ struct CheckArgs {
     #[command(flatten)]
     common: CommonArgs,
 
-    /// Use a simulated fleet
+    /// Use simulated machines
     #[arg(long)]
     demo: bool,
 
@@ -1086,7 +1087,7 @@ fn main() -> ExitCode {
                 out.push_str("\nOn your tailnet:\n");
                 for t in &h.tailnet {
                     let state = if t.online { "online" } else { "offline" };
-                    let added = t.machine_id.as_ref().map(|id| format!("  (in your fleet as {id})")).unwrap_or_default();
+                    let added = t.machine_id.as_ref().map(|id| format!("  (added as {id})")).unwrap_or_default();
                     out.push_str(&format!("{}  {}  {}{added}\n", t.host, t.os, state));
                 }
             }
@@ -1187,7 +1188,7 @@ fn open(args: OpenArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     let engine = Engine::new(args.common.paths(), args.demo);
     engine.start();
     if engine.is_demo() {
-        tracing::info!("demo mode: simulated fleet, nothing is read from or written to disk");
+        tracing::info!("demo mode: simulated machines, nothing is read from or written to disk");
     } else {
         tracing::info!("inventory {}", display_path(&engine.paths().inventory));
     }

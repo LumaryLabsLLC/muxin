@@ -1,4 +1,4 @@
-//! The root view: a full-height fleet sidebar, a page area with its own
+//! The root view: a full-height sidebar of machines, a page area with its own
 //! toolbar and history, and an activity drawer that slides over from the right.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -95,7 +95,7 @@ pub fn menus() -> Vec<Menu> {
             ],
         },
         Menu {
-            name: "Fleet".into(),
+            name: "Machines".into(),
             items: vec![
                 MenuItem::action("Check Machines", CheckNow),
                 MenuItem::action("Sync GitHub", SyncGitHub),
@@ -205,6 +205,8 @@ pub struct Root {
     pub(super) notice: Option<Notice>,
     pub(super) page_scroll: ScrollHandle,
     pub(super) pulse: VecDeque<PulseSample>,
+    /// The overview lists every notice, not just the first few.
+    pub(super) heads_up_open: bool,
     last_pulse: Option<Instant>,
     /// Width of the page area, for layouts that change with the window size.
     pub(super) content_width: f32,
@@ -260,7 +262,7 @@ pub struct Root {
 
 impl Root {
     pub fn new(engine: Arc<Engine>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let filter = cx.new(|cx| TextInput::new(cx, "Search fleet"));
+        let filter = cx.new(|cx| TextInput::new(cx, "Search"));
         let mut subscriptions = vec![cx.subscribe_in(&filter, window, |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::Changed => cx.notify(),
             InputEvent::Cancel => {
@@ -353,6 +355,7 @@ impl Root {
             notice: None,
             page_scroll: ScrollHandle::new(),
             pulse: VecDeque::with_capacity(PULSE_SAMPLES),
+            heads_up_open: false,
             last_pulse: None,
             content_width: 1000.,
             sidebar_width: cx.global::<super::theme::Appearance>().sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX),
@@ -631,7 +634,17 @@ impl Root {
                     self.open_menu(super::menu::MenuTarget::Job(id), gpui::point(px(900.), px(150.)), cx)
                 }
             }
-            "copy" => self.show_copy_files(Some(arg.to_string()).filter(|a| !a.is_empty()), None, window, cx),
+            // "copy:<from>", or "copy:<from>[@<folder>]><to>:<file>+<file>" with files picked (for screenshots).
+            "copy" => match arg.split_once('>') {
+                Some((from, rest)) => {
+                    let (from, from_dir) = from.split_once('@').unwrap_or((from, "~"));
+                    let (to, files) = rest.split_once(':').unwrap_or((rest, ""));
+                    let selected = files.split('+').filter(|f| !f.is_empty()).map(String::from).collect();
+                    let start = super::files::CopyStart { from: from.into(), from_dir: from_dir.into(), selected, to: to.into(), to_dir: "~".into() };
+                    self.show_copy_files(None, Some(start), window, cx)
+                }
+                None => self.show_copy_files(Some(arg.to_string()).filter(|a| !a.is_empty()), None, window, cx),
+            },
             "logs" => {
                 self.navigate(Route::Runner(arg.into()), window, cx);
                 // Give the first machine check a moment, so the runner's folder is known.
@@ -799,7 +812,7 @@ impl Root {
     /// Files dropped from the Finder on a machine: copy them there.
     pub(super) fn copy_dropped(&mut self, machine_id: &str, paths: &[std::path::PathBuf], window: &mut Window, cx: &mut Context<Self>) {
         let Some(local) = self.snapshot.machines.iter().find(|m| m.local).map(|m| m.id.clone()) else {
-            self.notify_user("Add this computer to the fleet (host \"local\") to copy files from it.", true, cx);
+            self.notify_user("Add this computer to Muxen (host \"local\") to copy files from it.", true, cx);
             return;
         };
         let Some(dir) = paths.first().and_then(|p| p.parent()).map(|p| p.display().to_string()) else { return };
@@ -931,7 +944,7 @@ impl Root {
         }
         let dialog = cx.new(|cx| {
             ConfirmDialog::new(
-                format!("Remove {} from the fleet?", machine.name),
+                format!("Remove {} from Muxen?", machine.name),
                 "It's taken out of config.toml. Nothing on the machine changes, and its runners stay registered.".into(),
                 "Remove machine",
                 None,
@@ -1326,8 +1339,14 @@ impl Root {
                 if has_desktop {
                     rows.push(self.desktop_row(&theme, m, self.route == Route::Desktop(m.id.clone()), cx).into_any_element());
                 }
-                for r in visible {
-                    rows.push(self.runner_row(&theme, &s, r, selected_runner.as_deref() == Some(&r.id), cx).into_any_element());
+                // Runners as one line; a search shows the ones it found.
+                if !machine_match {
+                    for r in visible {
+                        rows.push(self.runner_row(&theme, &s, r, selected_runner.as_deref() == Some(&r.id), cx).into_any_element());
+                    }
+                } else if !runners.is_empty() {
+                    let here = selected_runner.as_deref().is_some_and(|r| r.starts_with(&format!("{}/", m.id)));
+                    rows.push(self.runners_row(&theme, m, here, cx).into_any_element());
                 }
             }
         }
@@ -1390,7 +1409,7 @@ impl Root {
                         .child(div().absolute().right(px(7.)).top(px(6.)).child(kit::kbd(&theme, "/"))),
                 ),
             )
-            .child(div().id("fleet-list").flex_1().min_h(px(0.)).overflow_y_scroll().pb(px(12.)).children(rows))
+            .child(div().id("machine-list").flex_1().min_h(px(0.)).overflow_y_scroll().pb(px(12.)).children(rows))
             // The "what's happening now" card is hidden for now (connection_card).
             .child(self.sidebar_footer(&theme, cx))
     }
@@ -1538,25 +1557,14 @@ impl Root {
     ) -> impl IntoElement {
         let id = m.id.clone();
         let toggle_id = m.id.clone();
-        // The shortcut takes the place of the runner count and the toggle.
-        let (has_runners, has_sessions) = if hint.is_some() { (false, false) } else { (!m.runner_ids.is_empty(), has_sessions) };
+        // The shortcut takes the place of the toggle.
+        let has_children = hint.is_none() && (has_sessions || !m.runner_ids.is_empty());
         let (tile_from, tile_to) = format::machine_tile(m);
         let (subtitle, tone) = format::machine_subtitle(m);
-        // Runner count: "5/7" while some are working, else the total.
-        let sum = &m.summary;
-        let (count, count_color) = if sum.working > 0 {
-            (format!("{}/{}", sum.working, sum.total), theme.state("working"))
-        } else if sum.offline + sum.unknown == sum.total {
-            (sum.total.to_string(), theme.text_placeholder)
-        } else {
-            (sum.total.to_string(), theme.state("idle"))
-        };
         // The text column gets an explicit width: GPUI 0.2 only ellipsizes text
-        // whose width is known before layout. Row chrome: margins, padding, tile, gaps,
-        // and the count pill (padding, dot, gap, ~6.7px per mono character).
-        let pill_w = 12. + 6. + 4. + count.len() as f32 * 6.7;
+        // whose width is known before layout. Row chrome: margins, padding, tile, gaps.
         let favorite = Self::is_favorite(cx, &m.id);
-        let trailing = if hint.is_some() { 40. } else if has_runners { 10. + pill_w.max(22.) } else if has_sessions { 32. } else { 0. }
+        let trailing = if hint.is_some() { 40. } else if has_children { 32. } else { 0. }
             + if alert.is_some() { 18. } else { 0. }
             + if favorite { 22. } else { 0. };
         let text_w = (self.sidebar_width - 20. - 16. - 30. - 10. - trailing).max(40.);
@@ -1595,7 +1603,7 @@ impl Root {
                         .child(if m.checking {
                             spinner(SharedString::from(format!("side-spin-{}", m.id)), 10., theme.text_muted).into_any_element()
                         } else {
-                            kit::dot(theme.machine_status(&m), 8.).into_any_element()
+                            kit::dot(theme.machine_status(m), 8.).into_any_element()
                         }),
                 ),
             )
@@ -1628,7 +1636,7 @@ impl Root {
             .children(alert.map(|(kind, code)| super::sessions::attention_dot(theme, &kind, code)))
             .when(favorite, |d| d.child(icon("star-filled", 12., theme.warning)))
             .children(hint.map(|k| kit::kbd(theme, k)))
-            .when(has_runners || has_sessions, |d| {
+            .when(has_children, |d| {
                 d.child(
                     div()
                         .relative()
@@ -1637,23 +1645,7 @@ impl Root {
                         .h(px(18.))
                         .flex()
                         .justify_end()
-                        .when(has_runners, |d| d.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.))
-                                .h(px(18.))
-                                .px(px(6.))
-                                .rounded_full()
-                                .bg(theme.element)
-                                .font_family(mono_font())
-                                .text_size(px(11.))
-                                .text_color(theme.text_muted)
-                                .group_hover("machine-row", |st| st.invisible())
-                                .child(kit::dot(count_color, 6.))
-                                .child(count),
-                        ))
-                        // On hover the count gives way to the expand/collapse toggle.
+                        // The expand/collapse toggle, on hover.
                         .child(
                             div()
                                 .id(SharedString::from(format!("side-t-{}", m.id)))
@@ -1680,6 +1672,38 @@ impl Root {
                 let mid = m.id.clone();
                 super::menu::on_right_click(move || super::menu::MenuTarget::Machine(mid.clone()), cx)
             })
+            .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(id.clone()), window, cx)))
+    }
+
+    /// A machine's runners as one line ("3 runners · 2 busy"); opens the machine.
+    fn runners_row(&self, theme: &Theme, m: &Machine, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = m.id.clone();
+        let sum = &m.summary;
+        let label = if sum.total == 1 { "1 runner".to_string() } else { format!("{} runners", sum.total) };
+        let (state, color) = if sum.working > 0 {
+            (format!("{} busy", sum.working), theme.text_accent)
+        } else if sum.offline > 0 {
+            (format!("{} stopped", sum.offline), theme.text_placeholder)
+        } else {
+            ("idle".to_string(), theme.text_placeholder)
+        };
+        let (from, to) = kit::tiles::JOBS;
+        div()
+            .id(SharedString::from(format!("side-rs-{}", m.id)))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(26.))
+            .mx(px(10.))
+            .pl(px(22.))
+            .pr(px(8.))
+            .rounded(px(7.))
+            .cursor_pointer()
+            .when(selected, |d| d.bg(theme.element_selected))
+            .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+            .child(kit::tile("workflow", from, to, 16.))
+            .child(div().flex_1().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child(label))
+            .child(div().flex_none().text_size(px(11.)).text_color(color).child(state))
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(id.clone()), window, cx)))
     }
 

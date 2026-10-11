@@ -88,9 +88,9 @@ pub struct AddMachineDialog {
     name: Entity<TextInput>,
     host: Entity<TextInput>,
     hosts: Vec<String>,
-    /// Computers on the user's tailnet that aren't in the fleet yet.
+    /// Computers on the user's tailnet that aren't in Muxen yet.
     tailnet: Vec<crate::api::TailnetHost>,
-    /// Computers on this network that aren't in the fleet yet; still looking while None.
+    /// Computers on this network that aren't in Muxen yet; still looking while None.
     network: Option<Vec<crate::fleet::discover::NetworkHost>>,
     /// What to do before a picked machine can be added (a Mac with Remote Login off).
     note: Option<String>,

@@ -85,7 +85,7 @@ fn op_error(message: String) -> ApiError {
     let lower = message.to_ascii_lowercase();
     let code = if lower.contains("another operation") || lower.contains("still running") {
         "busy"
-    } else if lower.contains("isn't in config.toml") || lower.contains("isn't in the fleet") {
+    } else if lower.contains("isn't in config.toml") || lower.contains("isn't in muxen") {
         "not_found"
     } else {
         "invalid"
@@ -603,7 +603,7 @@ pub struct SshHostsResponse {
     /// Computers on the user's tailnet (when Tailscale is installed and on
     /// here), online ones first.
     pub tailnet: Vec<TailnetHost>,
-    /// Computers on this local network that aren't in the fleet yet: ones
+    /// Computers on this local network that aren't in Muxen yet: ones
     /// advertising ssh (`ssh: true`, add by `host`), and Macs with Remote
     /// Login off (`ssh: false`: it needs turning on there first).
     pub network: Vec<crate::fleet::discover::NetworkHost>,
@@ -622,7 +622,7 @@ pub struct TailnetHost {
     pub os: String,
     /// Whether Tailscale sees it online.
     pub online: bool,
-    /// Already in the fleet, as this machine.
+    /// Already in Muxen, as this machine.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<String>,
 }
@@ -782,7 +782,7 @@ fn find_machine<'a>(s: &'a Snapshot, id: &str) -> ApiResult<&'a Machine> {
     s.machines.iter().find(|m| m.id == id || m.name.eq_ignore_ascii_case(id)).ok_or_else(|| {
         let ids: Vec<&str> = s.machines.iter().map(|m| m.id.as_str()).collect();
         ApiError::not_found(format!("No machine \"{id}\".")).with_hint(if ids.is_empty() {
-            "The fleet is empty; add a machine first.".to_string()
+            "No machines yet; add one first.".to_string()
         } else {
             format!("Known machine ids: {}", ids.join(", "))
         })
@@ -971,7 +971,7 @@ pub fn status_from(s: &Snapshot, surface: Surface) -> StatusResponse {
         inventory: InventoryOut { path: s.inventory.path.clone(), error: s.inventory.error.clone() },
         hint: never_checked.then(|| {
             surface.say(
-                "No machine has been checked yet; call check_machines (or fleet_status with refresh=true).",
+                "No machine has been checked yet; call check_machines (or status with refresh=true).",
                 "No machine has been checked yet; run `muxen status --refresh` (or `muxen check`).",
             )
         }),
@@ -1287,14 +1287,14 @@ pub struct CloudCreateRequest {
     /// What it comes with, by id (cloud::setup::EXTRAS: tools, languages, agent CLIs, tailscale).
     #[serde(default)]
     pub install: Option<Vec<String>>,
-    /// Wait until it's set up and in the fleet (default true; takes a few minutes).
+    /// Wait until it's set up and added (default true; takes a few minutes).
     #[serde(default = "yes")]
     pub wait: bool,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
 }
 
-/// Creates a DigitalOcean droplet and adds it to the fleet.
+/// Creates a DigitalOcean droplet and adds it to the machines.
 pub async fn cloud_create(engine: &Arc<Engine>, req: CloudCreateRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<ActionResponse> {
     freshen(engine).await;
     let machine = crate::cloud::CloudCreate {
@@ -1318,7 +1318,7 @@ pub struct CloudMachineRequest {
     pub wait: bool,
 }
 
-/// Destroys a cloud machine: deletes the droplet and removes it from the fleet.
+/// Destroys a cloud machine: deletes the droplet and removes it from Muxen.
 pub async fn cloud_destroy(engine: &Arc<Engine>, req: CloudMachineRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<ActionResponse> {
     let s = freshen(engine).await;
     let m = find_machine(&s, &req.machine_id)?.clone();
@@ -2112,22 +2112,22 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn status_reads_the_demo_fleet() {
+    async fn status_reads_the_demo_machines() {
         let engine = demo();
         let s = status(&engine, StatusRequest { refresh: true }, Surface::Mcp).await.unwrap();
-        assert_eq!(s.counts.machines, 9);
+        assert_eq!(s.counts.machines, 7);
         assert!(s.demo && s.github.live);
-        assert!(s.summary.contains("9 machines"), "{}", s.summary);
-        let laravel = s.machines.iter().find(|m| m.id == "laravel-macbook").unwrap();
-        assert_eq!(laravel.status, "offline");
-        assert!(laravel.error.is_some());
-        assert!(s.attention.iter().any(|a| a.machine_id.as_deref() == Some("laravel-macbook")));
+        assert!(s.summary.contains("7 machines"), "{}", s.summary);
+        let harbor = s.machines.iter().find(|m| m.id == "harbor").unwrap();
+        assert_eq!(harbor.status, "offline");
+        assert!(harbor.error.is_some());
+        assert!(s.attention.iter().any(|a| a.machine_id.as_deref() == Some("harbor")));
 
         let err = machine(&engine, MachineRequest { machine_id: "nope".into() }).await.unwrap_err();
         assert_eq!(err.code, "not_found");
-        assert!(err.hint.unwrap().contains("mac-studio"));
-        let m = machine(&engine, MachineRequest { machine_id: "Mac Studio".into() }).await.unwrap();
-        assert_eq!(m.runners.len(), 7);
+        assert!(err.hint.unwrap().contains("forge"));
+        let m = machine(&engine, MachineRequest { machine_id: "Forge".into() }).await.unwrap();
+        assert_eq!(m.runners.len(), 3);
         assert!(runners(&engine, RunnersRequest { state: Some("busy".into()), ..Default::default() }).await.is_err());
     }
 
@@ -2188,7 +2188,7 @@ mod tests {
         let err = install_runners(
             &engine,
             InstallRunnersRequest {
-                machine_id: "laravel-macbook".into(),
+                machine_id: "harbor".into(),
                 scope: Some("acme".into()),
                 names: vec!["laravel-01".into()],
                 count: None,
@@ -2281,7 +2281,7 @@ mod tests {
     }
 
     /// Needs the workspace backend (src/fleet/workspaces.rs); run with `cargo test -- --ignored`
-    /// once it's implemented. Exercises the whole agent flow on the demo fleet.
+    /// once it's implemented. Exercises the whole agent flow on the demo machines.
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs the workspace backend"]
     async fn workspace_flow_in_demo() {
@@ -2478,7 +2478,7 @@ pub async fn sessions_list(engine: &Arc<Engine>, req: SessionListRequest) -> Api
     Ok(out)
 }
 
-/// Resolves "<machine>/<name>", or a bare name that's unique across the fleet.
+/// Resolves "<machine>/<name>", or a bare name that's unique across the machines.
 async fn resolve_session(engine: &Arc<Engine>, id: &str) -> ApiResult<SessionInfo> {
     let id = id.trim();
     if let Some((machine, name)) = id.split_once('/') {

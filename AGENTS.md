@@ -1,13 +1,13 @@
 # Working with Muxen as an agent
 
-Muxen manages a fleet of self-hosted GitHub Actions runners. The fleet is made up of machines (reached over `ssh`, or directly for `host = "local"`) and the runners installed on them.
+Muxen is one app for all of the user's machines (reached over `ssh`, or directly for `host = "local"`): agent sessions, desktops, files, GitHub, workspaces, cloud machines, and the self-hosted GitHub Actions runners installed on them.
 
 Use the MCP tools when they're connected: start the server with `muxen mcp`, and see the README for setup. Otherwise use the CLI with `--json`. Both front the same API and return the same shapes.
 
 ## Ground rules
 
-1. **Start with `fleet_status`** (`muxen status --json`) and read `attention` first. It lists what's wrong, most severe first, with the `machine_id` or `runner_id` each item is about.
-2. **The state may be stale.** `fleet_status` uses the last machine check. Look at `last_check_at` and each machine's `checked_at`. Call `check_machines` (or `fleet_status` with `refresh: true`) when you need it fresh. Checks are read-only.
+1. **Start with `status`** (`muxen status --json`) and read `attention` first. It lists what's wrong, most severe first, with the `machine_id` or `runner_id` each item is about.
+2. **The state may be stale.** `status` uses the last machine check. Look at `last_check_at` and each machine's `checked_at`. Call `check_machines` (or `status` with `refresh: true`) when you need it fresh. Checks are read-only.
 3. **Confirm before changing real things.** `install_runners` and `runner_action` with `stop`, `restart` or `remove` run commands on the user's machines and register or deregister runners on GitHub. Do them when the user asked for exactly that; otherwise say what you'd do and ask. `add_machine`, `remove_machine` and `rename_machine` only edit `config.toml`.
 4. **Use the hints.** Errors have a `code`:
    - `not_found`
@@ -34,9 +34,9 @@ Use the MCP tools when they're connected: start the server with `muxen mcp`, and
 
 **"Add my server and put two runners on it."**
 
-1. Call `list_ssh_hosts` to find the user's alias, or ask for `user@host`. Its `tailnet` list has the computers on the user's Tailscale network, each with the `host` to add it by; one added that way is reachable from anywhere. Its `network` list has computers on the local network that aren't in the fleet; `ssh: false` is a Mac with Remote Login off, which the user turns on in System Settings › General › Sharing before it can be added.
+1. Call `list_ssh_hosts` to find the user's alias, or ask for `user@host`. Its `tailnet` list has the computers on the user's Tailscale network, each with the `host` to add it by; one added that way is reachable from anywhere. Its `network` list has computers on the local network that aren't in Muxen yet; `ssh: false` is a Mac with Remote Login off, which the user turns on in System Settings › General › Sharing before it can be added.
 2. Call `add_machine(name, host)`. Its result includes the first check. If the status is `offline`, the machine isn't reachable with key-based ssh. Show the error and stop.
-3. Make sure a GitHub scope is watched (`fleet_status.github.watching`). If none is, ask which org or repo to use and call `github_scopes(add: [...])`. A failure there usually needs `admin:org`; show the hint.
+3. Make sure a GitHub scope is watched (`status.github.watching`). If none is, ask which org or repo to use and call `github_scopes(add: [...])`. A failure there usually needs `admin:org`; show the hint.
 4. Call `install_runners(machine_id, count: 2)`. Pass `scope` if more than one org or repo is watched. The default `mode: "auto"` picks a service where possible, else Docker containers (Linux without passwordless sudo), else a background run.sh; the log says which. Use `mode: "docker"` when the user wants isolated runners; only pass `docker_socket: true` if they explicitly want jobs to use Docker and trust the workflows (it's root-equivalent on the host).
 5. Report the new runner ids and their states from the result.
 
@@ -117,10 +117,10 @@ The CLI equivalents are `muxen session ls|start|read|send|attach|restart|rename|
 
 ## Cloud machines
 
-Muxen can create DigitalOcean droplets in the user's account and make them fleet machines (signed in from Settings › Cloud: an API token, the browser, or doctl).
+Muxen can create DigitalOcean droplets in the user's account and add them to the user's machines (signed in from Settings › Cloud: an API token, the browser, or doctl).
 
 - `cloud_options` shows the sign-in, regions, sizes with hourly and monthly prices, and the defaults.
-- `cloud_create(name, region?, size?)` creates one, sets it up (the user's account and SSH key; Docker, git, gh; Node with Claude Code and Codex; Tailscale, as the user's settings say) and adds it to the fleet. **It costs money every hour it exists:** tell the user the size and price and get their OK first.
+- `cloud_create(name, region?, size?)` creates one, sets it up (the user's account and SSH key; Docker, git, gh; Node with Claude Code and Codex; Tailscale, as the user's settings say) and adds it to the user's machines. **It costs money every hour it exists:** tell the user the size and price and get their OK first.
 - `cloud_power(machine_id, "on"|"off")`: a powered-off droplet is still billed. Only `cloud_destroy` stops the charges.
 - `cloud_usage` says what they cost: each one's hourly rate, monthly cap, this month and since created (destroyed ones this month too), the totals, and the account's DigitalOcean bill when the sign-in may read it.
 - `cloud_destroy(machine_id)` deletes the droplet and everything on it. Confirm first and make sure work there is pushed.

@@ -1,4 +1,4 @@
-//! New cloud machine: a DigitalOcean droplet, set up and added to the fleet.
+//! New cloud machine: a DigitalOcean droplet, set up and added to your machines.
 
 use std::sync::Arc;
 
@@ -240,7 +240,7 @@ impl Render for CloudDialog {
             .child(field(&theme, "Size", div().flex().flex_col().gap(px(4.)).children(size_rows), None))
             .child(field(&theme, "Comes with", extras, None))
             .children(price);
-        frame(&theme, "New cloud machine", Some("A DigitalOcean droplet, set up for you and added to your fleet.".into()))
+        frame(&theme, "New cloud machine", Some("A DigitalOcean droplet, set up for you and added to your machines.".into()))
             .child(div().id("cloud-body").max_h(px(body_max)).overflow_y_scroll().child(fields))
             .children(error_line(&theme, &self.error))
             .child(footer(vec![

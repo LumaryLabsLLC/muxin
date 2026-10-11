@@ -117,7 +117,7 @@ impl Root {
                         let machine = m.clone();
                         Button::icon_only("m-remove", "trash-2")
                             .style(ButtonStyle::Danger)
-                            .tooltip(if machine.cloud.is_some() { "Destroy" } else { "Remove from fleet" })
+                            .tooltip(if machine.cloud.is_some() { "Destroy" } else { "Remove from Muxen" })
                             .on_click(cx.listener(move |this, _, window, cx| this.confirm_remove_machine(&machine, window, cx)))
                     }),
             );

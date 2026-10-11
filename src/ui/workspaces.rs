@@ -1,4 +1,4 @@
-//! Agent workspaces: folders on fleet machines that agents check out as their
+//! Agent workspaces: folders on the user's machines that agents check out as their
 //! work environment. Lists them, shows what agents ran, and lets you step in.
 
 use std::collections::HashSet;
@@ -299,7 +299,7 @@ impl Root {
         // Sessions working in this folder.
         let here: Vec<_> = self.snapshot.sessions.iter().filter(|x| x.machine_id == w.machine_id && x.cwd.starts_with(&w.path)).cloned().collect();
         if !here.is_empty() {
-            let rows: Vec<AnyElement> = here.iter().enumerate().map(|(i, x)| self.machine_session_row(&theme, x, i, cx)).collect();
+            let rows: Vec<AnyElement> = here.iter().enumerate().map(|(i, x)| self.machine_session_row(&theme, x, i, false, cx)).collect();
             body = body.child(
                 div()
                     .flex()

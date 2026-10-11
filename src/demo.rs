@@ -1,5 +1,5 @@
-//! `muxen serve --demo`: a simulated fleet with jobs arriving, running and
-//! finishing, so the dashboard can be explored without any real machines.
+//! `muxen --demo`: simulated machines with jobs arriving, running and
+//! finishing, so the app can be explored without any real machines.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -12,55 +12,50 @@ use crate::probe::{ProbeResult, ProbedRunner, Shell};
 
 const ORG: &str = "acme";
 
-const INVENTORY: &str = r#"
-[[machine]]
-name = "Mac Mini"
-host = "ci@mac-mini.local"
-runners = ["mac-mini-01"]
+/// The demo's machines: a small studio's Macs, a Linux server and laptop, a
+/// NAS, a MacBook that's usually asleep, and a cloud machine created days ago.
+fn inventory_text(now: DateTime<Utc>) -> String {
+    let created = (now - chrono::Duration::days(3) - chrono::Duration::hours(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    format!(
+        r#"[[machine]]
+name = "Forge"
+host = "ci@forge.local"
+runners = ["forge-01", "forge-02", "forge-03"]
+notes = "The Mac Studio under the desk."
 
 [[machine]]
-name = "Mac Studio"
-host = "ci@mac-studio.local"
-runners = ["mac-studio-01", "mac-studio-02", "mac-studio-03", "mac-studio-04", "mac-studio-05", "mac-studio-06", "mac-studio-07"]
+name = "Orbit"
+host = "ci@orbit.local"
+runners = ["orbit-01", "orbit-02"]
 
 [[machine]]
-name = "Omarchy Laptop"
-host = "omarchy"
-runners = ["omarchy-01"]
+name = "Beacon"
+host = "beacon"
+runners = ["beacon-01"]
 
 [[machine]]
-name = "Tahoe Macbook"
-host = "tahoe.local"
-runners = ["tahoe-01", "tahoe-02"]
+name = "Pebble"
+host = "pebble"
+runners = ["pebble-01"]
 
 [[machine]]
-name = "Ubuntu NUC"
-host = "nuc-ubuntu"
-runners = ["minis-01-01"]
+name = "dev-1"
+host = "root@203.0.113.24"
+cloud = {{ provider = "digitalocean", id = 512034871, region = "sfo3", size = "s-2vcpu-4gb", price_hourly = 0.03571, created_at = "{created}" }}
 
 [[machine]]
-name = "Windows Laptop"
-host = "win-laptop"
-shell = "powershell"
-runners = ["windows-01"]
-
-[[machine]]
-name = "Windows NUC"
-host = "nuc-win"
-shell = "powershell"
-runners = ["minis-02-01"]
-
-[[machine]]
-name = "Laravel Macbook"
-host = "laravel-mbp.local"
+name = "Harbor"
+host = "harbor.local"
 platform = "darwin-arm64"
-notes = "Loaner laptop, usually asleep."
+notes = "The travel MacBook, usually asleep."
 
 [[machine]]
-name = "StudioNAS"
-host = "nas"
-notes = "Build artifact cache."
-"#;
+name = "Vault"
+host = "vault"
+notes = "Build cache and backups."
+"#
+    )
+}
 
 struct Hardware {
     id: &'static str,
@@ -74,6 +69,8 @@ struct Hardware {
     disk_free_gb: f64,
     up_hours: u64,
     reachable: bool,
+    /// Has a desktop to show (servers and the NAS don't).
+    desktop: bool,
     /// Docker server version, if the machine has Docker.
     docker: Option<&'static str>,
     /// Linux: "passwordless" | "password" (systemd services need passwordless sudo).
@@ -81,15 +78,15 @@ struct Hardware {
 }
 
 const HARDWARE: &[Hardware] = &[
-    Hardware { id: "mac-mini", os: "darwin", arch: "arm64", os_version: "macOS 26.1", cores: 10, mem_gb: 32, base_mem: 0.38, disk_total_gb: 1000, disk_free_gb: 381.0, up_hours: 23, reachable: true, docker: None, sudo: None },
-    Hardware { id: "mac-studio", os: "darwin", arch: "arm64", os_version: "macOS 26.1", cores: 24, mem_gb: 128, base_mem: 0.18, disk_total_gb: 1000, disk_free_gb: 106.0, up_hours: 116 * 24, reachable: true, docker: Some("29.0.1"), sudo: None },
-    Hardware { id: "omarchy-laptop", os: "linux", arch: "x86_64", os_version: "Arch Linux", cores: 16, mem_gb: 32, base_mem: 0.45, disk_total_gb: 1000, disk_free_gb: 328.0, up_hours: 37 * 24 + 15, reachable: true, docker: Some("29.1.3"), sudo: Some("passwordless") },
-    Hardware { id: "tahoe-macbook", os: "darwin", arch: "arm64", os_version: "macOS 26.0", cores: 12, mem_gb: 36, base_mem: 0.41, disk_total_gb: 500, disk_free_gb: 122.0, up_hours: 67 * 24 + 20, reachable: true, docker: None, sudo: None },
-    Hardware { id: "ubuntu-nuc", os: "linux", arch: "x86_64", os_version: "Ubuntu 24.04.3 LTS", cores: 8, mem_gb: 64, base_mem: 0.10, disk_total_gb: 1000, disk_free_gb: 914.0, up_hours: 43, reachable: true, docker: Some("29.1.3"), sudo: Some("password") },
-    Hardware { id: "windows-laptop", os: "windows", arch: "ARM64", os_version: "Microsoft Windows 11 Pro", cores: 12, mem_gb: 32, base_mem: 0.40, disk_total_gb: 512, disk_free_gb: 159.0, up_hours: 4 * 24 + 20, reachable: true, docker: None, sudo: None },
-    Hardware { id: "windows-nuc", os: "windows", arch: "AMD64", os_version: "Microsoft Windows 11 Pro", cores: 8, mem_gb: 32, base_mem: 0.33, disk_total_gb: 1000, disk_free_gb: 920.0, up_hours: 37, reachable: true, docker: None, sudo: None },
-    Hardware { id: "laravel-macbook", os: "darwin", arch: "arm64", os_version: "macOS 26.1", cores: 12, mem_gb: 36, base_mem: 0.3, disk_total_gb: 1000, disk_free_gb: 400.0, up_hours: 3, reachable: false, docker: None, sudo: None },
-    Hardware { id: "studionas", os: "linux", arch: "x86_64", os_version: "Debian GNU/Linux 12 (bookworm)", cores: 4, mem_gb: 16, base_mem: 0.18, disk_total_gb: 8000, disk_free_gb: 6.8, up_hours: 87 * 24 + 7, reachable: true, docker: Some("28.5.1"), sudo: Some("password") },
+    Hardware { id: "forge", os: "darwin", arch: "arm64", os_version: "macOS 26.1", cores: 16, mem_gb: 64, base_mem: 0.27, disk_total_gb: 2000, disk_free_gb: 1240.0, up_hours: 9 * 24 + 4, reachable: true, desktop: true, docker: Some("29.0.1"), sudo: None },
+    Hardware { id: "orbit", os: "darwin", arch: "arm64", os_version: "macOS 26.1", cores: 12, mem_gb: 24, base_mem: 0.44, disk_total_gb: 512, disk_free_gb: 203.0, up_hours: 2 * 24 + 18, reachable: true, desktop: true, docker: None, sudo: None },
+    Hardware { id: "beacon", os: "linux", arch: "x86_64", os_version: "Ubuntu 24.04.3 LTS", cores: 12, mem_gb: 96, base_mem: 0.14, disk_total_gb: 2000, disk_free_gb: 1610.0, up_hours: 31 * 24 + 2, reachable: true, desktop: false, docker: Some("29.1.3"), sudo: Some("password") },
+    Hardware { id: "pebble", os: "linux", arch: "x86_64", os_version: "Fedora Linux 42 (Workstation Edition)", cores: 8, mem_gb: 32, base_mem: 0.36, disk_total_gb: 1000, disk_free_gb: 512.0, up_hours: 6, reachable: true, desktop: true, docker: Some("28.5.2"), sudo: Some("passwordless") },
+    Hardware { id: "dev-1", os: "linux", arch: "x86_64", os_version: "Ubuntu 24.04.3 LTS", cores: 2, mem_gb: 4, base_mem: 0.31, disk_total_gb: 80, disk_free_gb: 61.0, up_hours: 3 * 24 + 5, reachable: true, desktop: false, docker: Some("29.1.3"), sudo: Some("passwordless") },
+    Hardware { id: "harbor", os: "darwin", arch: "arm64", os_version: "macOS 26.1", cores: 12, mem_gb: 36, base_mem: 0.3, disk_total_gb: 1000, disk_free_gb: 470.0, up_hours: 3, reachable: false, desktop: true, docker: None, sudo: None },
+    Hardware { id: "vault", os: "linux", arch: "aarch64", os_version: "Debian GNU/Linux 12 (bookworm)", cores: 4, mem_gb: 8, base_mem: 0.22, disk_total_gb: 4000, disk_free_gb: 41.0, up_hours: 54 * 24 + 11, reachable: true, desktop: false, docker: Some("28.5.1"), sudo: Some("password") },
+    // Not in the demo's machines; tests add it to try Windows.
+    Hardware { id: "test-windows", os: "windows", arch: "AMD64", os_version: "Microsoft Windows 11 Pro", cores: 8, mem_gb: 32, base_mem: 0.33, disk_total_gb: 1000, disk_free_gb: 700.0, up_hours: 30, reachable: true, desktop: false, docker: None, sudo: None },
 ];
 
 struct Template {
@@ -107,13 +104,13 @@ const TEMPLATES: &[Template] = &[
     Template { repo: "acme/desktop", workflow: "Release", name: "notarize", labels: &["self-hosted", "macOS", "ARM64"], min_secs: 120, max_secs: 240 },
     Template { repo: "acme/api", workflow: "CI", name: "test", labels: &["self-hosted", "Linux", "X64"], min_secs: 45, max_secs: 150 },
     Template { repo: "acme/api", workflow: "Deploy", name: "deploy (staging)", labels: &["self-hosted", "Linux"], min_secs: 30, max_secs: 90 },
-    Template { repo: "acme/web", workflow: "CI", name: "e2e (windows)", labels: &["self-hosted", "Windows"], min_secs: 90, max_secs: 240 },
+    Template { repo: "acme/web", workflow: "CI", name: "e2e (chromium)", labels: &["self-hosted", "Linux", "X64"], min_secs: 90, max_secs: 240 },
     Template { repo: "acme/web", workflow: "CI", name: "lint", labels: &["self-hosted", "Linux"], min_secs: 20, max_secs: 60 },
     Template { repo: "acme/mobile", workflow: "Release", name: "archive (ios)", labels: &["self-hosted", "macOS", "ARM64"], min_secs: 180, max_secs: 420 },
-    Template { repo: "acme/infra", workflow: "Nightly", name: "integration", labels: &["self-hosted", "Linux", "X64"], min_secs: 120, max_secs: 360 },
+    Template { repo: "acme/models", workflow: "Nightly", name: "train (small)", labels: &["self-hosted", "Linux", "X64"], min_secs: 120, max_secs: 360 },
 ];
 
-const BRANCHES: &[&str] = &["main", "main", "main", "feat/fleet-view", "fix/flaky-e2e", "release/2.4"];
+const BRANCHES: &[&str] = &["main", "main", "main", "feat/machine-cards", "fix/flaky-e2e", "release/2.4"];
 const ACTORS: &[&str] = &["dependabot[bot]", "maya", "theo", "sam", "priya"];
 
 struct SimRunner {
@@ -169,6 +166,7 @@ const GENERIC: Hardware = Hardware {
     disk_free_gb: 410.0,
     up_hours: 2,
     reachable: true,
+    desktop: true,
     docker: Some("29.1.3"),
     sudo: Some("password"),
 };
@@ -185,26 +183,23 @@ impl World {
         let mut add = |name: &str, machine: Option<&str>, l: Vec<String>, version: &'static str| {
             runners.push(SimRunner { name: name.into(), machine: machine.map(String::from), labels: l, online: true, job: None, version, docker: false });
         };
-        add("mac-mini-01", Some("mac-mini"), mac(), "2.325.0");
-        for i in 1..=7 {
-            add(&format!("mac-studio-{i:02}"), Some("mac-studio"), mac(), "2.329.0");
+        for i in 1..=3 {
+            add(&format!("forge-{i:02}"), Some("forge"), mac(), "2.329.0");
         }
-        add("omarchy-01", Some("omarchy-laptop"), labels(&["self-hosted", "Linux", "X64"]), "2.329.0");
-        add("tahoe-01", Some("tahoe-macbook"), mac(), "2.329.0");
-        add("tahoe-02", Some("tahoe-macbook"), mac(), "2.329.0");
-        add("minis-01-01", Some("ubuntu-nuc"), labels(&["self-hosted", "Linux", "X64"]), "2.329.0");
-        add("windows-01", Some("windows-laptop"), labels(&["self-hosted", "Windows", "ARM64"]), "2.329.0");
-        add("minis-02-01", Some("windows-nuc"), labels(&["self-hosted", "Windows", "X64"]), "2.329.0");
+        add("orbit-01", Some("orbit"), mac(), "2.329.0");
+        add("orbit-02", Some("orbit"), mac(), "2.325.0");
+        add("beacon-01", Some("beacon"), labels(&["self-hosted", "Linux", "X64"]), "2.329.0");
+        add("pebble-01", Some("pebble"), labels(&["self-hosted", "Linux", "X64"]), "2.329.0");
         // Registered on GitHub, but not in config.toml.
-        add("linux-spot-01", None, labels(&["self-hosted", "Linux", "X64", "spot"]), "2.329.0");
+        add("spot-x64-7", None, labels(&["self-hosted", "Linux", "X64", "spot"]), "2.329.0");
 
         let mut sim = Sim { rng: now.timestamp_nanos_opt().unwrap_or(1) as u64 | 1, last_tick: now, next_id: 9_000_100, runners, jobs: Vec::new() };
         // A stopped runner, to show what that looks like.
-        if let Some(r) = sim.runners.iter_mut().find(|r| r.name == "mac-studio-06") {
+        if let Some(r) = sim.runners.iter_mut().find(|r| r.name == "forge-03") {
             r.online = false;
         }
         // Start mid-afternoon: a few jobs already running, one that no runner can take.
-        for (t, runner, ago) in [(0, "mac-studio-01", 70), (7, "mac-studio-05", 140), (1, "mac-mini-01", 35), (4, "minis-01-01", 20), (5, "minis-02-01", 50)] {
+        for (t, runner, ago) in [(0, "forge-01", 70), (7, "forge-02", 140), (1, "orbit-01", 35), (3, "beacon-01", 20)] {
             let id = sim.new_job(t, now - chrono::Duration::seconds(ago + 5));
             let job = sim.jobs.iter_mut().find(|j| j.id == id).unwrap();
             job.started_at = Some(now - chrono::Duration::seconds(ago));
@@ -217,14 +212,14 @@ impl World {
         }
         World {
             sim: Mutex::new(sim),
-            inventory: Mutex::new(INVENTORY.trim_start().to_string()),
+            inventory: Mutex::new(inventory_text(now)),
             workspace_files: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
     pub fn inventory(&self) -> Inventory {
         let text = self.inventory.lock().unwrap();
-        Inventory::parse(&text).unwrap_or_else(|_| Inventory::parse(INVENTORY).expect("demo inventory parses"))
+        Inventory::parse(&text).unwrap_or_else(|_| Inventory::parse(&inventory_text(Utc::now())).expect("demo inventory parses"))
     }
 
     pub fn settings(&self) -> Settings {
@@ -315,8 +310,8 @@ impl World {
             os: Some(hw.os.into()),
             arch: Some(hw.arch.into()),
             os_version: Some(hw.os_version.into()),
-            form_factor: Some(if hw.id.contains("laptop") || hw.id.contains("macbook") { "laptop" } else { "desktop" }.into()),
-            desktop: Some(hw.os != "windows"),
+            form_factor: Some(if matches!(hw.id, "pebble" | "harbor") { "laptop" } else { "desktop" }.into()),
+            desktop: Some(hw.desktop),
             cores: Some(hw.cores),
             cpu_pct: Some((cpu * 10.0).round() / 10.0),
             mem_total: Some(mem_total),
@@ -537,7 +532,7 @@ impl World {
             format!("[{} INFO Terminal] WRITE LINE: Listening for Jobs", at(5395)),
         ];
         let past_job = match hw.os {
-            "windows" => "e2e (windows)",
+            "windows" => "test (windows)",
             "linux" => "test",
             _ => "build (macos-arm64)",
         };
@@ -718,18 +713,19 @@ impl World {
             persistent: true,
         };
         let (agents, sessions): (Vec<&str>, Vec<SessionInfo>) = match machine_id {
-            "mac-studio" => (
+            "forge" => (
                 vec!["claude", "codex", "opencode"],
                 vec![
-                    session("claude-7f3a", "claude", "Claude Code", "Claude Code · checkout", "/Users/ci/code/checkout", true, 12, 1),
-                    session("codex-19be", "codex", "Codex", "Codex · ios-app", "/Users/ci/code/ios-app", false, 48, 0),
+                    session("claude-7f3a", "claude", "Claude Code", "Checkout fix", "/Users/ci/code/checkout", true, 12, 1),
+                    session("shell-2b81", "shell", "Shell", "Shell · checkout", "/Users/ci/code/checkout", false, 31, 0),
                 ],
             ),
-            "ubuntu-nuc" => (
+            "orbit" => (vec!["claude", "codex"], vec![session("codex-19be", "codex", "Codex", "Codex · ios-app", "/Users/ci/code/ios-app", false, 48, 0)]),
+            "beacon" => (
                 vec!["claude", "opencode"],
                 vec![session("opencode-c40d", "opencode", "OpenCode", "OpenCode · api", "/home/ci/api", true, 5, 0)],
             ),
-            "mac-mini" | "omarchy-laptop" | "tahoe-macbook" => (vec!["claude", "codex"], Vec::new()),
+            "pebble" | "dev-1" => (vec!["claude", "codex"], Vec::new()),
             _ => (Vec::new(), Vec::new()),
         };
         let windows = hardware(machine_id).os == "windows";
@@ -738,7 +734,7 @@ impl World {
             agent_version: (!windows).then(|| "0.1.0".into()),
             agents: agents.into_iter().map(String::from).collect(),
             agents_checked_at: Some(now),
-            gh: (!windows).then(|| crate::fleet::model::GhCli { installed: true, logged_in: machine_id != "ubuntu-nuc", account: (machine_id != "ubuntu-nuc").then(|| "octocat".into()), path: None }),
+            gh: (!windows).then(|| crate::fleet::model::GhCli { installed: true, logged_in: machine_id != "beacon", account: (machine_id != "beacon").then(|| "octocat".into()), path: None }),
             sessions,
             events: Vec::new(),
             error: windows.then(|| "Sessions on Windows run while Muxen is open; they can't keep running in the background yet.".into()),

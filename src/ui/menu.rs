@@ -131,7 +131,7 @@ impl Root {
                     items.push(if busy { Item::Off { label: label.into(), glyph: Glyph::Icon("power") } } else { act(label, "power", Action::CloudPower(id.clone(), off)) });
                     items.push(Item::Action { label: "Destroy…".into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
                 } else {
-                    items.push(Item::Action { label: "Remove from fleet…".into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
+                    items.push(Item::Action { label: "Remove from Muxen…".into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
                 }
                 items
             }

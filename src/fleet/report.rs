@@ -1,4 +1,4 @@
-//! Plain-text fleet report for `muxen check`.
+//! Plain-text report for `muxen check`.
 
 use std::fmt::Write;
 
@@ -15,7 +15,7 @@ pub fn render(s: &Snapshot, color: bool) -> String {
     let c = &s.counts;
     let mut out = String::new();
 
-    let _ = writeln!(out, "{}  {}", bold("Fleet overview"), dim(&format!("{} machines · {} runners", c.machines, c.runners)));
+    let _ = writeln!(out, "{}  {}", bold("Overview"), dim(&format!("{} machines · {} runners", c.machines, c.runners)));
     let _ = writeln!(
         out,
         "{} working   {} idle   {} offline   {} unknown   {} queued",

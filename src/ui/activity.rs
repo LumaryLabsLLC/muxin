@@ -1,4 +1,4 @@
-//! The Activity page: one timeline of everything happening on the fleet —
+//! The Activity page: one timeline of everything happening on your machines —
 //! operations started here (installs, restarts, logs, workspace setup) and the
 //! commands agents ran in workspaces — with the selected item's output.
 

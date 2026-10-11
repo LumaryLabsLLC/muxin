@@ -201,7 +201,7 @@ impl Engine {
     /// Starts an action on a runner (id as in `Runner::id`). Returns the operation id.
     pub fn runner_action(self: &Arc<Self>, runner_id: &str, action: RunnerAction) -> Result<u64, String> {
         let snap = self.current();
-        let runner = snap.runners.iter().find(|r| r.id == runner_id).cloned().ok_or("That runner isn't in the fleet anymore.")?;
+        let runner = snap.runners.iter().find(|r| r.id == runner_id).cloned().ok_or("That runner isn't in Muxen anymore.")?;
         let machine = runner.machine_id.as_deref().and_then(|id| self.machine(id));
         let reachable = runner
             .machine_id
@@ -313,7 +313,7 @@ impl Engine {
         validate_machine(&name, &host)?;
         let taken = self.current().machines.iter().any(|m| m.name.eq_ignore_ascii_case(&name));
         if taken {
-            return Err(format!("A machine called \"{name}\" is already in the fleet."));
+            return Err(format!("You already have a machine called \"{name}\"."));
         }
 
         let mut new_id = None;
@@ -353,7 +353,7 @@ impl Engine {
             return Ok(());
         }
         if self.current().machines.iter().any(|m| m.id != spec.id && m.name.eq_ignore_ascii_case(name)) {
-            return Err(format!("A machine called \"{name}\" is already in the fleet."));
+            return Err(format!("You already have a machine called \"{name}\"."));
         }
         let edit = |text: &str| inventory_edit::rename_machine(text, &spec.id, name);
         match self.demo_world() {
@@ -1223,10 +1223,10 @@ mod engine_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn demo_docker_install() {
         let engine = Engine::new(Paths::resolve(Some(std::env::temp_dir()), None), true);
-        engine.run_check(Some(vec!["ubuntu-nuc".into()])).await;
+        engine.run_check(Some(vec!["beacon".into()])).await;
         // sudo asks for a password on the demo NUC, so Auto picks Docker.
         let req = InstallRequest {
-            machine_id: "ubuntu-nuc".into(),
+            machine_id: "beacon".into(),
             scope: "acme".into(),
             names: vec!["nuc-docker-01".into()],
             labels: vec![],
@@ -1238,17 +1238,17 @@ mod engine_tests {
         assert_eq!(o.status, "succeeded", "{:?}", o.log);
         assert!(o.log.iter().any(|l| l.starts_with("Install mode: Docker")), "{:?}", o.log);
         let snap = engine.current();
-        let r = snap.runners.iter().find(|r| r.id == "ubuntu-nuc/nuc-docker-01").expect("installed runner shows up");
+        let r = snap.runners.iter().find(|r| r.id == "beacon/nuc-docker-01").expect("installed runner shows up");
         let local = r.local.as_ref().unwrap();
         assert_eq!(local.container.as_deref(), Some("muxen-nuc-docker-01"));
         assert_eq!(local.dir, "docker://muxen-nuc-docker-01");
         assert!(r.labels.iter().any(|l| l == "docker"), "{:?}", r.labels);
-        assert_eq!(snap.machines.iter().find(|m| m.id == "ubuntu-nuc").unwrap().probe.as_ref().unwrap().docker.as_deref(), Some("29.1.3"));
+        assert_eq!(snap.machines.iter().find(|m| m.id == "beacon").unwrap().probe.as_ref().unwrap().docker.as_deref(), Some("29.1.3"));
 
-        let o = wait(&engine, engine.runner_action("ubuntu-nuc/nuc-docker-01", RunnerAction::Stop).unwrap()).await;
+        let o = wait(&engine, engine.runner_action("beacon/nuc-docker-01", RunnerAction::Stop).unwrap()).await;
         assert_eq!(o.status, "succeeded");
         assert!(o.log.iter().any(|l| l.contains("container muxen-nuc-docker-01")), "{:?}", o.log);
-        assert_eq!(state(&engine, "ubuntu-nuc/nuc-docker-01"), "offline");
+        assert_eq!(state(&engine, "beacon/nuc-docker-01"), "offline");
     }
 
     /// Lines an operation logged (after the coalesced publish catches up).
@@ -1358,36 +1358,36 @@ mod engine_tests {
         engine.run_check(None).await;
 
         let req = InstallRequest {
-            machine_id: "ubuntu-nuc".into(),
+            machine_id: "beacon".into(),
             scope: "acme".into(),
-            names: engine.suggest_runner_names("ubuntu-nuc", 2),
+            names: engine.suggest_runner_names("beacon", 2),
             labels: vec!["gpu".into()],
             group: None,
             as_service: true,
             mode: InstallMode::Auto,
         };
-        assert_eq!(req.names, vec!["ubuntu-nuc-01", "ubuntu-nuc-02"]);
+        assert_eq!(req.names, vec!["beacon-02", "beacon-03"]);
         let o = wait(&engine, engine.install_runners(req).unwrap()).await;
         assert_eq!(o.status, "succeeded", "{:?}", o.log);
         let snap = engine.current();
-        let r = snap.runners.iter().find(|r| r.id == "ubuntu-nuc/ubuntu-nuc-01").expect("installed runner shows up");
+        let r = snap.runners.iter().find(|r| r.id == "beacon/beacon-02").expect("installed runner shows up");
         assert!(r.declared && r.labels.contains(&"gpu".to_string()), "{r:?}");
 
-        let o = wait(&engine, engine.runner_action("ubuntu-nuc/ubuntu-nuc-01", RunnerAction::Stop).unwrap()).await;
+        let o = wait(&engine, engine.runner_action("beacon/beacon-02", RunnerAction::Stop).unwrap()).await;
         assert_eq!(o.status, "succeeded");
-        assert_eq!(state(&engine, "ubuntu-nuc/ubuntu-nuc-01"), "offline");
+        assert_eq!(state(&engine, "beacon/beacon-02"), "offline");
 
-        let o = wait(&engine, engine.runner_action("ubuntu-nuc/ubuntu-nuc-01", RunnerAction::Remove { delete_files: true }).unwrap()).await;
+        let o = wait(&engine, engine.runner_action("beacon/beacon-02", RunnerAction::Remove { delete_files: true }).unwrap()).await;
         assert_eq!(o.status, "succeeded", "{:?}", o.log);
-        assert!(!engine.current().runners.iter().any(|r| r.name == "ubuntu-nuc-01"));
+        assert!(!engine.current().runners.iter().any(|r| r.name == "beacon-02"));
 
         // The GitHub-only runner can be deregistered; the asleep laptop can't take installs.
-        let o = wait(&engine, engine.runner_action("github/linux-spot-01", RunnerAction::Remove { delete_files: false }).unwrap()).await;
+        let o = wait(&engine, engine.runner_action("github/spot-x64-7", RunnerAction::Remove { delete_files: false }).unwrap()).await;
         assert_eq!(o.status, "succeeded", "{:?}", o.log);
         let req = InstallRequest {
-            machine_id: "laravel-macbook".into(),
+            machine_id: "harbor".into(),
             scope: "acme".into(),
-            names: vec!["laravel-01".into()],
+            names: vec!["harbor-01".into()],
             labels: vec![],
             group: None,
             as_service: true,

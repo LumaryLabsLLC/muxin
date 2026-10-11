@@ -215,7 +215,7 @@ impl Engine {
                     .machines
                     .iter()
                     .find(|x| x.id == m || x.name.eq_ignore_ascii_case(&m))
-                    .ok_or_else(|| format!("Machine \"{m}\" not found in the fleet. Known machines: {}.", machine_names(&snap.machines)))?;
+                    .ok_or_else(|| format!("Machine \"{m}\" not found. Known machines: {}.", machine_names(&snap.machines)))?;
                 if found.host.is_empty() {
                     return Err(format!("{} has no host in config.toml, so Muxen can't reach it.", found.name));
                 }

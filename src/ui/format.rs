@@ -13,11 +13,6 @@ pub fn ago(t: Option<DateTime<Utc>>) -> String {
     }
 }
 
-pub fn until(t: DateTime<Utc>) -> String {
-    let secs = (t - Utc::now()).num_seconds();
-    if secs <= 0 { "now".into() } else { format!("in {}", util::short_duration(secs as u64)) }
-}
-
 /// Live elapsed time like "4m 07s", for running jobs.
 pub fn elapsed(since: DateTime<Utc>) -> String {
     let secs = (Utc::now() - since).num_seconds().max(0) as u64;
@@ -51,50 +46,6 @@ pub fn disk_used_fraction(m: &Machine) -> Option<f32> {
 
 pub fn disk_low(m: &Machine) -> bool {
     m.diagnostics.iter().any(|d| d.code == "low-disk")
-}
-
-/// "3/7 working", "2 idle", "1/2 offline", ... for a machine with runners.
-pub fn runner_summary(m: &Machine) -> String {
-    let s = &m.summary;
-    if s.total == 0 {
-        return match m.status.as_str() {
-            "online" => "connected".into(),
-            "offline" => unreachable_word(m).to_ascii_lowercase(),
-            _ => "not checked".into(),
-        };
-    }
-    if s.working > 0 {
-        format!("{}/{} working", s.working, s.total)
-    } else if s.idle == s.total {
-        format!("{} idle", s.idle)
-    } else if s.offline > 0 {
-        format!("{}/{} offline", s.offline, s.total)
-    } else if s.unknown == s.total {
-        format!("{} unknown", s.unknown)
-    } else {
-        format!("{} idle", s.idle)
-    }
-}
-
-/// "No warnings", "2 warnings", "1 unknown", "Unreachable", "Not checked".
-pub fn diagnostics_summary(m: &Machine) -> (String, &'static str) {
-    if m.checking && m.probe.is_none() {
-        return ("Checking…".into(), "muted");
-    }
-    match m.status.as_str() {
-        "offline" => return (unreachable_word(m).into(), if is_just_offline(m) { "muted" } else { "error" }),
-        "unchecked" | "manual" => return ("Not checked".into(), "muted"),
-        _ => {}
-    }
-    let warnings = m.diagnostics.iter().filter(|d| matches!(d.level.as_str(), "warning" | "error")).count();
-    let unknown = m.diagnostics.iter().filter(|d| d.level == "unknown").count();
-    if warnings > 0 {
-        (format!("{warnings} warning{}", if warnings == 1 { "" } else { "s" }), "warning")
-    } else if unknown > 0 {
-        (format!("{unknown} unknown"), "muted")
-    } else {
-        ("No warnings".into(), "muted")
-    }
 }
 
 /// Whether Muxen can show the machine's desktop (Linux with X11, macOS).

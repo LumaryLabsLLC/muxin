@@ -46,7 +46,7 @@ pub const ALL: &[Shortcut] = &[
     shortcut!("sync", "Sync GitHub", "secondary-shift-r", SyncGitHub),
     shortcut!("add-machine", "Add machine", "secondary-n", AddMachine),
     shortcut!("new-session", "New session", "secondary-t", NewSession),
-    shortcut!("filter", "Search the fleet", "secondary-f", FocusFilter),
+    shortcut!("filter", "Search machines and sessions", "secondary-f", FocusFilter),
     shortcut!("sidebar", "Hide or show the sidebar", "secondary-b", ToggleSidebar),
     shortcut!("back", "Back", "secondary-[", GoBack),
     shortcut!("forward", "Forward", "secondary-]", GoForward),

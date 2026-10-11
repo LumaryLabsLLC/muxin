@@ -665,14 +665,16 @@ impl Root {
                 )
                 .into_any_element()
         } else {
-            let rows: Vec<AnyElement> = sessions.iter().enumerate().map(|(i, x)| self.machine_session_row(theme, x, i, cx)).collect();
+            let rows: Vec<AnyElement> = sessions.iter().enumerate().map(|(i, x)| self.machine_session_row(theme, x, i, false, cx)).collect();
             card(theme).children(rows).into_any_element()
         };
         div().flex().flex_col().gap(px(10.)).child(title).child(content).into_any_element()
     }
 
-    pub(super) fn machine_session_row(&self, theme: &Theme, x: &SessionInfo, i: usize, cx: &mut Context<Self>) -> AnyElement {
+    /// A session in a list; `with_machine` names its machine too (lists that span machines).
+    pub(super) fn machine_session_row(&self, theme: &Theme, x: &SessionInfo, i: usize, with_machine: bool, cx: &mut Context<Self>) -> AnyElement {
         let id = x.id.clone();
+        let machine = with_machine.then(|| self.snapshot.machines.iter().find(|m| m.id == x.machine_id).map(|m| m.name.clone())).flatten();
         let (icon_name, (from, to)) = kit::agent_look(&x.agent);
         let offline = self.snapshot.machines.iter().any(|m| m.id == x.machine_id && m.status == "offline");
         let state = if x.status == "exited" {
@@ -727,6 +729,8 @@ impl Root {
                             .gap(px(6.))
                             .text_size(px(11.5))
                             .text_color(theme.text_placeholder)
+                            .children(machine.map(|m| div().text_color(theme.text_muted).child(m)))
+                            .when(with_machine, |d| d.child("·"))
                             .child(x.agent_name.clone())
                             .child("·")
                             .child(div().font_family(mono_font()).child(x.cwd.clone()))
@@ -1334,8 +1338,14 @@ fn demo_screen(agent: &str) -> Vec<u8> {
             String::new(),
             format!("{bold}›{reset} "),
         ],
+        "shell" => vec![
+            format!("{green}ci@forge{reset} {bold}~/code/checkout{reset} % git status --short"),
+            format!(" M src/cart/applyCoupon.ts"),
+            format!(" M e2e/checkout.spec.ts"),
+            format!("{green}ci@forge{reset} {bold}~/code/checkout{reset} % "),
+        ],
         _ => vec![
-            format!("{green}ci@ubuntu-nuc{reset}:{bold}~/api{reset}$ opencode"),
+            format!("{green}ci@beacon{reset}:{bold}~/api{reset}$ opencode"),
             String::new(),
             format!("{bold}  opencode{reset}  {dim}v0.15{reset}"),
             String::new(),

@@ -1,5 +1,5 @@
 //! Cloud machines: droplets Muxen creates in the user's DigitalOcean account,
-//! sets up, and adds to the fleet (see ops::cloud for the operations).
+//! sets up, and adds to your machines (see ops::cloud for the operations).
 
 pub mod auth;
 pub mod digitalocean;

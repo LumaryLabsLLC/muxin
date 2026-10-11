@@ -1,5 +1,5 @@
 //! `muxen mcp`: a Model Context Protocol server over stdio, so agents
-//! (Claude Code, Codex, any MCP client) can inspect and run the fleet.
+//! (Claude Code, Codex, any MCP client) can see and work with the user's machines.
 //!
 //! Transport: newline-delimited JSON-RPC 2.0 on stdin/stdout. Stdout carries
 //! protocol messages only; logs go to stderr. Requests are handled
@@ -19,14 +19,15 @@ use crate::fleet::Engine;
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 const INSTRUCTIONS: &str = "\
-Muxen manages a fleet of self-hosted GitHub Actions runners: the machines that host them \
-(reached with the system ssh, or directly for host \"local\") and the runners on each.
+Muxen is one app for all of the user's machines (reached with the system ssh, or directly for \
+host \"local\"): agent sessions, desktops, files, GitHub, workspaces, cloud machines, and the \
+self-hosted GitHub Actions runners on them.
 
-Start with fleet_status and read its `attention` list first; it names the problems worth fixing \
+Start with status and read its `attention` list first; it names the problems worth fixing \
 and the machine/runner they're about. Ids: machines are slugs like \"mac-studio\"; runners are \
 \"<machine-id>/<runner-name>\", or \"github/<name>\" for a runner GitHub knows but no machine lists.
 
-Read-only: fleet_status, get_machine, list_runners, list_jobs, check_machines (runs a read-only \
+Read-only: status, get_machine, list_runners, list_jobs, check_machines (runs a read-only \
 check over ssh), get_operation, list_operations, get_settings, list_ssh_hosts, list_files.
 Changes things: add_machine / remove_machine edit config.toml only. install_runners and \
 runner_action run commands on real machines and register or deregister runners on GitHub; \
@@ -47,7 +48,7 @@ Prefer one workspace per task, reuse it across steps, and call workspace_destroy
 done: nothing is deleted automatically. Commands run as the user on a real machine, so don't do \
 anything there you wouldn't do in their own terminal without asking.
 
-Agent sessions: long-running terminals on fleet machines, each running an AI agent CLI (Claude \
+Agent sessions: long-running terminals on the user's machines, each running an AI agent CLI (Claude \
 Code, Codex, OpenCode, Gemini CLI, Amp, Pi) or a plain shell, kept alive by Muxen's agent on \
 the machine so they survive disconnects. The user watches and types into them in the Muxen app. session_list shows them \
 (and which agents each machine has); session_start starts one, optionally with a first prompt; \
@@ -282,7 +283,7 @@ fn ok<T: Serialize>(value: T) -> Result<Value, ApiError> {
 
 async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value) -> Result<Value, ApiError> {
     match name {
-        "fleet_status" => ok(api::status(engine, args(a)?, Surface::Mcp).await?),
+        "status" | "fleet_status" => ok(api::status(engine, args(a)?, Surface::Mcp).await?),
         "get_machine" => ok(api::machine(engine, args(a)?).await?),
         "list_runners" => ok(json!({ "runners": api::runners(engine, args(a)?).await? })),
         "list_jobs" => ok(api::jobs(engine, Surface::Mcp).await?),
@@ -367,12 +368,12 @@ const RUNNER_ID: &str = "Runner id: \"<machine-id>/<runner-name>\", or \"github/
 pub fn tools() -> Vec<Value> {
     vec![
         json!({
-            "name": "fleet_status",
-            "description": "Overview of the whole fleet: counts of working/idle/offline runners, queued jobs, GitHub connection, every machine with CPU/memory/disk/uptime and a runner summary, and an `attention` list of problems (unreachable machines, stopped runners, jobs no runner can take, low disk). Call this first. Uses the last machine check unless refresh=true, which re-checks every machine over ssh first.",
+            "name": "status",
+            "description": "Overview of all the user's machines: counts of working/idle/offline runners, queued jobs, GitHub connection, every machine with CPU/memory/disk/uptime and a runner summary, and an `attention` list of problems (unreachable machines, stopped runners, jobs no runner can take, low disk). Call this first. Uses the last machine check unless refresh=true, which re-checks every machine over ssh first.",
             "inputSchema": schema(json!({
                 "refresh": { "type": "boolean", "description": "Re-check all machines over ssh and sync GitHub before answering. Slower; default false." }
             }), &[]),
-            "annotations": annotations("Fleet status", true, false, true, true),
+            "annotations": annotations("Status", true, false, true, true),
         }),
         json!({
             "name": "get_machine",
@@ -403,7 +404,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "add_machine",
-            "description": "Add a machine to the fleet (written to config.toml, comments preserved) and check it. `host` is anything the system ssh accepts (user@host, an ~/.ssh/config alias; see list_ssh_hosts) or \"local\" for this computer. Key-based ssh must work without a password prompt. Doesn't install anything.",
+            "description": "Add a machine to Muxen (written to config.toml, comments preserved) and check it. `host` is anything the system ssh accepts (user@host, an ~/.ssh/config alias; see list_ssh_hosts) or \"local\" for this computer. Key-based ssh must work without a password prompt. Doesn't install anything.",
             "inputSchema": schema(json!({
                 "name": { "type": "string", "description": "Display name, e.g. \"Mac Studio\"." },
                 "host": { "type": "string", "description": "ssh destination or \"local\"." },
@@ -471,7 +472,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "cloud_create",
-            "description": "Create a DigitalOcean droplet in the user's account, set it up (their user and SSH key, git, and the extras chosen: Docker, GitHub CLI, languages like Go, Rust, Python or PHP, agent CLIs, Tailscale), and add it to the fleet. It COSTS MONEY every hour it exists: tell the user the size and price (cloud_options) and get their OK first. Takes a few minutes.",
+            "description": "Create a DigitalOcean droplet in the user's account, set it up (their user and SSH key, git, and the extras chosen: Docker, GitHub CLI, languages like Go, Rust, Python or PHP, agent CLIs, Tailscale), and add it to the user's machines. It COSTS MONEY every hour it exists: tell the user the size and price (cloud_options) and get their OK first. Takes a few minutes.",
             "inputSchema": schema(json!({
                 "name": { "type": "string" },
                 "region": { "type": "string", "description": "Region slug, e.g. nyc3. Default: the user's setting, else the nearest." },
@@ -484,7 +485,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "cloud_destroy",
-            "description": "Destroy a cloud machine Muxen created: deletes the droplet (everything on it is lost) and removes it from the fleet. Confirm with the user first; make sure work there is pushed.",
+            "description": "Destroy a cloud machine Muxen created: deletes the droplet (everything on it is lost) and removes it from Muxen. Confirm with the user first; make sure work there is pushed.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string" }, "wait": { "type": "boolean" } }), &["machine_id"]),
             "annotations": annotations("Destroy cloud machine", false, true, true, true),
         }),
@@ -575,7 +576,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "list_ssh_hosts",
-            "description": "Hosts to suggest for add_machine: aliases from the user's ~/.ssh/config; computers on their Tailscale network (`tailnet`, when Tailscale is on here: each with the `host` to add it by, whether Tailscale sees it online, and `machine_id` when it's already in the fleet; a machine added by its tailnet name is reachable from anywhere); and computers on this local network that aren't in the fleet (`network`: `ssh: false` means a Mac with Remote Login off, which the user turns on in System Settings › General › Sharing). Listens on the network for a few seconds.",
+            "description": "Hosts to suggest for add_machine: aliases from the user's ~/.ssh/config; computers on their Tailscale network (`tailnet`, when Tailscale is on here: each with the `host` to add it by, whether Tailscale sees it online, and `machine_id` when it's already in Muxen; a machine added by its tailnet name is reachable from anywhere); and computers on this local network that aren't in Muxen yet (`network`: `ssh: false` means a Mac with Remote Login off, which the user turns on in System Settings › General › Sharing). Listens on the network for a few seconds.",
             "inputSchema": schema(json!({}), &[]),
             "annotations": annotations("List ssh hosts", true, false, true, false),
         }),
@@ -877,7 +878,7 @@ pub fn print_config() -> String {
         "# Claude Code\nclaude mcp add muxen -- {exe} mcp\n\n\
          # Codex (~/.codex/config.toml)\n[mcp_servers.muxen]\ncommand = \"{exe}\"\nargs = [\"mcp\"]\n\n\
          # Other MCP clients (Claude Desktop, Cursor, ...)\n{json_block}\n\n\
-         # Try it safely first with a simulated fleet: add \"--demo\" after \"mcp\".\n"
+         # Try it safely first with simulated machines: add \"--demo\" after \"mcp\".\n"
     )
 }
 
@@ -941,7 +942,7 @@ mod tests {
         assert!(text.contains("stdout:\n```\nok\n```") && text.contains("stderr:\n```\nboom\n```"), "{text}");
         let bg = readable_text("workspace_exec", &json!({ "background_pid": 42, "log_path": ".muxen/logs/1.log", "duration_ms": 5 })).unwrap();
         assert!(bg.contains("pid 42") && bg.contains(".muxen/logs/1.log"));
-        assert!(readable_text("fleet_status", &json!({})).is_none());
+        assert!(readable_text("status", &json!({})).is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -995,17 +996,17 @@ mod tests {
         assert_eq!(init["id"], 1);
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(init["result"]["serverInfo"]["name"], "muxen");
-        assert!(init["result"]["instructions"].as_str().unwrap().contains("fleet_status"));
+        assert!(init["result"]["instructions"].as_str().unwrap().contains("Start with status"));
 
         send(json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await;
         send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
         let list: Value = recv().await;
         assert_eq!(list["result"]["tools"].as_array().unwrap().len(), tools().len());
 
-        send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fleet_status","arguments":{}}})).await;
+        send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"status","arguments":{}}})).await;
         let status: Value = recv().await;
         assert_eq!(status["result"]["isError"], false);
-        assert_eq!(status["result"]["structuredContent"]["counts"]["machines"], 9);
+        assert_eq!(status["result"]["structuredContent"]["counts"]["machines"], 7);
         assert!(status["result"]["content"][0]["text"].as_str().unwrap().contains("\"summary\""));
 
         // Tool failures are results with isError, carrying a code an agent can branch on.

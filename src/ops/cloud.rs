@@ -1,4 +1,4 @@
-//! Cloud machine operations: create a droplet and make it a fleet machine,
+//! Cloud machine operations: create a droplet and make it one of your machines,
 //! power it off or on, destroy it; and the idle watch that warns, powers off
 //! or destroys machines nobody is using (as the user chose in Settings › Cloud).
 
@@ -76,7 +76,7 @@ impl Engine {
     }
 
     /// Creates a droplet, waits for it to set itself up, and adds it to the
-    /// fleet. Returns the operation that tracks it.
+    /// machines. Returns the operation that tracks it.
     pub fn cloud_create(self: &Arc<Self>, req: CloudCreate) -> Result<u64, String> {
         if self.demo_world().is_some() {
             return Err("The demo doesn't create cloud machines.".into());
@@ -86,7 +86,7 @@ impl Engine {
             return Err("Give the machine a name (up to 60 characters).".into());
         }
         if self.current().machines.iter().any(|m| m.name.eq_ignore_ascii_case(&name)) {
-            return Err(format!("A machine called \"{name}\" is already in the fleet."));
+            return Err(format!("You already have a machine called \"{name}\"."));
         }
         let key_path = crate::probe::default_ssh_key().ok_or("There's no SSH key on this computer to sign in with. Make one with `ssh-keygen -t ed25519`.")?;
         let settings = self.settings().cloud;
@@ -216,7 +216,7 @@ impl Engine {
                 return Ok(());
             }
         }
-        Err(format!("Setup didn't finish within {} minutes. It's in your fleet; check {} on it.", timeout.as_secs() / 60, setup::LOG))
+        Err(format!("Setup didn't finish within {} minutes. It's been added; check {} on it.", timeout.as_secs() / 60, setup::LOG))
     }
 
     /// Joins the machine to the user's tailnet: with the saved auth key, or by
@@ -255,12 +255,15 @@ impl Engine {
         }
     }
 
-    /// Destroys a cloud machine: deletes the droplet and removes it from the fleet.
+    /// Destroys a cloud machine: deletes the droplet and removes it from Muxen.
     pub fn cloud_destroy(self: &Arc<Self>, machine_id: &str) -> Result<u64, String> {
-        let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in the fleet anymore.")?;
+        let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in Muxen anymore.")?;
         let cloud = spec.cloud.clone().ok_or_else(|| format!("{} isn't a cloud machine Muxen created.", spec.name))?;
         if self.machine_busy(&spec.id) {
             return Err("An operation is still running on this machine. Wait for it to finish.".into());
+        }
+        if self.demo_world().is_some() {
+            return Err("The demo doesn't destroy cloud machines.".into());
         }
         let op = self.begin_op("cloud-destroy", format!("Destroy {}", spec.name), Some(spec.id.clone()), None);
         let me = self.clone();
@@ -289,10 +292,13 @@ impl Engine {
 
     /// Powers a cloud machine off (cleanly) or on. DigitalOcean still bills it while it's off.
     pub fn cloud_power(self: &Arc<Self>, machine_id: &str, on: bool) -> Result<u64, String> {
-        let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in the fleet anymore.")?;
+        let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in Muxen anymore.")?;
         let cloud = spec.cloud.clone().ok_or_else(|| format!("{} isn't a cloud machine Muxen created.", spec.name))?;
         if self.machine_busy(&spec.id) {
             return Err("An operation is still running on this machine. Wait for it to finish.".into());
+        }
+        if self.demo_world().is_some() {
+            return Err("The demo doesn't power cloud machines on or off.".into());
         }
         let title = format!("{} {}", if on { "Power on" } else { "Power off" }, spec.name);
         let op = self.begin_op(if on { "cloud-power-on" } else { "cloud-power-off" }, title, Some(spec.id.clone()), None);

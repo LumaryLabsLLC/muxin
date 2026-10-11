@@ -329,7 +329,7 @@ host = "nas"
         let local = out.find("host = \"local\"").unwrap();
         let commented = out.find("# runners = [").unwrap();
         let beelink = out.find("name = \"Beelink\"").unwrap();
-        let examples = out.find("# name = \"Mac Studio\"").unwrap();
+        let examples = out.find("# name = \"Forge\"").unwrap();
         assert!(local < commented && commented < beelink && beelink < examples, "{out}");
         assert!(out.contains("host = \"local\"\n# runners = ["), "{out}");
         assert!(out.contains("]\n\n[[machine]]\nname = \"Beelink\"\nhost = \"beelink\"\n\n# [[machine]]"), "{out}");

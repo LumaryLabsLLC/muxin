@@ -894,7 +894,7 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Fleet file", None))
+            .child(section_title(theme, "Machines file", None))
             .child(
                 card(theme)
                     .p(px(14.))

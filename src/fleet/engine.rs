@@ -15,7 +15,7 @@ mod roaming;
 
 use super::build::{build, Inputs};
 use super::model::{CheckInfo, InventoryInfo, Operation, Snapshot};
-use super::sessions::{self, DirectSession, MachineSessions, SessionNotice};
+use super::sessions::{self, DirectSession, MachineSessions, SessionInfo, SessionNotice};
 use super::workspaces::{self as workspaces, WorkspaceRecord};
 use crate::config::{default_inventory, display_path, write_atomic, Inventory, MachineSpec, Paths, PersistedState, Settings};
 use crate::demo::World;
@@ -587,6 +587,16 @@ impl Engine {
         let mut st = self.state.lock().unwrap();
         st.direct.retain(|d| d.info.id != id);
         self.publish(&mut st);
+    }
+
+    /// Renames a direct session; its info afterwards.
+    pub(crate) fn set_direct_title(&self, id: &str, title: &str) -> Option<SessionInfo> {
+        let mut st = self.state.lock().unwrap();
+        let d = st.direct.iter_mut().find(|d| d.info.id == id)?;
+        d.info.title = title.to_string();
+        let info = d.info.clone();
+        self.publish(&mut st);
+        Some(info)
     }
 
     /// A direct session's terminal exited ("exited") or was reopened ("running").

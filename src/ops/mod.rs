@@ -343,6 +343,27 @@ impl Engine {
         self.forget_machine(machine_id)
     }
 
+    /// Gives a machine a new name in config.toml. Its id doesn't change, so
+    /// its runners, sessions, favorites and history stay with it.
+    pub fn rename_machine(self: &Arc<Self>, machine_id: &str, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        validate_name(name)?;
+        let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in config.toml anymore.")?;
+        if spec.name == name {
+            return Ok(());
+        }
+        if self.current().machines.iter().any(|m| m.id != spec.id && m.name.eq_ignore_ascii_case(name)) {
+            return Err(format!("A machine called \"{name}\" is already in the fleet."));
+        }
+        let edit = |text: &str| inventory_edit::rename_machine(text, &spec.id, name);
+        match self.demo_world() {
+            Some(w) => w.edit_inventory(edit)?,
+            None => inventory_edit::edit_file(self.inventory_path(), edit)?,
+        }
+        self.reload_inventory_now();
+        Ok(())
+    }
+
     /// Drops a machine from config.toml, for an operation that is itself
     /// what's changing it (destroying a cloud machine).
     pub(crate) fn forget_machine(self: &Arc<Self>, machine_id: &str) -> Result<(), String> {
@@ -498,13 +519,18 @@ fn valid_runner_name(n: &str) -> bool {
         && n.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
 }
 
-fn validate_machine(name: &str, host: &str) -> Result<(), String> {
+fn validate_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("Give the machine a name.".into());
     }
     if name.len() > 80 || name.chars().any(char::is_control) {
         return Err("That name is too long or has odd characters.".into());
     }
+    Ok(())
+}
+
+fn validate_machine(name: &str, host: &str) -> Result<(), String> {
+    validate_name(name)?;
     if host.is_empty() {
         return Err("Enter an ssh destination (like ci@studio.local or an ~/.ssh/config alias), or \"local\".".into());
     }

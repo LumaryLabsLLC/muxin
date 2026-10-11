@@ -392,6 +392,30 @@ impl Engine {
         Ok(reply["text"].as_str().unwrap_or("").to_string())
     }
 
+    /// Gives a session a new title (kept by the agent on its machine, so every
+    /// Muxen sees it). An empty title goes back to the one it started with.
+    pub async fn rename_session(self: &Arc<Self>, id: &str, title: &str) -> Result<SessionInfo, String> {
+        let title = clean_title(title)?;
+        if let Some(d) = self.direct_session(id) {
+            let title = if title.is_empty() { agent(&d.info.agent).map(|k| default_title(k, &d.info.cwd)).unwrap_or_else(|| d.info.name.clone()) } else { title };
+            return self.set_direct_title(id, &title).ok_or_else(|| format!("No session {id}."));
+        }
+        let (machine_id, name) = split_id(id)?;
+        let (spec, probe) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
+        if self.demo_world().is_some() {
+            let mut found = self.sessions_of(&spec.id).ok_or_else(|| format!("No session {id}."))?;
+            let s = found.sessions.iter_mut().find(|s| s.name == name).ok_or_else(|| format!("No session {id}."))?;
+            s.title = if title.is_empty() { agent(&s.agent).map(|k| default_title(k, &s.cwd)).unwrap_or_else(|| s.name.clone()) } else { title };
+            let renamed = s.clone();
+            self.set_sessions(&spec.id, found);
+            return Ok(renamed);
+        }
+        agent::ensure(&spec, probe.as_ref()).await?;
+        agent::ctl(&spec, &json!({ "op": "rename", "name": name, "title": title })).await?;
+        let found = self.refresh_sessions(&spec.id).await?;
+        found.sessions.into_iter().find(|s| s.name == name).ok_or_else(|| format!("{id} ended."))
+    }
+
     /// The command that attaches a terminal to a session from this computer.
     pub fn attach_command(&self, id: &str) -> Result<AttachCommand, String> {
         let (machine_id, name) = split_id(id)?;
@@ -522,6 +546,16 @@ fn unique_title(title: &str, taken: &[String]) -> String {
         return title.to_string();
     }
     (2..).map(|n| format!("{title} {n}")).find(|t| !taken.contains(t)).unwrap_or_else(|| title.to_string())
+}
+
+/// A title as the user typed it, on one line. Empty is allowed (it means "the
+/// one it started with").
+fn clean_title(title: &str) -> Result<String, String> {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.chars().count() > 80 || title.chars().any(char::is_control) {
+        return Err("That title is too long or has odd characters.".into());
+    }
+    Ok(title)
 }
 
 /// A short default title: the agent and the folder it works in.
@@ -682,5 +716,8 @@ mod tests {
         let taken = vec!["Shell · home".to_string(), "Shell · home 2".to_string()];
         assert_eq!(unique_title("Shell · home", &taken), "Shell · home 3");
         assert_eq!(unique_title("Shell · tmp", &taken), "Shell · tmp");
+        assert_eq!(clean_title("  API\n server ").unwrap(), "API server");
+        assert_eq!(clean_title("   ").unwrap(), "");
+        assert!(clean_title(&"x".repeat(81)).is_err());
     }
 }

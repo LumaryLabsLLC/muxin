@@ -91,7 +91,71 @@ pub fn handle(req: &Value) -> Value {
             Err(e) => json!({ "ok": false, "error": e }),
         },
         "start" => request(&req, true),
+        "rename" => rename(&req),
         _ => request(&req, false),
+    }
+}
+
+/// Titles the user gave sessions, by session name (`~/.muxen/titles.json`).
+/// Kept here rather than in the session server, which goes on running the
+/// build it started with across agent updates, so renaming works with any.
+fn titles_path() -> std::path::PathBuf {
+    home_dir().join("titles.json")
+}
+
+fn read_titles() -> serde_json::Map<String, Value> {
+    std::fs::read_to_string(titles_path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v.as_object().cloned()).unwrap_or_default()
+}
+
+fn write_titles(titles: &serde_json::Map<String, Value>) -> io::Result<()> {
+    let path = titles_path();
+    if titles.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
+    let tmp = path.with_extension(format!("json.{}", std::process::id()));
+    std::fs::write(&tmp, Value::Object(titles.clone()).to_string())?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// Shows the titles the user gave in the server's session list.
+fn apply_titles(sessions: &mut Value, titles: &serde_json::Map<String, Value>) {
+    for s in sessions.as_array_mut().into_iter().flatten() {
+        if let Some(title) = s["name"].as_str().and_then(|n| titles.get(n)).cloned() {
+            s["title"] = title;
+        }
+    }
+}
+
+/// Forgets the titles of sessions that are gone. True when any were.
+fn prune_titles(sessions: &Value, titles: &mut serde_json::Map<String, Value>) -> bool {
+    let names: Vec<&str> = sessions.as_array().into_iter().flatten().filter_map(|s| s["name"].as_str()).collect();
+    let before = titles.len();
+    titles.retain(|name, _| names.contains(&name.as_str()));
+    titles.len() != before
+}
+
+/// `{"op": "rename", "name": "shell-ab12", "title": "API server"}`. An empty
+/// title goes back to the one the session started with.
+fn rename(req: &Value) -> Value {
+    let name = req["name"].as_str().unwrap_or("");
+    let title = req["title"].as_str().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
+    let list = request(&json!({ "op": "list" }), false);
+    let exists = list["sessions"].as_array().is_some_and(|a| a.iter().any(|s| s["name"].as_str() == Some(name)));
+    if name.is_empty() || !exists {
+        return json!({ "ok": false, "error": format!("there's no session called {name}") });
+    }
+    let mut titles = read_titles();
+    if title.is_empty() {
+        titles.remove(name);
+    } else {
+        titles.insert(name.to_string(), Value::String(title));
+    }
+    match write_titles(&titles) {
+        Ok(()) => json!({ "ok": true }),
+        Err(e) => json!({ "ok": false, "error": format!("couldn't save the title: {e}") }),
     }
 }
 
@@ -105,6 +169,16 @@ fn discover(req: &Value) -> Value {
     let gh = if names.is_empty() { Value::Null } else { crate::repos::gh_status(&dirs) };
     let running = UnixStream::connect(socket_path()).is_ok();
     let list = if running { request(&json!({ "op": "list" }), false) } else { json!({}) };
+    let mut sessions = list.get("sessions").cloned().unwrap_or_else(|| json!([]));
+    let mut titles = read_titles();
+    if !titles.is_empty() {
+        apply_titles(&mut sessions, &titles);
+        // Only a real answer says which sessions are gone (no server: all of them).
+        let answered = !running || list["ok"].as_bool() == Some(true);
+        if answered && prune_titles(&sessions, &mut titles) {
+            let _ = write_titles(&titles);
+        }
+    }
     json!({
         "ok": true,
         "version": crate::VERSION,
@@ -113,7 +187,7 @@ fn discover(req: &Value) -> Value {
         "gh": gh,
         "server": running,
         "now": now(),
-        "sessions": list.get("sessions").cloned().unwrap_or_else(|| json!([])),
+        "sessions": sessions,
         "events": list.get("events").cloned().unwrap_or_else(|| json!([])),
     })
 }
@@ -276,4 +350,23 @@ pub fn attach(name: &str) -> i32 {
         eprintln!("\r\n[detached from {name}]");
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn given_titles_show_and_gone_sessions_forget_theirs() {
+        let mut sessions = json!([{ "name": "shell-ab12", "title": "Shell · home" }, { "name": "claude-3f9a", "title": "Claude Code · api" }]);
+        let mut titles = serde_json::Map::new();
+        titles.insert("shell-ab12".into(), json!("API server"));
+        titles.insert("codex-0000".into(), json!("Gone"));
+        apply_titles(&mut sessions, &titles);
+        assert_eq!(sessions[0]["title"], "API server");
+        assert_eq!(sessions[1]["title"], "Claude Code · api");
+        assert!(prune_titles(&sessions, &mut titles));
+        assert_eq!(titles.keys().collect::<Vec<_>>(), ["shell-ab12"]);
+        assert!(!prune_titles(&sessions, &mut titles));
+    }
 }

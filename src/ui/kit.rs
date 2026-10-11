@@ -214,6 +214,7 @@ pub fn icon_colors(name: &str) -> Option<(u32, u32)> {
         "folder" | "folder-open" | "hard-drive" | "box" => (0xffd36b, 0xf09a0b),
         "file" | "settings" | "gauge" | "cpu" | "memory-stick" | "search" => (0xa3b4d9, 0x5a6d99),
         "copy" => (0xf0a6fc, 0xb83ad0),
+        "pencil" => (0xffc861, 0xe5900f),
         "refresh-cw" | "rotate-ccw" | "play" | "check" | "circle-check" => (0x6ee7a0, 0x1c9e55),
         "plus" => (0xb69cff, 0x7a4ce8),
         "trash-2" | "circle-x" | "square" => (0xff8080, 0xdc3b33),

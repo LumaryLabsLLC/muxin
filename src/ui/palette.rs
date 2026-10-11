@@ -62,6 +62,8 @@ enum Command {
     Settings(SettingsTab),
     Theme(Mode),
     ChooseTheme,
+    /// The machine or session on screen.
+    Rename,
 }
 
 #[derive(Clone)]
@@ -288,6 +290,11 @@ impl Root {
                 Command::Settings(tab) => self.open_settings_tab(tab, window, cx),
                 Command::Theme(mode) => theme::update_appearance(window, cx, |a, _| a.mode = mode),
                 Command::ChooseTheme => {}
+                Command::Rename => {
+                    if let Some((target, _)) = self.rename_target() {
+                        self.show_rename(target, window, cx)
+                    }
+                }
             },
             Run::Theme(_) => {}
         }
@@ -402,6 +409,17 @@ impl Root {
             .collect()
     }
 
+    /// The machine or session on screen, and its name.
+    fn rename_target(&self) -> Option<(super::dialogs::RenameTarget, String)> {
+        use super::dialogs::RenameTarget;
+        let s = &self.snapshot;
+        match &self.route {
+            Route::Machine(id) | Route::Desktop(id) => s.machines.iter().find(|m| &m.id == id).map(|m| (RenameTarget::Machine(m.id.clone()), m.name.clone())),
+            Route::Session(id) => s.sessions.iter().find(|x| &x.id == id).map(|x| (RenameTarget::Session(x.id.clone()), x.title.clone())),
+            _ => None,
+        }
+    }
+
     fn command_items(&self, cx: &App) -> Vec<Item> {
         use super::shortcuts::label_for;
         let keys = |id: &str| label_for(cx, id);
@@ -410,7 +428,9 @@ impl Root {
             i.side_is_keys = true;
             i
         };
-        vec![
+        // The machine or session on screen comes first.
+        let rename = self.rename_target().map(|(_, name)| item(&format!("Rename {name}…"), "pencil", None, Run::Do(Command::Rename)));
+        let all = [
             item("Add machine…", "plus", Some("add-machine"), Run::Do(Command::AddMachine)),
             item("New cloud machine…", "cloud", None, Run::Do(Command::NewCloudMachine)),
             item("New session…", "square-terminal", Some("new-session"), Run::Do(Command::NewSession)),
@@ -439,7 +459,8 @@ impl Root {
             item("Theme: Dark mode", "palette", None, Run::Do(Command::Theme(Mode::Dark))),
             item("Theme: Match the system", "palette", None, Run::Do(Command::Theme(Mode::System))),
             item("About Muxen", "info", None, Run::Go(Route::About)),
-        ]
+        ];
+        rename.into_iter().chain(all).collect()
     }
 
     pub(super) fn render_palette(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {

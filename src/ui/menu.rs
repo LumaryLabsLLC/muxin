@@ -59,6 +59,8 @@ enum Action {
     WorkspaceSession(String),
     DeleteWorkspace(String),
     AddAccount,
+    RenameMachine(String),
+    RenameSession(String),
 }
 
 enum Item {
@@ -114,6 +116,7 @@ impl Root {
                     items.push(needs_up(act("Install runner…", "plus", Action::InstallRunner(id.clone()))));
                     items.push(Item::Separator);
                 }
+                items.push(act("Rename…", "pencil", Action::RenameMachine(id.clone())));
                 if Root::is_favorite(cx, id) {
                     items.push(act("Remove from favorites", "star", Action::FavoriteMachine(id.clone(), false)));
                 } else {
@@ -195,16 +198,14 @@ impl Root {
             }
             MenuTarget::Session(id) => {
                 let Some(x) = s.sessions.iter().find(|x| &x.id == id) else { return Vec::new() };
-                let mut items = Vec::new();
+                let mut items = vec![act("Rename…", "pencil", Action::RenameSession(id.clone()))];
                 if x.persistent {
                     items.push(act("Copy attach command", "copy", Action::CopyAttach(id.clone())));
                 }
                 if x.status == "exited" {
                     items.push(act("Restart", "rotate-ccw", Action::Restart(id.clone())));
                 }
-                if !items.is_empty() {
-                    items.push(Item::Separator);
-                }
+                items.push(Item::Separator);
                 items.push(Item::Action { label: "End session…".into(), glyph: Glyph::Icon("power"), action: Action::End(id.clone()), danger: true });
                 items
             }
@@ -295,6 +296,8 @@ impl Root {
             Action::Check(machine) => self.engine.trigger_check(Some(machine)),
             Action::Runner(id, action) => self.runner_action(&id, action, cx),
             Action::FavoriteMachine(id, favorite) => self.set_favorite_machine(&id, favorite, cx),
+            Action::RenameMachine(id) => self.show_rename(super::dialogs::RenameTarget::Machine(id), window, cx),
+            Action::RenameSession(id) => self.show_rename(super::dialogs::RenameTarget::Session(id), window, cx),
             Action::CloudPower(id, on) => self.cloud_power(&id, on, cx),
             Action::ShowRunner(id) => self.navigate(Route::Runner(id), window, cx),
             Action::InstallWith(machine, labels) => self.show_install_dialog_with(&machine, &labels, window, cx),

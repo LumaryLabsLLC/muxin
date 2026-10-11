@@ -10,7 +10,7 @@ use gpui::{
     MenuItem, MouseButton, ScrollHandle, SharedString, Subscription, Task, Window, actions, div, prelude::*, px,
 };
 
-use super::dialogs::{AddMachineDialog, ConfirmDialog, DialogEvent, InstallDialog, NewSessionDialog, NewWorkspaceDialog};
+use super::dialogs::{AddMachineDialog, ConfirmDialog, DialogEvent, InstallDialog, NewSessionDialog, NewWorkspaceDialog, RenameDialog, RenameTarget};
 use super::terminal::TerminalView;
 use super::format;
 use super::input::{InputEvent, TextInput};
@@ -171,6 +171,7 @@ pub enum Modal {
     Licenses(Entity<super::about::LicensesDialog>),
     Copy(Entity<super::files::CopyDialog>),
     Cloud(Entity<super::cloud_dialog::CloudDialog>),
+    Rename(Entity<RenameDialog>),
 }
 
 pub struct Notice {
@@ -604,6 +605,14 @@ impl Root {
                 self.show_install_dialog(arg, window, cx);
             }
             "add-machine" => self.show_add_machine(window, cx),
+            // "rename:<machine-id>", and "rename-session:<session-id>" (the first session without one).
+            "rename" => self.show_rename(RenameTarget::Machine(arg.into()), window, cx),
+            "rename-session" => {
+                let id = if arg.is_empty() { self.snapshot.sessions.first().map(|x| x.id.clone()) } else { Some(arg.to_string()) };
+                if let Some(id) = id {
+                    self.show_rename(RenameTarget::Session(id), window, cx)
+                }
+            }
             "menu" => self.open_menu(super::menu::MenuTarget::Machine(arg.into()), gpui::point(px(260.), px(160.)), cx),
             "runner-menu" => self.open_menu(super::menu::MenuTarget::Runner(arg.into()), gpui::point(px(200.), px(560.)), cx),
             "favorite" => self.set_favorite_machine(arg, true, cx),
@@ -846,6 +855,23 @@ impl Root {
         self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
     }
 
+    /// Asks for a machine's or a session's new name.
+    pub(super) fn show_rename(&mut self, target: RenameTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let s = &self.snapshot;
+        let machine_name = |id: &str| s.machines.iter().find(|m| m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.to_string());
+        let (current, machine) = match &target {
+            RenameTarget::Machine(id) => (machine_name(id), machine_name(id)),
+            RenameTarget::Session(id) => match s.sessions.iter().find(|x| &x.id == id) {
+                Some(x) => (x.title.clone(), machine_name(&x.machine_id)),
+                None => return,
+            },
+        };
+        let engine = self.engine.clone();
+        let dialog = cx.new(|cx| RenameDialog::new(engine, target, current, machine, window, cx));
+        self.show_modal(Modal::Rename(dialog.clone()), window, cx);
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+    }
+
     pub(super) fn show_add_machine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let engine = self.engine.clone();
         let dialog = cx.new(|cx| AddMachineDialog::new(engine, window, cx));
@@ -1053,6 +1079,7 @@ impl Root {
             Modal::NewSession(d) => d.read(cx).first_focus(cx),
             Modal::Copy(d) => d.read(cx).first_focus(cx),
             Modal::Cloud(d) => d.read(cx).first_focus(cx),
+            Modal::Rename(d) => d.read(cx).first_focus(cx),
             Modal::Licenses(d) => d.focus_handle(cx),
         };
         window.focus(&focus);
@@ -2218,6 +2245,7 @@ impl Render for Root {
             Modal::NewSession(d) => d.clone().into_any_element(),
             Modal::Copy(d) => d.clone().into_any_element(),
             Modal::Cloud(d) => d.clone().into_any_element(),
+            Modal::Rename(d) => d.clone().into_any_element(),
             Modal::Licenses(d) => d.clone().into_any_element(),
         });
         let notice = self.render_notice(&theme);

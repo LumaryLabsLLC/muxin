@@ -150,6 +150,15 @@ pub struct CheckRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RenameMachineRequest {
+    /// Machine id, e.g. "mac-studio". It stays the same after the rename.
+    pub machine_id: String,
+    /// The new display name.
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddMachineRequest {
     /// Display name, e.g. "Mac Studio". The id is derived from it.
     pub name: String,
@@ -1163,6 +1172,15 @@ pub async fn add_machine(engine: &Arc<Engine>, req: AddMachineRequest, surface: 
         _ => surface.say(format!("Call check_machines(machine_id=\"{id}\") to check it."), "Run `muxen check` to check it.".to_string()),
     };
     Ok(AddMachineResponse { machine_id: id, machine, next })
+}
+
+/// Gives a machine a new name; its id (and everything tied to it) stays.
+pub async fn rename_machine(engine: &Arc<Engine>, req: RenameMachineRequest) -> ApiResult<MachineSummary> {
+    engine.refresh_from_disk();
+    let id = find_machine(&engine.current(), &req.machine_id)?.id.clone();
+    engine.rename_machine(&id, &req.name).map_err(op_error)?;
+    let s = engine.current();
+    Ok(machine_summary(find_machine(&s, &id)?))
 }
 
 pub async fn remove_machine(engine: &Arc<Engine>, req: MachineRequest) -> ApiResult<MachineSummary> {
@@ -2353,6 +2371,14 @@ pub struct SessionRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SessionRenameRequest {
+    pub session_id: String,
+    /// The new title. Empty goes back to the one it started with.
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionSendRequest {
     pub session_id: String,
     /// Text to type into the session.
@@ -2524,6 +2550,11 @@ pub async fn session_restart(engine: &Arc<Engine>, req: SessionRequest) -> ApiRe
     let s = resolve_session(engine, &req.session_id).await?;
     engine.control_session(&s.id, Control::Restart).await.map_err(session_error)?;
     Ok(SessionDoneOut { session_id: s.id, done: "restarted".into() })
+}
+
+pub async fn session_rename(engine: &Arc<Engine>, req: SessionRenameRequest) -> ApiResult<SessionInfo> {
+    let s = resolve_session(engine, &req.session_id).await?;
+    engine.rename_session(&s.id, &req.title).await.map_err(session_error)
 }
 
 /// The program and arguments that attach this terminal to a session.

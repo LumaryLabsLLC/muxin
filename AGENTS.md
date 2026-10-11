@@ -8,7 +8,7 @@ Use the MCP tools when they're connected: start the server with `muxen mcp`, and
 
 1. **Start with `fleet_status`** (`muxen status --json`) and read `attention` first. It lists what's wrong, most severe first, with the `machine_id` or `runner_id` each item is about.
 2. **The state may be stale.** `fleet_status` uses the last machine check. Look at `last_check_at` and each machine's `checked_at`. Call `check_machines` (or `fleet_status` with `refresh: true`) when you need it fresh. Checks are read-only.
-3. **Confirm before changing real things.** `install_runners` and `runner_action` with `stop`, `restart` or `remove` run commands on the user's machines and register or deregister runners on GitHub. Do them when the user asked for exactly that; otherwise say what you'd do and ask. `add_machine` and `remove_machine` only edit `config.toml`.
+3. **Confirm before changing real things.** `install_runners` and `runner_action` with `stop`, `restart` or `remove` run commands on the user's machines and register or deregister runners on GitHub. Do them when the user asked for exactly that; otherwise say what you'd do and ask. `add_machine`, `remove_machine` and `rename_machine` only edit `config.toml`.
 4. **Use the hints.** Errors have a `code`:
    - `not_found`
    - `invalid`
@@ -94,10 +94,10 @@ The user runs AI agent CLIs (Claude Code, Codex, OpenCode, Gemini CLI, Amp) or s
 
 - `session_list` shows every session (agent, folder, `status`, `busy` = printed output in the last few seconds) and which agent CLIs each machine has.
 - `session_read` returns the screen and recent scrollback as text: use it to see what an agent is doing or asking.
-- `session_send` types text and presses Enter. `session_start` starts one (optionally with a `prompt`); `session_stop` ends it.
+- `session_send` types text and presses Enter. `session_start` starts one (optionally with a `prompt`); `session_stop` ends it. `session_rename` changes its title (the agent on the machine keeps it; an empty title goes back to the original).
 - These are the user's sessions. Start, type into or stop one only when they asked; reading is fine.
 
-The CLI equivalents are `muxen session ls|start|read|send|attach|restart|stop`.
+The CLI equivalents are `muxen session ls|start|read|send|attach|restart|rename|stop`.
 
 ## GitHub and the user's code
 

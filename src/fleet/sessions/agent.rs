@@ -83,9 +83,9 @@ fn verified() -> &'static Mutex<HashMap<String, String>> {
 /// Makes sure the machine runs this Muxen's agent build, installing it if
 /// not. Cheap after the first time per machine.
 pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(), String> {
-    let target = target(probe).ok_or_else(|| {
-        let p = probe.map(|p| format!("{}-{}", p.os.as_deref().unwrap_or("?"), p.arch.as_deref().unwrap_or("?"))).unwrap_or_else(|| "this".into());
-        format!("Muxen has no agent for {p} machines yet.")
+    let target = target(probe).ok_or_else(|| match probe {
+        Some(p) => format!("Muxen has no agent for {}-{} machines yet.", p.os.as_deref().unwrap_or("?"), p.arch.as_deref().unwrap_or("?")),
+        None => format!("Muxen hasn't checked {} yet, so it doesn't know which agent build it needs. Check it first.", spec.name),
     })?;
     let (bytes, hash) = build(&target)?;
     if verified().lock().unwrap().get(&spec.id) == Some(&hash) {

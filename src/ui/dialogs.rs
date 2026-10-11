@@ -597,6 +597,120 @@ impl InstallDialog {
 
 // ---------------------------------------------------------------------------
 
+/// What a rename dialog renames, by id.
+#[derive(Clone)]
+pub enum RenameTarget {
+    Machine(String),
+    Session(String),
+}
+
+pub struct RenameDialog {
+    engine: Arc<Engine>,
+    target: RenameTarget,
+    /// Where it lives, for the intro ("Beelink").
+    machine: String,
+    name: Entity<TextInput>,
+    saving: bool,
+    error: Option<String>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl EventEmitter<DialogEvent> for RenameDialog {}
+
+impl RenameDialog {
+    pub fn new(engine: Arc<Engine>, target: RenameTarget, current: String, machine: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let name = cx.new(|cx| TextInput::new(cx, current.clone()).with_text(current).selected());
+        let sub = cx.subscribe_in(&name, window, |this: &mut Self, _, e: &InputEvent, _, cx| match e {
+            InputEvent::Submit => this.submit(cx),
+            InputEvent::Cancel => cx.emit(DialogEvent::Dismissed),
+            InputEvent::Changed => {
+                this.error = None;
+                cx.notify()
+            }
+        });
+        RenameDialog { engine, target, machine, name, saving: false, error: None, _subscriptions: vec![sub] }
+    }
+
+    pub fn first_focus(&self, cx: &App) -> FocusHandle {
+        self.name.focus_handle(cx)
+    }
+
+    fn submit(&mut self, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
+        let text = self.name.read(cx).text().trim().to_string();
+        if text.is_empty() {
+            self.error = Some("Give it a name.".into());
+            cx.notify();
+            return;
+        }
+        match self.target.clone() {
+            RenameTarget::Machine(id) => match self.engine.rename_machine(&id, &text) {
+                Ok(()) => cx.emit(DialogEvent::Dismissed),
+                Err(e) => {
+                    self.error = Some(e);
+                    cx.notify();
+                }
+            },
+            // The agent on the machine keeps it: one round trip.
+            RenameTarget::Session(id) => {
+                self.saving = true;
+                cx.notify();
+                let engine = self.engine.clone();
+                let job = engine.runtime().spawn({
+                    let engine = engine.clone();
+                    async move { engine.rename_session(&id, &text).await }
+                });
+                cx.spawn(async move |this, cx| {
+                    let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+                    let _ = this.update(cx, |this, cx| match result {
+                        Ok(_) => cx.emit(DialogEvent::Dismissed),
+                        Err(e) => {
+                            this.saving = false;
+                            this.error = Some(e);
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+}
+
+impl Render for RenameDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (title, intro, field_name) = match &self.target {
+            RenameTarget::Machine(id) => (
+                "Rename machine",
+                format!("Only the name Muxen shows changes. Its id ({id}), runners and sessions stay the same, and nothing on the machine changes."),
+                "Name",
+            ),
+            RenameTarget::Session(_) => (
+                "Rename session",
+                format!("Muxen's agent on {} keeps the title, so it shows wherever you use Muxen. What runs in the session isn't touched.", self.machine),
+                "Title",
+            ),
+        };
+        frame(&theme, title, Some(intro.into()))
+            .child(field(&theme, field_name, self.name.clone(), None))
+            .children(error_line(&theme, &self.error))
+            .child(footer(vec![
+                Button::new("rn-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                Button::new("rn-save", if self.saving { "Saving…" } else { "Rename" })
+                    .style(ButtonStyle::Primary)
+                    .loading(self.saving)
+                    .key_hint("↵")
+                    .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
+                    .into_any_element(),
+            ]))
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 type ConfirmAction = Box<dyn Fn(bool, &Arc<Engine>) -> Result<Option<u64>, String>>;
 
 pub struct ConfirmDialog {

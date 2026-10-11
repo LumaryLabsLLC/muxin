@@ -289,6 +289,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "check_machines" => ok(json!({ "machines": api::check(engine, args(a)?).await? })),
         "add_machine" => ok(api::add_machine(engine, args(a)?, Surface::Mcp).await?),
         "remove_machine" => ok(json!({ "removed": api::remove_machine(engine, args(a)?).await? })),
+        "rename_machine" => ok(json!({ "renamed": api::rename_machine(engine, args(a)?).await? })),
         "install_runners" => ok(api::install_runners(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "runner_action" => ok(api::runner_action(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "cancel_run" => ok(api::cancel_run(engine, args(a)?, Surface::Mcp, |_| {}).await?),
@@ -323,6 +324,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "session_read" => ok(api::session_read(engine, args(a)?).await?),
         "session_stop" => ok(api::session_stop(engine, args(a)?).await?),
         "session_restart" => ok(api::session_restart(engine, args(a)?).await?),
+        "session_rename" => ok(api::session_rename(engine, args(a)?).await?),
         "github_inbox" => ok(api::github_inbox(engine).await?),
         "github_repos" => ok(json!({ "repos": api::github_repos(engine).await? })),
         "github_favorite" => ok(api::github_favorite(engine, args(a)?)?),
@@ -414,6 +416,15 @@ pub fn tools() -> Vec<Value> {
             "description": "Remove a machine from config.toml. Nothing on the machine changes and its runners stay registered on GitHub; use runner_action remove first to take runners down.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
             "annotations": annotations("Remove machine", false, true, true, false),
+        }),
+        json!({
+            "name": "rename_machine",
+            "description": "Give a machine a new display name in config.toml (comments preserved). Its machine_id doesn't change, so its runners, sessions, workspaces and favorites stay with it. Nothing on the machine changes.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "name": { "type": "string", "description": "The new display name, e.g. \"Studio\"." }
+            }), &["machine_id", "name"]),
+            "annotations": annotations("Rename machine", false, false, true, false),
         }),
         json!({
             "name": "install_runners",
@@ -725,6 +736,15 @@ pub fn tools() -> Vec<Value> {
             "annotations": annotations("Restart session", false, true, false, false),
         }),
         json!({
+            "name": "session_rename",
+            "description": "Give a session a new title (what the app's sidebar and session_list show). The agent on its machine keeps it, so it sticks for every Muxen. An empty title goes back to the one it started with. Doesn't touch what runs in it.",
+            "inputSchema": schema(json!({
+                "session_id": { "type": "string", "description": SESSION_ID },
+                "title": { "type": "string", "description": "The new title, e.g. \"API server\"." }
+            }), &["session_id", "title"]),
+            "annotations": annotations("Rename session", false, false, true, false),
+        }),
+        json!({
             "name": "github_inbox",
             "description": "What needs the user on GitHub: pull requests waiting for their review, open issues and PRs assigned to them, and their own open pull requests (repo, number, title, labels, updated time, URL). Uses their GitHub login.",
             "inputSchema": schema(json!({}), &[]),
@@ -874,7 +894,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 56);
+        assert_eq!(tools.len(), 58);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

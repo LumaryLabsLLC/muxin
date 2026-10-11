@@ -163,7 +163,7 @@ The MCP server has these tools:
 | `list_runners` | Runners, optionally filtered by machine or state. |
 | `list_jobs` | Queued and running jobs, including which ones no runner can take. |
 | `check_machines` | Runs the read-only machine check over ssh now. |
-| `add_machine`, `remove_machine` | Edit `config.toml`. Nothing on the machine changes. |
+| `add_machine`, `remove_machine`, `rename_machine` | Edit `config.toml`. Nothing on the machine changes. |
 | `install_runners` | Downloads, registers and starts runners on a machine. |
 | `runner_action` | Starts, stops, restarts or removes a runner, or reads its logs. |
 | `get_operation`, `list_operations` | Progress and output of long operations. |
@@ -173,7 +173,7 @@ The MCP server has these tools:
 | `list_files`, `copy_files`, `cancel_operation` | Browse a folder on a machine; copy files and folders between machines; stop a copy. |
 | `machine_connection`, `direct_connection` | How a machine is reached (direct, ssh, which network, Tailscale's view); pair it for direct connections. |
 | `desktop_screenshot`, `desktop_input` | Look at a Linux machine's screen; click, type and scroll there. |
-| `session_list`, `session_start`, `session_read`, `session_send`, `session_stop` | Agent sessions on the machines. |
+| `session_list`, `session_start`, `session_read`, `session_send`, `session_rename`, `session_stop` | Agent sessions on the machines. |
 | `github_inbox`, `github_repos`, `github_repo`, `github_item`, `local_checkouts`, `git_sync`, … | The user's GitHub, and git checkouts on the machines. |
 | `workspace_create`, `workspace_list`, `workspace_get` | Check out a machine as a work environment; see what exists. |
 | `workspace_exec` | Runs a command in a workspace (or starts it in the background). |
@@ -208,6 +208,7 @@ muxen runners [--machine <id>] [--state offline]
 muxen jobs
 muxen add-machine --name <name> --host <ssh-host> [--no-check]
 muxen remove-machine <id>
+muxen rename-machine <id> <new name>      # the id stays the same
 muxen install <machine-id> [--scope acme] [--count N | --name a --name b] [--label gpu] [--mode auto|service|background|docker] [--image IMAGE] [--docker-socket] [--no-wait]
 muxen runner <start|stop|restart|logs|remove> <runner-id> [--delete-files]
 muxen watch <org|owner/repo>... / unwatch ...
@@ -306,6 +307,7 @@ Start an AI agent on one of your machines and come back to it whenever you like,
 - **Keeps running.** Sessions live in Muxen's agent on the machine (`~/.muxen/bin/muxen-agent`), a small background program that holds each session's terminal, the way tmux would. Closing the app, sleeping your laptop or losing the network only detaches; the agent keeps working until you end the session.
 - **Nothing to install.** When Muxen connects to a machine it uploads the agent build for that OS and CPU (macOS and Linux, x86_64 and arm64; static binaries, about 1 MB) and keeps it up to date. Windows machines run sessions in the app's terminal for now, so they end with the window.
 - **A real terminal in the app.** Everything goes to the agent: Esc, Ctrl-C, Tab, arrows, Option/Shift+Enter for newlines. ⌘C copies a selection, ⌘V pastes, the wheel scrolls back. Right-click a machine for a new terminal or agent session.
+- **Names you choose.** Right-click a machine or a session and pick **Rename…** (or ⇧⌘P › Rename on its page). A machine keeps its id, so its runners, sessions and favorites stay with it; `config.toml` gets `id = "<old id>"` when the new name would give a different one. A session's title is kept by the agent on its machine (`~/.muxen/titles.json`), so every Muxen sees it; an empty title goes back to the one it started with.
 - **Your environment.** The agent starts in your login shell, in the folder you pick, so nvm/fnm/asdf and the CLI's own login work as they do in your terminal. Muxen finds which agent CLIs each machine has: `claude`, `codex`, `opencode`, `gemini`, `amp`.
 - **Agents can drive agents.** `session_start`, `session_read` (the screen as text), `session_send` (type into it) and `session_stop` are MCP tools and CLI commands too.
 
@@ -316,6 +318,7 @@ muxen session read beelink/claude-3f9a             # what's on its screen
 muxen session send beelink/claude-3f9a "yes"       # type, then Enter (--no-enter to skip it)
 muxen session attach beelink/claude-3f9a           # open it in this terminal; detach with Ctrl-] then d
 muxen session restart beelink/claude-3f9a
+muxen session rename beelink/claude-3f9a "API server"   # "" goes back to the original title
 muxen session stop beelink/claude-3f9a
 ```
 

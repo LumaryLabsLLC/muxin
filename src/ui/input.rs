@@ -121,6 +121,12 @@ impl TextInput {
         self
     }
 
+    /// Starts with all of its text selected, so typing replaces it.
+    pub fn selected(mut self) -> Self {
+        self.selected_range = 0..self.content.len();
+        self
+    }
+
     pub fn text(&self) -> &str {
         &self.content
     }

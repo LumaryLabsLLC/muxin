@@ -52,6 +52,8 @@ enum Command {
     AddMachine(AddMachineArgs),
     /// Remove a machine from config.toml (nothing on the machine changes)
     RemoveMachine(MachineArgs),
+    /// Give a machine a new name (its id stays the same)
+    RenameMachine(RenameMachineArgs),
     /// List runners
     Runners(RunnersArgs),
     /// Queued and running self-hosted jobs
@@ -192,6 +194,18 @@ struct MachineArgs {
 
     /// Machine id (e.g. mac-studio) or name
     machine_id: String,
+}
+
+#[derive(Args)]
+struct RenameMachineArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+
+    /// Machine id (e.g. mac-studio) or name
+    machine_id: String,
+
+    /// The new name, e.g. "Studio"
+    name: String,
 }
 
 #[derive(Args)]
@@ -610,6 +624,8 @@ enum SessionCommand {
     Attach(SessionIdArgs),
     /// Run a session's agent again
     Restart(SessionIdArgs),
+    /// Give a session a new title ("" goes back to the one it started with)
+    Rename(SessionRenameArgs),
     /// End a session
     #[command(alias = "rm")]
     Stop(SessionIdArgs),
@@ -649,6 +665,16 @@ struct SessionIdArgs {
     agent: AgentArgs,
     /// Session id (<machine-id>/<name>) or unique name
     session_id: String,
+}
+
+#[derive(Args)]
+struct SessionRenameArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Session id (<machine-id>/<name>) or unique name
+    session_id: String,
+    /// The new title
+    title: String,
 }
 
 #[derive(Args)]
@@ -976,6 +1002,10 @@ fn main() -> ExitCode {
             run(&runtime, &a.agent, async move |e| api::remove_machine(&e, req).await, |m| {
                 format!("Removed {} ({}) from config.toml. Nothing on the machine changed.\n", m.name, m.id)
             })
+        }
+        Some(Command::RenameMachine(a)) => {
+            let req = api::RenameMachineRequest { machine_id: a.machine_id, name: a.name };
+            run(&runtime, &a.agent, async move |e| api::rename_machine(&e, req).await, |m| format!("Renamed {} to {}.\n", m.id, m.name))
         }
         Some(Command::Runners(a)) => {
             let req = api::RunnersRequest { machine_id: a.machine, state: a.state };
@@ -1557,6 +1587,10 @@ fn session(cmd: SessionCommand, runtime: &tokio::runtime::Runtime) -> u8 {
         SessionCommand::Restart(a) => {
             let req = api::SessionRequest { session_id: a.session_id };
             run(runtime, &a.agent, async move |e| api::session_restart(&e, req).await, |r| format!("Restarted {}.\n", r.session_id))
+        }
+        SessionCommand::Rename(a) => {
+            let req = api::SessionRenameRequest { session_id: a.session_id, title: a.title };
+            run(runtime, &a.agent, async move |e| api::session_rename(&e, req).await, |s| format!("{} is now \"{}\".\n", s.id, s.title))
         }
         SessionCommand::Stop(a) => {
             let req = api::SessionRequest { session_id: a.session_id };

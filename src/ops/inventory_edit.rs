@@ -86,6 +86,39 @@ pub fn remove_machine(text: &str, machine_id: &str) -> Result<String, String> {
     finish(doc)
 }
 
+/// Gives a machine a new display name. Its id stays the same: when the new
+/// name wouldn't slug to it, the old id is written as `id`, so the machine's
+/// runners, sessions, favorites and saved state stay attached to it.
+pub fn rename_machine(text: &str, machine_id: &str, name: &str) -> Result<String, String> {
+    let name = name.trim();
+    let mut doc = parse(text)?;
+    let machines = machines_mut(&mut doc)?;
+    let index = find_machine(machines, machine_id)?;
+    if machines.iter().enumerate().any(|(i, t)| i != index && table_name(t).eq_ignore_ascii_case(name)) {
+        return Err(format!("A machine called \"{name}\" is already in config.toml."));
+    }
+    let table = machines.get_mut(index).ok_or("Machine not found.")?;
+    // Keep a comment after the old name (`name = "Box" # the NAS`).
+    match table.get_mut("name").and_then(Item::as_value_mut) {
+        Some(v) => {
+            let decor = v.decor().clone();
+            *v = name.into();
+            *v.decor_mut() = decor;
+        }
+        None => table["name"] = value(name),
+    }
+    let explicit = table.get("id").and_then(Item::as_str).is_some_and(|s| !s.trim().is_empty());
+    if !explicit && crate::util::slug(name) != machine_id {
+        table["id"] = value(machine_id);
+    }
+    let out = finish(doc)?;
+    let kept = Inventory::parse(&out).map_err(|e| e.to_string())?.machines.iter().any(|m| m.id == machine_id && m.name == name);
+    if !kept {
+        return Err("Renaming it would change its id, so it wasn't renamed.".into());
+    }
+    Ok(out)
+}
+
 /// Records that a machine is a cloud machine (or forgets it, with `None`).
 pub fn set_machine_cloud(text: &str, machine_id: &str, cloud: Option<&crate::config::CloudRef>) -> Result<String, String> {
     let mut doc = parse(text)?;
@@ -345,6 +378,38 @@ host = "nas"
         let out = remove_machine(FILE, "nas").unwrap();
         assert!(!out.contains("The NAS"));
         assert!(out.starts_with("# My fleet"));
+    }
+
+    #[test]
+    fn renames_a_machine_and_keeps_its_id() {
+        let out = rename_machine(FILE, "mac-studio", "Studio").unwrap();
+        assert!(out.contains("name = \"Studio\"   # the big one"), "{out}");
+        let inv = Inventory::parse(&out).unwrap();
+        assert_eq!((inv.machines[0].id.as_str(), inv.machines[0].name.as_str()), ("mac-studio", "Studio"));
+        assert_eq!(inv.machines[0].runners, vec!["studio-01", "studio-02"]);
+        assert!(out.contains("id = \"mac-studio\""), "{out}");
+
+        // A name that gives the same id needs no `id` line, and case-only changes are fine.
+        let out = rename_machine(FILE, "nas", "nas").unwrap();
+        assert!(!out.contains("id ="), "{out}");
+        assert_eq!(Inventory::parse(&out).unwrap().machines[1].name, "nas");
+
+        // Renaming again keeps the id it already pinned.
+        let again = rename_machine(&rename_machine(FILE, "mac-studio", "Studio").unwrap(), "mac-studio", "Big Mac").unwrap();
+        let inv = Inventory::parse(&again).unwrap();
+        assert_eq!((inv.machines[0].id.as_str(), inv.machines[0].name.as_str()), ("mac-studio", "Big Mac"));
+        assert_eq!(again.matches("id = ").count(), 1, "{again}");
+
+        assert!(rename_machine(FILE, "mac-studio", "NAS").is_err());
+        assert!(rename_machine(FILE, "nope", "X").is_err());
+    }
+
+    #[test]
+    fn renaming_a_repeated_name_keeps_its_numbered_id() {
+        let text = "[[machine]]\nname = \"Box\"\nhost = \"a\"\n\n[[machine]]\nname = \"Box\"\nhost = \"b\"\n";
+        let out = rename_machine(text, "box-2", "Spare").unwrap();
+        let inv = Inventory::parse(&out).unwrap();
+        assert_eq!(inv.machines.iter().map(|m| (m.id.as_str(), m.name.as_str())).collect::<Vec<_>>(), [("box", "Box"), ("box-2", "Spare")]);
     }
 
     #[test]

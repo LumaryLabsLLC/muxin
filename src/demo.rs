@@ -778,3 +778,145 @@ pub fn demo_screen_text(name: &str) -> String {
         _ => "$ ".into(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// GitHub, simulated: the demo never reads the user's real account.
+
+pub mod github {
+    use chrono::{Duration as Ago, Utc};
+
+    use crate::github::hub::{Checks, Comment, Detail, Inbox, Item, Label, PullInfo, Repo, RepoItems, Review, Run, Viewer};
+
+    pub const LOGIN: &str = "jordan";
+
+    fn label(name: &str, color: &str) -> Label {
+        Label { name: name.into(), color: color.into() }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn item(repo: &str, number: u64, title: &str, pull: bool, author: &str, labels: Vec<Label>, comments: u32, minutes_ago: i64) -> Item {
+        let updated = Utc::now() - Ago::minutes(minutes_ago);
+        Item {
+            repo: repo.into(),
+            number,
+            title: title.into(),
+            pull_request: pull,
+            draft: false,
+            state: "open".into(),
+            author: author.into(),
+            assignees: if pull { Vec::new() } else { vec![LOGIN.into()] },
+            labels,
+            comments,
+            created_at: updated - Ago::hours(30),
+            updated_at: updated,
+            html_url: format!("https://github.com/{repo}/{}/{number}", if pull { "pull" } else { "issues" }),
+        }
+    }
+
+    fn repo(full_name: &str, description: &str, private: bool, language: &str, stars: u32, open_issues: u32, hours_ago: i64) -> Repo {
+        Repo {
+            full_name: full_name.into(),
+            description: Some(description.into()),
+            private,
+            fork: false,
+            archived: false,
+            default_branch: "main".into(),
+            language: Some(language.into()),
+            stars,
+            open_issues,
+            pushed_at: Some(Utc::now() - Ago::hours(hours_ago)),
+            html_url: format!("https://github.com/{full_name}"),
+            owner_is_org: full_name.starts_with("acme/"),
+            favorite: false,
+        }
+    }
+
+    pub fn viewer() -> Viewer {
+        Viewer { login: LOGIN.into(), name: Some("Jordan Lee".into()), html_url: format!("https://github.com/{LOGIN}") }
+    }
+
+    pub fn repos() -> Vec<Repo> {
+        vec![
+            repo("acme/api", "Billing, accounts and the public API", true, "Go", 48, 12, 1),
+            repo("acme/web", "The customer dashboard", true, "TypeScript", 23, 8, 2),
+            repo("acme/desktop", "The desktop app for macOS, Windows and Linux", false, "Rust", 1310, 41, 5),
+            repo("acme/ios", "The iPhone and iPad app", true, "Swift", 12, 6, 20),
+            repo("acme/infra", "Terraform and deploy scripts", true, "HCL", 4, 2, 48),
+            repo("jordan/dotfiles", "My shell, editor and terminal setup", false, "Shell", 31, 0, 96),
+            repo("jordan/blog", "jordanlee.dev", false, "TypeScript", 6, 1, 200),
+        ]
+    }
+
+    pub fn inbox() -> Inbox {
+        Inbox {
+            viewer: viewer(),
+            review_requests: vec![
+                item("acme/web", 91, "Checkout: show tax before the total", true, "mira", vec![label("frontend", "1d76db")], 3, 40),
+                item("acme/api", 418, "Retry failed webhooks with backoff", true, "devon", vec![label("backend", "5319e7")], 1, 130),
+                item("acme/desktop", 1302, "Remember each window's size per display", true, "lena", vec![label("enhancement", "a2eeef")], 6, 1500),
+            ],
+            assigned: vec![
+                item("acme/api", 412, "Coupon total is wrong after tax", false, "sam", vec![label("bug", "d73a4a"), label("billing", "fbca04")], 5, 190),
+                item("acme/web", 87, "Empty state for the orders page", false, "mira", vec![label("design", "c5def5")], 2, 1300),
+                item("acme/desktop", 1290, "Crash when a monitor is unplugged", false, "kai", vec![label("bug", "d73a4a"), label("crash", "b60205")], 9, 2900),
+            ],
+            authored: vec![item("acme/api", 415, "Cache the plan lookup per request", true, LOGIN, vec![label("performance", "0e8a16")], 0, 300)],
+        }
+    }
+
+    /// Everything in the inbox and a few more, by repository.
+    fn all() -> Vec<Item> {
+        let i = inbox();
+        let mut out: Vec<Item> = i.review_requests.into_iter().chain(i.assigned).chain(i.authored).collect();
+        out.push(item("acme/api", 409, "Rate limits per API key", false, "devon", vec![label("enhancement", "a2eeef")], 4, 4000));
+        out.push(item("acme/desktop", 1287, "Tray icon is blurry on Linux", false, "noor", vec![label("bug", "d73a4a"), label("linux", "fef2c0")], 2, 5000));
+        out
+    }
+
+    pub fn repo_items(full_name: &str) -> RepoItems {
+        let (pulls, issues) = all().into_iter().filter(|i| i.repo.eq_ignore_ascii_case(full_name)).partition(|i| i.pull_request);
+        RepoItems { issues, pulls }
+    }
+
+    pub fn repo_named(full_name: &str) -> Option<Repo> {
+        repos().into_iter().find(|r| r.full_name.eq_ignore_ascii_case(full_name))
+    }
+
+    pub fn runs(full_name: &str) -> Vec<Run> {
+        let run = |name: &str, conclusion: Option<&str>, title: &str, minutes: i64| Run {
+            name: name.into(),
+            status: if conclusion.is_some() { "completed".into() } else { "in_progress".into() },
+            conclusion: conclusion.map(str::to_string),
+            branch: "main".into(),
+            event: "push".into(),
+            title: title.into(),
+            created_at: Utc::now() - Ago::minutes(minutes),
+            html_url: format!("https://github.com/{full_name}/actions"),
+        };
+        vec![run("CI", None, "Cache the plan lookup per request", 4), run("CI", Some("success"), "Retry failed webhooks with backoff", 95), run("Deploy", Some("success"), "Release 2.14", 600)]
+    }
+
+    pub fn detail(full_name: &str, number: u64) -> Option<Detail> {
+        let item = all().into_iter().find(|i| i.repo.eq_ignore_ascii_case(full_name) && i.number == number)?;
+        let body = if item.pull_request {
+            format!("{}.\n\nTested on staging; screenshots below.", item.title)
+        } else {
+            "Steps:\n1. Add a 10% coupon to an order over $100\n2. Check out with tax on\n\nThe coupon comes off after tax instead of before, so the total is a few cents off.".to_string()
+        };
+        // As many comments as the list says it has.
+        let said = [("sam", "Seen on three orders today."), ("devon", "The discount runs after tax in pricing.go."), ("mira", "Same thing on the web checkout."), ("kai", "Support has two tickets about it."), ("sam", "Can we get this into Friday's release?")];
+        let comments = said.iter().cycle().take(item.comments as usize).enumerate().map(|(k, (author, body))| Comment { author: author.to_string(), body: body.to_string(), created_at: Utc::now() - Ago::hours(20 - 3 * k as i64) }).collect();
+        let pull = item.pull_request.then(|| PullInfo {
+            head: "feature".into(),
+            head_repo: Some(item.repo.clone()),
+            base: "main".into(),
+            mergeable: Some(true),
+            additions: 84,
+            deletions: 17,
+            changed_files: 6,
+            checks: Checks { total: 4, passed: 4, ..Default::default() },
+            reviews: vec![Review { author: "devon".into(), state: "APPROVED".into() }],
+        });
+        Some(Detail { item, body, comments, pull })
+    }
+}

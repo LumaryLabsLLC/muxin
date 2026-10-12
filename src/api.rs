@@ -2708,6 +2708,9 @@ pub struct GitOut {
 }
 
 pub async fn github_inbox(engine: &Arc<Engine>) -> ApiResult<hub::Inbox> {
+    if engine.is_demo() {
+        return Ok(crate::demo::github::inbox());
+    }
     let settings = engine.settings().github;
     engine.github().inbox(&settings).await.map_err(github_error)
 }
@@ -2715,7 +2718,7 @@ pub async fn github_inbox(engine: &Arc<Engine>) -> ApiResult<hub::Inbox> {
 /// Your repositories, favorites first, then most recently pushed.
 pub async fn github_repos(engine: &Arc<Engine>) -> ApiResult<Vec<hub::Repo>> {
     let settings = engine.settings();
-    let mut repos = engine.github().my_repos(&settings.github).await.map_err(github_error)?;
+    let mut repos = if engine.is_demo() { crate::demo::github::repos() } else { engine.github().my_repos(&settings.github).await.map_err(github_error)? };
     for r in &mut repos {
         r.favorite = settings.favorite_repos.iter().any(|f| f.eq_ignore_ascii_case(&r.full_name));
     }
@@ -2726,6 +2729,19 @@ pub async fn github_repos(engine: &Arc<Engine>) -> ApiResult<Vec<hub::Repo>> {
 /// The GitHub CLI's accounts, and which one Muxen uses (read fresh, so a
 /// permission granted a moment ago shows).
 pub async fn github_accounts(engine: &Arc<Engine>) -> ApiResult<AccountsOut> {
+    if engine.is_demo() {
+        let login = crate::demo::github::LOGIN.to_string();
+        return Ok(AccountsOut {
+            using: Some(login.clone()),
+            token_source: "gh".into(),
+            machine_id: None,
+            accounts: vec![crate::github::Account { login, gh_active: true, ok: true, scopes: "repo, read:org, admin:org".into() }],
+            machines: Vec::new(),
+            scopes: Some(vec!["repo".into(), "read:org".into(), "admin:org".into()]),
+            orgs: vec!["acme".into()],
+            grant_command: None,
+        });
+    }
     let settings = engine.settings().github;
     let gh = engine.github();
     gh.reload_login();
@@ -2841,6 +2857,11 @@ pub fn github_favorite(engine: &Arc<Engine>, req: FavoriteRequest) -> ApiResult<
 
 pub async fn github_repo(engine: &Arc<Engine>, req: RepoRequest) -> ApiResult<RepoOut> {
     let name = hub::repo_name(&req.repo).ok_or_else(|| ApiError::invalid(format!("\"{}\" isn't a GitHub repository; use owner/name.", req.repo)))?;
+    if engine.is_demo() {
+        let repo = crate::demo::github::repo_named(&name).ok_or_else(|| ApiError::new("not_found", format!("No repository called {name} in the demo.")))?;
+        let items = crate::demo::github::repo_items(&name);
+        return Ok(RepoOut { repo, issues: items.issues, pulls: items.pulls, runs: crate::demo::github::runs(&name), checkouts: Vec::new() });
+    }
     let settings = engine.settings().github;
     let gh = engine.github();
     let (repo, items, runs) = futures::join!(gh.repo(&settings, &name), gh.repo_items(&settings, &name), gh.repo_runs(&settings, &name));
@@ -2854,6 +2875,9 @@ pub async fn github_repo(engine: &Arc<Engine>, req: RepoRequest) -> ApiResult<Re
 pub async fn github_item(engine: &Arc<Engine>, req: ItemRequest) -> ApiResult<hub::Detail> {
     let (repo, number) = hub::issue_ref(&req.reference)
         .ok_or_else(|| ApiError::invalid(format!("\"{}\" isn't an issue or pull request; use its URL or owner/name#123.", req.reference)))?;
+    if engine.is_demo() {
+        return crate::demo::github::detail(&repo, number).ok_or_else(|| ApiError::new("not_found", format!("No {repo}#{number} in the demo.")));
+    }
     let settings = engine.settings().github;
     engine.github().detail(&settings, &repo, number).await.map_err(github_error)
 }

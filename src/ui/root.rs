@@ -836,6 +836,14 @@ impl Root {
                     page.read(cx).scroll.scroll_to_bottom();
                 }
             }
+            // "forward:<machine>:<port>": that port of the machine open here (no browser).
+            "forward" => {
+                if let Some((machine, port)) = arg.rsplit_once(':')
+                    && let Ok(port) = port.parse::<u16>()
+                {
+                    self.open_port(machine, port, None, false, cx);
+                }
+            }
             "theme" => {
                 let id = arg.to_string();
                 if let Some(p) = super::themes::find(&id) {

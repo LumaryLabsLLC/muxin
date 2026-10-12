@@ -752,3 +752,54 @@ pub fn copied(r: &crate::api::CopyFilesResponse) -> String {
     }
     out
 }
+
+/// A machine's logs, as the flags that open each.
+pub fn log_sources(s: &crate::fleet::logs::LogSources) -> String {
+    use crate::fleet::logs::LogSource;
+    let mut out = String::new();
+    let mut section = |title: &str, list: &[LogSource], note: &Option<String>, flag: &dyn Fn(&LogSource) -> String| {
+        if list.is_empty() && note.is_none() {
+            return;
+        }
+        out.push_str(&format!("{title}\n"));
+        if let Some(n) = note {
+            out.push_str(&format!("  ({n})\n"));
+        }
+        for x in list {
+            let mut detail = x.detail.clone();
+            if x.readable == Some(false) {
+                detail = format!("{detail} (root only)");
+            }
+            out.push_str(&format!("  {:<44} {detail}\n", flag(x)));
+        }
+    };
+    section("System", &s.system, &s.system_note, &|x| if x.kind == "kernel" { "--kernel".into() } else { "(default)".into() });
+    section("Files", &s.files, &None, &|x| format!("--file {}", x.detail));
+    section("Containers", &s.docker, &s.docker_note, &|x| format!("--container {}", x.name));
+    section("Services", &s.services, &s.services_note, &|x| format!("--unit {}{}", x.name, if x.user { " --user" } else { "" }));
+    out
+}
+
+/// A machine's services and containers, failed first.
+pub fn services(l: &crate::fleet::services::ServiceList) -> String {
+    let mut out = String::new();
+    for (title, list, note) in [("Services", &l.services, &l.services_note), ("Containers", &l.containers, &l.containers_note)] {
+        if list.is_empty() && note.is_none() {
+            continue;
+        }
+        out.push_str(&format!("{title}\n"));
+        if let Some(n) = note {
+            out.push_str(&format!("  ({n})\n"));
+        }
+        for s in list {
+            let state = if s.kind == "docker" { s.status.clone() } else { s.state.clone() };
+            let boot = match s.at_boot.as_str() {
+                "enabled" => " · at boot",
+                _ => "",
+            };
+            let yours = if s.user && s.kind == "service" { " (yours)" } else { "" };
+            out.push_str(&format!("  {:<36} {:<24} {}{boot}{yours}\n", s.name, state, s.detail));
+        }
+    }
+    out
+}

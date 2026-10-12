@@ -698,7 +698,7 @@ impl Root {
                             .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(title))
                             .child(div().text_size(px(12.5)).text_color(theme.text_muted).text_center().child("Shut down: this session ended. Asleep: it's still there."))
                             .child(
-                                Button::new("session-offline-check", "Check again")
+                                Button::new("session-offline-check", "Try again")
                                     .icon("refresh-cw")
                                     .loading(m.checking)
                                     .on_click(cx.listener(move |this, _, _, _| this.engine.trigger_check(Some(mid.clone())))),
@@ -1039,7 +1039,7 @@ impl Root {
             .items_center()
             .child(section_title(theme, "Git", None))
             .child(div().flex_1())
-            .child(Button::icon_only("m-git-refresh", "refresh-cw").tooltip("Check again").on_click(cx.listener({
+            .child(Button::icon_only("m-git-refresh", "refresh-cw").tooltip("Refresh").on_click(cx.listener({
                 let mid = mid.clone();
                 move |this, _, _, cx| this.load_machine_git(&mid, cx)
             })));
@@ -1208,7 +1208,7 @@ impl Root {
                     .items_center()
                     .child(section_title(theme, "Connection", None))
                     .child(div().flex_1())
-                    .child(Button::icon_only("m-conn-refresh", "refresh-cw").tooltip("Check again").on_click(cx.listener({
+                    .child(Button::icon_only("m-conn-refresh", "refresh-cw").tooltip("Refresh").on_click(cx.listener({
                         let mid = mid.clone();
                         move |this, _, _, cx| this.load_machine_connection(&mid, cx)
                     }))),

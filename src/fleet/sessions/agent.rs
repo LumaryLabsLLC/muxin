@@ -85,7 +85,7 @@ fn verified() -> &'static Mutex<HashMap<String, String>> {
 pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(), String> {
     let target = target(probe).ok_or_else(|| match probe {
         Some(p) => format!("Muxen has no agent for {}-{} machines yet.", p.os.as_deref().unwrap_or("?"), p.arch.as_deref().unwrap_or("?")),
-        None => format!("Muxen hasn't checked {} yet, so it doesn't know which agent build it needs. Check it first.", spec.name),
+        None => format!("Muxen hasn't reached {} yet, so it doesn't know which agent build it needs. Refresh it first.", spec.name),
     })?;
     let (bytes, hash) = build(&target)?;
     if verified().lock().unwrap().get(&spec.id) == Some(&hash) {
@@ -126,8 +126,10 @@ async fn upload(spec: &MachineSpec, bytes: Vec<u8>) -> Result<String, String> {
     // The folder from before the rename (OpenRunner) moves over first: running
     // sessions keep their server (its socket moves with the folder). Then the
     // direct-connection service (if set up) moves to the new name or restarts
-    // onto the new build.
-    let script = r#"set -e; if [ -d "$HOME/.openrunner" ] && [ ! -e "$HOME/.muxen" ]; then mv "$HOME/.openrunner" "$HOME/.muxen"; fi; d="$HOME/.muxen/bin"; mkdir -p "$d"; n="$d/muxen-agent.new.$$"; cat > "$n"; chmod 755 "$n"; mv -f "$n" "$d/muxen-agent"; rm -f "$d/openrunner-agent"; "$d/muxen-agent" migrate >/dev/null 2>&1 || true; rmdir "$HOME/.openrunner" 2>/dev/null || true; (systemctl --user try-restart muxen-agent.service || launchctl kickstart -k "gui/$(id -u)/com.lumarylabs.muxen-agent") >/dev/null 2>&1 || true; "$d/muxen-agent" hash"#;
+    // onto the new build. A listener the service doesn't know about (one left
+    // from before, holding the port) goes first, or the old build would keep
+    // answering.
+    let script = r#"set -e; if [ -d "$HOME/.openrunner" ] && [ ! -e "$HOME/.muxen" ]; then mv "$HOME/.openrunner" "$HOME/.muxen"; fi; d="$HOME/.muxen/bin"; mkdir -p "$d"; n="$d/muxen-agent.new.$$"; cat > "$n"; chmod 755 "$n"; mv -f "$n" "$d/muxen-agent"; rm -f "$d/openrunner-agent"; "$d/muxen-agent" migrate >/dev/null 2>&1 || true; rmdir "$HOME/.openrunner" 2>/dev/null || true; if systemctl --user is-enabled muxen-agent.service >/dev/null 2>&1; then pkill -f "$d/muxen-agent listen" >/dev/null 2>&1 || true; systemctl --user restart muxen-agent.service >/dev/null 2>&1 || true; elif launchctl print "gui/$(id -u)/com.lumarylabs.muxen-agent" >/dev/null 2>&1; then pkill -f "$d/muxen-agent listen" >/dev/null 2>&1 || true; launchctl kickstart -k "gui/$(id -u)/com.lumarylabs.muxen-agent" >/dev/null 2>&1 || true; fi; "$d/muxen-agent" hash"#;
     let mut cmd = if spec.is_local() {
         let mut c = Command::new("/bin/sh");
         c.args(["-c", script]);

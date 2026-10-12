@@ -74,7 +74,7 @@ pub fn machine_tile(m: &Machine) -> (u32, u32) {
 /// with a color role: "muted" or "error".
 pub fn machine_subtitle(m: &Machine) -> (String, &'static str) {
     if m.checking && m.probe.is_none() {
-        return ("Checking…".into(), "muted");
+        return ("Connecting…".into(), "muted");
     }
     if m.status == "offline" {
         let seen = m.unreachable.as_ref().and_then(|u| u.last_seen_at);

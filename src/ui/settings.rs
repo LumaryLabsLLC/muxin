@@ -398,7 +398,7 @@ impl SettingsPage {
                         .style(ButtonStyle::Primary)
                         .on_click(|_, window, cx| window.dispatch_action(Box::new(super::root::GrantGitHubAccess), cx)),
                 )
-                .child(Button::icon_only("gh-recheck", "refresh-cw").tooltip("Check again").on_click(cx.listener(|this, _, _, cx| this.load_access(cx))))
+                .child(Button::icon_only("gh-recheck", "refresh-cw").tooltip("Refresh").on_click(cx.listener(|this, _, _, cx| this.load_access(cx))))
         });
         let chip = |id: (&'static str, usize), name: &str, cx: &mut Context<Self>| {
             let scope = name.to_string();

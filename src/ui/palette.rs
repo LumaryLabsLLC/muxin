@@ -392,6 +392,16 @@ impl Root {
                 item.group = Some(m.id.clone());
                 item.also = m.name.clone();
                 out.push(item);
+                let mut logs = Item::new("Logs", "Its system log, files, containers, services", "Logs", Glyph::Icon("scroll-text"), Run::Go(Route::Logs(m.id.clone())));
+                logs.indent = true;
+                logs.group = Some(m.id.clone());
+                logs.also = m.name.clone();
+                out.push(logs);
+                let mut services = Item::new("Services", "Its services and containers: start, stop, restart", "Services", Glyph::Icon("layers"), Run::Go(Route::Services(m.id.clone())));
+                services.indent = true;
+                services.group = Some(m.id.clone());
+                services.also = m.name.clone();
+                out.push(services);
                 // Its other monitors, virtual ones included.
                 for d in m.displays.iter().filter(|d| d.id != "all" && !d.main) {
                     let kind = if d.is_virtual { "Virtual monitor" } else { "Monitor" };
@@ -427,7 +437,7 @@ impl Root {
         use super::dialogs::RenameTarget;
         let s = &self.snapshot;
         match &self.route {
-            Route::Machine(id) | Route::Desktop(id) => s.machines.iter().find(|m| &m.id == id).map(|m| (RenameTarget::Machine(m.id.clone()), m.name.clone())),
+            Route::Machine(id) | Route::Desktop(id) | Route::Logs(id) | Route::Services(id) => s.machines.iter().find(|m| &m.id == id).map(|m| (RenameTarget::Machine(m.id.clone()), m.name.clone())),
             Route::Session(id) => s.sessions.iter().find(|x| &x.id == id).map(|x| (RenameTarget::Session(x.id.clone()), x.title.clone())),
             _ => None,
         }
@@ -454,7 +464,7 @@ impl Root {
             item("Go to Workspaces", "layers", Some("workspaces"), Run::Go(Route::Workspaces)),
             item("Go to GitHub", "agent-github", Some("github"), Run::Go(Route::Github)),
             item("Go to Activity", "activity", Some("activity"), Run::Go(Route::Activity)),
-            item("Check all machines", "refresh-cw", Some("check"), Run::Do(Command::CheckMachines)),
+            item("Refresh all machines", "refresh-cw", Some("check"), Run::Do(Command::CheckMachines)),
             item("Sync GitHub", "refresh-cw", Some("sync"), Run::Do(Command::SyncGitHub)),
             item("Hide or show the sidebar", "panel-left", Some("sidebar"), Run::Do(Command::ToggleSidebar)),
             item("Back", "arrow-left", Some("back"), Run::Do(Command::Back)),

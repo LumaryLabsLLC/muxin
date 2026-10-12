@@ -199,7 +199,15 @@ async fn bridge(mut send: quinn::SendStream, mut recv: quinn::RecvStream) {
     let _ = ours.set_nonblocking(true);
     let Ok(ours) = tokio::net::UnixStream::from_std(ours) else { return };
     let (mut from_link, mut to_link) = ours.into_split();
-    let up = async { tokio::io::copy(&mut recv, &mut to_link).await };
+    // The app's side ending (closed, or gone quiet past the idle timeout) ends
+    // the link's input too, so it lets go of what the connection had open
+    // (terminals, logs being followed) instead of waiting on it forever.
+    let up = async {
+        use tokio::io::AsyncWriteExt;
+        let r = tokio::io::copy(&mut recv, &mut to_link).await;
+        let _ = to_link.shutdown().await;
+        r
+    };
     let down = async {
         let r = tokio::io::copy(&mut from_link, &mut send).await;
         let _ = send.finish();

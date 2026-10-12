@@ -72,8 +72,8 @@ impl Root {
         }
         let checked = match (s.check.running, s.check.finished_at) {
             (true, _) => "Checking your machines now…".to_string(),
-            (false, Some(_)) => format!("Checked {}", format::ago(s.check.finished_at)),
-            (false, None) => "Not checked yet".into(),
+            (false, Some(_)) => format!("Updated {}", format::ago(s.check.finished_at)),
+            (false, None) => "Not updated yet".into(),
         };
         div()
             .flex()

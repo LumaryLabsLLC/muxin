@@ -778,7 +778,7 @@ fn round1(v: f64) -> f64 {
     (v * 10.0).round() / 10.0
 }
 
-fn find_machine<'a>(s: &'a Snapshot, id: &str) -> ApiResult<&'a Machine> {
+pub(crate) fn find_machine<'a>(s: &'a Snapshot, id: &str) -> ApiResult<&'a Machine> {
     s.machines.iter().find(|m| m.id == id || m.name.eq_ignore_ascii_case(id)).ok_or_else(|| {
         let ids: Vec<&str> = s.machines.iter().map(|m| m.id.as_str()).collect();
         ApiError::not_found(format!("No machine \"{id}\".")).with_hint(if ids.is_empty() {
@@ -3064,6 +3064,187 @@ pub async fn desktop_remove_display(engine: &Arc<Engine>, req: RemoveDisplayRequ
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
     engine.remove_display(&m.id, &req.display).await.map_err(display_error)?;
     Ok(serde_json::json!({ "machine_id": m.id, "removed": req.display }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogSourcesRequest {
+    pub machine_id: String,
+}
+
+/// What a machine has to read: its system log, log files, containers, services.
+pub async fn log_sources(engine: &Arc<Engine>, req: LogSourcesRequest) -> ApiResult<crate::fleet::logs::LogSources> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    engine.log_sources(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadLogsRequest {
+    pub machine_id: String,
+    /// system, kernel, file, docker or service.
+    pub kind: String,
+    /// The file's path, the container's name or id, the unit (empty for the system log).
+    #[serde(default)]
+    pub target: String,
+    /// A service of the user's own (systemctl --user).
+    #[serde(default)]
+    pub user: bool,
+    pub lines: Option<u64>,
+    pub filter: Option<String>,
+}
+
+/// A log's last lines.
+pub async fn logs_read(engine: &Arc<Engine>, req: ReadLogsRequest) -> ApiResult<serde_json::Value> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    let source = crate::fleet::logs::LogSource { kind: req.kind.clone(), target: req.target.clone(), user: req.user, ..Default::default() };
+    let lines = engine.read_logs(&m.id, &source, req.lines.unwrap_or(200), req.filter.as_deref()).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    Ok(serde_json::json!({ "machine_id": m.id, "kind": req.kind, "target": req.target, "lines": lines }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServicesRequest {
+    pub machine_id: String,
+}
+
+/// A machine's services (systemd's on Linux, Homebrew's on a Mac) and Docker containers.
+pub async fn machine_services(engine: &Arc<Engine>, req: ServicesRequest) -> ApiResult<crate::fleet::services::ServiceList> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    engine.services(&m.id, true).await.map_err(|e| ApiError::new("operation_failed", e))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceActionRequest {
+    pub machine_id: String,
+    /// A service's or container's name (as `machine_services` lists it).
+    pub name: String,
+    /// start, stop, restart; enable or disable (whether a systemd service starts at boot).
+    pub action: String,
+    /// Look among containers only.
+    #[serde(default)]
+    pub container: bool,
+}
+
+/// Starts, stops or restarts a service or container.
+pub async fn service_action(engine: &Arc<Engine>, req: ServiceActionRequest) -> ApiResult<serde_json::Value> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    let action: &'static str = match req.action.as_str() {
+        "start" => "start",
+        "stop" => "stop",
+        "restart" => "restart",
+        "enable" => "enable",
+        "disable" => "disable",
+        other => return Err(ApiError::new("invalid", format!("\"{other}\" isn't an action: start, stop, restart, enable or disable."))),
+    };
+    let list = engine.services(&m.id, false).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    let wanted = req.name.trim_end_matches(".service");
+    let pool: Vec<_> = if req.container { list.containers } else { list.services.into_iter().chain(list.containers).collect() };
+    let service = pool
+        .into_iter()
+        .find(|s| s.name == wanted || s.target == req.name)
+        .ok_or_else(|| ApiError::new("not_found", format!("{} has no service or container called {}.", m.name, req.name)))?;
+    engine.service_action(&m.id, &service, action).await.map_err(|e| match e {
+        crate::fleet::desktop::AddDisplayError::NeedsPassword(_) => {
+            ApiError::new("invalid", format!("{} wants the user's password for that (sudo).", m.name)).with_hint("Do it from the Muxen app (machine › Services), which asks for it.")
+        }
+        crate::fleet::desktop::AddDisplayError::Failed(why) => ApiError::new("operation_failed", why),
+    })?;
+    Ok(serde_json::json!({ "machine_id": m.id, "name": service.name, "kind": service.kind, "action": action, "ok": true }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerRunRequest {
+    pub machine_id: String,
+    pub image: String,
+    pub name: Option<String>,
+    #[serde(default)]
+    pub ports: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub volumes: Vec<String>,
+    /// no, always, unless-stopped (default), on-failure.
+    pub restart: Option<String>,
+    pub command: Option<String>,
+    /// Wait for it to finish (default true).
+    pub wait: Option<bool>,
+}
+
+/// An operation's result: waited for (up to 30 minutes) unless `wait` is off.
+async fn operation_result(engine: &Arc<Engine>, op: u64, wait: bool) -> ApiResult<OperationOut> {
+    let done = if wait { wait_operation(engine, op, Duration::from_secs(30 * 60), |_| {}).await } else { None };
+    let o = done.or_else(|| engine.current().operations.iter().find(|o| o.id == op).cloned()).ok_or_else(|| ApiError::new("internal", "The operation went missing."))?;
+    Ok(operation_out(&o, DEFAULT_TAIL))
+}
+
+/// `docker run -d` on a machine (pulling the image first if needed).
+pub async fn docker_run(engine: &Arc<Engine>, req: DockerRunRequest) -> ApiResult<OperationOut> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    let run = crate::fleet::services::DockerRun {
+        image: req.image,
+        name: req.name.unwrap_or_default(),
+        ports: req.ports,
+        env: req.env,
+        volumes: req.volumes,
+        restart: req.restart.unwrap_or_else(|| "unless-stopped".into()),
+        command: req.command.unwrap_or_default(),
+    };
+    let op = engine.docker_run(&m.id, run).map_err(|e| ApiError::new("invalid", e))?;
+    operation_result(engine, op, req.wait.unwrap_or(true)).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerPullRequest {
+    pub machine_id: String,
+    pub image: String,
+    pub wait: Option<bool>,
+}
+
+pub async fn docker_pull(engine: &Arc<Engine>, req: DockerPullRequest) -> ApiResult<OperationOut> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    let op = engine.docker_pull(&m.id, &req.image).map_err(|e| ApiError::new("invalid", e))?;
+    operation_result(engine, op, req.wait.unwrap_or(true)).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComposeActionRequest {
+    pub machine_id: String,
+    /// The project's name, as machine_services lists it.
+    pub project: String,
+    /// up, down, restart or pull.
+    pub action: String,
+    pub wait: Option<bool>,
+}
+
+pub async fn compose_action(engine: &Arc<Engine>, req: ComposeActionRequest) -> ApiResult<OperationOut> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    let list = engine.services(&m.id, false).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    let project = list.compose.into_iter().find(|p| p.name == req.project).ok_or_else(|| ApiError::new("not_found", format!("{} has no Compose project called {}.", m.name, req.project)))?;
+    let op = engine.compose_action(&m.id, &project, &req.action).map_err(|e| ApiError::new("invalid", e))?;
+    operation_result(engine, op, req.wait.unwrap_or(true)).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComposeProjectRequest {
+    pub machine_id: String,
+    /// The project's name, as machine_services lists it.
+    pub project: String,
+}
+
+/// A Compose project's parts: its services (image, ports, what each waits
+/// for, networks, volumes, health check) with their containers' state, and
+/// its networks and volumes.
+pub async fn compose_project(engine: &Arc<Engine>, req: ComposeProjectRequest) -> ApiResult<crate::fleet::services::ComposeGraph> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    let list = engine.services(&m.id, false).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    let project = list.compose.into_iter().find(|p| p.name == req.project).ok_or_else(|| ApiError::new("not_found", format!("{} has no Compose project called {}.", m.name, req.project)))?;
+    engine.compose_describe(&m.id, &project).await.map_err(|e| ApiError::new("operation_failed", e))
 }
 
 /// Git checkouts on the machines, re-read first.

@@ -290,12 +290,12 @@ fn passwords() -> &'static std::sync::Mutex<std::collections::HashMap<String, St
     PASSWORDS.get_or_init(Default::default)
 }
 
-fn password_for(machine_id: &str) -> Option<String> {
+pub(super) fn password_for(machine_id: &str) -> Option<String> {
     passwords().lock().unwrap().get(machine_id).cloned()
 }
 
 /// Why the machine said no; a password it didn't take is forgotten.
-fn refusal(machine_id: &str, reply: &Value, fallback: &str) -> AddDisplayError {
+pub(super) fn refusal(machine_id: &str, reply: &Value, fallback: &str) -> AddDisplayError {
     let why = reply["error"].as_str().unwrap_or(fallback).to_string();
     if reply["password"].as_bool() == Some(true) {
         passwords().lock().unwrap().remove(machine_id);

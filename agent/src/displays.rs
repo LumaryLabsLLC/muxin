@@ -370,9 +370,9 @@ fn xrandr(args: &[String]) -> Result<String, String> {
     }
 }
 
-/// What `create` and `remove` say when they need the user's password (the app asks for it).
-pub const NEEDS_PASSWORD: &str = "Muxen needs your password on this machine to plug in a monitor.";
-pub const WRONG_PASSWORD: &str = "That password didn't work.";
+use crate::root::{NEEDS_PASSWORD, WRONG_PASSWORD};
+#[cfg(target_os = "linux")]
+use crate::root::as_root;
 
 /// Plugs a made-up monitor (its EDID in the file `$2`) into the video output
 /// `$1`, which must have nothing on it, through the kernel's own switches
@@ -406,44 +406,6 @@ card=${c%%-*}; dir="/sys/kernel/debug/dri/${card#card}/${c#*-}"
 [ -e "$dir/edid_override" ] && echo reset > "$dir/edid_override" || true
 [ "$(cat "/sys/class/drm/$c/status")" = disconnected ] || { echo "The machine kept the monitor plugged in." >&2; exit 1; }
 "#;
-
-/// Runs `script` as root: without a password when sudo allows it here
-/// (passwordless, or used a moment ago), else with `password` on sudo's
-/// stdin. The password goes nowhere else.
-#[cfg(target_os = "linux")]
-fn as_root(script: &str, args: &[&str], password: Option<&str>) -> Result<(), String> {
-    use std::io::Write;
-    // Whether sudo needs a password here at all (its wording differs between versions).
-    let free = Command::new("sudo").args(["-n", "true"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
-    if free {
-        let out = Command::new("sudo").args(["-n", "sh", "-c", script, "muxen"]).args(args).stdin(Stdio::null()).stdout(Stdio::null()).output().map_err(|e| e.to_string())?;
-        return if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) };
-    }
-    let password = password.filter(|p| !p.is_empty()).ok_or(NEEDS_PASSWORD)?;
-    let mut child = Command::new("sudo")
-        .args(["-S", "-p", "", "sh", "-c", script, "muxen"])
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(format!("{password}\n").as_bytes());
-    }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let err = String::from_utf8_lossy(&out.stderr);
-    if err.contains("incorrect password") || err.contains("Sorry, try again") {
-        Err(WRONG_PASSWORD.into())
-    } else if err.contains("not in the sudoers") || err.contains("is not allowed") {
-        Err("This account can't use sudo on this machine.".into())
-    } else {
-        Err(err.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("").trim().to_string())
-    }
-}
 
 /// The video outputs the kernel knows ("card1-DP-1") with nothing on them.
 #[cfg(target_os = "linux")]

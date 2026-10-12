@@ -144,6 +144,10 @@ pub enum Route {
     Session(String),
     /// A machine's desktop, live.
     Desktop(String),
+    /// A machine's logs, live.
+    Logs(String),
+    /// A machine's services and containers.
+    Services(String),
     Settings,
     About,
 }
@@ -239,6 +243,10 @@ pub struct Root {
     desktops: std::collections::HashMap<String, Entity<super::desktop::DesktopView>>,
     /// Sessions showing their machine's desktop beside the terminal.
     pub(super) split: HashSet<String>,
+    /// Log viewers open, by machine (each an item in the sidebar while open).
+    pub(super) logs: HashMap<String, Entity<super::logs::LogsView>>,
+    /// Services pages open, by machine (each an item in the sidebar while open).
+    pub(super) service_pages: HashMap<String, Entity<super::services::ServicesView>>,
     /// Terminals split into panes (see panes.rs); a session page shows the layout it's in.
     pub(super) panes: Vec<super::panes::Panes>,
     /// The terminal's share of a split page, and whether its divider is being dragged.
@@ -377,6 +385,8 @@ impl Root {
             gh: Default::default(),
             desktops: Default::default(),
             split: Default::default(),
+            logs: HashMap::new(),
+            service_pages: HashMap::new(),
             panes: cx.global::<super::theme::Appearance>().panes.iter().filter_map(|t| super::panes::Panes::decode(t)).filter(|p| p.ids().len() > 1).collect(),
             split_ratio: cx.global::<super::theme::Appearance>().split_ratio.clamp(0.2, 0.8),
             split_resizing: false,
@@ -526,6 +536,40 @@ impl Root {
                 let engine = self.engine.clone();
                 let view = self.desktops.entry(id.clone()).or_insert_with(|| cx.new(|cx| super::desktop::DesktopView::new(engine, id, window, cx))).clone();
                 window.focus(&view.focus_handle(cx));
+            }
+            Route::Logs(id) => {
+                let view = self.logs_view(&id, window, cx);
+                window.focus(&view.focus_handle(cx));
+            }
+            Route::Services(id) => {
+                if !self.service_pages.contains_key(&id) {
+                    let engine = self.engine.clone();
+                    let view = cx.new(|cx| super::services::ServicesView::new(engine, id.clone(), window, cx));
+                    // Its Logs buttons: that log in the machine's log viewer.
+                    let machine = id.clone();
+                    let sub = cx.subscribe_in(&view, window, move |this, _, e: &super::services::ServicesEvent, window, cx| match e {
+                        super::services::ServicesEvent::OpenLogs(source) => {
+                            let logs = this.logs_view(&machine, window, cx);
+                            logs.update(cx, |v, cx| v.show_source(source.clone(), window, cx));
+                            this.navigate(Route::Logs(machine.clone()), window, cx);
+                        }
+                        // A container's shell, an editor on a compose file: a terminal session.
+                        super::services::ServicesEvent::OpenTerminal { cwd, command, title } => {
+                            let req = crate::fleet::sessions::StartSession {
+                                machine_id: machine.clone(),
+                                agent: "shell".into(),
+                                cwd: cwd.clone(),
+                                title: Some(title.clone()),
+                                command: Some(command.clone()),
+                                ..Default::default()
+                            };
+                            this.start_session(req, window, cx);
+                        }
+                    });
+                    self._subscriptions.push(sub);
+                    self.service_pages.insert(id.clone(), view);
+                }
+                window.focus(&self.service_pages[&id].focus_handle(cx));
             }
             _ => window.focus(&self.focus),
         }
@@ -691,6 +735,15 @@ impl Root {
                     let saved: Vec<String> = self.panes.iter().map(super::panes::Panes::encode).collect();
                     super::theme::remember(cx, |a| a.panes = saved);
                     self.navigate(Route::Session(first), window, cx);
+                }
+            }
+            "machine-logs" => self.navigate(Route::Logs(arg.into()), window, cx),
+            // "machine-services:<machine>" or "machine-services:<machine>@<tab>".
+            "machine-services" => {
+                let (machine, tab) = arg.split_once('@').unwrap_or((arg, ""));
+                self.navigate(Route::Services(machine.into()), window, cx);
+                if let Some(view) = self.service_pages.get(machine).cloned() {
+                    view.update(cx, |v, cx| v.show_tab(tab, cx));
                 }
             }
             // The session shown, split: a new shell beside it or below it.
@@ -1456,7 +1509,7 @@ impl Root {
             // Collapsed: the machine carries its sessions' unread dot.
             let alert = (!open).then(|| sessions.iter().find_map(|x| x.attention.clone().map(|k| (k, x.exit_code)))).flatten();
             let has_desktop = pinned_desktops.contains(&m.id);
-            rows.push(self.machine_row(&theme, m, open, !sessions.is_empty() || has_desktop, alert, selected_machine.as_deref() == Some(&m.id), hint, cx).into_any_element());
+            rows.push(self.machine_row(&theme, m, open, !sessions.is_empty() || has_desktop || self.logs.contains_key(&m.id) || self.service_pages.contains_key(&m.id), alert, selected_machine.as_deref() == Some(&m.id), hint, cx).into_any_element());
             if open {
                 // Agent sessions first: they're what you come back to.
                 for x in sessions {
@@ -1473,6 +1526,13 @@ impl Root {
                         let selected = showing.as_ref().is_some_and(|s| s.as_deref() == Some(d.id.as_str()));
                         rows.push(self.monitor_row(&theme, m, d, selected, cx).into_any_element());
                     }
+                }
+                if self.logs.contains_key(&m.id) {
+                    let shown = self.logs.get(&m.id).and_then(|v| v.read(cx).source_name().map(str::to_string));
+                    rows.push(self.tool_row(&theme, m, Route::Logs(m.id.clone()), "scroll-text", "Logs", shown, cx).into_any_element());
+                }
+                if self.service_pages.contains_key(&m.id) {
+                    rows.push(self.tool_row(&theme, m, Route::Services(m.id.clone()), "layers", "Services", None, cx).into_any_element());
                 }
                 // Runners as one line; a search shows the ones it found.
                 if !machine_match {
@@ -2033,11 +2093,11 @@ impl Root {
                 }
             };
             let detail = if s.check.running {
-                "Checking…".to_string()
+                "Refreshing…".to_string()
             } else {
                 match s.check.finished_at {
-                    Some(t) => format!("Checked {}", format::ago(Some(t))),
-                    None => "Not checked yet".to_string(),
+                    Some(t) => format!("Updated {}", format::ago(Some(t))),
+                    None => "Not updated yet".to_string(),
                 }
             };
             let color = if offline > 0 { theme.warning } else if total > 0 { theme.success } else { theme.text_placeholder };
@@ -2361,6 +2421,80 @@ impl Root {
             .on_click(cx.listener(move |this, _, window, cx| this.show_display(open.clone(), None, window, cx)))
     }
 
+    /// A machine's open Logs or Services page in the sidebar (with what it
+    /// shows, when there's something to say); × closes it.
+    #[allow(clippy::too_many_arguments)]
+    fn tool_row(&self, theme: &Theme, m: &Machine, route: Route, icon_name: &'static str, label: &'static str, shown: Option<String>, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.route == route;
+        let (open, close) = (route.clone(), route);
+        let (from, to) = format::machine_tile(m);
+        let group = SharedString::from(format!("tool-row-{label}"));
+        let hover = group.clone();
+        div()
+            .id(SharedString::from(format!("side-{label}-{}", m.id)))
+            .group(group.clone())
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(26.))
+            .mx(px(10.))
+            .pl(px(22.))
+            .pr(px(8.))
+            .rounded(px(7.))
+            .cursor_pointer()
+            .when(selected, |d| d.bg(theme.element_selected))
+            .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+            .child(kit::tile(icon_name, from, to, 16.))
+            .child(div().flex_none().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child(label))
+            .child(div().flex_1())
+            .children(shown.map(|s| {
+                let w = (self.sidebar_width - 20. - 30. - 16. - 16. - 60. - 16.).max(30.);
+                let hover = hover.clone();
+                div().w(px(w)).flex().justify_end().group_hover(hover, |st| st.invisible()).child(div().max_w(px(w)).truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(s))
+            }))
+            .child(
+                div()
+                    .id(SharedString::from(format!("side-{label}-x-{}", m.id)))
+                    .absolute()
+                    .right(px(8.))
+                    .invisible()
+                    .group_hover(group, |st| st.visible())
+                    .tooltip(move |window, cx| kit::Tooltip::view(format!("Close {}", label.to_lowercase()).into(), window, cx))
+                    .child(icon("x", 12., theme.text_placeholder))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close_tool(&close, window, cx)
+                    })),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| this.navigate(open.clone(), window, cx)))
+    }
+
+    /// Closes a machine's Logs or Services page (logs stop following).
+    pub(super) fn close_tool(&mut self, route: &Route, window: &mut Window, cx: &mut Context<Self>) {
+        let machine = match route {
+            Route::Logs(id) => {
+                self.logs.remove(id);
+                id.clone()
+            }
+            Route::Services(id) => {
+                self.service_pages.remove(id);
+                id.clone()
+            }
+            _ => return,
+        };
+        if &self.route == route {
+            self.navigate(Route::Machine(machine), window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The machine's log viewer, opened if it isn't.
+    pub(super) fn logs_view(&mut self, machine: &str, window: &mut Window, cx: &mut Context<Self>) -> Entity<super::logs::LogsView> {
+        let engine = self.engine.clone();
+        self.logs.entry(machine.to_string()).or_insert_with(|| cx.new(|cx| super::logs::LogsView::new(engine, machine.to_string(), window, cx))).clone()
+    }
+
     /// A virtual monitor's item in the sidebar, under its machine: opens the
     /// desktop page on it.
     fn monitor_row(&self, theme: &Theme, m: &Machine, d: &crate::fleet::model::DisplayInfo, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2461,6 +2595,20 @@ impl Root {
             Route::Runner(id) => self.render_runner(&id, cx),
             Route::Session(id) => self.render_session(&id, window, cx),
             Route::Desktop(id) => self.render_desktop(&id, window, cx),
+            Route::Logs(id) => match self.logs.get(&id).cloned() {
+                Some(view) => view.into_any_element(),
+                None => {
+                    self.on_route_changed(window, cx);
+                    div().into_any_element()
+                }
+            },
+            Route::Services(id) => match self.service_pages.get(&id).cloned() {
+                Some(view) => view.into_any_element(),
+                None => {
+                    self.on_route_changed(window, cx);
+                    div().into_any_element()
+                }
+            },
             Route::About => self.render_about(cx),
             Route::Github | Route::GithubRepo(_) | Route::GithubItem(..) => self.render_github(window, cx),
             Route::Settings => match &self.settings {
@@ -2657,6 +2805,8 @@ fn route_title(s: &Snapshot, route: &Route) -> (Option<&'static str>, String) {
         Route::Machine(id) => (Some("Machines"), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
         Route::Session(id) => (Some("Sessions"), s.sessions.iter().find(|x| &x.id == id).map(|x| x.title.clone()).unwrap_or_else(|| id.clone())),
         Route::Desktop(id) => (Some("Desktop"), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
+        Route::Logs(id) => (Some("Logs"), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
+        Route::Services(id) => (Some("Services"), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
         Route::Runner(id) => {
             let r = s.runners.iter().find(|r| &r.id == id);
             let machine = r.and_then(|r| r.machine_id.as_deref()).and_then(|mid| s.machines.iter().find(|m| m.id == mid));

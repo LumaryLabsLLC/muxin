@@ -94,6 +94,10 @@ enum Command {
     /// A machine's desktop: a screenshot, or mouse and keyboard input
     #[command(subcommand)]
     Desktop(DesktopCommand),
+    /// A machine's logs: the system log, a service's, a file's or a container's (--list to see them)
+    Logs(LogsArgs),
+    /// A machine's services and containers; or start, stop, restart, enable or disable one
+    Services(ServicesArgs),
     /// Cloud machines: create DigitalOcean droplets to work in, power them, destroy them
     #[command(subcommand)]
     Cloud(CloudCommand),
@@ -480,6 +484,56 @@ enum DesktopCommand {
     Remove(DesktopRemoveArgs),
     /// Change a monitor's resolution or scale
     Set(DesktopSetArgs),
+}
+
+#[derive(Args)]
+struct ServicesArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// start, stop, restart, enable or disable (none: list them)
+    action: Option<String>,
+    /// The service or container
+    name: Option<String>,
+    /// It's a container (when a service has the same name)
+    #[arg(long)]
+    container: bool,
+}
+
+#[derive(Args)]
+struct LogsArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// What there is to read instead
+    #[arg(long)]
+    list: bool,
+    /// The kernel's messages (Linux)
+    #[arg(long, conflicts_with_all = ["file", "unit", "container"])]
+    kernel: bool,
+    /// A log file
+    #[arg(long, conflicts_with_all = ["unit", "container"])]
+    file: Option<String>,
+    /// A systemd unit (nginx, actions.runner...)
+    #[arg(long, conflicts_with = "container")]
+    unit: Option<String>,
+    /// The unit is the user's own (systemctl --user)
+    #[arg(long, requires = "unit")]
+    user: bool,
+    /// A Docker container (name or id)
+    #[arg(long)]
+    container: Option<String>,
+    /// How many lines (default 200)
+    #[arg(short = 'n', long, default_value_t = 200)]
+    lines: u64,
+    /// Only lines holding this (any case)
+    #[arg(long)]
+    grep: Option<String>,
+    /// Keep printing new lines (Ctrl-C to stop)
+    #[arg(long)]
+    follow: bool,
 }
 
 #[derive(Args)]
@@ -1153,6 +1207,8 @@ fn main() -> ExitCode {
         Some(Command::Checkouts(a)) => checkouts(a, &runtime),
         Some(Command::Git(cmd)) => git(cmd, &runtime),
         Some(Command::Desktop(cmd)) => desktop(cmd, &runtime),
+        Some(Command::Logs(a)) => logs(a, &runtime),
+        Some(Command::Services(a)) => services(a, &runtime),
         Some(Command::Cloud(cmd)) => cloud(cmd, &runtime),
         Some(Command::Files(a)) => {
             let (machine, path) = a.target.split_once(':').map(|(m, p)| (m.to_string(), p.to_string())).unwrap_or((a.target.clone(), String::new()));
@@ -1636,6 +1692,92 @@ fn desktop(cmd: DesktopCommand, runtime: &tokio::runtime::Runtime) -> u8 {
         DesktopCommand::Remove(a) => {
             let req = api::RemoveDisplayRequest { machine_id: a.machine, display: a.display };
             run(runtime, &a.agent, async move |e| api::desktop_remove_display(&e, req).await, |v| format!("Removed display {}.\n", v["removed"].as_str().unwrap_or("")))
+        }
+    }
+}
+
+fn services(a: ServicesArgs, runtime: &tokio::runtime::Runtime) -> u8 {
+    let machine = a.machine.clone();
+    match (a.action.clone(), a.name.clone()) {
+        (None, _) => run(runtime, &a.agent, async move |e| api::machine_services(&e, api::ServicesRequest { machine_id: machine }).await, cli::services),
+        (Some(action), Some(name)) => {
+            let req = api::ServiceActionRequest { machine_id: machine, name, action, container: a.container };
+            run(runtime, &a.agent, async move |e| api::service_action(&e, req).await, |v| format!("{} {}.\n", past(v["action"].as_str().unwrap_or("")), v["name"].as_str().unwrap_or("")))
+        }
+        (Some(_), None) => {
+            eprintln!("error: which service or container? muxen services <machine> <action> <name>");
+            2
+        }
+    }
+}
+
+/// "restart" as "Restarted", for saying what was done.
+fn past(action: &str) -> &'static str {
+    match action {
+        "start" => "Started",
+        "stop" => "Stopped",
+        "restart" => "Restarted",
+        "enable" => "It starts at boot now:",
+        "disable" => "It doesn't start at boot now:",
+        _ => "Done:",
+    }
+}
+
+fn logs(a: LogsArgs, runtime: &tokio::runtime::Runtime) -> u8 {
+    use crate::fleet::logs::LogSource;
+    let machine = a.machine.clone();
+    if a.list {
+        return run(runtime, &a.agent, async move |e| api::log_sources(&e, api::LogSourcesRequest { machine_id: machine }).await, cli::log_sources);
+    }
+    let (kind, target) = match (&a.file, &a.unit, &a.container) {
+        (Some(f), _, _) => ("file", f.clone()),
+        (_, Some(u), _) => ("service", if u.contains('.') { u.clone() } else { format!("{u}.service") }),
+        (_, _, Some(c)) => ("docker", c.clone()),
+        _ if a.kernel => ("kernel", String::new()),
+        _ => ("system", String::new()),
+    };
+    if !a.follow {
+        let req = api::ReadLogsRequest { machine_id: machine, kind: kind.into(), target, user: a.user, lines: Some(a.lines), filter: a.grep.clone() };
+        return run(runtime, &a.agent, async move |e| api::logs_read(&e, req).await, |v| {
+            v["lines"].as_array().map(|l| l.iter().filter_map(|x| x.as_str()).map(|x| format!("{x}\n")).collect()).unwrap_or_default()
+        });
+    }
+    // Following: the machine's link, printing lines as they come.
+    let source = LogSource { kind: kind.into(), target, user: a.user, ..Default::default() };
+    let grep = a.grep.as_deref().map(str::to_lowercase);
+    let _guard = runtime.enter();
+    let engine = Engine::new(a.agent.common.paths(), a.agent.demo);
+    let result: Result<(), String> = runtime.block_on(async {
+        let m = api::find_machine(&engine.current(), &a.machine).map_err(|e| e.message.clone())?.clone();
+        let (spec, probe) = engine.machine(&m.id).ok_or("No such machine.")?;
+        crate::fleet::sessions::agent::ensure(&spec, probe.as_ref()).await?;
+        let link = crate::fleet::link::get(&spec).await.ok_or_else(|| format!("Can't reach the agent on {}.", spec.name))?;
+        let (channel, mut frames) = link.open_channel();
+        let request = serde_json::json!({ "op": "logs", "channel": channel, "source": source.request(), "lines": a.lines });
+        let reply = link.request(request, std::time::Duration::from_secs(20)).await?;
+        if reply["ok"].as_bool() != Some(true) {
+            return Err(reply["error"].as_str().unwrap_or("The machine couldn't open that log.").to_string());
+        }
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        while let Some((kind, bytes)) = frames.recv().await {
+            if kind == crate::fleet::link::CLOSE {
+                break;
+            }
+            let text = String::from_utf8_lossy(&bytes);
+            for line in text.lines().filter(|l| grep.as_ref().is_none_or(|g| l.to_lowercase().contains(g))) {
+                if writeln!(stdout, "{line}").is_err() {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    });
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
         }
     }
 }

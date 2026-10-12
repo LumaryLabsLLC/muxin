@@ -26,6 +26,9 @@ mod detect;
 mod desktop;
 #[cfg(unix)]
 mod displays;
+mod logs;
+mod root;
+mod services;
 #[cfg(unix)]
 mod direct;
 #[cfg(unix)]

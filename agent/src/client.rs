@@ -97,6 +97,12 @@ pub fn handle(req: &Value) -> Value {
         "display_remove" => crate::displays::remove(&req),
         "display_rename" => crate::displays::rename(&req),
         "display_set" => crate::displays::set(&req),
+        "log_sources" => crate::logs::sources(),
+        "logs_read" => crate::logs::read(&req),
+        "services" => crate::services::list(&req),
+        "service_action" => crate::services::act(&req),
+        "compose_new" => crate::services::compose_new(&req),
+        "compose_describe" => crate::services::compose_describe(&req),
         _ => request(&req, false),
     }
 }

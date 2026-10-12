@@ -42,7 +42,7 @@ pub const ALL: &[Shortcut] = &[
     shortcut!("github", "GitHub", page("ctrl-4", "alt-4"), ShowGithub),
     shortcut!("activity", "Activity", "secondary-j", ToggleActivity),
     shortcut!("settings", "Settings", "secondary-,", OpenSettings),
-    shortcut!("check", "Check machines", "secondary-r", CheckNow),
+    shortcut!("check", "Refresh all machines", "secondary-r", CheckNow),
     shortcut!("sync", "Sync GitHub", "secondary-shift-r", SyncGitHub),
     shortcut!("add-machine", "Add machine", "secondary-n", AddMachine),
     shortcut!("new-session", "New session", "secondary-t", NewSession),

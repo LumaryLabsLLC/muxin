@@ -10,6 +10,7 @@
 //! PUBLIC API — the UI depends on these signatures.
 
 pub(crate) mod cloud;
+mod docker;
 pub(crate) mod inventory_edit;
 pub(crate) mod remote;
 

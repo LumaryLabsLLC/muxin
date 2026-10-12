@@ -80,6 +80,8 @@ enum Sink {
     Unpack(crate::files::Unpack),
     /// The clipboard: a `clip` program (its stdin takes what the app copied).
     Clip(Program),
+    /// A log being followed (journalctl, tail -F, docker logs -f, log stream).
+    Logs(std::process::Child),
 }
 
 impl Sink {
@@ -92,6 +94,12 @@ impl Sink {
             Sink::Pack(credit) => credit.close(),
 
             Sink::Unpack(u) => u.stop(),
+            Sink::Logs(mut child) => {
+                // Its whole process group (`log stream` runs under a shell).
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM) };
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
     }
 }
@@ -223,6 +231,7 @@ fn handle(req: &Value, out: &Out, attached: &Attached) -> Value {
         "desktop" => desktop(req, out, attached),
         "files" => crate::files::list(req),
         "clipboard" => clipboard(req, out, attached),
+        "logs" => logs(req, out, attached),
         "pack" | "unpack" => files(req, out, attached),
         "watch" => {
             let out = out.clone();
@@ -405,6 +414,77 @@ fn relay(out: &Out, attached: &Attached, channel: u32, mut from: Box<dyn Read + 
             let _ = send(&out, channel, CLOSE, &[]);
         }
     });
+}
+
+/// Follows a log on a channel: `{"op": "logs", "channel", "source",
+/// "lines"}` (see logs.rs). Its last lines, then new ones, go to the app as
+/// DATA, whole lines at a time, until it stops or the app closes the channel.
+fn logs(req: &Value, out: &Out, attached: &Attached) -> Value {
+    let channel = req["channel"].as_u64().unwrap_or(0) as u32;
+    if channel == CONTROL {
+        return json!({ "ok": false, "error": "a log needs a channel" });
+    }
+    let (program, args) = match crate::logs::command(&req["source"], crate::logs::initial_lines(req), true) {
+        Ok(c) => c,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let mut cmd = Command::new(&program);
+    cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return json!({ "ok": false, "error": format!("couldn't run {program}: {e}") }),
+    };
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+    attached.lock().unwrap().insert(channel, Sink::Logs(child));
+    // Both outputs (docker writes a container's stderr to its own), a whole
+    // line at a time so the two don't cut into each other's lines.
+    let pump = |pipe: Box<dyn Read + Send>, last: bool| {
+        let (out, attached) = (out.clone(), attached.clone());
+        thread::spawn(move || {
+            let mut pipe = pipe;
+            let mut pending: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 16 * 1024];
+            loop {
+                let n = pipe.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                pending.extend_from_slice(&chunk[..n]);
+                if let Some(end) = pending.iter().rposition(|b| *b == b'\n') {
+                    let lines: Vec<u8> = pending.drain(..=end).collect();
+                    // The app can't be reached: stop the program.
+                    if send(&out, channel, proto::DATA, &lines).is_err() {
+                        if let Some(s) = attached.lock().unwrap().remove(&channel) {
+                            s.close();
+                        }
+                        return;
+                    }
+                }
+            }
+            if !pending.is_empty() {
+                pending.push(b'\n');
+                let _ = send(&out, channel, proto::DATA, &pending);
+            }
+            // Stdout ended: the program stopped.
+            if last && let Some(s) = attached.lock().unwrap().remove(&channel) {
+                s.close();
+                let _ = send(&out, channel, CLOSE, &[]);
+            }
+        });
+    };
+    if let Some(e) = stderr {
+        pump(Box::new(e), false);
+    }
+    if let Some(o) = stdout {
+        pump(Box::new(o), true);
+    }
+    json!({ "ok": true })
 }
 
 /// Shares this machine's clipboard on the request's channel (see clipboard.rs):

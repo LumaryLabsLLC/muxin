@@ -174,6 +174,10 @@ The MCP server has these tools:
 | `machine_connection`, `direct_connection` | How a machine is reached (direct, ssh, which network, Tailscale's view); pair it for direct connections. |
 | `desktop_screenshot`, `desktop_input` | Look at a machine's screen (or one monitor of it); click, type and scroll there. |
 | `desktop_displays`, `desktop_add_display`, `desktop_remove_display`, `desktop_set_display` | A machine's monitors; add or remove virtual ones, change their resolution or scale. |
+| `log_sources`, `logs_read` | A machine's logs: its system log, files, containers and services, and their last lines. |
+| `machine_services`, `service_action` | A machine's services, containers, images and Compose projects (with CPU and memory); start, stop, restart, enable or disable one. |
+| `docker_run`, `docker_pull`, `compose_action` | Run a container, pull an image, bring a Compose project up or down. |
+| `compose_project` | A Compose project's parts: services, ports, what waits for what, networks, volumes, health. |
 | `session_list`, `session_start`, `session_read`, `session_send`, `session_rename`, `session_stop` | Agent sessions on the machines. |
 | `github_inbox`, `github_repos`, `github_repo`, `github_item`, `local_checkouts`, `git_sync`, … | The user's GitHub, and git checkouts on the machines. |
 | `workspace_create`, `workspace_list`, `workspace_get` | Check out a machine as a work environment; see what exists. |
@@ -375,6 +379,42 @@ If [Tailscale](https://tailscale.com) is on your Mac, Muxen uses it to keep mach
 - **Offline answers.** Tailscale's view tells Muxen when a machine is back, whether Tailscale lost it too, or that Tailscale is off on this Mac (with **Open Tailscale**).
 - **The Connection card** says which way it goes (Local network, or Tailscale peer-to-peer or through a relay), whether the machine is on your tailnet, and offers **Set up Tailscale** on Linux machines that aren't (the install command, typed in a shell there for you to run).
 - **Adding machines:** the Add machine dialog lists the computers on your tailnet; one added by its tailnet name is reachable from anywhere.
+
+## Logs
+
+A machine's logs, live: **Logs** on its page (or right-click it, or ⌘P › Logs) opens them, and they stay under the machine in the sidebar until you close them.
+
+- **System:** the systemd journal and the kernel's messages on Linux, the unified log on a Mac. Without the `systemd-journal` group Linux shows only your own; Muxen says so.
+- **Files:** `/var/log`, `~/Library/Logs`, and log files written lately under your home folder (an app's `storage/logs`, a runner's `_diag`), newest first, or any path you type. Root-only ones are marked.
+- **Docker** containers, and running **services** (systemd units, yours and the system's).
+- The last 500 lines, then new ones as they're written; a filter, Pause, Follow (scrolling up stops it) and Copy. Errors are red and warnings amber.
+
+```sh
+muxen logs beelink --list                          # what there is
+muxen logs beelink --unit nginx -n 100             # a service's last lines
+muxen logs beelink --file '~/app/storage/logs/laravel.log' --grep error
+muxen logs beelink --container postgres --follow   # keep printing (Ctrl-C to stop)
+```
+
+## Services and containers
+
+A machine's services, and its Docker containers: **Services** on its page (or right-click it, or ⌘P › Services). Failed ones come first, then running ones; Find narrows the list.
+
+- **Linux:** systemd services, the system's and your own ("yours"), with whether each starts at boot (click **At boot** to change it). **Start**, **Stop**, **Restart**. The system's take root: when sudo wants your password, Muxen asks for it there, once, and keeps it in memory until you quit.
+- **A Mac:** Homebrew's services (`brew services`: Postgres, Redis, nginx, ...).
+- **What they use:** CPU and memory for each running service and container; sort by them to find what's busy.
+- **Docker, all of it:**
+  - **Containers:** run one (image, name, ports, environment, volumes, restart policy, command), start, stop, restart, remove, a shell inside it (a terminal session), its log.
+  - **Compose:** each project Docker knows, with **Up**, **Down**, **Restart**, **Pull**, its log, and **Edit** (its compose file in your editor, in a terminal on the machine). **New project** makes `~/compose/<name>/compose.yaml` to start from. Click a project to see it as a picture: its services as boxes, an arrow to what each waits for (green when it waits until that's healthy), the ports each opens on the machine, its networks as colored tags, the files it mounts, and its volumes at the right; each box shows the image, state, health, CPU and memory, with its logs and a shell.
+  - **Images:** pull one, run it, remove it, or remove every unused one.
+  - Pulls, runs and Compose up/down run as operations: their output shows as they go, and in Activity.
+- Stop, Restart, Remove and Down ask first, and say so when stopping one (ssh, Tailscale, the network) could cut Muxen off from the machine. The log button opens its log in **Logs**.
+
+```sh
+muxen services beelink                             # services and containers
+muxen services beelink restart nginx
+muxen services beelink stop postgres --container
+```
 
 ## Files and the clipboard
 

@@ -36,8 +36,8 @@ impl Root {
             self.machine_git.remove(&m.id);
         }
         let checked = match &m.probe {
-            Some(p) => format!("Checked {} in {:.1}s", format::ago(Some(p.checked_at)), p.duration_ms as f64 / 1000.0),
-            None => "Not checked yet".into(),
+            Some(p) => format!("Updated {} (took {:.1}s)", format::ago(Some(p.checked_at)), p.duration_ms as f64 / 1000.0),
+            None => "Not updated yet".into(),
         };
 
         let header = div()
@@ -99,6 +99,24 @@ impl Root {
                                 .on_click(cx.listener(move |this, _, window, cx| this.show_display(mid.clone(), None, window, cx))),
                         )
                     })
+                    .when(!m.platform.starts_with("windows"), |d| {
+                        let mid = m.id.clone();
+                        d.child(
+                            Button::new("m-logs", "Logs")
+                                .icon("scroll-text")
+                                .disabled(m.host.is_empty() || offline)
+                                .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Logs(mid.clone()), window, cx))),
+                        )
+                    })
+                    .when(!m.platform.starts_with("windows"), |d| {
+                        let mid = m.id.clone();
+                        d.child(
+                            Button::new("m-services", "Services")
+                                .icon("layers")
+                                .disabled(m.host.is_empty() || offline)
+                                .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Services(mid.clone()), window, cx))),
+                        )
+                    })
                     .child({
                         let mid = m.id.clone();
                         Button::new("m-install", "Install runner")
@@ -117,7 +135,8 @@ impl Root {
                     })
                     .child({
                         let mid = m.id.clone();
-                        Button::new("m-check", "Check")
+                        Button::new("m-check", "Refresh")
+                            .tooltip("Read its status, CPU, memory, disk, runners and sessions again")
                             .icon("refresh-cw")
                             .loading(m.checking)
                             .disabled(m.host.is_empty())
@@ -804,7 +823,7 @@ impl Root {
                 d.child(Button::new("m-offline-tailscale", "Open Tailscale").style(ButtonStyle::Primary).on_click(|_, _, _| super::open_tailscale()))
             })
             .child(
-                Button::new("m-offline-check", "Check again")
+                Button::new("m-offline-check", "Try again")
                     .icon("refresh-cw")
                     .loading(m.checking)
                     .on_click(cx.listener(move |this, _, _, _| this.engine.trigger_check(Some(mid.clone())))),

@@ -23,7 +23,7 @@ icons!(
     "bot", "square-terminal", "power", "plug", "unplug",
     "agent-claude", "agent-codex", "agent-gemini", "agent-opencode", "agent-amp", "agent-pi", "agent-github",
     "circle-dot", "git-pull-request", "git-pull-request-draft", "git-merge", "message-square", "lock", "star",
-    "arrow-down", "arrow-up", "book-open", "star-filled", "maximize", "minimize", "panel-right", "panel-left", "columns-2", "rows-2",
+    "arrow-down", "arrow-up", "book-open", "star-filled", "maximize", "minimize", "panel-right", "panel-left", "columns-2", "rows-2", "pause", "circle-stop",
     "folder", "file", "sliders-horizontal", "palette", "keyboard", "cloud", "brand-digitalocean", "pencil",
     // The glyphs of each icon style (see kit::IconStyle): pf- Phosphor (MIT),
     // so- Solar (CC BY 4.0), mc- MingCute (Apache-2.0), fl- Fluent (MIT),

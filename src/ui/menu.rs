@@ -37,6 +37,8 @@ pub struct ContextMenu {
 enum Action {
     NewTerminal(String),
     ShowDesktop(String),
+    ShowLogs(String),
+    ShowServices(String),
     CopyFiles(String),
     NewAgent(String, &'static str),
     Check(String),
@@ -120,10 +122,14 @@ impl Root {
                         items.push(needs_up(act("Add virtual monitor…", "monitor", Action::AddDisplay(id.clone()))));
                     }
                     if !m.platform.starts_with("windows") {
+                        items.push(needs_up(act("Logs", "scroll-text", Action::ShowLogs(id.clone()))));
+                        items.push(needs_up(act("Services", "layers", Action::ShowServices(id.clone()))));
+                    }
+                    if !m.platform.starts_with("windows") {
                         items.push(needs_up(act("Copy files…", "folder", Action::CopyFiles(id.clone()))));
                     }
                     items.push(Item::Separator);
-                    items.push(act("Check now", "refresh-cw", Action::Check(id.clone())));
+                    items.push(act("Refresh", "refresh-cw", Action::Check(id.clone())));
                     items.push(needs_up(act("Install runner…", "plus", Action::InstallRunner(id.clone()))));
                     items.push(Item::Separator);
                 }
@@ -336,6 +342,8 @@ impl Root {
             }
             Action::NewAgent(machine, agent) => self.show_new_session_with(Some(machine), Some(agent), window, cx),
             Action::ShowDesktop(machine) => self.navigate(Route::Desktop(machine), window, cx),
+            Action::ShowLogs(machine) => self.navigate(Route::Logs(machine), window, cx),
+            Action::ShowServices(machine) => self.navigate(Route::Services(machine), window, cx),
             Action::CopyFiles(machine) => self.show_copy_files(Some(machine), None, window, cx),
             Action::Check(machine) => self.engine.trigger_check(Some(machine)),
             Action::Runner(id, action) => self.runner_action(&id, action, cx),

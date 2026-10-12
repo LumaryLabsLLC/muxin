@@ -343,6 +343,14 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "desktop_add_display" => ok(api::desktop_add_display(engine, args(a)?).await?),
         "desktop_remove_display" => ok(api::desktop_remove_display(engine, args(a)?).await?),
         "desktop_set_display" => ok(api::desktop_set_display(engine, args(a)?).await?),
+        "log_sources" => ok(api::log_sources(engine, args(a)?).await?),
+        "logs_read" => ok(api::logs_read(engine, args(a)?).await?),
+        "machine_services" => ok(api::machine_services(engine, args(a)?).await?),
+        "service_action" => ok(api::service_action(engine, args(a)?).await?),
+        "docker_run" => ok(api::docker_run(engine, args(a)?).await?),
+        "docker_pull" => ok(api::docker_pull(engine, args(a)?).await?),
+        "compose_action" => ok(api::compose_action(engine, args(a)?).await?),
+        "compose_project" => ok(api::compose_project(engine, args(a)?).await?),
         "direct_connection" => ok(api::set_direct(engine, args(a)?).await?),
         "git_setup" => ok(api::git_setup(engine, args(a)?).await?),
         other => Err(ApiError::not_found(format!("Unknown tool: {other}"))),
@@ -881,6 +889,88 @@ pub fn tools() -> Vec<Value> {
             "annotations": annotations("Set monitor resolution or scale", false, false, true, false),
         }),
         json!({
+            "name": "log_sources",
+            "description": "What a machine has in the way of logs: the system log (journal on Linux, unified log on a Mac; kind system, and kernel on Linux), log files (with readable: false for root-only ones), Docker containers and running services (systemd units; user: true for the user's own). Pass an entry's kind and target to logs_read.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
+            "annotations": annotations("List log sources", true, false, true, false),
+        }),
+        json!({
+            "name": "logs_read",
+            "description": "A log's last lines on a machine: the system log, the kernel's, a service's, a file's or a container's (see log_sources). filter keeps the lines holding it (any case). Read-only.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "kind": { "type": "string", "enum": ["system", "kernel", "file", "docker", "service"] },
+                "target": { "type": "string", "description": "The file's path, the container's name or id, or the unit (e.g. nginx.service). Empty for the system log; on a Mac a process name narrows it." },
+                "user": { "type": "boolean", "description": "A service of the user's own (systemctl --user)." },
+                "lines": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Default 200." },
+                "filter": { "type": "string" }
+            }), &["machine_id", "kind"]),
+            "annotations": annotations("Read logs", true, false, true, false),
+        }),
+        json!({
+            "name": "machine_services",
+            "description": "A machine's services and Docker: systemd services on Linux (the system's and the user's own, user: true; at_boot says whether one starts at boot), Homebrew's on a Mac (brew services), containers (status, ports), each with cpu (percent of one core) and memory (bytes) when running; Docker images and Compose projects (with their files). Failed ones come first.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
+            "annotations": annotations("List services and containers", true, false, true, false),
+        }),
+        json!({
+            "name": "service_action",
+            "description": "Start, stop or restart a service or container on a machine; enable or disable whether a systemd service starts at boot. The system's services need root: when sudo there wants a password this fails, and the user does it from the Muxen app (which asks). Stopping ssh, tailscaled or the network can cut the machine off. It changes the user's machine: only when asked.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "name": { "type": "string", "description": "The service's or container's name, as machine_services lists it (e.g. nginx, postgres)." },
+                "action": { "type": "string", "enum": ["start", "stop", "restart", "enable", "disable"] },
+                "container": { "type": "boolean", "description": "Look among containers only (when a service has the same name)." }
+            }), &["machine_id", "name", "action"]),
+            "annotations": annotations("Start, stop or restart a service", false, true, false, false),
+        }),
+        json!({
+            "name": "docker_run",
+            "description": "Run a Docker container on a machine (docker run -d), pulling the image first if it isn't there. Waits for it (an operation; its log_tail has Docker's output) unless wait is false. It changes the user's machine: only when asked.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "image": { "type": "string", "description": "e.g. postgres:17" },
+                "name": { "type": "string" },
+                "ports": { "type": "array", "items": { "type": "string" }, "description": "host:container, e.g. 5432:5432" },
+                "env": { "type": "array", "items": { "type": "string" }, "description": "KEY=value" },
+                "volumes": { "type": "array", "items": { "type": "string" }, "description": "host path or volume:container path" },
+                "restart": { "type": "string", "enum": ["no", "always", "unless-stopped", "on-failure"], "description": "Default unless-stopped." },
+                "command": { "type": "string", "description": "Instead of the image's own command." },
+                "wait": { "type": "boolean" }
+            }), &["machine_id", "image"]),
+            "annotations": annotations("Run a container", false, false, false, false),
+        }),
+        json!({
+            "name": "docker_pull",
+            "description": "Pull a Docker image onto a machine. Waits for it unless wait is false.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "image": { "type": "string" },
+                "wait": { "type": "boolean" }
+            }), &["machine_id", "image"]),
+            "annotations": annotations("Pull an image", false, false, true, false),
+        }),
+        json!({
+            "name": "compose_project",
+            "description": "A Docker Compose project's parts on a machine (machine_services lists the projects): each service's image (or build folder), the ports it opens on the machine, what it waits for (depends_on with its condition), its networks, volumes and the machine's files it mounts, whether it has a health check, and its containers' state and health; the project's networks and volumes. Environment values aren't included, only how many. Read-only.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "project": { "type": "string" }
+            }), &["machine_id", "project"]),
+            "annotations": annotations("Describe a Compose project", true, false, true, false),
+        }),
+        json!({
+            "name": "compose_action",
+            "description": "Bring a Docker Compose project up (detached), down, restart it or pull its images, on a machine (machine_services lists the projects). down stops and removes its containers. Waits unless wait is false. Only when asked.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "project": { "type": "string" },
+                "action": { "type": "string", "enum": ["up", "down", "restart", "pull"] },
+                "wait": { "type": "boolean" }
+            }), &["machine_id", "project", "action"]),
+            "annotations": annotations("Compose up, down, restart or pull", false, true, false, false),
+        }),
+        json!({
             "name": "git_status",
             "description": "Whether git on one of the user's machines can commit and push to GitHub: its name and email (can_commit), how a push gets a GitHub login (push: gh, other, none), the machine's GitHub CLI account, and the identity git_setup would use.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
@@ -943,7 +1033,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 62);
+        assert_eq!(tools.len(), 70);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

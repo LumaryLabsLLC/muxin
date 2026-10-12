@@ -129,6 +129,22 @@ Muxen can create DigitalOcean droplets in the user's account and add them to the
 
 The CLI equivalents are `muxen cloud options|create|usage|power|destroy|login|logout`.
 
+## Logs
+
+- `log_sources(machine_id)` lists what a machine has to read: its system log (`kind: "system"`; `"kernel"` on Linux), log files (`readable: false` for root-only ones), Docker containers and running services (`user: true` for the user's own units).
+- `logs_read(machine_id, kind, target?, lines?, filter?)` returns a log's last lines (200 by default): a file's path, a container's name or id, a unit as `target`. Use it to find out why something failed before guessing. Read-only.
+- The CLI equivalent is `muxen logs <machine> [--list | --kernel | --file <path> | --unit <name> [--user] | --container <name>] [-n N] [--grep X] [--follow]`.
+
+## Services and containers
+
+- `machine_services(machine_id)` lists a machine's services (systemd on Linux, with `at_boot` and `user: true` for the user's own; Homebrew's on a Mac) and Docker containers, failed ones first.
+- `service_action(machine_id, name, action)` starts, stops or restarts one, or `enable`/`disable` whether a systemd service starts at boot. It changes the user's machine: only when asked, and say so before stopping anything that could cut the machine off (ssh, tailscaled, the network). The system's services need root: when sudo wants a password it fails with a hint to use the Muxen app, which asks for it; pass that on.
+- Each running service and container has `cpu` (percent of one core) and `memory` (bytes); `machine_services` also lists Docker `images` and Compose projects (`compose`, with their files).
+- `docker_run(machine_id, image, name?, ports?, env?, volumes?, restart?, command?)`, `docker_pull(machine_id, image)` and `compose_action(machine_id, project, "up" | "down" | "restart" | "pull")` run as operations and wait by default (their `log_tail` has Docker's output). They change the user's machine: only when asked. `service_action` removes a container (`remove`) too.
+- `compose_project(machine_id, project)` describes a Compose project's parts: each service's image, ports, what it waits for (`depends_on`), networks, volumes and mounted files, health check, and its containers' state. Read it before changing a project. The app draws the same as a picture (Services › Compose, a project).
+- Read a failing service's log first with `logs_read(machine_id, kind: "service", target: "<unit>")`; a Compose project's with `kind: "compose", target: "<project>"`.
+- The CLI equivalent is `muxen services <machine> [start|stop|restart|enable|disable <name> [--container]]`.
+
 ## Files
 
 - `list_files(machine_id, path)` lists a folder on any Linux or macOS machine, this computer included.

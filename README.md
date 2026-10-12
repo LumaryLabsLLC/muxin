@@ -70,6 +70,11 @@ muxen status
 - **Machines and runners:** install runners on a machine, and start, stop, restart, show logs for or remove each one. A machine that's off or out of reach says so in plain words (offline, Remote Login off, ssh key not accepted, Tailscale off on this Mac, …), with when it was last seen and what to do; Muxen picks it back up by itself when it returns.
 - **Adding machines (⌘N):** suggestions from your `~/.ssh/config`, your Tailscale network, and this network (machines advertising ssh over Bonjour, and Macs that would be addable once Remote Login is on).
 - **Agent sessions (⌘T):** a real terminal on any machine running Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell. Sessions are listed under their machine in the sidebar (a spinner while the agent works, a colored dot when it wants you), with its open desktop and one line for its runners, and keep running when you close the app. Terminal font size, line height and a blinking cursor are in Settings.
+- **Usage (⌃5):** what Claude Code and Codex used on all your machines today or over the last 7, 30 or 90 days, read from their own logs there: tokens and requests by day, model, machine and folder, and what it would cost at Anthropic's and OpenAI's API list prices. With a Claude or ChatGPT plan you don't pay per token; it's what the same use would cost through the API.
+- **Run (⌃6):** one command on several machines at once (`df -h /`, `brew upgrade`, `git -C ~/code/api pull`), each one's output side by side as it comes, and its exit status. It runs in your login shell from your home folder; right-click a machine › **Run a command…** to start with just that one.
+- **Open in your editor:** sessions, workspaces, GitHub checkouts and Compose projects have a button that lists the editors on this computer (Zed, Cursor, VS Code) and opens their folder in the one you pick, over the editor's own ssh support. Settings › General › Editor picks which comes first (and which `muxen edit` uses).
+- **What's running:** a machine's **Services › Processes** lists its busiest processes (CPU, memory, how long they've run, GPU memory on NVIDIA) and stops or kills one; its page shows its GPU (NVIDIA, AMD on Linux, Apple), how busy it is and its memory.
+- **Fleet warnings and Wake:** a machine's page and the Overview say when it wants a reboot (Linux updates) or has failed services. A machine that's asleep or off has a **Wake** button (Wake on LAN, sent from this computer and from your machines on its network) once Muxen has seen its network card.
 - **Copy files:** a two-pane dialog to copy files and folders from one machine to another (see [Files and the clipboard](#files-and-the-clipboard)); or drop files from the Finder onto a machine in the sidebar.
 - **Activity (⌘J):** one timeline of everything happening on your machines: operations started in the app (with live output) and every command agents ran in workspaces, filterable by kind or failures.
 - **Workspaces:** see what agents are doing on your machines (every command, its exit code and output), review a workspace's git changes, copy a shell command to step in, or destroy it.
@@ -80,7 +85,7 @@ muxen status
 
   The macOS themes also switch to the system fonts (SF Pro, and SF Mono when it's installed). The choice is saved in `config.toml` (`[ui]`).
 
-Keyboard: ⌘P goes to any machine, session or desktop by name, and ⇧⌘P (or ⌘P then `>`) runs any command, including **Theme: Choose…**, which previews each theme as you move through the list · ⌘1…⌘9 go to your machines · ⌃1…⌃4 overview, jobs, workspaces, GitHub (Alt on Linux and Windows) · ⌘J activity · ⌘R check machines · ⇧⌘R sync GitHub · ⌘N add machine · ⌘T new session · ⌘F or `/` search your machines and sessions · ⌘B sidebar · ⌘[ / ⌘] back / forward · ⌘, settings. Hold ⌘ to see them in the app, and change them in Settings › Keyboard. On Linux and Windows, use Ctrl instead of ⌘.
+Keyboard: ⌘P goes to any machine, session or desktop by name, and ⇧⌘P (or ⌘P then `>`) runs any command, including **Theme: Choose…**, which previews each theme as you move through the list · ⌘1…⌘9 go to your machines · ⌃1…⌃6 overview, jobs, workspaces, GitHub, usage, run (Alt on Linux and Windows) · ⌘J activity · ⌘R check machines · ⇧⌘R sync GitHub · ⌘N add machine · ⌘T new session · ⌘F or `/` search your machines and sessions · ⌘B sidebar · ⌘[ / ⌘] back / forward · ⌘, settings. Hold ⌘ to see them in the app, and change them in Settings › Keyboard. On Linux and Windows, use Ctrl instead of ⌘.
 
 ## Your settings: `config.toml`
 
@@ -166,6 +171,10 @@ The MCP server has these tools:
 | `add_machine`, `remove_machine`, `rename_machine` | Edit `config.toml`. Nothing on the machine changes. |
 | `connect_machine` | Disconnect from a machine (`connected: false`) or connect again. Its sessions keep running there. |
 | `machine_ports` | What's listening on a machine: ports, programs or containers, and web servers' page titles. |
+| `machine_processes`, `process_signal` | A machine's busiest processes and its GPUs; stop or kill one. |
+| `run_on_machines` | Runs one shell command on several machines at once, with each one's output and exit status. |
+| `wake_machine` | Wakes a machine that's asleep or off (Wake on LAN). |
+| `agent_usage` | What Claude Code and Codex used over the last N days: tokens, requests and cost at API prices, by model and machine. |
 | `install_runners` | Downloads, registers and starts runners on a machine. |
 | `runner_action` | Starts, stops, restarts or removes a runner, or reads its logs. |
 | `get_operation`, `list_operations` | Progress and output of long operations. |
@@ -181,6 +190,7 @@ The MCP server has these tools:
 | `docker_run`, `docker_pull`, `compose_action` | Run a container, pull an image, bring a Compose project up or down (or start, stop, restart one of its services). |
 | `compose_project` | A Compose project's parts: services, ports, what waits for what, networks, volumes, health. |
 | `session_list`, `session_start`, `session_read`, `session_send`, `session_rename`, `session_stop` | Agent sessions on the machines. |
+| `session_question`, `session_answer` | What a session's agent is asking (its options), and pick one. |
 | `github_inbox`, `github_repos`, `github_repo`, `github_item`, `local_checkouts`, `git_sync`, … | The user's GitHub, and git checkouts on the machines. |
 | `workspace_create`, `workspace_list`, `workspace_get` | Check out a machine as a work environment; see what exists. |
 | `workspace_exec` | Runs a command in a workspace (or starts it in the background). |
@@ -218,6 +228,12 @@ muxen remove-machine <id>
 muxen rename-machine <id> <new name>      # the id stays the same
 muxen ports beelink                       # what's listening there (web servers first)
 muxen forward beelink 3000                # its port 3000 at localhost:3000 here, until Ctrl-C
+muxen run --on beelink,mac-studio -- df -h /   # one command on several machines (--all: every one online)
+muxen ps beelink [-n 20]                  # its busiest processes and its GPUs
+muxen kill beelink 4242 [--force]         # stop a process (--force: SIGKILL)
+muxen wake beelink                        # Wake on LAN
+muxen usage [--days 30] [--machine beelink]   # what the agents used, and the cost at API prices
+muxen edit beelink:~/code/api [--editor zed] [--print]   # open a folder there in your editor
 muxen disconnect <id>                     # stop connecting to it (its sessions go on there)
 muxen connect <id>                        # connect again, and check it
 muxen install <machine-id> [--scope acme] [--count N | --name a --name b] [--label gpu] [--mode auto|service|background|docker] [--image IMAGE] [--docker-socket] [--no-wait]
@@ -321,13 +337,15 @@ Start an AI agent on one of your machines and come back to it whenever you like,
 - **A real terminal in the app.** Everything goes to the agent: Esc, Ctrl-C, Tab, arrows, Option/Shift+Enter for newlines. ⌘C copies a selection, ⌘V pastes, the wheel scrolls back. Nerd Font icons (Neovim's file icons, prompt glyphs) show with any terminal font: Muxen brings the symbols. Right-click a machine for a new terminal or agent session.
 - **Names you choose.** Right-click a machine or a session and pick **Rename…** (or ⇧⌘P › Rename on its page). A machine keeps its id, so its runners, sessions and favorites stay with it; `config.toml` gets `id = "<old id>"` when the new name would give a different one. A session's title is kept by the agent on its machine (`~/.muxen/titles.json`), so every Muxen sees it; an empty title goes back to the one it started with.
 - **Your environment.** The agent starts in your login shell, in the folder you pick, so nvm/fnm/asdf and the CLI's own login work as they do in your terminal. Muxen finds which agent CLIs each machine has: `claude`, `codex`, `opencode`, `gemini`, `amp`.
-- **Agents can drive agents.** `session_start`, `session_read` (the screen as text), `session_send` (type into it) and `session_stop` are MCP tools and CLI commands too.
+- **Agents can drive agents.** `session_start`, `session_read` (the screen as text), `session_question` and `session_answer` (what it asks, and an answer), `session_send` (type into it) and `session_stop` are MCP tools and CLI commands too.
 
 ```sh
 muxen session ls                                   # every session, and which agents each machine has
 muxen session start beelink claude --cwd ~/code/api --prompt "fix the failing test"
 muxen session read beelink/claude-3f9a             # what's on its screen
 muxen session send beelink/claude-3f9a "yes"       # type, then Enter (--no-enter to skip it)
+muxen session question beelink/claude-3f9a         # what it's asking, and the options' keys
+muxen session answer beelink/claude-3f9a 1         # pick one
 muxen session attach beelink/claude-3f9a           # open it in this terminal; detach with Ctrl-] then d
 muxen session restart beelink/claude-3f9a
 muxen session rename beelink/claude-3f9a "API server"   # "" goes back to the original title
@@ -418,6 +436,8 @@ A machine's services, and its Docker containers: **Services** on its page (or ri
   - **Images:** pull one, run it, remove it, or remove every unused one.
   - Pulls, runs and Compose up/down run as operations: their output shows as they go, and in Activity.
 - Stop, Restart, Remove and Down ask first, and say so when stopping one (ssh, Tailscale, the network) could cut Muxen off from the machine. The log button opens its log in **Logs**.
+
+- **Processes:** the machine's busiest few hundred processes, with CPU (percent of one core), memory, how long each has run and who runs it; **Stop** sends SIGTERM, **Kill** SIGKILL (both ask first). Another user's takes root, as for system services. NVIDIA, AMD (Linux) and Apple GPUs show above the list, with how busy and how much memory.
 
 ```sh
 muxen services beelink                             # services and containers

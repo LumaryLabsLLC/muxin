@@ -194,6 +194,8 @@ pub mod tiles {
     pub const JOBS: (u32, u32) = (0xffbf55, 0xff7a3d);
     pub const WORKSPACES: (u32, u32) = (0x4be3b9, 0x14a083);
     pub const ACTIVITY: (u32, u32) = (0xff7aa8, 0xe0457b);
+    pub const USAGE: (u32, u32) = (0x6ee7a0, 0x1c9e55);
+    pub const RUN: (u32, u32) = (0xffd84d, 0xe8a10c);
     pub const MACOS: (u32, u32) = (0x6cb6ff, 0x2f6fe4);
     pub const LINUX: (u32, u32) = (0xffb35c, 0xf0703f);
     pub const WINDOWS: (u32, u32) = (0x5ad2f4, 0x1f8fd6);

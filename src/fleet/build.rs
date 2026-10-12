@@ -619,6 +619,19 @@ fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Opt
             ));
         }
     }
+    if p.reboot_required {
+        out.push(diag("warning", "reboot-required", "Updates are waiting for a reboot.".into(), Some("sudo reboot  # its sessions end; Muxen reconnects when it's back".into()), None));
+    }
+    if !p.failed_units.is_empty() {
+        let n = p.failed_units.len();
+        out.push(diag(
+            "warning",
+            "failed-services",
+            format!("{} service{} failed: {}.", n, if n == 1 { "" } else { "s" }, p.failed_units.join(", ")),
+            Some("Machine › Services shows them, with their logs.".into()),
+            None,
+        ));
+    }
     if let Some(err) = &p.docker_error {
         out.push(diag(
             "info",
@@ -886,6 +899,24 @@ fn attention(
                 level: "warning".into(),
                 title: format!("{} is low on disk", m.name),
                 detail: d.message.clone(),
+                action: action("View machine", "machine", Some(m.id.clone())),
+            });
+        }
+        if let Some(d) = m.diagnostics.iter().find(|d| d.code == "failed-services") {
+            out.push(Attention {
+                id: format!("failed-services-{}", m.id),
+                level: "warning".into(),
+                title: format!("Services failed on {}", m.name),
+                detail: d.message.clone(),
+                action: action("View machine", "machine", Some(m.id.clone())),
+            });
+        }
+        if m.diagnostics.iter().any(|d| d.code == "reboot-required") {
+            out.push(Attention {
+                id: format!("reboot-required-{}", m.id),
+                level: "info".into(),
+                title: format!("{} wants a reboot", m.name),
+                detail: "Updates are waiting for a restart to finish.".into(),
                 action: action("View machine", "machine", Some(m.id.clone())),
             });
         }

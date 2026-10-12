@@ -25,6 +25,8 @@ pub enum MenuTarget {
     Workspace(String),
     /// One of a machine's monitors.
     Display { machine: String, display: String },
+    /// The editors to open a machine's folder in.
+    Editors { machine: String, path: String },
 }
 
 pub struct ContextMenu {
@@ -44,6 +46,12 @@ enum Action {
     Check(String),
     /// Connect to (true) or disconnect from (false) a machine.
     Connect(String, bool),
+    /// A machine's folder, in an editor (by id).
+    OpenInEditor(String, String, &'static str),
+    /// Wake on LAN.
+    Wake(String),
+    /// The Run page, with just this machine picked.
+    RunOn(String),
     InstallRunner(String),
     Remove(String),
     Runner(String, RunnerAction),
@@ -87,12 +95,37 @@ enum Item {
 enum Glyph {
     Icon(&'static str),
     Agent(&'static str),
+    /// An app's own icon (a PNG file), else this glyph.
+    App(Option<std::path::PathBuf>, &'static str),
     /// The one picked (a plain check).
     Selected,
     None,
 }
 
+/// One item per editor here ("Zed", or "Open in Zed" when `long`), each with its app's icon.
+fn editor_items(chosen: &str, machine: &str, path: &str, long: bool) -> Vec<Item> {
+    crate::fleet::editor::by_preference(chosen)
+        .into_iter()
+        .map(|e| Item::Action {
+            label: if long { format!("Open in {}", e.name) } else { e.name.to_string() },
+            glyph: Glyph::App(crate::fleet::editor::icon(e.id), "code"),
+            action: Action::OpenInEditor(machine.to_string(), path.to_string(), e.id),
+            danger: false,
+        })
+        .collect()
+}
+
 impl Root {
+    /// The editors to open a machine's folder in, as a menu where the click was
+    /// (or straight in the only one there is).
+    pub(super) fn pick_editor(&mut self, machine: &str, path: &str, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let editors = crate::fleet::editor::installed();
+        match editors.as_slice() {
+            [only] => self.open_in_editor(machine, path, only.id, cx),
+            _ => self.open_menu(MenuTarget::Editors { machine: machine.to_string(), path: path.to_string() }, position, cx),
+        }
+    }
+
     pub(super) fn open_menu(&mut self, target: MenuTarget, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.context_menu = Some(ContextMenu { target, position });
         cx.notify();
@@ -107,6 +140,11 @@ impl Root {
                 let Some(m) = s.machines.iter().find(|m| &m.id == id) else { return Vec::new() };
                 let mut items = Vec::new();
                 if !m.host.is_empty() {
+                    // Asleep: wake it first.
+                    if m.status == "offline" && super::format::is_just_offline(m) && self.engine.can_wake(&m.id) {
+                        items.push(act("Wake", "power", Action::Wake(id.clone())));
+                        items.push(Item::Separator);
+                    }
                     // Disconnected on purpose: connecting comes first.
                     if m.is_disconnected() {
                         items.push(act("Connect", "plug", Action::Connect(id.clone(), true)));
@@ -135,6 +173,7 @@ impl Root {
                     if !m.platform.starts_with("windows") {
                         items.push(needs_up(act("Copy files…", "folder", Action::CopyFiles(id.clone()))));
                     }
+                    items.push(needs_up(act("Run a command…", "zap", Action::RunOn(id.clone()))));
                     items.push(Item::Separator);
                     if !m.is_disconnected() {
                         items.push(act("Refresh", "refresh-cw", Action::Check(id.clone())));
@@ -231,11 +270,22 @@ impl Root {
                 if x.persistent {
                     items.push(act("Copy attach command", "copy", Action::CopyAttach(id.clone())));
                 }
+                if !x.cwd.is_empty() {
+                    items.extend(editor_items(&self.engine.settings().editor, &x.machine_id, &x.cwd, true));
+                }
                 if x.status == "exited" {
                     items.push(act("Restart", "rotate-ccw", Action::Restart(id.clone())));
                 }
                 items.push(Item::Separator);
                 items.push(Item::Action { label: "End session…".into(), glyph: Glyph::Icon("power"), action: Action::End(id.clone()), danger: true });
+                items
+            }
+            MenuTarget::Editors { machine, path } => {
+                let mut items = vec![Item::Note("Open it in".into())];
+                items.extend(editor_items(&self.engine.settings().editor, machine, path, false));
+                if items.len() == 1 {
+                    items.push(Item::Note("No editor here: Muxen opens folders in Zed, Cursor or VS Code.".into()));
+                }
                 items
             }
             MenuTarget::Display { machine, display } => {
@@ -359,6 +409,12 @@ impl Root {
             Action::CopyFiles(machine) => self.show_copy_files(Some(machine), None, window, cx),
             Action::Check(machine) => self.engine.trigger_check(Some(machine)),
             Action::Connect(machine, on) => self.set_machine_connected(&machine, on, cx),
+            Action::OpenInEditor(machine, path, editor) => self.open_in_editor(&machine, &path, editor, cx),
+            Action::Wake(machine) => self.wake_machine(&machine, cx),
+            Action::RunOn(machine) => {
+                self.run_picked = Some([machine].into());
+                self.navigate(Route::Run, window, cx);
+            }
             Action::Runner(id, action) => self.runner_action(&id, action, cx),
             Action::FavoriteMachine(id, favorite) => self.set_favorite_machine(&id, favorite, cx),
             Action::AddDisplay(id) => self.show_add_display(id, window, cx),
@@ -562,6 +618,8 @@ fn menu_glyph(theme: &Theme, glyph: Glyph) -> AnyElement {
             let (name, (from, to)) = kit::agent_look(agent);
             kit::tile(name, from, to, 18.).into_any_element()
         }
+        Glyph::App(Some(png), _) => gpui::img(png.clone()).size(px(18.)).flex_none().into_any_element(),
+        Glyph::App(None, name) => kit::color_tile(name, 18.).into_any_element(),
         Glyph::Selected => icon("check", 14., theme.accent).into_any_element(),
         Glyph::None => div().into_any_element(),
     }

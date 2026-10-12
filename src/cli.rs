@@ -826,3 +826,55 @@ pub fn ports(list: &[crate::fleet::ports::ListeningPort]) -> String {
     }
     out
 }
+
+/// What the agents used, by model, and the cost at list prices.
+pub fn usage(u: &crate::api::UsageOut) -> String {
+    let short = |n: u64| match n {
+        n if n >= 1_000_000_000 => format!("{:.1}B", n as f64 / 1e9),
+        n if n >= 1_000_000 => format!("{:.1}M", n as f64 / 1e6),
+        n if n >= 1_000 => format!("{:.0}K", n as f64 / 1e3),
+        n => n.to_string(),
+    };
+    if u.models.is_empty() {
+        return format!("No agent use in the last {} days.\n", u.days);
+    }
+    let mut out = format!("Last {} days: ${:.2} at API prices ({})\n\n", u.days, u.total_cost, u.prices_as_of);
+    out.push_str(&format!("  {:<24} {:<12} {:>9} {:>9} {:>11} {:>10}\n", "model", "agent", "requests", "output", "all tokens", "cost"));
+    for m in &u.models {
+        let agent = match m.tool.as_str() {
+            "claude" => "Claude Code",
+            "codex" => "Codex",
+            t => t,
+        };
+        let cost = m.cost.map(|c| format!("${c:.2}")).unwrap_or_else(|| "no price".into());
+        out.push_str(&format!("  {:<24} {:<12} {:>9} {:>9} {:>11} {:>10}\n", m.model, agent, m.tokens.requests, short(m.tokens.output), short(m.tokens.total()), cost));
+    }
+    for e in &u.errors {
+        out.push_str(&format!("\n  {}: {}\n", e["machine_id"].as_str().unwrap_or(""), e["error"].as_str().unwrap_or("")));
+    }
+    out
+}
+
+/// A machine's GPUs, then its busiest processes.
+pub fn processes(l: &crate::fleet::procs::ProcessList, n: usize) -> String {
+    let mb = |b: u64| if b >= 1 << 30 { format!("{:.1} GB", b as f64 / (1u64 << 30) as f64) } else { format!("{} MB", b >> 20) };
+    let mut out = String::new();
+    for g in &l.gpus {
+        let mem = match (g.memory_used, g.memory_total) {
+            (Some(u), Some(t)) => format!("{} of {}", mb(u), mb(t)),
+            (Some(u), None) => format!("{} in use", mb(u)),
+            _ => String::new(),
+        };
+        out.push_str(&format!("GPU  {}  {:.0}% busy  {mem}\n", g.name, g.busy.unwrap_or(0.)));
+    }
+    if !l.gpus.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(&format!("  {:>7} {:<10} {:>7} {:>9}  {}\n", "pid", "user", "cpu", "memory", "command"));
+    for p in l.processes.iter().take(n) {
+        let cmd: String = p.command.chars().take(80).collect();
+        out.push_str(&format!("  {:>7} {:<10} {:>6.1}% {:>9}  {}\n", p.pid, p.user.chars().take(10).collect::<String>(), p.cpu, mb(p.memory), cmd));
+    }
+    out.push_str(&format!("\n{} processes, {} cores.\n", l.total, l.cores));
+    out
+}

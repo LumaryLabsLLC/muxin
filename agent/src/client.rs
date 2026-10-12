@@ -105,6 +105,11 @@ pub fn handle(req: &Value) -> Value {
         "compose_describe" => crate::services::compose_describe(&req),
         "ports" => crate::ports::list(),
         "listening" => crate::ports::listening(),
+        "usage" => crate::usage::usage(&req),
+        "processes" => crate::procs::list(),
+        "gpus" => json!({ "ok": true, "gpus": crate::procs::gpus() }),
+        "process_signal" => crate::procs::signal(&req),
+        "wake" => crate::wake::wake(&req),
         _ => request(&req, false),
     }
 }

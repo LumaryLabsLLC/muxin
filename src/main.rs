@@ -104,6 +104,18 @@ enum Command {
     Services(ServicesArgs),
     /// What's listening on a machine (its servers and ports)
     Ports(MachineArgs),
+    /// What the agents (Claude Code, Codex) used, and what it'd cost at API prices
+    Usage(UsageArgs),
+    /// Open a machine's folder in your editor (Zed, Cursor or VS Code) over ssh
+    Edit(OpenFolderArgs),
+    /// A machine's busiest processes and its GPUs
+    Ps(PsArgs),
+    /// Stop a process on a machine (--force kills it)
+    Kill(KillArgs),
+    /// Run a command on several machines at once (--on a,b or --all)
+    Run(FleetRunArgs),
+    /// Wake a machine that's asleep or off (Wake on LAN)
+    Wake(MachineArgs),
     /// Open a machine's port on this computer (localhost) until Ctrl-C
     Forward(ForwardArgs),
     /// Cloud machines: create DigitalOcean droplets to work in, power them, destroy them
@@ -495,6 +507,72 @@ enum DesktopCommand {
 }
 
 #[derive(Args)]
+struct PsArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// How many to show
+    #[arg(short = 'n', long, default_value_t = 20)]
+    lines: usize,
+}
+
+#[derive(Args)]
+struct FleetRunArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine ids or names, comma-separated
+    #[arg(long, value_delimiter = ',', required_unless_present = "all")]
+    on: Vec<String>,
+    /// Every machine that's online
+    #[arg(long, conflicts_with = "on")]
+    all: bool,
+    /// Seconds each may run
+    #[arg(long, default_value_t = 600)]
+    timeout: u64,
+    /// The command (quote it, or put it after --)
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    command: Vec<String>,
+}
+
+#[derive(Args)]
+struct KillArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    pid: u32,
+    /// SIGKILL instead of SIGTERM
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Args)]
+struct OpenFolderArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// <machine>:<folder>, e.g. beelink:~/code/api
+    target: String,
+    /// zed, cursor or vscode (default: Settings › General › Editor, or the first installed)
+    #[arg(long, default_value = "")]
+    editor: String,
+    /// Print the command instead of running it
+    #[arg(long)]
+    print: bool,
+}
+
+#[derive(Args)]
+struct UsageArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// The last N days
+    #[arg(long, default_value_t = 7)]
+    days: u32,
+    /// Just this machine
+    machine: Option<String>,
+}
+
+#[derive(Args)]
 struct ForwardArgs {
     #[command(flatten)]
     agent: AgentArgs,
@@ -750,6 +828,10 @@ enum SessionCommand {
     Read(SessionReadArgs),
     /// Type text into a session (and press Enter)
     Send(SessionSendArgs),
+    /// What a session's agent is waiting for: a choice and its options, or what it said last
+    Question(SessionIdArgs),
+    /// Pick one of a waiting session's options (its key from `question`)
+    Answer(SessionAnswerArgs),
     /// Open a session in this terminal (detach with the window's close, or kill the ssh)
     Attach(SessionIdArgs),
     /// Run a session's agent again
@@ -795,6 +877,16 @@ struct SessionIdArgs {
     agent: AgentArgs,
     /// Session id (<machine-id>/<name>) or unique name
     session_id: String,
+}
+
+#[derive(Args)]
+struct SessionAnswerArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Session id (<machine-id>/<name>) or unique name
+    session_id: String,
+    /// The option's key, as `muxen session question` shows it (1, 2, … or #0, #1, …)
+    choice: String,
 }
 
 #[derive(Args)]
@@ -1238,6 +1330,36 @@ fn main() -> ExitCode {
         Some(Command::Desktop(cmd)) => desktop(cmd, &runtime),
         Some(Command::Logs(a)) => logs(a, &runtime),
         Some(Command::Services(a)) => services(a, &runtime),
+        Some(Command::Ps(a)) => {
+            let (req, n) = (api::ProcessesRequest { machine_id: a.machine }, a.lines);
+            run(&runtime, &a.agent, async move |e| api::machine_processes(&e, req).await, move |l| cli::processes(l, n))
+        }
+        Some(Command::Kill(a)) => {
+            let req = api::ProcessSignalRequest { machine_id: a.machine, pid: a.pid, signal: Some(if a.force { "kill".into() } else { "stop".into() }) };
+            run(&runtime, &a.agent, async move |e| api::process_signal(&e, req).await, |v| format!("{} {}.\n", if v["done"] == "killed" { "Killed" } else { "Stopped" }, v["pid"]))
+        }
+        Some(Command::Run(a)) => fleet_run(a, &runtime),
+        Some(Command::Wake(a)) => {
+            let req = api::WakeRequest { machine_id: a.machine_id };
+            run(&runtime, &a.agent, async move |e| api::wake_machine(&e, req).await, |v| format!("Sent the wake signal from {}. Muxen checks it again in 20 and 40 seconds.\n", v["sent_from"].as_str().unwrap_or("here")))
+        }
+        Some(Command::Edit(a)) => {
+            let (machine, path) = a.target.split_once(':').map(|(m, p)| (m.to_string(), p.to_string())).unwrap_or((a.target.clone(), "~".into()));
+            let (editor, print) = (a.editor.clone(), a.print);
+            run(
+                &runtime,
+                &a.agent,
+                async move |e| {
+                    let m = api::find_machine(&e.current(), &machine)?.clone();
+                    e.editor_command(&m.id, &path, &editor, !print).await.map_err(api::ApiError::invalid)
+                },
+                move |(name, line)| if print { format!("{}\n", line.join(" ")) } else { format!("Opening it in {name}.\n") },
+            )
+        }
+        Some(Command::Usage(a)) => {
+            let req = api::UsageRequest { days: Some(a.days), machine_id: a.machine };
+            run(&runtime, &a.agent, async move |e| api::usage(&e, req).await, |u| cli::usage(u))
+        }
         Some(Command::Ports(a)) => {
             let req = api::PortsRequest { machine_id: a.machine_id };
             run(&runtime, &a.agent, async move |e| api::machine_ports(&e, req).await, |p| cli::ports(p))
@@ -1521,6 +1643,44 @@ fn workspace(cmd: WorkspaceCommand, runtime: &tokio::runtime::Runtime) -> u8 {
 
 /// `workspace exec`: passes the command's output through and exits with its exit code
 /// (124 when it timed out, like `timeout(1)`), so it composes in scripts.
+/// `muxen run`: each machine's output under its name; exits 1 when any failed.
+fn fleet_run(a: FleetRunArgs, runtime: &tokio::runtime::Runtime) -> u8 {
+    let _guard = runtime.enter();
+    let engine = Engine::new(a.agent.common.paths(), a.agent.demo);
+    let machine_ids = if a.all {
+        runtime.block_on(api::status(&engine, api::StatusRequest::default(), CLI)).ok();
+        engine.current().machines.iter().filter(|m| m.status == "online").map(|m| m.id.clone()).collect()
+    } else {
+        a.on.clone()
+    };
+    let req = api::RunRequest { machine_ids, command: shell_join(&a.command), timeout_secs: Some(a.timeout), wait: Some(true) };
+    match runtime.block_on(api::run_on_machines(&engine, req)) {
+        Ok(out) => {
+            if a.agent.json {
+                println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+            } else {
+                let snap = engine.current();
+                let ops = &snap.operations;
+                for r in &out {
+                    let how = match (r.exit_code, &r.error) {
+                        (Some(0), _) => "ok".to_string(),
+                        (Some(c), _) => format!("exit {c}"),
+                        (None, Some(e)) => e.clone(),
+                        (None, None) => "running".into(),
+                    };
+                    println!("── {} ({how})", r.machine_id);
+                    let log = r.operation.as_ref().and_then(|o| ops.iter().find(|x| x.id == o.id)).map(|o| o.log.clone()).unwrap_or_default();
+                    for line in log.iter().filter(|l| !l.starts_with("error: ")) {
+                        println!("{line}");
+                    }
+                }
+            }
+            u8::from(out.iter().any(|r| r.exit_code != Some(0)))
+        }
+        Err(e) => report_error(&a.agent, &e),
+    }
+}
+
 fn workspace_exec(a: WsExecArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     let mut env = std::collections::BTreeMap::new();
     for pair in &a.env {
@@ -1871,6 +2031,24 @@ fn session(cmd: SessionCommand, runtime: &tokio::runtime::Runtime) -> u8 {
         SessionCommand::Read(a) => {
             let req = api::SessionReadRequest { session_id: a.session_id, lines: Some(a.lines) };
             run(runtime, &a.agent, async move |e| api::session_read(&e, req).await, |r| format!("{}\n", r.text))
+        }
+        SessionCommand::Question(a) => {
+            let req = api::SessionRequest { session_id: a.session_id };
+            run(runtime, &a.agent, async move |e| api::session_question(&e, req).await, |q| {
+                let mut out: String = q.text.iter().map(|l| format!("{l}\n")).collect();
+                if q.options.is_empty() {
+                    out.push_str("(waiting for a message: muxen session send)\n");
+                }
+                for o in &q.options {
+                    let mark = if q.selected.as_deref() == Some(o.key.as_str()) { "›" } else { " " };
+                    out.push_str(&format!("{mark} {:<3} {}\n", o.key, o.label));
+                }
+                out
+            })
+        }
+        SessionCommand::Answer(a) => {
+            let req = api::SessionAnswerRequest { session_id: a.session_id, choice: a.choice };
+            run(runtime, &a.agent, async move |e| api::session_answer(&e, req).await, |d| format!("Answered {}.\n", d.session_id))
         }
         SessionCommand::Send(a) => {
             let req = api::SessionSendRequest { session_id: a.session_id, text: a.text, enter: !a.no_enter };

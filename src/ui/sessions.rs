@@ -540,6 +540,15 @@ impl Root {
                         })),
                 )
             })
+            // Its folder in your editor.
+            .when(offline.is_none() && !info.cwd.is_empty(), |d| {
+                let (mid, cwd) = (info.machine_id.clone(), info.cwd.clone());
+                d.child(
+                    Button::icon_only("session-editor", "code")
+                        .tooltip(format!("Open {} in an editor", info.cwd))
+                        .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.pick_editor(&mid, &cwd, e.position(), cx))),
+                )
+            })
             // Another shell beside it or below it, like splitting a terminal.
             .when(info.persistent && offline.is_none() && !self.engine.is_demo(), |d| {
                 d.child(

@@ -219,6 +219,13 @@ impl Root {
                             .disabled(w.status != "ready")
                             .on_click(cx.listener(move |this, _, window, cx| this.new_workspace_session(&ws, window, cx)))
                     })
+                    .child({
+                        let (mid, path) = (w.machine_id.clone(), w.path.clone());
+                        Button::new("ws-editor", "Open in editor")
+                            .icon("code")
+                            .disabled(w.status != "ready")
+                            .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.pick_editor(&mid, &path, e.position(), cx)))
+                    })
                     .child(
                         Button::new("ws-copy-shell", "Copy shell command")
                             .icon("terminal")

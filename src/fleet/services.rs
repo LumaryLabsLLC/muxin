@@ -337,7 +337,12 @@ impl Engine {
         }
         super::sessions::agent::ensure(&spec, probe.as_ref()).await?;
         let password = password_for(&spec.id);
-        let request = json!({ "op": "service_action", "kind": service.kind, "target": service.target, "user": service.user, "action": action, "password": password.as_deref().unwrap_or("") });
+        // A process: stopped (TERM) or killed (KILL).
+        let request = if service.kind == "process" {
+            json!({ "op": "process_signal", "pid": service.target.parse::<u64>().unwrap_or(0), "signal": if action == "kill" { "KILL" } else { "TERM" }, "password": password.as_deref().unwrap_or("") })
+        } else {
+            json!({ "op": "service_action", "kind": service.kind, "target": service.target, "user": service.user, "action": action, "password": password.as_deref().unwrap_or("") })
+        };
         let reply = super::sessions::agent::ctl_reply(&spec, &request).await?;
         if reply["ok"].as_bool() != Some(true) {
             return Err(refusal(&spec.id, &reply, "The machine couldn't do that."));

@@ -6,7 +6,7 @@ use gpui::{App, KeyBinding, Keystroke};
 
 use super::root::{
     AddMachine, CheckNow, CommandPalette, FocusFilter, GoBack, GoForward, GoToMachine1, GoToMachine2, GoToMachine3, GoToMachine4, GoToMachine5, GoToMachine6,
-    GoToMachine7, GoToMachine8, GoToMachine9, NewSession, NextPane, OpenSettings, PreviousPane, ShowGithub, ShowJobs, ShowOverview, ShowWorkspaces,
+    GoToMachine7, GoToMachine8, GoToMachine9, NewSession, NextPane, OpenSettings, PreviousPane, ShowGithub, ShowJobs, ShowRun, ShowUsage, ShowOverview, ShowWorkspaces,
     SplitDown, SplitRight, SyncGitHub, QuickOpen, ToggleActivity, ToggleSidebar,
 };
 use super::theme::Appearance;
@@ -40,6 +40,8 @@ pub const ALL: &[Shortcut] = &[
     shortcut!("jobs", "Jobs", page("ctrl-2", "alt-2"), ShowJobs),
     shortcut!("workspaces", "Workspaces", page("ctrl-3", "alt-3"), ShowWorkspaces),
     shortcut!("github", "GitHub", page("ctrl-4", "alt-4"), ShowGithub),
+    shortcut!("usage", "Usage", page("ctrl-5", "alt-5"), ShowUsage),
+    shortcut!("run", "Run on machines", page("ctrl-6", "alt-6"), ShowRun),
     shortcut!("activity", "Activity", "secondary-j", ToggleActivity),
     shortcut!("settings", "Settings", "secondary-,", OpenSettings),
     shortcut!("check", "Refresh all machines", "secondary-r", CheckNow),

@@ -886,6 +886,56 @@ impl SettingsPage {
             )
     }
 
+    /// The editor machines' folders open in.
+    fn editor_section(&self, theme: &Theme) -> impl IntoElement {
+        let chosen = self.engine.settings().editor;
+        let installed = crate::fleet::editor::installed();
+        let mut options: Vec<(String, String)> = vec![(String::new(), "First installed".into())];
+        options.extend(installed.iter().map(|e| (e.id.to_string(), e.name.to_string())));
+        let detail = if installed.is_empty() {
+            "No editor found: Muxen opens folders in Zed, Cursor or VS Code (with Remote - SSH).".to_string()
+        } else {
+            format!("Open in editor (on a session, workspace, checkout or Compose project) lists the editors found here ({}) and opens the machine’s folder over ssh. The one picked here comes first, and `muxen edit` uses it.", installed.iter().map(|e| e.name).collect::<Vec<_>>().join(", "))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(section_title(theme, "Editor", None))
+            .child(
+                card(theme)
+                    .px(px(14.))
+                    .py(px(12.))
+                    .gap(px(8.))
+                    .child(div().flex().flex_wrap().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).w_full().max_w(px(520.)).children(options.into_iter().map(|(id, name)| {
+                        let on = chosen == id;
+                        let engine = self.engine.clone();
+                        div()
+                            .id(SharedString::from(format!("editor-{}", if id.is_empty() { "auto" } else { id.as_str() })))
+                            .px(px(10.))
+                            .h(px(24.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(5.))
+                            .cursor_pointer()
+                            .text_size(px(12.))
+                            .text_color(if on { theme.text } else { theme.text_placeholder })
+                            .when(on, |d| d.bg(theme.element_selected))
+                            .when(!on, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+                            .gap(px(6.))
+                            .children(crate::fleet::editor::icon(&id).map(|png| gpui::img(png).size(px(14.)).flex_none()))
+                            .child(name)
+                            .on_click(move |_, _, cx| {
+                                let mut s = engine.settings();
+                                s.editor = id.clone();
+                                let _ = engine.update_settings(s);
+                                cx.refresh_windows();
+                            })
+                    })))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(detail)),
+            )
+    }
+
     fn inventory_section(&self, theme: &Theme) -> impl IntoElement {
         let path = self.engine.paths().inventory.clone();
         let reveal = path.clone();
@@ -951,6 +1001,7 @@ impl Render for SettingsPage {
             SettingsTab::General => body
                 .child(self.shell_section(&theme, cx))
                 .child(self.clipboard_section(&theme))
+                .child(self.editor_section(&theme))
                 .children(self.tailscale_section(&theme))
                 .child(self.checks_section(&theme, false, cx))
                 .child(self.inventory_section(&theme)),

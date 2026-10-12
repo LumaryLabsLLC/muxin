@@ -61,6 +61,20 @@ pub struct ProbeResult {
     pub sudo: Option<String>,
     /// The last time a check reached the machine (this one, when it did).
     pub last_seen_at: Option<DateTime<Utc>>,
+    /// The network card it's reached by: its address (to wake the machine
+    /// with), and its IPv4 address and broadcast. Kept while it's offline.
+    #[serde(default)]
+    pub mac: Option<String>,
+    #[serde(default)]
+    pub lan_ip: Option<String>,
+    #[serde(default)]
+    pub lan_broadcast: Option<String>,
+    /// Linux: updates want a reboot (/var/run/reboot-required).
+    #[serde(default)]
+    pub reboot_required: bool,
+    /// Linux: systemd services that failed (the first few).
+    #[serde(default)]
+    pub failed_units: Vec<String>,
 }
 
 impl ProbeResult {
@@ -79,6 +93,10 @@ impl ProbeResult {
             self.arch = self.arch.take().or_else(|| p.arch.clone());
             self.os_version = self.os_version.take().or_else(|| p.os_version.clone());
             self.form_factor = self.form_factor.take().or_else(|| p.form_factor.clone());
+            // How to wake it, from when it was on.
+            self.mac = self.mac.take().or_else(|| p.mac.clone());
+            self.lan_ip = self.lan_ip.take().or_else(|| p.lan_ip.clone());
+            self.lan_broadcast = self.lan_broadcast.take().or_else(|| p.lan_broadcast.clone());
             if !self.ok {
                 self.desktop = self.desktop.or(p.desktop);
             }
@@ -388,6 +406,14 @@ pub fn parse(out: &str) -> ProbeResult {
             "docker" => r.docker = text(),
             "docker_error" => r.docker_error = text(),
             "sudo" => r.sudo = text(),
+            "mac" => r.mac = text().filter(|m| m.len() == 17 && m != "00:00:00:00:00:00"),
+            "lan" => {
+                let mut parts = value.split_whitespace();
+                r.lan_ip = parts.next().map(|a| a.split('/').next().unwrap_or(a).to_string());
+                r.lan_broadcast = parts.next().map(str::to_string);
+            }
+            "reboot_required" => r.reboot_required = value == "yes",
+            "failed_units" => r.failed_units = value.split_whitespace().map(str::to_string).collect(),
             k if k.starts_with('c') && k.contains('.') => {
                 let (idx, field) = k[1..].split_once('.').unwrap();
                 let Ok(idx) = idx.parse::<usize>() else { continue };

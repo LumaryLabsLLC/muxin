@@ -244,6 +244,10 @@ impl World {
                 arch: Some(hw.arch.into()),
                 os_version: Some(hw.os_version.into()),
                 last_seen_at: Some(Utc::now() - chrono::Duration::minutes(47)),
+                // From when it was on: how to wake it.
+                mac: Some("3c:22:fb:9a:41:07".into()),
+                lan_ip: Some("192.168.1.42".into()),
+                lan_broadcast: Some("192.168.1.255".into()),
                 ..Default::default()
             };
         }
@@ -330,6 +334,12 @@ impl World {
             docker_error: None,
             sudo: hw.sudo.map(String::from),
             last_seen_at: Some(now),
+            // A network card each (Harbor, asleep, can be woken), and a reboot waiting on Pebble.
+            mac: Some(format!("3c:22:fb:{:02x}:{:02x}:{:02x}", hw.id.len() * 7, hw.cores, hw.disk_total_gb % 256)),
+            lan_ip: Some(format!("192.168.1.{}", 10 + hw.id.len())),
+            lan_broadcast: Some("192.168.1.255".into()),
+            reboot_required: hw.id == "pebble",
+            failed_units: Vec::new(),
         }
     }
 
@@ -774,7 +784,7 @@ impl World {
 pub fn demo_screen_text(name: &str) -> String {
     match name.split('-').next().unwrap_or("") {
         "claude" => "> Fix the flaky checkout test\n\n⏺ Reading e2e/checkout.spec.ts\n⏺ The discount is applied after tax; moving it before.\n⏺ Running npm test -- e2e/checkout.spec.ts\n  ✓ 12 passed\n\n✻ Thinking…".into(),
-        "codex" => "› Add a dark mode toggle to Settings\n\n• Updated SettingsView.swift (+42 -3)\n• Build succeeded\n\n› ".into(),
+        "codex" => "› Add a dark mode toggle to Settings\n\n• Updated SettingsView.swift (+42 -3)\n• Build succeeded\n\nWould you like to run the following command?\n\n  $ xcodebuild -scheme App -destination 'platform=iOS Simulator,name=iPhone 17' test\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for this command (a)\n  3. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n".into(),
         _ => "$ ".into(),
     }
 }

@@ -21,6 +21,7 @@ use crate::fleet::desktop::AddDisplayError;
 use crate::fleet::logs::LogSource;
 use super::compose::{self as picture, NodeAction};
 use super::logs::LogsView;
+use crate::fleet::procs::{Gpu, Process, ProcessList};
 use crate::fleet::services::{ComposeGraph, ComposeProject, DockerRun, Image, Service, ServiceList};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -29,6 +30,7 @@ enum Tab {
     Containers,
     Compose,
     Images,
+    Processes,
 }
 
 /// How a Compose project is shown.
@@ -49,6 +51,8 @@ enum Sort {
 
 /// What the page asks the rest of the app to do.
 pub enum ServicesEvent {
+    /// Open a folder in an editor: the folder, and where the click was (for the menu of editors).
+    Editor(String, gpui::Point<gpui::Pixels>),
     /// One of the machine's ports, opened in the browser here (localhost).
     Port(u16),
     /// Show this log in the machine's log viewer.
@@ -99,6 +103,8 @@ pub struct ServicesView {
     project_mode: ProjectMode,
     /// The open project's log (its Logs view), while it's open.
     project_logs: Option<Entity<LogsView>>,
+    /// The Processes tab: the machine's processes and GPUs, as last read.
+    procs: Option<Result<ProcessList, String>>,
     scroll: UniformListScrollHandle,
     /// The list's width, measured as it's drawn: GPUI only cuts off text
     /// (with …) when told its width, so the rows work it out from this.
@@ -190,6 +196,7 @@ impl ServicesView {
             graph: None,
             project_mode: ProjectMode::Picture,
             project_logs: None,
+            procs: None,
             scroll: UniformListScrollHandle::new(),
             width: Rc::new(Cell::new(0.)),
             focus: cx.focus_handle(),
@@ -239,8 +246,12 @@ impl ServicesView {
             "containers" => Tab::Containers,
             "compose" => Tab::Compose,
             "images" => Tab::Images,
+            "processes" => Tab::Processes,
             _ => Tab::Services,
         };
+        if self.tab == Tab::Processes {
+            self.load_procs(cx);
+        }
         cx.notify();
     }
 
@@ -248,6 +259,9 @@ impl ServicesView {
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.project.is_some() {
             self.fetch_graph(cx);
+        }
+        if self.tab == Tab::Processes {
+            self.load_procs(cx);
         }
         let (engine, machine) = (self.engine.clone(), self.machine.clone());
         let fast = engine.runtime().spawn({
@@ -338,7 +352,7 @@ impl ServicesView {
     /// Does an action on a service or container: stop, restart, remove ask
     /// first (`confirmed` once they have).
     fn act(&mut self, service: Service, action: &'static str, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(action, "stop" | "restart" | "remove" | "prune") && !confirmed {
+        if matches!(action, "stop" | "restart" | "remove" | "prune" | "kill") && !confirmed {
             self.confirming = Some((key(&service), action));
             cx.notify();
             return;
@@ -445,6 +459,26 @@ impl ServicesView {
             self.run = None;
         }
         self.watch(result, what, cx);
+    }
+
+    /// Reads the machine's processes and GPUs (the Processes tab).
+    fn load_procs(&mut self, cx: &mut Context<Self>) {
+        let (engine, machine) = (self.engine.clone(), self.machine.clone());
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.processes(&machine).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                // A failed look keeps what was shown.
+                if result.is_ok() || !matches!(this.procs, Some(Ok(_))) {
+                    this.procs = Some(result);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Shows a Compose project as a picture of its parts.
@@ -617,6 +651,7 @@ impl Render for ServicesView {
         if data.docker {
             tab_list.extend([(Tab::Compose, "Compose", data.compose.len()), (Tab::Images, "Images", data.images.len())]);
         }
+        tab_list.push((Tab::Processes, "Processes", self.procs.as_ref().and_then(|p| p.as_ref().ok()).map(|p| p.total).unwrap_or(0)));
         let tabs = div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(tab_list.into_iter().map(|(tab, label, n)| {
             chip(&theme, format!("svc-tab-{label}"), label, self.tab == tab)
                 .when(n > 0, |d| d.child(div().text_size(px(10.5)).text_color(theme.text_placeholder).child(n.to_string())))
@@ -625,6 +660,9 @@ impl Render for ServicesView {
                     this.confirming = None;
                     this.project = None;
                     this.project_logs = None;
+                    if tab == Tab::Processes {
+                        this.load_procs(cx);
+                    }
                     cx.notify();
                 }))
         }));
@@ -844,6 +882,8 @@ impl Render for ServicesView {
         let view = cx.entity().downgrade();
         // The column names go over rows, not over "Nothing here yet".
         let mut rows = false;
+        // Processes: the machine's GPUs, above the list.
+        let mut gpus_el: Option<AnyElement> = None;
         let body: AnyElement = match &self.list {
             None => div()
                 .flex_1()
@@ -887,6 +927,23 @@ impl Render for ServicesView {
                         self.compose_rows(items, view, &theme)
                     }
                 }
+                Tab::Processes => match &self.procs {
+                    None => div().flex_1().flex().items_center().justify_center().gap(px(8.)).text_size(px(13.)).text_color(theme.text_muted).child(spinner("procs-loading", 14., theme.text_muted)).child(format!("Asking {machine_name}…")).into_any_element(),
+                    Some(Err(e)) => div().flex_1().flex().items_center().justify_center().text_size(px(13.)).text_color(theme.error).child(e.clone()).into_any_element(),
+                    Some(Ok(list)) => {
+                        let mut items: Vec<Process> = list.processes.iter().filter(|p| matches(&p.name, &format!("{} {} {}", p.command, p.user, p.pid))).cloned().collect();
+                        if self.sort == Sort::Memory {
+                            items.sort_by_key(|p| std::cmp::Reverse(p.memory));
+                        }
+                        gpus_el = (!list.gpus.is_empty()).then(|| gpu_strip(&list.gpus, &theme));
+                        if items.is_empty() {
+                            empty(&theme, "Nothing matches.".into())
+                        } else {
+                            rows = true;
+                            self.process_rows(items, view, &theme)
+                        }
+                    }
+                },
                 Tab::Images => {
                     let items: Vec<Image> = data.images.iter().filter(|i| matches(&i.name, &i.id)).cloned().collect();
                     if items.is_empty() {
@@ -913,6 +970,7 @@ impl Render for ServicesView {
             .children(prune)
             .children(run_form)
             .children(new_compose)
+            .children(gpus_el)
             .children(header)
             .child(body)
     }
@@ -930,6 +988,10 @@ const W_CREATED: f32 = 130.;
 const W_USED: f32 = 220.;
 /// The size of an image.
 const W_SIZE: f32 = 80.;
+/// Processes: its id, user and how long it's run.
+const W_PID: f32 = 64.;
+const W_USER: f32 = 90.;
+const W_UP: f32 = 70.;
 
 /// Which columns fit at the page's width, and how wide (the header and the
 /// rows follow the same): as it narrows, buttons turn to icons, then the
@@ -1011,6 +1073,20 @@ impl ServicesView {
                 }
                 c.text = text(&c).max(110.);
             }
+            Tab::Processes => {
+                c.actions = 180.;
+                let text = |c: &Cols| w - 28. - 17. - W_PID - 10. - if c.usage { W_USER + 10. } else { 0. } - W_CPU - 10. - W_MEM - 10. - if c.created { W_UP + 10. } else { 0. } - c.actions - 10.;
+                if !roomy(text(&c)) {
+                    (c.compact, c.actions) = (true, 76.);
+                }
+                if !roomy(text(&c)) {
+                    c.created = false;
+                }
+                if !roomy(text(&c)) {
+                    c.usage = false;
+                }
+                c.text = text(&c).max(110.);
+            }
             Tab::Images => {
                 c.actions = 170.;
                 let text = |c: &Cols| w - 28. - 24. - W_SIZE - 10. - if c.created { W_CREATED + 10. } else { 0. } - if c.used { W_USED + 10. } else { 0. } - c.actions - 10.;
@@ -1089,6 +1165,16 @@ impl ServicesView {
                 .child(div().flex_none().w(px(7.)))
                 .child(div().flex_1().min_w(px(0.)).child(label("Project · files")))
                 .child(div().flex_none().w(px(c.state)).pl(px(12.)).child(label("Status")))
+                .child(div().flex_none().w(px(c.actions)))
+                .into_any_element(),
+            Tab::Processes => frame
+                .child(div().flex_none().w(px(7.)))
+                .child(div().flex_1().min_w(px(0.)).child(label("Process · command")))
+                .child(div().flex_none().w(px(W_PID)).flex().justify_end().child(label("PID")))
+                .when(c.usage, |d| d.child(div().flex_none().w(px(W_USER)).pl(px(12.)).child(label("User"))))
+                .child(sortable("proc-h-cpu", "CPU", Sort::Cpu, W_CPU, true, cx))
+                .child(sortable("proc-h-mem", "Memory", Sort::Memory, W_MEM, true, cx))
+                .when(c.created, |d| d.child(div().flex_none().w(px(W_UP)).flex().justify_end().child(label("Up for"))))
                 .child(div().flex_none().w(px(c.actions)))
                 .into_any_element(),
             Tab::Images => frame
@@ -1321,7 +1407,11 @@ impl ServicesView {
                     cx.emit(ServicesEvent::Terminal { cwd: folder.clone(), command, title: format!("{name} · compose") });
                 }))
             };
-            let mut row = div().flex().items_center().gap(px(4.)).child(logs).child(edit).child(act("cmp-p-pull", "Pull", "arrow-down", "pull", cx));
+            let folder = {
+                let folder = project.folder().to_string();
+                Button::icon_only("cmp-p-folder", "code").tooltip("Open its folder in an editor").on_click(cx.listener(move |_, e: &gpui::ClickEvent, _, cx| cx.emit(ServicesEvent::Editor(folder.clone(), e.position()))))
+            };
+            let mut row = div().flex().items_center().gap(px(4.)).child(logs).child(folder).child(edit).child(act("cmp-p-pull", "Pull", "arrow-down", "pull", cx));
             if running {
                 row = row.child(act("cmp-p-restart", "Restart", "rotate-ccw", "restart", cx)).child(act("cmp-p-down", "Down", "circle-stop", "down", cx));
             } else {
@@ -1750,6 +1840,98 @@ impl ServicesView {
         .into_any_element()
     }
 
+    fn process_rows(&self, items: Vec<Process>, view: gpui::WeakEntity<Self>, theme: &Theme) -> AnyElement {
+        let (confirming, busy) = (self.confirming.clone(), self.busy.clone());
+        let theme = *theme;
+        let c = self.cols();
+        let text_w = c.text;
+        uniform_list("proc-rows", items.len(), move |range, _, _| {
+            range
+                .map(|n| {
+                    let p = items[n].clone();
+                    // A process as a "service" of kind process: stopped through the same path (and password).
+                    let as_service = Service { kind: "process".into(), target: p.pid.to_string(), name: p.name.clone(), user: p.yours, ..Default::default() };
+                    let k = key(&as_service);
+                    let actions = match &confirming {
+                        Some((ck, action)) if *ck == k => {
+                            let kill = *action == "kill";
+                            let (yes, no, s2, action) = (view.clone(), view.clone(), as_service.clone(), *action);
+                            confirm_row(
+                                &theme,
+                                n,
+                                if kill { format!("Kill {} ({})? It ends at once, without cleaning up.", p.name, p.pid) } else { format!("Stop {} ({})?", p.name, p.pid) },
+                                kill,
+                                if kill { "Kill" } else { "Stop" },
+                                if kill { "x" } else { "circle-stop" },
+                                move |window, cx| {
+                                    let _ = yes.update(cx, |v, cx| v.act(s2.clone(), action, true, window, cx));
+                                },
+                                move |cx| {
+                                    let _ = no.update(cx, |v, cx| {
+                                        v.confirming = None;
+                                        cx.notify();
+                                    });
+                                },
+                            )
+                        }
+                        _ if busy.contains(&k) => div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child(spinner(SharedString::from(format!("proc-busy-{n}")), 12., theme.text_muted)).child("Working…").into_any_element(),
+                        _ => {
+                            let (stop, kill) = (view.clone(), view.clone());
+                            let (s1, s2) = (as_service.clone(), as_service.clone());
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .child(word_or_icon(SharedString::from(format!("proc-stop-{n}")), "Stop", "circle-stop", c.compact).tooltip("Ask it to end (SIGTERM)").on_click(move |_, window, cx| {
+                                    let _ = stop.update(cx, |v, cx| v.act(s1.clone(), "stop", false, window, cx));
+                                }))
+                                .child(word_or_icon(SharedString::from(format!("proc-kill-{n}")), "Kill", "x", c.compact).tooltip("End it at once (SIGKILL)").on_click(move |_, window, cx| {
+                                    let _ = kill.update(cx, |v, cx| v.act(s2.clone(), "kill", false, window, cx));
+                                }))
+                                .into_any_element()
+                        }
+                    };
+                    let up = match p.seconds {
+                        s if s >= 86_400 => format!("{}d", s / 86_400),
+                        s if s >= 3600 => format!("{}h", s / 3600),
+                        s if s >= 60 => format!("{}m", s / 60),
+                        s => format!("{s}s"),
+                    };
+                    // Its GPU memory under its own (NVIDIA says).
+                    let mem = div()
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .gap(px(2.))
+                        .child(clipped(format!("proc-mem-{n}"), memory(Some(p.memory)), 12., theme.text_muted, W_MEM).text_right())
+                        .when_some(p.gpu_memory, |d, g| d.child(clipped(format!("proc-gpu-{n}"), format!("GPU {}", memory(Some(g))), 11., theme.text_accent, W_MEM).text_right()));
+                    row(&theme)
+                        .h(px(ROW_H))
+                        .child(kit::dot(if p.cpu >= 50. { theme.warning } else if p.cpu >= 1. { theme.success } else { theme.text_placeholder }, 7.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(clipped(format!("proc-name-{n}"), p.name.clone(), 13., theme.text, text_w))
+                                .child(clipped(format!("proc-cmd-{n}"), p.command.clone(), 11.5, theme.text_placeholder, text_w)),
+                        )
+                        .child(div().flex_none().w(px(W_PID)).flex().justify_end().font_family(super::theme::mono_font()).text_size(px(12.)).text_color(theme.text_muted).child(p.pid.to_string()))
+                        .when(c.usage, |d| d.child(div().flex_none().w(px(W_USER)).pl(px(12.)).child(clipped(format!("proc-user-{n}"), p.user.clone(), 12., if p.yours { theme.text_muted } else { theme.text_placeholder }, W_USER - 12.))))
+                        .child(div().flex_none().w(px(W_CPU)).flex().justify_end().text_size(px(12.)).text_color(theme.text_muted).child(cpu(Some(p.cpu))))
+                        .child(div().flex_none().w(px(W_MEM)).flex().justify_end().child(mem))
+                        .when(c.created, |d| d.child(div().flex_none().w(px(W_UP)).flex().justify_end().text_size(px(12.)).text_color(theme.text_placeholder).child(up)))
+                        .child(div().flex_none().w(px(c.actions)).flex().justify_end().child(actions))
+                })
+                .collect()
+        })
+        .track_scroll(self.scroll.clone())
+        .flex_1()
+        .into_any_element()
+    }
+
     fn image_rows(&self, items: Vec<Image>, view: gpui::WeakEntity<Self>, theme: &Theme) -> AnyElement {
         let (confirming, busy) = (self.confirming.clone(), self.busy.clone());
         let theme = *theme;
@@ -1838,4 +2020,41 @@ impl ServicesView {
         .flex_1()
         .into_any_element()
     }
+}
+
+/// The machine's GPUs, above its processes: how busy, memory, temperature, power.
+fn gpu_strip(gpus: &[Gpu], theme: &Theme) -> AnyElement {
+    div()
+        .flex_none()
+        .flex()
+        .flex_wrap()
+        .gap(px(10.))
+        .px(px(14.))
+        .py(px(10.))
+        .border_b_1()
+        .border_color(theme.border_variant)
+        .children(gpus.iter().map(|g| {
+            let busy = g.busy.unwrap_or(0.);
+            let mem = match (g.memory_used, g.memory_total) {
+                (Some(u), Some(t)) => format!("{} of {}", memory(Some(u)), memory(Some(t))),
+                (Some(u), None) => format!("{} in use", memory(Some(u))),
+                _ => String::new(),
+            };
+            let extra = [g.temperature.map(|t| format!("{t:.0}°C")), g.power.map(|p| format!("{p:.0} W"))].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(12.))
+                .py(px(8.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(theme.border_variant)
+                .bg(theme.surface)
+                .child(icon("cpu", 14., theme.text_muted))
+                .child(div().flex().flex_col().gap(px(3.)).child(div().text_size(px(12.5)).text_color(theme.text).child(g.name.clone())).child(div().text_size(px(11.)).text_color(theme.text_placeholder).child([mem, extra].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · "))))
+                .child(div().w(px(90.)).child(kit::meter(theme, (busy / 100.) as f32, if busy >= 80. { theme.warning } else { theme.accent })))
+                .child(div().w(px(40.)).flex().justify_end().text_size(px(12.)).text_color(theme.text_muted).child(format!("{busy:.0}%")))
+        }))
+        .into_any_element()
 }

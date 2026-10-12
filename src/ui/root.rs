@@ -34,6 +34,8 @@ actions!(
         ShowJobs,
         ShowWorkspaces,
         ShowGithub,
+        ShowUsage,
+        ShowRun,
         GoToMachine1,
         GoToMachine2,
         GoToMachine3,
@@ -118,6 +120,8 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Jobs", ShowJobs),
                 MenuItem::action("Workspaces", ShowWorkspaces),
                 MenuItem::action("GitHub", ShowGithub),
+                MenuItem::action("Usage", ShowUsage),
+                MenuItem::action("Run on Machines", ShowRun),
                 MenuItem::action("Activity", ToggleActivity),
                 MenuItem::separator(),
                 MenuItem::action("Back", GoBack),
@@ -137,6 +141,10 @@ pub enum Route {
     Github,
     GithubRepo(String),
     GithubItem(String, u64),
+    /// What the agents used, and what it'd cost.
+    Usage,
+    /// One command on several machines.
+    Run,
     Activity,
     Machine(String),
     Runner(String),
@@ -261,7 +269,21 @@ pub struct Root {
     /// What's listening on each machine (the machine page's Servers), the
     /// machines whose other ports are shown, and the field to open one by number.
     pub(super) machine_ports: std::collections::HashMap<String, super::github::Load<Vec<crate::fleet::ports::ListeningPort>>>,
+    /// The Usage page: its period (days) and each machine's use, as last read.
+    pub(super) usage_days: u32,
+    pub(super) usage_data: Option<super::github::Load<super::usage::UsageData>>,
+    pub(super) usage_at: Option<Instant>,
+    /// The Run page: the command field, the machines picked (None: all
+    /// online), the last command run and the ones before it.
+    pub(super) run_input: Entity<TextInput>,
+    pub(super) run_picked: Option<std::collections::HashSet<String>>,
+    pub(super) run_last: Option<super::run::RunBatch>,
+    pub(super) run_history: Vec<String>,
+    /// The machine whose output is shown bigger.
+    pub(super) run_expanded: Option<String>,
     pub(super) ports_more: std::collections::HashSet<String>,
+    /// Each machine's GPUs (its page's GPU card), as last read.
+    pub(super) machine_gpus: std::collections::HashMap<String, Vec<crate::fleet::procs::Gpu>>,
     /// Forwarded ports seen listening there (so one that stops can be closed here).
     pub(super) forward_seen: std::collections::HashSet<(String, u16)>,
     pub(super) port_input: Entity<TextInput>,
@@ -376,6 +398,15 @@ impl Root {
                 _ => this.notify_user(format!("\"{text}\" isn't a port number."), true, cx),
             }
         }));
+        // The editors' own icons, for the menu of editors (made once, off the main thread).
+        std::thread::spawn(crate::fleet::editor::warm_icons);
+        // The Run page's command: Return runs it.
+        let run_input = cx.new(|cx| TextInput::new(cx, "A command, e.g. df -h /").mono());
+        subscriptions.push(cx.subscribe_in(&run_input, window, |this, _, e: &InputEvent, _, cx| {
+            if *e == InputEvent::Submit {
+                this.start_run(cx);
+            }
+        }));
         let mut ws = Root {
             engine,
             snapshot,
@@ -418,9 +449,18 @@ impl Root {
             machine_conn: Default::default(),
             conn_changing: Default::default(),
             machine_ports: Default::default(),
+            usage_days: 7,
+            usage_data: None,
+            usage_at: None,
             ports_more: Default::default(),
+            machine_gpus: Default::default(),
             forward_seen: Default::default(),
             port_input,
+            run_input,
+            run_picked: None,
+            run_last: None,
+            run_history: Vec::new(),
+            run_expanded: None,
             offline_details: Default::default(),
             last_notice: None,
             refocus: false,
@@ -554,6 +594,10 @@ impl Root {
         {
             self.load_machine_ports(&id, cx);
         }
+        // And its GPUs, each visit.
+        if let Route::Machine(id) = self.route.clone() {
+            self.load_machine_gpus(&id, cx);
+        }
         // A desktop streams only while it's shown: its page, or beside a session.
         let showing = match &self.route {
             Route::Desktop(id) => Some(id.clone()),
@@ -593,6 +637,7 @@ impl Root {
                     // Its Logs buttons: that log in the machine's log viewer.
                     let machine = id.clone();
                     let sub = cx.subscribe_in(&view, window, move |this, _, e: &super::services::ServicesEvent, window, cx| match e {
+                        super::services::ServicesEvent::Editor(path, at) => this.pick_editor(&machine, path, *at, cx),
                         // A Compose service's port: open here, in the browser.
                         super::services::ServicesEvent::Port(port) => this.open_port(&machine, *port, None, true, cx),
                         super::services::ServicesEvent::Logs(source) => {
@@ -618,6 +663,7 @@ impl Root {
                 }
                 window.focus(&self.service_pages[&id].focus_handle(cx));
             }
+            Route::Run => window.focus(&self.run_input.read(cx).focus_handle(cx)),
             _ => window.focus(&self.focus),
         }
         self.page_scroll = ScrollHandle::new();
@@ -629,6 +675,34 @@ impl Root {
         let (kind, arg) = view.split_once(':').unwrap_or((view, ""));
         match kind {
             "jobs" => self.navigate(Route::Jobs, window, cx),
+            "usage" => self.navigate(Route::Usage, window, cx),
+            "run-big" => self.run_expanded = Some(arg.to_string()),
+            // The menu of editors, for "<machine>@<folder>".
+            "editors" => {
+                let (machine, path) = arg.split_once('@').unwrap_or((arg, "~"));
+                self.open_menu(super::menu::MenuTarget::Editors { machine: machine.into(), path: path.into() }, gpui::point(px(700.), px(150.)), cx);
+            }
+            "run" => {
+                self.navigate(Route::Run, window, cx);
+                if !arg.is_empty() {
+                    let text = arg.to_string();
+                    self.run_input.update(cx, |i, cx| i.set_text(text, cx));
+                    // The demo runs it too (made-up output), once its machines are checked.
+                    if self.engine.demo_world().is_some() {
+                        let task = cx.spawn(async move |this, cx| {
+                            for _ in 0..100 {
+                                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                                let ready = this.update(cx, |this, _| this.snapshot.machines.iter().all(|m| m.is_down() || m.probe.is_some())).unwrap_or(true);
+                                if ready {
+                                    break;
+                                }
+                            }
+                            let _ = this.update(cx, |this, cx| this.start_run(cx));
+                        });
+                        self.track(task);
+                    }
+                }
+            }
             "workspaces" => self.navigate(Route::Workspaces, window, cx),
             "workspace" => self.navigate(Route::Workspace(arg.into()), window, cx),
             "new-workspace" => {
@@ -1019,6 +1093,64 @@ impl Root {
     }
 
     /// Powers a cloud machine on or off.
+    /// Sends a machine the Wake on LAN signal (from here and its network's machines).
+    pub(super) fn wake_machine(&mut self, machine_id: &str, cx: &mut Context<Self>) {
+        let (engine, id) = (self.engine.clone(), machine_id.to_string());
+        let name = self.snapshot.machines.iter().find(|m| m.id == machine_id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone());
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.wake(&id).await }
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(from) => this.notify_user(format!("Woke {name} from {from}. Muxen looks again in a moment."), false, cx),
+                Err(e) => this.notify_user(e, true, cx),
+            });
+        });
+        self.track(task);
+    }
+
+    /// A machine's GPUs, for its page (none: no GPU card).
+    pub(super) fn load_machine_gpus(&mut self, machine_id: &str, cx: &mut Context<Self>) {
+        let Some(m) = self.snapshot.machines.iter().find(|m| m.id == machine_id) else { return };
+        if m.is_down() || m.host.is_empty() || m.platform.starts_with("windows") {
+            return;
+        }
+        let (engine, id) = (self.engine.clone(), machine_id.to_string());
+        let job = engine.runtime().spawn({
+            let (engine, id) = (engine.clone(), id.clone());
+            async move { engine.gpus(&id).await }
+        });
+        let task = cx.spawn(async move |this, cx| {
+            if let Ok(Ok(gpus)) = job.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.machine_gpus.insert(id, gpus);
+                    cx.notify();
+                });
+            }
+        });
+        self.track(task);
+    }
+
+    /// Opens a machine's folder in the editor chosen in Settings (over ssh).
+    /// Opens a machine's folder in an editor here (by id; "" for the one chosen in Settings).
+    pub(super) fn open_in_editor(&mut self, machine_id: &str, path: &str, editor: &str, cx: &mut Context<Self>) {
+        let (engine, machine, path, editor) = (self.engine.clone(), machine_id.to_string(), path.to_string(), editor.to_string());
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.open_in_editor(&machine, &path, &editor).await }
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(name) => this.notify_user(format!("Opening it in {name}…"), false, cx),
+                Err(e) => this.notify_user(e, true, cx),
+            });
+        });
+        self.track(task);
+    }
+
     /// Connects to a machine again, or disconnects from it (its sessions go on there).
     pub(super) fn set_machine_connected(&mut self, machine_id: &str, connected: bool, cx: &mut Context<Self>) {
         if let Err(e) = self.engine.set_connected(machine_id, connected) {
@@ -1671,6 +1803,8 @@ impl Root {
                     .child(self.nav_item("nav-jobs", "workflow", kit::tiles::JOBS, "Jobs", Some(s.counts.queued + s.counts.running), Route::Jobs, "jobs", cx))
                     .child(self.nav_item("nav-workspaces", "terminal", kit::tiles::WORKSPACES, "Workspaces", Some(s.workspaces.len()), Route::Workspaces, "workspaces", cx))
                     .child(self.nav_item("nav-github", "agent-github", super::github::TILE, "GitHub", self.gh.waiting(), Route::Github, "github", cx))
+                    .child(self.nav_item("nav-usage", "gauge", kit::tiles::USAGE, "Usage", None, Route::Usage, "usage", cx))
+                    .child(self.nav_item("nav-run", "zap", kit::tiles::RUN, "Run", None, Route::Run, "run", cx))
                     .child(self.activity_nav(&theme, running_ops, cx)),
             )
             .child(
@@ -2668,6 +2802,8 @@ impl Root {
             Route::Workspaces => self.render_workspaces(cx).into_any_element(),
             Route::Workspace(id) => self.render_workspace(&id, cx),
             Route::Activity => self.render_activity(cx).into_any_element(),
+            Route::Usage => self.render_usage(cx),
+            Route::Run => self.render_run(window, cx),
             Route::Machine(id) => self.render_machine(&id, cx),
             Route::Runner(id) => self.render_runner(&id, cx),
             Route::Session(id) => self.render_session(&id, window, cx),
@@ -2755,6 +2891,8 @@ impl Render for Root {
             .on_action(cx.listener(Self::show_jobs))
             .on_action(cx.listener(|this, _: &ShowWorkspaces, window, cx| this.navigate(Route::Workspaces, window, cx)))
             .on_action(cx.listener(|this, _: &ShowGithub, window, cx| this.navigate(Route::Github, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowUsage, window, cx| this.navigate(Route::Usage, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowRun, window, cx| this.navigate(Route::Run, window, cx)))
             .on_action(cx.listener(|this, _: &GoToMachine1, window, cx| this.go_to_machine(1, window, cx)))
             .on_action(cx.listener(|this, _: &GoToMachine2, window, cx| this.go_to_machine(2, window, cx)))
             .on_action(cx.listener(|this, _: &GoToMachine3, window, cx| this.go_to_machine(3, window, cx)))
@@ -2873,6 +3011,8 @@ fn route_title(s: &Snapshot, route: &Route) -> (Option<&'static str>, String) {
         Route::Jobs => (None, "Jobs".into()),
         Route::Workspaces => (None, "Workspaces".into()),
         Route::Activity => (None, "Activity".into()),
+        Route::Usage => (None, "Usage".into()),
+        Route::Run => (None, "Run".into()),
         Route::Workspace(id) => (Some("Workspaces"), s.workspaces.iter().find(|w| &w.id == id).map(|w| w.name.clone()).unwrap_or_else(|| id.clone())),
         Route::Settings => (None, "Settings".into()),
         Route::About => (None, "About".into()),

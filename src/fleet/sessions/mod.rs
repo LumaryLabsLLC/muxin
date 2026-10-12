@@ -9,6 +9,7 @@
 //! machine and refreshes it after changes and on a timer.
 
 pub(crate) mod agent;
+pub mod question;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -351,6 +352,22 @@ impl Engine {
 
     /// Stops, restarts, types into or reads a session. `Read` returns the screen
     /// and scrollback text; the others return an empty string.
+    /// What a waiting session is asking, read off its screen: a choice, or
+    /// the end of what it said (see question.rs).
+    pub async fn session_question(self: &Arc<Self>, id: &str) -> Result<question::Question, String> {
+        let screen = self.control_session(id, Control::Read { lines: 60 }).await?;
+        Ok(question::read(&screen))
+    }
+
+    /// Picks one of a waiting session's choices (`key`, as the question gave
+    /// it; `selected`, the one its cursor was on), and marks it read.
+    pub async fn answer_session(self: &Arc<Self>, id: &str, key: &str, selected: Option<&str>) -> Result<(), String> {
+        let (keys, enter) = question::keys_for(key, selected);
+        self.control_session(id, Control::Send { text: &keys, enter }).await?;
+        self.ack_session(id);
+        Ok(())
+    }
+
     pub async fn control_session(self: &Arc<Self>, id: &str, action: Control<'_>) -> Result<String, String> {
         if self.direct_session(id).is_some() {
             return match action {

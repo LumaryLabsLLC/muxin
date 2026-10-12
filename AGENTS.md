@@ -94,16 +94,23 @@ The user runs AI agent CLIs (Claude Code, Codex, OpenCode, Gemini CLI, Amp) or s
 
 - `session_list` shows every session (agent, folder, `status`, `busy` = printed output in the last few seconds) and which agent CLIs each machine has.
 - `session_read` returns the screen and recent scrollback as text: use it to see what an agent is doing or asking.
+- `session_question` says what a waiting session asks: the question and its `options`, each with a `key` (and the `selected` one), or, when it's simply done, the end of what it said (`options` empty). `session_answer(id, key)` picks an option: it approves or refuses what that agent asked, so only when the user told you to, and say which option.
 - `session_send` types text and presses Enter. `session_start` starts one (optionally with a `prompt`); `session_stop` ends it. `session_rename` changes its title (the agent on the machine keeps it; an empty title goes back to the original).
 - These are the user's sessions. Start, type into or stop one only when they asked; reading is fine.
 
-The CLI equivalents are `muxen session ls|start|read|send|attach|restart|rename|stop`.
+The CLI equivalents are `muxen session ls|start|read|question|answer|send|attach|restart|rename|stop`.
+
+## Usage and cost
+
+- `agent_usage(days?, machine_id?)` says what Claude Code and Codex used over the last N days (default 7), from their own logs on each machine: tokens (input, output, cache reads and writes) and requests by model and machine, and the cost at Anthropic's and OpenAI's API list prices (`null` for a model whose price isn't known). With a Claude or ChatGPT plan the user doesn't pay per token: say it's what the same use would cost through the API. Read-only.
+- The CLI equivalent is `muxen usage [--days N] [--machine X]`.
 
 ## GitHub and the user's code
 
 - `github_inbox` shows what needs the user: review requests, assigned issues, their open PRs. `github_repos` lists their repositories, favorites first (`favorite: true`: the ones they work on most). `github_favorite` stars or unstars one; only when asked.
 - Muxen uses one GitHub account at a time. `github_accounts` shows which (`using`) and the alternatives: accounts the GitHub CLI here is signed in to, and other machines' `gh` logins. `github_use_account` switches (only when asked); it changes whose repositories and runners Muxen sees.
 - `github_repo` gives a repository's open issues, PRs, recent Actions runs, and its checkouts on the user's machines. `github_item` gives an issue or PR in full (description, comments; for PRs also checks and reviews), from its URL or `owner/name#123`.
+- `muxen edit <machine>:<folder>` opens a folder of a machine's in the user's editor here (Zed, Cursor or VS Code, over ssh). It opens a window on the user's screen: only when asked.
 - `local_checkouts` lists git checkouts on the machines (branch, ahead/behind, uncommitted files). `git_sync` runs fetch, pull (fast-forward only) or push in one; only when asked.
 - To work on an issue: find a checkout with `local_checkouts`, or create a workspace with the repo (`workspace_create(repo, branch: "issue-123-short-name")`; for a pull request `ref: "pull/123/head"` checks out its code, forks included). Then `session_start` an agent in that folder with the issue's URL and text as the prompt, or work there yourself with `workspace_exec`.
 - Before an agent commits or pushes on a machine, `git_status(machine_id)` says whether that works (`can_commit`, `push`). `git_setup` fixes it (identity from the user's GitHub account, credentials through the machine's GitHub CLI); only when asked, since it changes the machine's global git config.
@@ -132,6 +139,13 @@ Muxen can create DigitalOcean droplets in the user's account and add them to the
 
 The CLI equivalents are `muxen cloud options|create|usage|power|destroy|login|logout`.
 
+## Several machines at once
+
+- `run_on_machines(machine_ids, command, timeout_secs?)` runs one shell command on each machine, in its login shell from the home folder, without a terminal (nothing interactive). It waits for all of them and returns each one's `exit_code`, `error` and `operation.log_tail`. It runs as the user on their real machines: only when asked, and show the command first.
+- `status.attention` and `get_machine`'s diagnostics include `reboot-required` (a Linux machine's updates want a restart) and `failed-services` (systemd units that failed, by name). Read their logs (`logs_read(kind: "service")`) before suggesting a fix.
+- `wake_machine(machine_id)` sends Wake on LAN to a machine that's asleep or off, from this computer and from online machines on its network. It works once Muxen has seen the machine's network card (while it was on) and when the machine is set up to wake that way. Muxen checks it again after 20 and 40 seconds.
+- The CLI equivalents are `muxen run --on a,b -- <command>` (`--all` for every machine online; it exits 1 when any failed) and `muxen wake <machine>`.
+
 ## Logs
 
 - `log_sources(machine_id)` lists what a machine has to read: its system log (`kind: "system"`; `"kernel"` on Linux), log files (`readable: false` for root-only ones), Docker containers and running services (`user: true` for the user's own units).
@@ -145,8 +159,9 @@ The CLI equivalents are `muxen cloud options|create|usage|power|destroy|login|lo
 - Each running service and container has `cpu` (percent of one core) and `memory` (bytes); `machine_services` also lists Docker `images` and Compose projects (`compose`, with their files).
 - `docker_run(machine_id, image, name?, ports?, env?, volumes?, restart?, command?)`, `docker_pull(machine_id, image)` and `compose_action(machine_id, project, "up" | "down" | "restart" | "pull")` (with `service`: `"start" | "stop" | "restart"` that one service) run as operations and wait by default (their `log_tail` has Docker's output). They change the user's machine: only when asked. `service_action` removes a container (`remove`) too.
 - `compose_project(machine_id, project)` describes a Compose project's parts: each service's image, ports, what it waits for (`depends_on`), networks, volumes and mounted files, health check, and its containers' state. Read it before changing a project. The app draws the same as a picture (Services › Compose, a project).
+- `machine_processes(machine_id)` lists the busiest few hundred processes (pid, user, name, command, `cpu` in percent of one core, `memory` in bytes, `seconds` running, `gpu_memory` on NVIDIA, `yours`) and the machine's `gpus` (name, `busy` percent, memory used and total). `process_signal(machine_id, pid, signal: "stop"|"kill")` ends one: only when asked, and name the process first. Another user's process needs root; when sudo wants a password it fails with a hint to use the Muxen app.
 - Read a failing service's log first with `logs_read(machine_id, kind: "service", target: "<unit>")`; a Compose project's with `kind: "compose", target: "<project>"`.
-- The CLI equivalent is `muxen services <machine> [start|stop|restart|enable|disable <name> [--container]]`.
+- The CLI equivalents are `muxen services <machine> [start|stop|restart|enable|disable <name> [--container]]`, `muxen ps <machine>` and `muxen kill <machine> <pid> [--force]`.
 
 ## Files
 

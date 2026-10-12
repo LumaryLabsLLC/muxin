@@ -1,8 +1,10 @@
 pub mod build;
 pub mod clipboard;
 pub mod code;
+pub mod command;
 pub mod connection;
 pub mod discover;
+pub mod editor;
 pub mod desktop;
 pub mod direct;
 pub mod link;
@@ -12,9 +14,12 @@ pub mod engine;
 pub mod files;
 pub mod model;
 pub mod ports;
+pub mod procs;
 pub mod report;
 pub mod sessions;
 pub mod tailscale;
+pub mod usage;
+pub mod wake;
 pub mod workspaces;
 
 pub use engine::Engine;

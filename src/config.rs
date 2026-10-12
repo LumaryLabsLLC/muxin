@@ -499,6 +499,8 @@ pub struct Settings {
     pub favorite_repos: Vec<String>,
     /// Text copied here can be pasted on the machines (Linux desktops, Macs), and back.
     pub share_clipboard: bool,
+    /// The editor machines' folders open in: "zed", "cursor", "vscode", or "" for the first one installed.
+    pub editor: String,
     /// Cloud machines: how Muxen signs in, what new ones come with, what happens when they sit idle.
     pub cloud: CloudSettings,
 }
@@ -564,6 +566,7 @@ impl Default for Settings {
             code_folders: default_code_folders(),
             favorite_repos: Vec::new(),
             share_clipboard: true,
+            editor: String::new(),
             cloud: CloudSettings::default(),
         }
     }

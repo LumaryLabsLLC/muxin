@@ -2563,6 +2563,36 @@ pub async fn session_read(engine: &Arc<Engine>, req: SessionReadRequest) -> ApiR
     Ok(SessionReadOut { session_id: s.id, status: s.status, exit_code: s.exit_code, busy: s.busy, text })
 }
 
+/// What a session is waiting for: a choice (with the keys that pick each
+/// option) or, when it's simply done, the end of what it said.
+pub async fn session_question(engine: &Arc<Engine>, req: SessionRequest) -> ApiResult<crate::fleet::sessions::question::Question> {
+    let s = resolve_session(engine, &req.session_id).await?;
+    if s.status != "running" {
+        return Err(ApiError::invalid(format!("{} has exited.", s.id)));
+    }
+    engine.session_question(&s.id).await.map_err(session_error)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionAnswerRequest {
+    pub session_id: String,
+    /// One of session_question's options, by its key ("1", "2", or "#1" for a menu without numbers).
+    pub choice: String,
+}
+
+/// Picks one of a waiting session's choices, as session_question listed them.
+pub async fn session_answer(engine: &Arc<Engine>, req: SessionAnswerRequest) -> ApiResult<SessionDoneOut> {
+    let s = resolve_session(engine, &req.session_id).await?;
+    let q = engine.session_question(&s.id).await.map_err(session_error)?;
+    if !q.options.iter().any(|o| o.key == req.choice) {
+        let keys: Vec<String> = q.options.iter().map(|o| format!("{} ({})", o.key, o.label)).collect();
+        return Err(ApiError::invalid(if keys.is_empty() { format!("{} isn't asking to choose anything right now.", s.id) } else { format!("No choice \"{}\": it offers {}.", req.choice, keys.join(", ")) }));
+    }
+    engine.answer_session(&s.id, &req.choice, q.selected.as_deref()).await.map_err(session_error)?;
+    Ok(SessionDoneOut { session_id: s.id, done: "answered".into() })
+}
+
 pub async fn session_stop(engine: &Arc<Engine>, req: SessionRequest) -> ApiResult<SessionDoneOut> {
     let s = resolve_session(engine, &req.session_id).await?;
     engine.control_session(&s.id, Control::Stop).await.map_err(session_error)?;
@@ -3280,6 +3310,184 @@ pub async fn compose_action(engine: &Arc<Engine>, req: ComposeActionRequest) -> 
     }
     .map_err(|e| ApiError::new("invalid", e))?;
     operation_result(engine, op, req.wait.unwrap_or(true)).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageRequest {
+    /// The last N days (default 7, at most 400).
+    pub days: Option<u32>,
+    /// One machine; default: every machine that's online.
+    pub machine_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UsageModel {
+    pub tool: String,
+    pub model: String,
+    #[serde(flatten)]
+    pub tokens: crate::fleet::usage::Tokens,
+    /// At the API's list price; null when the model's price isn't known.
+    pub cost: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UsageMachine {
+    pub machine_id: String,
+    #[serde(flatten)]
+    pub tokens: crate::fleet::usage::Tokens,
+    pub cost: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UsageOut {
+    pub days: u32,
+    /// What it'd all cost at list prices (models without a known price left out).
+    pub total_cost: f64,
+    pub prices_as_of: &'static str,
+    pub models: Vec<UsageModel>,
+    pub machines: Vec<UsageMachine>,
+    /// Machines that couldn't say, and why.
+    pub errors: Vec<serde_json::Value>,
+}
+
+/// What the agent CLIs (Claude Code, Codex) used, from their own logs on
+/// each machine: tokens by model and machine, and the cost at list prices.
+pub async fn usage(engine: &Arc<Engine>, req: UsageRequest) -> ApiResult<UsageOut> {
+    let days = req.days.unwrap_or(7).clamp(1, 400);
+    let results = match &req.machine_id {
+        Some(id) => {
+            let m = find_machine(&engine.current(), id)?.clone();
+            vec![(m.id.clone(), engine.usage(&m.id, days).await)]
+        }
+        None => engine.usage_all(days).await,
+    };
+    let mut ok = Vec::new();
+    let mut errors = Vec::new();
+    for (id, r) in results {
+        match r {
+            Ok(u) => ok.push(u),
+            Err(e) => errors.push(serde_json::json!({ "machine_id": id, "error": e })),
+        }
+    }
+    let models: Vec<UsageModel> = crate::fleet::usage::by_model(&ok).into_iter().map(|(tool, model, tokens, cost)| UsageModel { tool, model, tokens, cost }).collect();
+    let machines = ok
+        .iter()
+        .map(|u| {
+            let mut tokens = crate::fleet::usage::Tokens::default();
+            let mut cost = 0.;
+            for h in &u.hours {
+                tokens.add(&h.tokens);
+                cost += crate::fleet::usage::cost(&h.model, &h.tokens).unwrap_or(0.);
+            }
+            UsageMachine { machine_id: u.machine_id.clone(), tokens, cost }
+        })
+        .collect();
+    let total_cost = models.iter().filter_map(|m| m.cost).sum();
+    Ok(UsageOut { days, total_cost, prices_as_of: crate::fleet::usage::PRICES_AS_OF, models, machines, errors })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessesRequest {
+    pub machine_id: String,
+}
+
+/// A machine's processes (the busiest few hundred, with CPU and memory) and its GPUs.
+pub async fn machine_processes(engine: &Arc<Engine>, req: ProcessesRequest) -> ApiResult<crate::fleet::procs::ProcessList> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    engine.processes(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessSignalRequest {
+    pub machine_id: String,
+    pub pid: u32,
+    /// "stop" (SIGTERM, the default) or "kill" (SIGKILL).
+    #[serde(default)]
+    pub signal: Option<String>,
+}
+
+/// Stops (SIGTERM) or kills (SIGKILL) a process on a machine.
+pub async fn process_signal(engine: &Arc<Engine>, req: ProcessSignalRequest) -> ApiResult<serde_json::Value> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    let action = match req.signal.as_deref().unwrap_or("stop") {
+        "kill" | "KILL" => "kill",
+        "stop" | "term" | "TERM" => "stop",
+        other => return Err(ApiError::invalid(format!("\"{other}\" isn't a signal: stop or kill."))),
+    };
+    let process = crate::fleet::services::Service { kind: "process".into(), target: req.pid.to_string(), name: req.pid.to_string(), ..Default::default() };
+    engine.service_action(&m.id, &process, action).await.map_err(|e| match e {
+        crate::fleet::desktop::AddDisplayError::NeedsPassword(_) => ApiError::new("invalid", format!("{} wants the user's password for that: it's another user's process (sudo).", m.name)).with_hint("Do it from the Muxen app (machine › Services › Processes), which asks for it."),
+        crate::fleet::desktop::AddDisplayError::Failed(e) => ApiError::new("operation_failed", e),
+    })?;
+    Ok(serde_json::json!({ "machine_id": m.id, "pid": req.pid, "done": if action == "kill" { "killed" } else { "stopped" } }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunRequest {
+    pub machine_ids: Vec<String>,
+    pub command: String,
+    /// Seconds each may run (default 600, at most 3600).
+    pub timeout_secs: Option<u64>,
+    /// Wait for all of them (default true).
+    pub wait: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunOut {
+    pub machine_id: String,
+    /// Absent when it couldn't start there (`error` says why).
+    pub operation: Option<OperationOut>,
+    /// The command's exit status, when it ran to the end.
+    pub exit_code: Option<i32>,
+    pub error: Option<String>,
+}
+
+/// Runs one shell command on several machines at once, in each one's login
+/// shell from the home folder.
+pub async fn run_on_machines(engine: &Arc<Engine>, req: RunRequest) -> ApiResult<Vec<RunOut>> {
+    if req.machine_ids.is_empty() {
+        return Err(ApiError::invalid("On which machines? Pass machine_ids."));
+    }
+    let s = engine.current();
+    let ids: Vec<String> = req.machine_ids.iter().map(|id| find_machine(&s, id).map(|m| m.id.clone())).collect::<ApiResult<_>>()?;
+    let timeout = req.timeout_secs.map(Duration::from_secs).unwrap_or(crate::fleet::command::DEFAULT_TIMEOUT);
+    let started = engine.run_on_machines(&ids, &req.command, timeout);
+    let wait = req.wait.unwrap_or(true);
+    let mut out = Vec::new();
+    for (machine_id, op) in started {
+        match op {
+            Ok(op) => {
+                let o = if wait { wait_operation(engine, op, timeout + Duration::from_secs(30), |_| {}).await } else { None };
+                let o = o.or_else(|| engine.current().operations.iter().find(|o| o.id == op).cloned()).ok_or_else(|| ApiError::new("internal", "The operation went missing."))?;
+                let exit_code = match (o.status.as_str(), o.error.as_deref()) {
+                    ("succeeded", _) => Some(0),
+                    (_, Some(e)) => e.strip_prefix("Exited with status ").and_then(|c| c.trim_end_matches('.').parse().ok()),
+                    _ => None,
+                };
+                let error = o.error.clone();
+                out.push(RunOut { machine_id, operation: Some(operation_out(&o, DEFAULT_TAIL)), exit_code, error });
+            }
+            Err(e) => out.push(RunOut { machine_id, operation: None, exit_code: None, error: Some(e) }),
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WakeRequest {
+    pub machine_id: String,
+}
+
+/// Wakes a machine that's asleep or off (Wake on LAN).
+pub async fn wake_machine(engine: &Arc<Engine>, req: WakeRequest) -> ApiResult<serde_json::Value> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    let from = engine.wake(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    Ok(serde_json::json!({ "machine_id": m.id, "sent_from": from, "next": "Muxen checks it again in 20 and 40 seconds; call get_machine then." }))
 }
 
 #[derive(Debug, Deserialize)]

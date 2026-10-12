@@ -324,6 +324,8 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "session_list" => ok(api::sessions_list(engine, args(a)?).await?),
         "session_start" => ok(api::session_start(engine, args(a)?).await?),
         "session_send" => ok(api::session_send(engine, args(a)?).await?),
+        "session_question" => ok(api::session_question(engine, args(a)?).await?),
+        "session_answer" => ok(api::session_answer(engine, args(a)?).await?),
         "session_read" => ok(api::session_read(engine, args(a)?).await?),
         "session_stop" => ok(api::session_stop(engine, args(a)?).await?),
         "session_restart" => ok(api::session_restart(engine, args(a)?).await?),
@@ -353,6 +355,11 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "compose_action" => ok(api::compose_action(engine, args(a)?).await?),
         "compose_project" => ok(api::compose_project(engine, args(a)?).await?),
         "machine_ports" => ok(json!({ "ports": api::machine_ports(engine, args(a)?).await? })),
+        "agent_usage" => ok(api::usage(engine, args(a)?).await?),
+        "machine_processes" => ok(api::machine_processes(engine, args(a)?).await?),
+        "process_signal" => ok(api::process_signal(engine, args(a)?).await?),
+        "run_on_machines" => ok(api::run_on_machines(engine, args(a)?).await?),
+        "wake_machine" => ok(api::wake_machine(engine, args(a)?).await?),
         "direct_connection" => ok(api::set_direct(engine, args(a)?).await?),
         "git_setup" => ok(api::git_setup(engine, args(a)?).await?),
         other => Err(ApiError::not_found(format!("Unknown tool: {other}"))),
@@ -750,6 +757,21 @@ pub fn tools() -> Vec<Value> {
             "annotations": annotations("Type into session", false, false, false, false),
         }),
         json!({
+            "name": "session_question",
+            "description": "What a session's agent is waiting for, read off its screen: a choice (\"Do you want to proceed?\" with its options, each with a key, and the one selected), or, when it's simply done, the end of what it said (options empty). Read-only.",
+            "inputSchema": schema(json!({ "session_id": { "type": "string", "description": SESSION_ID } }), &["session_id"]),
+            "annotations": annotations("Read what a session asks", true, false, true, false),
+        }),
+        json!({
+            "name": "session_answer",
+            "description": "Pick one of a waiting session's choices by its key from session_question (\"1\", \"2\", or \"#1\" for a menu without numbers). It approves or refuses what the agent asked: only when the user asked you to answer, and say which option. To reply with text, use session_send.",
+            "inputSchema": schema(json!({
+                "session_id": { "type": "string", "description": SESSION_ID },
+                "choice": { "type": "string", "description": "The option's key." }
+            }), &["session_id", "choice"]),
+            "annotations": annotations("Answer a session's question", false, false, false, false),
+        }),
+        json!({
             "name": "session_stop",
             "description": "End a session: closes it and whatever runs in it. Unsaved agent state is lost. Ask the user first unless they asked for exactly this.",
             "inputSchema": schema(json!({ "session_id": { "type": "string", "description": SESSION_ID } }), &["session_id"]),
@@ -962,6 +984,48 @@ pub fn tools() -> Vec<Value> {
             "annotations": annotations("Pull an image", false, false, true, false),
         }),
         json!({
+            "name": "machine_processes",
+            "description": "A machine's processes, the busiest few hundred: pid, user, name, command line, cpu (percent of one core), memory (bytes), how long it has run, GPU memory when NVIDIA says, and yours (owned by the user Muxen runs as); and its GPUs (NVIDIA, AMD on Linux, Apple): name, busy percent, memory used and total, temperature and power when known. Read-only.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
+            "annotations": annotations("List a machine's processes and GPUs", true, false, true, false),
+        }),
+        json!({
+            "name": "process_signal",
+            "description": "Stop (SIGTERM, the default) or kill (SIGKILL) a process on a machine, by pid from machine_processes. Another user's process needs root: when sudo wants a password it fails with a hint to use the Muxen app. It ends something on the user's machine: only when asked, and say which process first.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "pid": { "type": "integer" },
+                "signal": { "type": "string", "enum": ["stop", "kill"] }
+            }), &["machine_id", "pid"]),
+            "annotations": annotations("Stop or kill a process", false, true, false, false),
+        }),
+        json!({
+            "name": "run_on_machines",
+            "description": "Run one shell command on several machines at once: in each one's login shell (sh-family; PowerShell on Windows), from the home folder, without a terminal (nothing interactive). One operation per machine; waits for all unless wait is false, and returns each one's exit_code and log_tail. It runs on the user's real machines as the user: only when asked, and show the command first.",
+            "inputSchema": schema(json!({
+                "machine_ids": { "type": "array", "items": { "type": "string" }, "description": "Machine ids (or names)." },
+                "command": { "type": "string" },
+                "timeout_secs": { "type": "integer", "description": "How long each may run, default 600, at most 3600." },
+                "wait": { "type": "boolean" }
+            }), &["machine_ids", "command"]),
+            "annotations": annotations("Run a command on machines", false, true, false, false),
+        }),
+        json!({
+            "name": "wake_machine",
+            "description": "Wake a machine that's asleep or shut down (Wake on LAN), when its network card is known (Muxen learns it while the machine is on) and it's set up to wake that way. The signal goes from this computer and from online machines on the same network. Muxen checks it again after 20 and 40 seconds.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
+            "annotations": annotations("Wake a machine", false, false, true, true),
+        }),
+        json!({
+            "name": "agent_usage",
+            "description": "What the agent CLIs (Claude Code, Codex) used over the last N days (default 7), from their own logs on each machine: tokens (input, output, cache reads and writes) and requests by model and machine, and the cost at Anthropic's and OpenAI's list prices (null for a model whose price isn't known). With a Claude or ChatGPT plan the user doesn't pay per token. Read-only.",
+            "inputSchema": schema(json!({
+                "days": { "type": "integer", "description": "The last N days, 1 to 400. Default 7." },
+                "machine_id": { "type": "string", "description": "One machine; default: all that are online." }
+            }), &[]),
+            "annotations": annotations("Agent usage and cost", true, false, true, false),
+        }),
+        json!({
             "name": "machine_ports",
             "description": "What's listening on a machine: each TCP port (port, address it listens on, host to connect to) with its program or Docker container, and for web servers (web: true) the status and title of their front page. Read-only. The user opens them on their computer from the Muxen app (machine page › Servers), or with `muxen forward <machine> <port>`.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
@@ -1051,7 +1115,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 72);
+        assert_eq!(tools.len(), 79);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

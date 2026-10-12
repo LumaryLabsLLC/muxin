@@ -196,4 +196,24 @@ if command -v docker >/dev/null 2>&1; then
   fi
 fi
 
+# The network card it's reached by (to wake it later), and what wants a look.
+case "$os" in
+  linux)
+    nic=$(ip route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+    if [ -n "$nic" ]; then
+      kv mac "$(cat "/sys/class/net/$nic/address" 2>/dev/null)"
+      kv lan "$(ip -o -4 addr show dev "$nic" 2>/dev/null | awk '{ for (i = 1; i < NF; i++) { if ($i == "inet") a = $(i + 1); if ($i == "brd") b = $(i + 1) } } END { if (a != "") print a " " b }')"
+    fi
+    [ -f /var/run/reboot-required ] && kv reboot_required yes
+    command -v systemctl >/dev/null 2>&1 && kv failed_units "$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{ print $1 }' | head -n 5 | tr '\n' ' ')"
+    ;;
+  darwin)
+    nic=$(route -n get default 2>/dev/null | awk '/interface:/ { print $2 }')
+    if [ -n "$nic" ]; then
+      kv mac "$(ifconfig "$nic" 2>/dev/null | awk '/ether / { print $2; exit }')"
+      kv lan "$(ifconfig "$nic" 2>/dev/null | awk '/inet / { for (i = 1; i < NF; i++) { if ($i == "inet") a = $(i + 1); if ($i == "broadcast") b = $(i + 1) } print a " " b; exit }')"
+    fi
+    ;;
+esac
+
 kv elapsed_s "$(( $(date +%s) - now ))"

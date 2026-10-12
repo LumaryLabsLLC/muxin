@@ -220,6 +220,16 @@ impl Root {
                         disk,
                         if format::disk_low(&m) { theme.error } else { theme.accent },
                     ))
+                    .children(self.machine_gpus.get(&m.id).and_then(|g| g.first()).map(|g| {
+                        let mem = match (g.memory_used, g.memory_total) {
+                            (Some(u), Some(t)) => format!(" · {} of {}", super::services::memory(Some(u)), super::services::memory(Some(t))),
+                            (Some(u), None) => format!(" · {} in use", super::services::memory(Some(u))),
+                            _ => String::new(),
+                        };
+                        // "RTX 4090 · 14 GB of 24 GB": the vendor's words are long for a card.
+                        let name = g.name.trim_start_matches("NVIDIA ").trim_start_matches("GeForce ").trim_start_matches("AMD ").to_string();
+                        metric_card(&theme, "GPU", g.busy.map(|b| format!("{b:.0}%")), Some(format!("{name}{mem}")), g.busy.map(|b| b as f32 / 100.), theme.accent)
+                    }))
                     .child(metric_card(
                         &theme,
                         "Uptime",
@@ -877,6 +887,11 @@ impl Root {
             })
             .when(u.kind == "tailscale-off" && super::can_open_tailscale(), |d| {
                 d.child(Button::new("m-offline-tailscale", "Open Tailscale").style(ButtonStyle::Primary).on_click(|_, _, _| super::open_tailscale()))
+            })
+            // Asleep (or off): wake it over its network.
+            .when(u.kind == "offline" && self.engine.can_wake(&m.id), |d| {
+                let mid = m.id.clone();
+                d.child(Button::new("m-offline-wake", "Wake").icon("power").style(ButtonStyle::Primary).tooltip("Send it the Wake on LAN signal").on_click(cx.listener(move |this, _, _, cx| this.wake_machine(&mid, cx))))
             })
             .child(
                 Button::new("m-offline-check", "Try again")

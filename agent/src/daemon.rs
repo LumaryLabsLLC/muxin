@@ -457,13 +457,24 @@ fn restart(state: &Arc<State>, req: &Value) -> Result<Value, String> {
 fn send(state: &State, req: &Value) -> Result<Value, String> {
     let name = str_of(req, "name");
     let s = state.find(name).ok_or_else(|| format!("no session called {name}"))?;
-    let mut i = s.inner.lock().unwrap();
-    let w = i.writer.as_mut().ok_or_else(|| format!("{name} has exited"))?;
-    let mut bytes = str_of(req, "text").as_bytes().to_vec();
-    if req["enter"].as_bool().unwrap_or(true) {
-        bytes.push(b'\r');
+    let text = str_of(req, "text");
+    let enter = req["enter"].as_bool().unwrap_or(true);
+    {
+        let mut i = s.inner.lock().unwrap();
+        let w = i.writer.as_mut().ok_or_else(|| format!("{name} has exited"))?;
+        w.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
     }
-    w.write_all(&bytes).map_err(|e| e.to_string())?;
+    if enter {
+        // Enter on its own, a moment later: typed together, agents' input
+        // boxes (Claude Code's) take it as part of a paste, a new line
+        // rather than "send".
+        if !text.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+        let mut i = s.inner.lock().unwrap();
+        let w = i.writer.as_mut().ok_or_else(|| format!("{name} has exited"))?;
+        w.write_all(b"\r").map_err(|e| e.to_string())?;
+    }
     Ok(json!({}))
 }
 

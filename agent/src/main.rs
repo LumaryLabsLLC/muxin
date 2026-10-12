@@ -28,6 +28,9 @@ mod desktop;
 mod displays;
 mod logs;
 mod ports;
+mod procs;
+mod usage;
+mod wake;
 mod root;
 mod services;
 #[cfg(unix)]

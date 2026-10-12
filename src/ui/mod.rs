@@ -25,6 +25,8 @@ mod settings;
 mod shortcuts;
 mod terminal;
 mod theme;
+mod run;
+mod usage;
 mod themes;
 mod workspaces;
 mod root;

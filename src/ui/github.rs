@@ -947,6 +947,10 @@ impl Root {
                     .child(Button::new(("gh-fetch", i), "Fetch").disabled(busy).on_click(cx.listener(move |this, _, _, cx| this.gh_git(&fetch, "fetch", cx))))
                     .child(Button::new(("gh-pull", i), "Pull").icon("arrow-down").disabled(busy || c.behind == 0).on_click(cx.listener(move |this, _, _, cx| this.gh_git(&pull, "pull", cx))))
                     .child(Button::new(("gh-push", i), "Push").icon("arrow-up").disabled(busy || c.ahead == 0).on_click(cx.listener(move |this, _, _, cx| this.gh_git(&push, "push", cx))))
+                    .child({
+                        let (mid, path) = (c.machine_id.clone(), c.path.clone());
+                        Button::icon_only(("gh-editor", i), "code").tooltip("Open in an editor").on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.pick_editor(&mid, &path, e.position(), cx)))
+                    })
                     .child(Button::icon_only(("gh-term", i), "square-terminal").tooltip("New session here").on_click(cx.listener(move |this, _, window, cx| {
                         let prefill = Prefill { repo: term.repo.clone(), ..Default::default() };
                         this.show_new_session_prefilled(Some(term.machine_id.clone()), Some(term.path.clone()), prefill, window, cx)

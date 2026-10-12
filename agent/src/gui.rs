@@ -52,7 +52,14 @@ fn run(mut conn: UnixStream) {
     let Ok(req) = crate::proto::read_line(&mut conn) else { return };
     let args: Vec<String> = req["run"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
     // Only the programs that need the session.
-    if !matches!(args.first().map(String::as_str), Some("screen" | "clip")) {
+    if !matches!(args.first().map(String::as_str), Some("screen" | "clip" | "displays" | "display-mode" | "vdisplay")) {
+        return;
+    }
+    // A virtual display's holder outlives the connection: start it, say its id.
+    #[cfg(target_os = "macos")]
+    if args.first().map(String::as_str) == Some("vdisplay") {
+        let line = crate::displays::start_holder(&args).unwrap_or_else(|e| json!({ "error": e }).to_string());
+        let _ = writeln!(conn, "{line}");
         return;
     }
     let Ok(exe) = std::env::current_exe() else { return };

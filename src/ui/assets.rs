@@ -23,7 +23,7 @@ icons!(
     "bot", "square-terminal", "power", "plug", "unplug",
     "agent-claude", "agent-codex", "agent-gemini", "agent-opencode", "agent-amp", "agent-pi", "agent-github",
     "circle-dot", "git-pull-request", "git-pull-request-draft", "git-merge", "message-square", "lock", "star",
-    "arrow-down", "arrow-up", "book-open", "star-filled", "maximize", "minimize", "panel-right", "panel-left",
+    "arrow-down", "arrow-up", "book-open", "star-filled", "maximize", "minimize", "panel-right", "panel-left", "columns-2", "rows-2",
     "folder", "file", "sliders-horizontal", "palette", "keyboard", "cloud", "brand-digitalocean", "pencil",
     // The glyphs of each icon style (see kit::IconStyle): pf- Phosphor (MIT),
     // so- Solar (CC BY 4.0), mc- MingCute (Apache-2.0), fl- Fluent (MIT),
@@ -76,7 +76,16 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../../assets/fonts/geist-600.ttf"),
     include_bytes!("../../assets/fonts/geist-mono-400.ttf"),
     include_bytes!("../../assets/fonts/geist-mono-500.ttf"),
+    NERD_SYMBOLS,
 ];
+
+/// Nerd Font icons (Neovim's file icons, prompt glyphs), drawn when the
+/// terminal font doesn't have them: Symbols Nerd Font Mono (MIT, see
+/// NERD-FONTS-LICENSE.txt), one cell wide each.
+const NERD_SYMBOLS: &[u8] = include_bytes!("../../assets/fonts/symbols-nerd-font-mono.ttf");
+/// Its names, for the terminal font's fallbacks: PostScript (what macOS
+/// looks fallbacks up by), then family.
+pub const NERD_SYMBOLS_NAMES: [&str; 2] = ["SymbolsNFM", "Symbols Nerd Font Mono"];
 
 /// The app icon, for the Dock when running outside an .app bundle.
 pub const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/brand/icon-512.png");
@@ -112,6 +121,43 @@ pub fn load_fonts(cx: &mut App) {
     let fonts = FONTS.iter().map(|f| Cow::Borrowed(*f)).collect();
     if let Err(e) = cx.text_system().add_fonts(fonts) {
         tracing::warn!("couldn't load bundled fonts: {e}");
+    }
+    #[cfg(target_os = "macos")]
+    register_with_core_text(NERD_SYMBOLS);
+}
+
+/// Makes a bundled font known to macOS by name, for this app only: font
+/// fallbacks are looked up that way, and GPUI's own fonts aren't.
+#[cfg(target_os = "macos")]
+fn register_with_core_text(bytes: &'static [u8]) {
+    use std::ffi::c_void;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGDataProviderCreateWithData(info: *mut c_void, data: *const c_void, size: usize, release: *const c_void) -> *const c_void;
+        fn CGDataProviderRelease(provider: *const c_void);
+        fn CGFontCreateWithDataProvider(provider: *const c_void) -> *const c_void;
+        fn CGFontRelease(font: *const c_void);
+    }
+    #[link(name = "CoreText", kind = "framework")]
+    unsafe extern "C" {
+        fn CTFontManagerRegisterGraphicsFont(font: *const c_void, error: *mut *const c_void) -> bool;
+    }
+    // SAFETY: `bytes` lives for the whole program; each object made here is released here.
+    unsafe {
+        let provider = CGDataProviderCreateWithData(std::ptr::null_mut(), bytes.as_ptr().cast(), bytes.len(), std::ptr::null());
+        if provider.is_null() {
+            return;
+        }
+        let font = CGFontCreateWithDataProvider(provider);
+        CGDataProviderRelease(provider);
+        if font.is_null() {
+            return;
+        }
+        let mut error = std::ptr::null();
+        if !CTFontManagerRegisterGraphicsFont(font, &mut error) {
+            tracing::warn!("couldn't register the Nerd Font symbols");
+        }
+        CGFontRelease(font);
     }
 }
 

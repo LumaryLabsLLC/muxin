@@ -264,7 +264,11 @@ impl Engine {
         let name = format!("{}-{}", kind.id, super::workspaces::random_id(4));
         let cwd = if req.cwd.trim().is_empty() { "~".to_string() } else { req.cwd.trim().to_string() };
         let title = req.title.clone().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| default_title(kind, &cwd));
-        // "Shell · home", "Shell · home 2", ... so sessions on a machine are told apart.
+        // "Shell · home", "Shell · home 2", ... so sessions on a machine are told apart
+        // (knowing which it has: the CLI starts without having asked).
+        if self.sessions_of(&spec.id).is_none_or(|f| f.checked_at.is_none()) && self.demo_world().is_none() {
+            let _ = self.refresh_sessions(&spec.id).await;
+        }
         let taken: Vec<String> = self.sessions_of(&spec.id).map(|f| f.sessions.into_iter().map(|s| s.title).collect()).unwrap_or_default();
         let title = unique_title(&title, &taken);
 
@@ -540,6 +544,15 @@ fn closes_on_exit(s: &SessionInfo) -> bool {
     s.status == "exited" && (s.agent == "shell" || s.exit_code == Some(0))
 }
 
+#[cfg(test)]
+#[test]
+fn titles_name_the_folder() {
+    let shell = agent("shell").unwrap();
+    for (cwd, title) in [("~", "Shell · home"), ("/home/adib", "Shell · home"), ("/Users/adib/", "Shell · home"), ("/root", "Shell · home"), ("~/code/api", "Shell · api"), ("/home/adib/openrunner", "Shell · openrunner")] {
+        assert_eq!(default_title(shell, cwd), title, "{cwd}");
+    }
+}
+
 /// `title`, or `title 2`, `title 3`, ... when a session already has it.
 fn unique_title(title: &str, taken: &[String]) -> String {
     if !taken.iter().any(|t| t == title) {
@@ -560,7 +573,11 @@ fn clean_title(title: &str) -> Result<String, String> {
 
 /// A short default title: the agent and the folder it works in.
 fn default_title(kind: &AgentKind, cwd: &str) -> String {
-    let folder = cwd.trim_end_matches('/').rsplit('/').next().filter(|f| !f.is_empty() && *f != "~").unwrap_or("home");
+    let path = cwd.trim_end_matches('/');
+    // The home folder, however it's written: "~", /home/adib, /Users/adib, /root.
+    let parts: Vec<&str> = path.split('/').collect();
+    let home = path.is_empty() || path == "~" || path == "/root" || matches!(parts[..], ["", "home" | "Users", user] if !user.is_empty());
+    let folder = if home { "home" } else { path.rsplit('/').next().filter(|f| !f.is_empty()).unwrap_or("home") };
     format!("{} · {folder}", kind.name)
 }
 

@@ -10,7 +10,7 @@ use gpui::{
     MenuItem, MouseButton, ScrollHandle, SharedString, Subscription, Task, Window, actions, div, prelude::*, px,
 };
 
-use super::dialogs::{AddMachineDialog, ConfirmDialog, DialogEvent, InstallDialog, NewSessionDialog, NewWorkspaceDialog, RenameDialog, RenameTarget};
+use super::dialogs::{AddDisplayDialog, MonitorPasswordDialog, AddMachineDialog, ConfirmDialog, DialogEvent, InstallDialog, NewSessionDialog, NewWorkspaceDialog, RenameDialog, RenameTarget};
 use super::terminal::TerminalView;
 use super::format;
 use super::input::{InputEvent, TextInput};
@@ -51,6 +51,10 @@ actions!(
         ToggleSidebar,
         AddMachine,
         NewSession,
+        SplitRight,
+        SplitDown,
+        NextPane,
+        PreviousPane,
         QuickOpen,
         CommandPalette,
         ShowAbout,
@@ -172,6 +176,8 @@ pub enum Modal {
     Copy(Entity<super::files::CopyDialog>),
     Cloud(Entity<super::cloud_dialog::CloudDialog>),
     Rename(Entity<RenameDialog>),
+    AddDisplay(Entity<AddDisplayDialog>),
+    MonitorPassword(Entity<MonitorPasswordDialog>),
 }
 
 pub struct Notice {
@@ -233,6 +239,8 @@ pub struct Root {
     desktops: std::collections::HashMap<String, Entity<super::desktop::DesktopView>>,
     /// Sessions showing their machine's desktop beside the terminal.
     pub(super) split: HashSet<String>,
+    /// Terminals split into panes (see panes.rs); a session page shows the layout it's in.
+    pub(super) panes: Vec<super::panes::Panes>,
     /// The terminal's share of a split page, and whether its divider is being dragged.
     pub(super) split_ratio: f32,
     pub(super) split_resizing: bool,
@@ -369,6 +377,7 @@ impl Root {
             gh: Default::default(),
             desktops: Default::default(),
             split: Default::default(),
+            panes: cx.global::<super::theme::Appearance>().panes.iter().filter_map(|t| super::panes::Panes::decode(t)).filter(|p| p.ids().len() > 1).collect(),
             split_ratio: cx.global::<super::theme::Appearance>().split_ratio.clamp(0.2, 0.8),
             split_resizing: false,
             machine_git: Default::default(),
@@ -402,14 +411,19 @@ impl Root {
         // Terminals of sessions that ended go away (one without the agent stops with its terminal).
         self.terminals.retain(|id, _| snapshot.sessions.iter().any(|s| &s.id == id));
         // Looking at a session that just closed: back to its machine.
-        if let Route::Session(id) = &self.route {
-            let gone = !snapshot.sessions.iter().any(|s| &s.id == id) && self.snapshot.sessions.iter().any(|s| &s.id == id);
+        if let Route::Session(id) = self.route.clone() {
+            let gone = !snapshot.sessions.iter().any(|s| s.id == id) && self.snapshot.sessions.iter().any(|s| s.id == id);
             if gone {
-                let machine = id.split('/').next().unwrap_or_default().to_string();
-                self.show(Route::Machine(machine), cx);
+                // In a split: the pane next to it.
+                let next = self.panes.iter().find(|p| p.contains(&id)).and_then(|p| p.ids().into_iter().find(|x| *x != id && snapshot.sessions.iter().any(|s| s.id == *x)).map(str::to_string));
+                match next {
+                    Some(next) => self.route = Route::Session(next),
+                    None => self.show(Route::Machine(id.split('/').next().unwrap_or_default().to_string()), cx),
+                }
                 self.refocus = true;
             }
         }
+        self.prune_panes(&snapshot, cx);
         // Favorites of machines that are gone (removed, destroyed) go too. Not
         // while the list is empty: that's before config.toml has been read.
         let favorites = &cx.global::<super::theme::Appearance>().favorite_machines;
@@ -474,7 +488,7 @@ impl Root {
         self.show(Route::Activity, cx);
     }
 
-    fn on_route_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_route_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.route == Route::Settings && self.settings.is_none() {
             let engine = self.engine.clone();
             self.settings = Some(cx.new(|cx| SettingsPage::new(engine, window, cx)));
@@ -488,7 +502,7 @@ impl Root {
         // A desktop streams only while it's shown: its page, or beside a session.
         let showing = match &self.route {
             Route::Desktop(id) => Some(id.clone()),
-            Route::Session(sid) if self.split.contains(sid) => sid.split('/').next().map(str::to_string),
+            Route::Session(sid) if self.page_split(sid).is_some() => sid.split('/').next().map(str::to_string),
             _ => None,
         };
         // Desktops in the sidebar keep streaming, so going back is instant.
@@ -608,6 +622,7 @@ impl Root {
                 self.show_install_dialog(arg, window, cx);
             }
             "add-machine" => self.show_add_machine(window, cx),
+            "add-display" => self.show_add_display(arg.into(), window, cx),
             // "rename:<machine-id>", and "rename-session:<session-id>" (the first session without one).
             "rename" => self.show_rename(RenameTarget::Machine(arg.into()), window, cx),
             "rename-session" => {
@@ -657,10 +672,44 @@ impl Root {
             }
             "activity" => self.show(Route::Activity, cx),
             "about" => self.navigate(Route::About, window, cx),
-            "desktop" => self.navigate(Route::Desktop(arg.into()), window, cx),
+            // "desktop:<machine>", or "desktop:<machine>@<display>" for one of its displays.
+            "desktop" => match arg.split_once('@') {
+                Some((machine, display)) => self.show_display(machine.into(), Some(display.into()), window, cx),
+                None => self.navigate(Route::Desktop(arg.into()), window, cx),
+            },
             "desktop-window" => {
                 let name = self.snapshot.machines.iter().find(|m| m.id == arg).map(|m| m.name.clone()).unwrap_or_else(|| arg.to_string());
-                super::desktop::open_window(self.engine.clone(), arg.to_string(), name, cx);
+                super::desktop::open_window(self.engine.clone(), arg.to_string(), None, name, cx);
+            }
+            // Sessions split into panes: "panes:r(<id>+d(<id>+<id>))" (`+` for
+            // the layout's commas, which separate views).
+            "panes" => {
+                if let Some(layout) = super::panes::Panes::decode(&arg.replace('+', ",")).filter(|p| p.ids().len() > 1) {
+                    let first = layout.ids()[0].to_string();
+                    self.panes.retain(|p| !layout.ids().iter().any(|id| p.contains(id)));
+                    self.panes.push(layout);
+                    let saved: Vec<String> = self.panes.iter().map(super::panes::Panes::encode).collect();
+                    super::theme::remember(cx, |a| a.panes = saved);
+                    self.navigate(Route::Session(first), window, cx);
+                }
+            }
+            // The session shown, split: a new shell beside it or below it.
+            // (once the session is known: sessions are found over the network).
+            "split-right" | "split-down" => {
+                let down = kind == "split-down";
+                let task = cx.spawn_in(window, async move |this, cx| {
+                    for _ in 0..100 {
+                        let known = this
+                            .update(cx, |this, _| matches!(&this.route, Route::Session(id) if this.snapshot.sessions.iter().any(|s| &s.id == id)))
+                            .unwrap_or(false);
+                        if known {
+                            let _ = this.update_in(cx, |this, window, cx| this.split_session(down, window, cx));
+                            return;
+                        }
+                        cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+                    }
+                });
+                self.track(task);
             }
             // A session with its machine's desktop beside the terminal.
             "split" => {
@@ -868,6 +917,73 @@ impl Root {
         self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
     }
 
+    /// Asks for a new virtual monitor's name and size.
+    pub(super) fn show_add_display(&mut self, machine: String, window: &mut Window, cx: &mut Context<Self>) {
+        let engine = self.engine.clone();
+        let dialog = cx.new(|cx| AddDisplayDialog::new(engine, machine, window, cx));
+        self.show_modal(Modal::AddDisplay(dialog.clone()), window, cx);
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+    }
+
+    /// Shows one of a machine's displays (None: its default one) on the desktop page.
+    pub(super) fn show_display(&mut self, machine: String, display: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.pin_desktop(&machine, cx);
+        self.navigate(Route::Desktop(machine.clone()), window, cx);
+        if let Some(view) = self.desktops.get(&machine).cloned() {
+            view.update(cx, |v, cx| v.set_display(display, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Sets a monitor's size or scale, through its desktop view when one is
+    /// open (it follows the new size).
+    pub(super) fn set_display(&mut self, machine: String, display: String, size: Option<(u32, u32)>, scale: Option<f64>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.desktops.get(&machine).cloned() {
+            view.update(cx, |v, cx| v.change_display(display, size, scale, window, cx));
+            return;
+        }
+        let engine = self.engine.clone();
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.set_display(&machine, &display, size, scale).await }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Err(e)) = job.await {
+                let _ = this.update(cx, |this, cx| this.notify_user(e, true, cx));
+            }
+        });
+        self.track(task);
+    }
+
+    /// Removes a virtual monitor; the desktop goes back to the default display.
+    pub(super) fn remove_display(&mut self, machine: String, display: String, window: &mut Window, cx: &mut Context<Self>) {
+        let (machine_for_dialog, display_for_dialog) = (machine.clone(), display.clone());
+        if let Some(view) = self.desktops.get(&machine).cloned() {
+            view.update(cx, |v, cx| v.set_display(None, window, cx));
+        }
+        let engine = self.engine.clone();
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.remove_display(&machine, &display).await }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| match job.await {
+            // The machine asks for the password (sudo, on Linux).
+            Ok(Err(crate::fleet::desktop::AddDisplayError::NeedsPassword(why))) => {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    let engine = this.engine.clone();
+                    let dialog = cx.new(|cx| MonitorPasswordDialog::new(engine, machine_for_dialog, display_for_dialog, Some(why), window, cx));
+                    this.show_modal(Modal::MonitorPassword(dialog.clone()), window, cx);
+                    this._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+                });
+            }
+            Ok(Err(e)) => {
+                let _ = this.update(cx, |this, cx| this.notify_user(e.to_string(), true, cx));
+            }
+            _ => {}
+        });
+        self.track(task);
+    }
+
     /// Asks for a machine's or a session's new name.
     pub(super) fn show_rename(&mut self, target: RenameTarget, window: &mut Window, cx: &mut Context<Self>) {
         let s = &self.snapshot;
@@ -878,6 +994,13 @@ impl Root {
                 Some(x) => (x.title.clone(), machine_name(&x.machine_id)),
                 None => return,
             },
+            RenameTarget::Display(machine, display) => {
+                let name = s.machines.iter().find(|m| &m.id == machine).and_then(|m| m.displays.iter().find(|d| &d.id == display)).map(|d| d.name.clone());
+                match name {
+                    Some(n) => (n, machine_name(machine)),
+                    None => return,
+                }
+            }
         };
         let engine = self.engine.clone();
         let dialog = cx.new(|cx| RenameDialog::new(engine, target, current, machine, window, cx));
@@ -1093,6 +1216,8 @@ impl Root {
             Modal::Copy(d) => d.read(cx).first_focus(cx),
             Modal::Cloud(d) => d.read(cx).first_focus(cx),
             Modal::Rename(d) => d.read(cx).first_focus(cx),
+            Modal::AddDisplay(d) => d.read(cx).first_focus(cx),
+            Modal::MonitorPassword(d) => d.read(cx).first_focus(cx),
             Modal::Licenses(d) => d.focus_handle(cx),
         };
         window.focus(&focus);
@@ -1111,6 +1236,7 @@ impl Root {
             DialogEvent::NewCloudMachine => self.show_cloud_dialog(window, cx),
             DialogEvent::CreateWorkspace(req, iso) => self.create_workspace(req.clone(), iso.clone(), window, cx),
             DialogEvent::StartInWorkspace(req, session) => self.start_in_workspace(req.clone(), session.clone(), window, cx),
+            DialogEvent::DisplayAdded(machine, display) => self.show_display(machine.clone(), Some(display.clone()), window, cx),
             DialogEvent::StartSession(req) => {
                 self.start_session(req.clone(), window, cx);
                 cx.notify();
@@ -1336,8 +1462,17 @@ impl Root {
                 for x in sessions {
                     rows.push(self.session_row(&theme, x, selected_session.as_deref() == Some(&x.id), cx).into_any_element());
                 }
+                // Which of its displays the desktop page shows, when it's on screen.
+                let showing = (self.route == Route::Desktop(m.id.clone())).then(|| self.desktops.get(&m.id).map(|v| v.read(cx).display().map(str::to_string))).flatten();
+                let on_virtual = showing.as_ref().is_some_and(|d| d.as_ref().is_some_and(|d| m.displays.iter().any(|x| &x.id == d && x.is_virtual)));
+                // The open desktop: its main screen, then the virtual monitors
+                // (closed together).
                 if has_desktop {
-                    rows.push(self.desktop_row(&theme, m, self.route == Route::Desktop(m.id.clone()), cx).into_any_element());
+                    rows.push(self.desktop_row(&theme, m, showing.is_some() && !on_virtual, cx).into_any_element());
+                    for d in m.displays.iter().filter(|d| d.is_virtual) {
+                        let selected = showing.as_ref().is_some_and(|s| s.as_deref() == Some(d.id.as_str()));
+                        rows.push(self.monitor_row(&theme, m, d, selected, cx).into_any_element());
+                    }
                 }
                 // Runners as one line; a search shows the ones it found.
                 if !machine_match {
@@ -2095,7 +2230,31 @@ impl Root {
         }
         let Some(view) = self.desktops.get(id).cloned() else { return div().into_any_element() };
         let (pop, close) = (id.to_string(), id.to_string());
-        let extra = vec![
+        let machine = self.snapshot.machines.iter().find(|m| m.id == id);
+        let shown = view.read(cx).display().map(str::to_string);
+        let virtual_shown = shown.clone().filter(|d| machine.is_some_and(|m| m.displays.iter().any(|x| &x.id == d && x.is_virtual)));
+        let can_add = machine.is_some() && !self.snapshot.demo;
+        let mut extra = Vec::new();
+        if let Some(display) = virtual_shown {
+            let mid = id.to_string();
+            extra.push(
+                Button::new("desktop-remove-monitor", "Remove monitor")
+                    .style(ButtonStyle::Ghost)
+                    .icon("trash-2")
+                    .on_click(cx.listener(move |this, _, window, cx| this.remove_display(mid.clone(), display.clone(), window, cx)))
+                    .into_any_element(),
+            );
+        } else if can_add {
+            let mid = id.to_string();
+            extra.push(
+                Button::new("desktop-add-monitor", "Add monitor")
+                    .style(ButtonStyle::Ghost)
+                    .icon("plus")
+                    .on_click(cx.listener(move |this, _, window, cx| this.show_add_display(mid.clone(), window, cx)))
+                    .into_any_element(),
+            );
+        }
+        extra.extend(vec![
             Button::new("desktop-window", "Open in window")
                 .style(ButtonStyle::Ghost)
                 .icon("external-link")
@@ -2106,12 +2265,17 @@ impl Root {
                 .icon("x")
                 .on_click(cx.listener(move |this, _, window, cx| this.close_desktop(&close, window, cx)))
                 .into_any_element(),
-        ];
+        ]);
+        let root = cx.entity().downgrade();
+        let menu: super::desktop::DisplayMenu = std::rc::Rc::new(move |machine: &str, display: &str, at, _window, cx| {
+            let target = super::menu::MenuTarget::Display { machine: machine.to_string(), display: display.to_string() };
+            let _ = root.update(cx, |this, cx| this.open_menu(target, at, cx));
+        });
         div()
             .size_full()
             .flex()
             .flex_col()
-            .child(super::desktop::toolbar(&view, extra, cx))
+            .child(super::desktop::toolbar_with_menu(&view, extra, Some(menu), cx))
             .child(div().flex_1().min_h(px(0.)).child(view))
             .into_any_element()
     }
@@ -2141,7 +2305,9 @@ impl Root {
     pub(super) fn desktop_to_sidebar(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let machine = session_id.split('/').next().unwrap_or_default().to_string();
         self.pin_desktop(&machine, cx);
-        self.split.remove(session_id);
+        if let Some(key) = self.page_split(session_id) {
+            self.split.remove(&key);
+        }
         self.navigate(Route::Desktop(machine), window, cx);
     }
 
@@ -2149,9 +2315,17 @@ impl Root {
     fn desktop_row(&self, theme: &Theme, m: &Machine, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let (open, close) = (m.id.clone(), m.id.clone());
         let (from, to) = format::machine_tile(m);
+        // Its main monitor: the size, and its menu on right-click (no Remove: it's real).
+        let main = m.displays.iter().find(|d| d.main && d.id != "all").cloned();
+        let size = main.as_ref().map(|d| format!("{}×{}", d.width as u32, d.height as u32));
+        let right_click = main.map(|d| {
+            let (machine, display) = (m.id.clone(), d.id);
+            super::menu::on_right_click(move || super::menu::MenuTarget::Display { machine: machine.clone(), display: display.clone() }, cx)
+        });
         div()
             .id(SharedString::from(format!("side-d-{}", m.id)))
             .group("desktop-row")
+            .relative()
             .flex()
             .items_center()
             .gap(px(8.))
@@ -2165,31 +2339,92 @@ impl Root {
             .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
             .child(kit::tile("monitor", from, to, 16.))
             .child(div().flex_1().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child("Desktop"))
+            // The size lines up with the monitors' below; the close button
+            // takes its place on hover.
+            .children(size.map(|s| div().flex_none().font_family(mono_font()).text_size(px(10.5)).text_color(theme.text_placeholder).group_hover("desktop-row", |st| st.invisible()).child(s)))
             .child(
                 div()
                     .id(SharedString::from(format!("side-d-x-{}", m.id)))
+                    .absolute()
+                    .right(px(8.))
                     .invisible()
                     .group_hover("desktop-row", |st| st.visible())
+                    .tooltip(|window, cx| kit::Tooltip::view("Close the desktop".into(), window, cx))
                     .child(icon("x", 12., theme.text_placeholder))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.close_desktop(&close, window, cx)
                     })),
             )
-            .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Desktop(open.clone()), window, cx)))
+            .when_some(right_click, |el, f| el.on_mouse_down(MouseButton::Right, f))
+            // Its main monitor (the virtual ones are listed below it).
+            .on_click(cx.listener(move |this, _, window, cx| this.show_display(open.clone(), None, window, cx)))
+    }
+
+    /// A virtual monitor's item in the sidebar, under its machine: opens the
+    /// desktop page on it.
+    fn monitor_row(&self, theme: &Theme, m: &Machine, d: &crate::fleet::model::DisplayInfo, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let (machine, display) = (m.id.clone(), d.id.clone());
+        let remove = (m.id.clone(), d.id.clone());
+        let (from, to) = format::machine_tile(m);
+        div()
+            .id(SharedString::from(format!("side-v-{}-{}", m.id, d.id)))
+            .group("monitor-row")
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(26.))
+            .mx(px(10.))
+            .pl(px(22.))
+            .pr(px(8.))
+            .rounded(px(7.))
+            .cursor_pointer()
+            .when(selected, |el| el.bg(theme.element_selected))
+            .when(!selected, |el| el.hover(|st| st.bg(theme.ghost_hover)))
+            .child(kit::tile("monitor", from, to, 16.))
+            // An explicit width: GPUI 0.2 only ellipsizes text whose width it knows.
+            .child(div().w(px((self.sidebar_width - 20. - 30. - 16. - 16. - 74. - 52.).max(40.))).truncate().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child(d.name.clone()))
+            .child(div().flex_1())
+            // Which ones Muxen added (and the × takes away).
+            .child(kit::pill("virtual", theme.accent))
+            .child(div().flex_none().font_family(mono_font()).text_size(px(10.5)).text_color(theme.text_placeholder).group_hover("monitor-row", |st| st.invisible()).child(format!("{}×{}", d.width as u32, d.height as u32)))
+            // On hover, in place of the size: unplug it.
+            .child(
+                div()
+                    .id(SharedString::from(format!("side-v-x-{}-{}", m.id, d.id)))
+                    .absolute()
+                    .right(px(8.))
+                    .invisible()
+                    .group_hover("monitor-row", |st| st.visible())
+                    .tooltip(|window, cx| kit::Tooltip::view("Remove this virtual monitor".into(), window, cx))
+                    .child(icon("x", 12., theme.text_placeholder))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.remove_display(remove.0.clone(), remove.1.clone(), window, cx)
+                    })),
+            )
+            .on_mouse_down(MouseButton::Right, {
+                let (machine, display) = (m.id.clone(), d.id.clone());
+                super::menu::on_right_click(move || super::menu::MenuTarget::Display { machine: machine.clone(), display: display.clone() }, cx)
+            })
+            .on_click(cx.listener(move |this, _, window, cx| this.show_display(machine.clone(), Some(display.clone()), window, cx)))
     }
 
     /// Moves a machine's desktop into a window of its own (and out of this one).
     pub(super) fn pop_out_desktop(&mut self, machine_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let display = self.desktops.get(machine_id).and_then(|v| v.read(cx).display().map(str::to_string));
         let id = machine_id.to_string();
         super::theme::remember(cx, |a| a.desktops.retain(|d| *d != id));
         self.desktops.remove(machine_id);
         let name = self.snapshot.machines.iter().find(|m| m.id == machine_id).map(|m| m.name.clone()).unwrap_or_else(|| machine_id.to_string());
-        super::desktop::open_window(self.engine.clone(), machine_id.to_string(), name, cx);
+        super::desktop::open_window(self.engine.clone(), machine_id.to_string(), display, name, cx);
         match self.route.clone() {
             Route::Desktop(_) => self.navigate(Route::Machine(machine_id.to_string()), window, cx),
             Route::Session(sid) => {
-                self.split.remove(&sid);
+                if let Some(key) = self.page_split(&sid) {
+                    self.split.remove(&key);
+                }
                 self.on_route_changed(window, cx);
             }
             _ => {}
@@ -2198,17 +2433,20 @@ impl Root {
 
     /// Shows or hides a machine's desktop next to a session's terminal.
     pub(super) fn toggle_split(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.split.remove(session_id) {
-            self.split.insert(session_id.to_string());
+        match self.page_split(session_id) {
+            Some(key) => {
+                self.split.remove(&key);
+            }
+            None => {
+                self.split.insert(session_id.to_string());
+            }
         }
         self.on_route_changed(window, cx);
     }
 
     /// The desktop shown next to a session's terminal, if it's split.
     pub(super) fn split_desktop(&self, session_id: &str) -> Option<Entity<super::desktop::DesktopView>> {
-        if !self.split.contains(session_id) {
-            return None;
-        }
+        self.page_split(session_id)?;
         self.desktops.get(session_id.split('/').next().unwrap_or_default()).cloned()
     }
 
@@ -2254,7 +2492,11 @@ impl Render for Root {
             self.keys_soon = None;
         }
         if std::mem::take(&mut self.refocus) {
-            window.focus(&self.focus);
+            // Moved to another pane of a split: its terminal; else the page.
+            match &self.route {
+                Route::Session(id) if self.terminals.contains_key(id) => window.focus(&self.terminals[id].focus_handle(cx)),
+                _ => window.focus(&self.focus),
+            }
         }
         let window_height = f32::from(window.viewport_size().height);
         // Dialogs sit lower on tall windows and scroll when they don't fit.
@@ -2270,6 +2512,8 @@ impl Render for Root {
             Modal::Copy(d) => d.clone().into_any_element(),
             Modal::Cloud(d) => d.clone().into_any_element(),
             Modal::Rename(d) => d.clone().into_any_element(),
+            Modal::AddDisplay(d) => d.clone().into_any_element(),
+            Modal::MonitorPassword(d) => d.clone().into_any_element(),
             Modal::Licenses(d) => d.clone().into_any_element(),
         });
         let notice = self.render_notice(&theme);
@@ -2303,6 +2547,10 @@ impl Render for Root {
             .on_action(cx.listener(Self::toggle_activity))
             .on_action(cx.listener(Self::add_machine))
             .on_action(cx.listener(Self::new_session))
+            .on_action(cx.listener(|this, _: &SplitRight, window, cx| this.split_session(false, window, cx)))
+            .on_action(cx.listener(|this, _: &SplitDown, window, cx| this.split_session(true, window, cx)))
+            .on_action(cx.listener(|this, _: &NextPane, window, cx| this.step_pane(1, window, cx)))
+            .on_action(cx.listener(|this, _: &PreviousPane, window, cx| this.step_pane(-1, window, cx)))
             .on_action(cx.listener(|this, _: &QuickOpen, window, cx| this.open_palette(false, window, cx)))
             .on_action(cx.listener(|this, _: &CommandPalette, window, cx| this.open_palette(true, window, cx)))
             .on_action(cx.listener(|this, _: &ShowAbout, window, cx| this.navigate(Route::About, window, cx)))

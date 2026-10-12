@@ -472,6 +472,54 @@ enum DesktopCommand {
     Shot(DesktopShotArgs),
     /// Send input: a JSON list like '[{"type":"click","x":100,"y":200},{"type":"text","text":"hi"}]'
     Input(DesktopInputArgs),
+    /// List the machine's monitors, virtual ones included
+    Displays(MachineArgs),
+    /// Add a virtual monitor (like plugging in another screen)
+    Add(DesktopAddArgs),
+    /// Remove a virtual monitor Muxen added
+    Remove(DesktopRemoveArgs),
+    /// Change a monitor's resolution or scale
+    Set(DesktopSetArgs),
+}
+
+#[derive(Args)]
+struct DesktopSetArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// The display's id (see `muxen desktop displays`)
+    display: String,
+    /// Its resolution, e.g. 3840x2160 (one it offers)
+    #[arg(long)]
+    size: Option<String>,
+    /// How much the desktop scales things up: 1, 2, ...
+    #[arg(long)]
+    scale: Option<f64>,
+}
+
+#[derive(Args)]
+struct DesktopAddArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// Its size, e.g. 2560x1440 (default: the main monitor's)
+    #[arg(long)]
+    size: Option<String>,
+    /// What to call it
+    #[arg(long)]
+    name: Option<String>,
+}
+
+#[derive(Args)]
+struct DesktopRemoveArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// The display's id (see `muxen desktop displays`)
+    display: String,
 }
 
 #[derive(Args)]
@@ -483,6 +531,9 @@ struct DesktopShotArgs {
     /// Where to save it (default: <machine>-desktop.jpg)
     #[arg(short, long)]
     output: Option<std::path::PathBuf>,
+    /// One of its displays (see `muxen desktop displays`)
+    #[arg(long)]
+    display: Option<String>,
 }
 
 #[derive(Args)]
@@ -493,6 +544,9 @@ struct DesktopInputArgs {
     machine: String,
     /// The events, as JSON
     events: String,
+    /// One of its displays (see `muxen desktop displays`)
+    #[arg(long)]
+    display: Option<String>,
 }
 
 #[derive(Args)]
@@ -1527,14 +1581,15 @@ fn desktop(cmd: DesktopCommand, runtime: &tokio::runtime::Runtime) -> u8 {
         DesktopCommand::Shot(a) => {
             let machine = a.machine.clone();
             let path = a.output.clone().unwrap_or_else(|| format!("{machine}-desktop.jpg").into());
-            run(runtime, &a.agent, async move |e| api::desktop_screenshot(&e, &machine).await, move |shot| match std::fs::write(&path, &shot.jpeg) {
+            let display = a.display.clone();
+            run(runtime, &a.agent, async move |e| api::desktop_screenshot(&e, &machine, display.as_deref()).await, move |shot| match std::fs::write(&path, &shot.jpeg) {
                 Ok(()) => format!("Saved {} ({}×{}, screen {}×{}).\n", path.display(), shot.width, shot.height, shot.screen_width, shot.screen_height),
                 Err(e) => format!("Couldn't save {}: {e}\n", path.display()),
             })
         }
         DesktopCommand::Input(a) => match serde_json::from_str(&a.events) {
             Ok(events) => {
-                let req = api::DesktopInputRequest { machine_id: a.machine, events };
+                let req = api::DesktopInputRequest { machine_id: a.machine, display: a.display, events };
                 run(runtime, &a.agent, async move |e| api::desktop_input(&e, req).await, |v| format!("Sent {} events.\n", v["events"]))
             }
             Err(e) => {
@@ -1542,7 +1597,53 @@ fn desktop(cmd: DesktopCommand, runtime: &tokio::runtime::Runtime) -> u8 {
                 2
             }
         },
+        DesktopCommand::Displays(a) => {
+            let req = api::MachineRequest { machine_id: a.machine_id };
+            run(runtime, &a.agent, async move |e| api::desktop_displays(&e, req).await, |displays| {
+                displays
+                    .iter()
+                    .map(|d| {
+                        let tags = [d.main.then_some("main"), d.is_virtual.then_some("virtual")].into_iter().flatten().collect::<Vec<_>>().join(", ");
+                        format!("{:<16} {:<20} {:>5}×{:<5} at {},{}{}\n", d.id, d.name, d.width, d.height, d.x, d.y, if tags.is_empty() { String::new() } else { format!("  ({tags})") })
+                    })
+                    .collect::<String>()
+            })
+        }
+        DesktopCommand::Add(a) => {
+            let size = match a.size.as_deref().map(parse_size) {
+                Some(Some(size)) => Some(size),
+                Some(None) => {
+                    eprintln!("error: --size looks like 1920x1080");
+                    return 2;
+                }
+                None => None,
+            };
+            let req = api::AddDisplayRequest { machine_id: a.machine, width: size.map(|s| s.0), height: size.map(|s| s.1), name: a.name };
+            run(runtime, &a.agent, async move |e| api::desktop_add_display(&e, req).await, |d| format!("Added {} ({}×{}) as display {}.\n", d.name, d.width, d.height, d.id))
+        }
+        DesktopCommand::Set(a) => {
+            let size = match a.size.as_deref().map(parse_size) {
+                Some(Some(size)) => Some(size),
+                Some(None) => {
+                    eprintln!("error: --size looks like 3840x2160");
+                    return 2;
+                }
+                None => None,
+            };
+            let req = api::SetDisplayRequest { machine_id: a.machine, display: a.display, width: size.map(|s| s.0), height: size.map(|s| s.1), scale: a.scale };
+            run(runtime, &a.agent, async move |e| api::desktop_set_display(&e, req).await, |d| format!("{} is now {}×{}.\n", d.name, d.width, d.height))
+        }
+        DesktopCommand::Remove(a) => {
+            let req = api::RemoveDisplayRequest { machine_id: a.machine, display: a.display };
+            run(runtime, &a.agent, async move |e| api::desktop_remove_display(&e, req).await, |v| format!("Removed display {}.\n", v["removed"].as_str().unwrap_or("")))
+        }
     }
+}
+
+/// "1920x1080" as (1920, 1080).
+fn parse_size(text: &str) -> Option<(u32, u32)> {
+    let (w, h) = text.split_once(['x', '×'])?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
 }
 
 fn git(cmd: GitCommand, runtime: &tokio::runtime::Runtime) -> u8 {

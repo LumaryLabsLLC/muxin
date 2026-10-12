@@ -48,6 +48,8 @@ enum Msg {
     /// The stream ended: why, and whether it may well work again in a moment
     /// (the connection dropped, as opposed to the machine saying no).
     Ended(String, bool),
+    /// The monitor asked for is gone: showing the default one instead.
+    Gone,
 }
 
 /// The machine's screen as last received: patches land here as they arrive,
@@ -63,9 +65,11 @@ struct Canvas {
 /// Tries at picking a dropped stream back up before saying it ended.
 const RETRIES: u32 = 6;
 
-/// Frame widths to choose from; `NATIVE` is the screen's own size.
+/// A frame width meaning the screen's own size.
 pub const NATIVE: u32 = 16384;
-pub const RESOLUTIONS: [(&str, u32); 5] = [("720p", 1280), ("1080p", 1920), ("1440p", 2560), ("4K", 3840), ("Native", NATIVE)];
+
+/// Monitor sizes with a short name, offered when the monitor has them.
+const SIZES: [((u32, u32), &str); 4] = [((1280, 720), "720p"), ((1920, 1080), "1080p"), ((2560, 1440), "1440p"), ((3840, 2160), "4K")];
 
 /// The desktop's channel on the machine's link.
 struct Remote {
@@ -88,10 +92,11 @@ impl Drop for Remote {
 pub struct DesktopView {
     engine: Arc<Engine>,
     machine: String,
+    /// One of the machine's displays (None: the whole desktop, or a Mac's main display).
+    display: Option<String>,
     /// The frame width asked for (None: native on a local network, else 1080p).
     width: Option<u32>,
-    /// What the stream ended up using, and how it travels ("Direct · Local network").
-    chosen: u32,
+    /// How the stream travels ("Direct · Local network").
     via: String,
     canvas: Arc<std::sync::Mutex<Canvas>>,
     /// A Changed message is on its way (so patches don't queue up draws).
@@ -104,9 +109,15 @@ pub struct DesktopView {
     size: (u32, u32),
     /// Where the frame was last drawn, for mapping the mouse.
     shown: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The area it was drawn in (to place things over the picture).
+    area: Rc<Cell<Option<Bounds<Pixels>>>>,
     focus: FocusHandle,
     /// Modifier keys the machine has been told are down.
     held: Modifiers,
+    /// Other keys (keysyms) and mouse buttons it has been told are down, let
+    /// go when the view loses focus (else they'd stay held there).
+    keys_down: Vec<u32>,
+    buttons_down: Vec<u64>,
     last_move: Instant,
     scroll_rest: f32,
     frames: u64,
@@ -116,11 +127,15 @@ pub struct DesktopView {
     mac: bool,
     /// What the machine says about the stream (e.g. view only).
     note: Option<String>,
+    /// A monitor's size or scale being changed, and why the last change didn't happen.
+    changing: bool,
+    change_error: Option<String>,
     /// Picking a dropped stream back up: tries so far, and the next one.
     resuming: bool,
     retries: u32,
     retry: Option<Task<()>>,
     _tasks: Vec<Task<()>>,
+    _subscriptions: Vec<gpui::Subscription>,
 }
 
 impl Focusable for DesktopView {
@@ -134,8 +149,8 @@ impl DesktopView {
         let mut view = DesktopView {
             engine,
             machine: machine_id,
+            display: None,
             width: None,
-            chosen: 0,
             via: String::new(),
             canvas: Arc::new(std::sync::Mutex::new(Canvas::default())),
             pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -145,8 +160,11 @@ impl DesktopView {
             frame: None,
             size: (0, 0),
             shown: Rc::new(Cell::new(None)),
+            area: Rc::new(Cell::new(None)),
             focus: cx.focus_handle(),
             held: Modifiers::default(),
+            keys_down: Vec::new(),
+            buttons_down: Vec::new(),
             last_move: Instant::now(),
             scroll_rest: 0.,
             frames: 0,
@@ -156,10 +174,22 @@ impl DesktopView {
             resuming: false,
             retries: 0,
             retry: None,
+            changing: false,
+            change_error: None,
             _tasks: Vec::new(),
+            _subscriptions: Vec::new(),
         };
         view.mac = view.engine.current().machines.iter().any(|m| m.id == view.machine && m.platform.starts_with("darwin"));
         view.start(window, cx);
+        // Keys and buttons held when the view loses the keyboard (another
+        // app, ⌘Q, a click elsewhere): let go on the machine too.
+        let blur = cx.on_focus_out(&view.focus, window, |this, _, _, _| this.let_go());
+        let away = cx.observe_window_activation(window, |this, window, _| {
+            if !window.is_window_active() {
+                this.let_go();
+            }
+        });
+        view._subscriptions = vec![blur, away];
         // Follow the machine: say so when it goes offline, and pick the stream
         // back up when it returns.
         let mut rx = view.engine.subscribe();
@@ -198,22 +228,63 @@ impl DesktopView {
         cx.notify();
     }
 
-    /// The frame width in use, for the resolution picker.
-    pub fn resolution(&self) -> u32 {
-        self.width.unwrap_or(self.chosen)
-    }
-
     /// How the stream travels, e.g. "Direct · Local network".
     pub fn via(&self) -> &str {
         &self.via
     }
 
-    /// Switches resolution: a new stream at that width.
-    pub fn set_resolution(&mut self, width: u32, window: &mut Window, cx: &mut Context<Self>) {
-        if Some(width) != self.width {
-            self.width = Some(width);
+    /// The display shown (None: the default one).
+    pub fn display(&self) -> Option<&str> {
+        self.display.as_deref()
+    }
+
+    /// Shows another of the machine's displays: a new stream.
+    pub fn set_display(&mut self, display: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if display != self.display {
+            self.display = display;
+            self.retries = 0;
+            // Not the last monitor's picture while the new one comes.
+            if let Some(old) = self.frame.take() {
+                cx.drop_image(old, Some(window));
+            }
             self.start(window, cx);
+            cx.notify();
         }
+    }
+
+    /// Sets a monitor's size or scale on the machine; a new stream at its new
+    /// size once it has one.
+    pub fn change_display(&mut self, display: String, size: Option<(u32, u32)>, scale: Option<f64>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.changing {
+            return;
+        }
+        self.changing = true;
+        self.change_error = None;
+        cx.notify();
+        let (engine, machine) = (self.engine.clone(), self.machine.clone());
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.set_display(&machine, &display, size, scale).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.changing = false;
+                match result {
+                    Ok(()) if size.is_some() => {
+                        this.retries = 0;
+                        if let Some(old) = this.frame.take() {
+                            cx.drop_image(old, Some(window));
+                        }
+                        this.start(window, cx);
+                    }
+                    Ok(()) => {}
+                    Err(e) => this.change_error = Some(e),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// (Re)starts the stream from the machine.
@@ -224,7 +295,7 @@ impl DesktopView {
         // mustn't hold up the new one.
         self.pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Msg>();
-        let (engine, machine_id, wanted) = (self.engine.clone(), self.machine.clone(), self.width);
+        let (engine, machine_id, wanted, mut display) = (self.engine.clone(), self.machine.clone(), self.width, self.display.clone().unwrap_or_default());
         let (canvas, pending) = (self.canvas.clone(), self.pending.clone());
         let rt = engine.runtime().clone();
         rt.spawn(async move {
@@ -236,6 +307,22 @@ impl DesktopView {
                 let _ = tx.unbounded_send(Msg::Ended("The demo has no desktops to show.".into(), false));
                 return;
             }
+            // Its monitors as they are now (one may have been added, removed
+            // or resized since), for the picker; a gone one falls back to the default.
+            if let Ok(displays) = engine.displays(&machine_id).await {
+                if !display.is_empty() && display != "all" && !displays.iter().any(|d| d.id == display) {
+                    display.clear();
+                    let _ = tx.unbounded_send(Msg::Gone);
+                }
+                // The default: the main monitor (the agent's own default on
+                // Linux is the whole desktop).
+                if display.is_empty()
+                    && displays.iter().any(|d| d.id == "all")
+                    && let Some(main) = displays.iter().find(|d| d.main && d.id != "all")
+                {
+                    display = main.id.clone();
+                }
+            }
             let Some(link) = crate::fleet::link::get(&spec).await else {
                 let _ = tx.unbounded_send(Msg::Ended(format!("Can't reach the agent on {}.", spec.name), true));
                 return;
@@ -245,7 +332,7 @@ impl DesktopView {
             let width = wanted.unwrap_or(if matches!(network, Some("Local network" | "This computer")) { NATIVE } else { 1920 });
             let via = [Some(if link.transport() == "direct" { "Direct" } else { "Over ssh" }), network].into_iter().flatten().collect::<Vec<_>>().join(" · ");
             let (channel, mut frames) = link.open_channel();
-            let request = json!({ "op": "desktop", "channel": channel, "fps": 30, "quality": 78, "max_width": width, "tiles": true });
+            let request = json!({ "op": "desktop", "channel": channel, "fps": 30, "quality": 78, "max_width": width, "tiles": true, "display": display });
             match link.request(request, Duration::from_secs(20)).await {
                 Ok(r) if r["ok"].as_bool() == Some(true) => {
                     let (w, h) = (r["width"].as_u64().unwrap_or(0) as u32, r["height"].as_u64().unwrap_or(0) as u32);
@@ -296,9 +383,7 @@ impl DesktopView {
                                 this.state = State::Live;
                                 this.retries = 0;
                                 this.resuming = false;
-                                let (via, width) = via.split_once('|').unwrap_or((&via, "0"));
-                                this.via = via.to_string();
-                                this.chosen = width.parse().unwrap_or(0);
+                                this.via = via.split_once('|').map_or(via.as_str(), |(v, _)| v).to_string();
                             }
                             Msg::Changed => {
                                 this.pending.store(false, std::sync::atomic::Ordering::Release);
@@ -315,6 +400,7 @@ impl DesktopView {
                                     }
                                 }
                             }
+                            Msg::Gone => this.display = None,
                             Msg::Ended(why, may_return) => {
                                 this.remote = None;
                                 // The connection dropped (another network, a
@@ -350,10 +436,66 @@ impl DesktopView {
         self.stream = Some(feed);
     }
 
+    /// While the whole desktop shows, a label over each monitor's corner that
+    /// opens that monitor (clicks elsewhere still go to the machine).
+    fn monitor_labels(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if self.display.as_deref() != Some("all") || self.frame.is_none() {
+            return Vec::new();
+        }
+        let displays = self.engine.current().machines.iter().find(|m| m.id == self.machine).map(|m| m.displays.clone()).unwrap_or_default();
+        let Some(all) = displays.iter().find(|d| d.id == "all") else { return Vec::new() };
+        let (Some(rect), Some(area)) = (self.shown.get(), self.area.get()) else { return Vec::new() };
+        if all.width <= 0. {
+            return Vec::new();
+        }
+        let theme = cx.theme();
+        let scale = f32::from(rect.size.width) / all.width as f32;
+        let (ox, oy) = (f32::from(rect.origin.x - area.origin.x), f32::from(rect.origin.y - area.origin.y));
+        displays
+            .iter()
+            .filter(|d| d.id != "all")
+            .map(|d| {
+                let id = d.id.clone();
+                div()
+                    .id(SharedString::from(format!("mon-label-{}", d.id)))
+                    .absolute()
+                    .left(px(ox + d.x as f32 * scale + 8.))
+                    .top(px(oy + d.y as f32 * scale + 8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .h(px(24.))
+                    .px(px(9.))
+                    .rounded(px(7.))
+                    .bg(gpui::black().opacity(0.62))
+                    .border_1()
+                    .border_color(gpui::white().opacity(0.18))
+                    .text_size(px(12.))
+                    .text_color(gpui::white())
+                    .cursor_pointer()
+                    .hover(|st| st.bg(theme.accent))
+                    .when(d.is_virtual, |el| el.child(kit::dot(theme.accent, 6.)))
+                    .child(d.name.clone())
+                    .child(kit::icon("external-link", 11., gpui::white().opacity(0.8)))
+                    // The click is for the label, not the machine.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, window, cx| this.set_display(Some(id.clone()), window, cx)))
+                    .into_any_element()
+            })
+            .collect()
+    }
+
     /// "Live", "Connecting…" or why it ended, for the page header.
     pub fn status(&self) -> String {
         if let (Some(why), false) = (&self.offline, matches!(self.state, State::Live)) {
             return why.clone();
+        }
+        if self.changing {
+            return "Changing the monitor…".into();
+        }
+        if let Some(e) = &self.change_error {
+            return e.clone();
         }
         match &self.state {
             State::Connecting if self.resuming => "Reconnecting…".into(),
@@ -406,6 +548,10 @@ impl DesktopView {
             window.focus(&self.focus);
             cx.notify();
         }
+        self.buttons_down.retain(|x| *x != b);
+        if down {
+            self.buttons_down.push(b);
+        }
         if let Some((x, y)) = self.at(position) {
             self.send(json!({ "t": "button", "b": b, "down": down, "x": x, "y": y }));
         } else if !down {
@@ -449,7 +595,22 @@ impl DesktopView {
     fn key(&mut self, key: &str, down: bool, cx: &mut Context<Self>) {
         if let Some(sym) = keysym(key) {
             self.send(json!({ "t": "key", "keysym": sym, "down": down }));
+            self.keys_down.retain(|x| *x != sym);
+            if down {
+                self.keys_down.push(sym);
+            }
             cx.stop_propagation();
+        }
+    }
+
+    /// Lets go of every key, modifier and button the machine was told is down.
+    fn let_go(&mut self) {
+        for sym in std::mem::take(&mut self.keys_down) {
+            self.send(json!({ "t": "key", "keysym": sym, "down": false }));
+        }
+        self.modifiers(Modifiers::default());
+        for b in std::mem::take(&mut self.buttons_down) {
+            self.send(json!({ "t": "button", "b": b, "down": false, "x": 0, "y": 0 }));
         }
     }
 }
@@ -524,9 +685,11 @@ impl Render for DesktopView {
         let frame = self.frame.clone();
         let size = self.size;
         let shown = self.shown.clone();
+        let area = self.area.clone();
         let picture = canvas(
             |_, _, _| (),
             move |bounds, _, window, _| {
+                area.set(Some(bounds));
                 let Some(frame) = frame else { return };
                 // Fit the frame inside, keeping its shape.
                 let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
@@ -580,6 +743,8 @@ impl Render for DesktopView {
             ),
             _ => None,
         };
+        // Showing every screen: each monitor's name over its corner opens it.
+        let labels = self.monitor_labels(cx);
         div()
             .id("desktop")
             .key_context(CONTEXT)
@@ -589,6 +754,7 @@ impl Render for DesktopView {
             .bg(gpui::black())
             .cursor_default()
             .child(picture)
+            .children(labels)
             // Over the last picture, dimmed: it's no longer live.
             .children(waiting.map(|w| div().absolute().inset_0().flex().items_center().justify_center().when(self.frame.is_some(), |d| d.bg(gpui::black().opacity(0.72))).child(w)))
             .on_mouse_move(cx.listener(Self::mouse_move))
@@ -608,19 +774,60 @@ impl Render for DesktopView {
     }
 }
 
+/// Opens a display's menu: (machine, display, where), from a right-click on it.
+pub type DisplayMenu = Rc<dyn Fn(&str, &str, gpui::Point<Pixels>, &mut Window, &mut App)>;
+
 /// Status, network and resolution for a desktop, then `extra` controls (close,
 /// pop out, full screen): the bar above every desktop view.
 pub fn toolbar(view: &Entity<DesktopView>, extra: Vec<AnyElement>, cx: &App) -> AnyElement {
+    toolbar_with_menu(view, extra, None, cx)
+}
+
+/// The toolbar, with `menu` opening a monitor's menu on right-click.
+pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, menu: Option<DisplayMenu>, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let (status, via, current) = {
+    let (status, via, machine, shown, engine) = {
         let v = view.read(cx);
-        (v.status(), v.via().to_string(), v.resolution())
+        (v.status(), v.via().to_string(), v.machine.clone(), v.display.clone(), v.engine.clone())
     };
-    // 720p · 1080p · 1440p · 4K · Native
-    let picker = div().flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(RESOLUTIONS.iter().map(|(label, width)| {
-        let (on, width, view) = (current == *width, *width, view.clone());
+    // Its monitors, when it has more than one: pick the one to show.
+    let displays = engine.current().machines.iter().find(|m| m.id == machine).map(|m| m.displays.clone()).unwrap_or_default();
+    // Shown unless another is picked: the main monitor.
+    let default = displays.iter().find(|d| d.main && d.id != "all").or_else(|| displays.iter().find(|d| d.id != "all")).map(|d| d.id.clone());
+    let showing = shown.or(default);
+    let monitors = (displays.len() > 1).then(|| {
+        div().flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(displays.iter().map(|d| {
+            let (on, id, view) = (showing.as_deref() == Some(d.id.as_str()), d.id.clone(), view.clone());
+            let right_click = menu.clone().filter(|_| d.id != "all").map(|menu| {
+                let (machine, display) = (machine.clone(), d.id.clone());
+                move |e: &MouseDownEvent, window: &mut Window, cx: &mut App| menu(&machine, &display, e.position, window, cx)
+            });
+            let name = if d.name.chars().count() > 18 { format!("{}…", d.name.chars().take(17).collect::<String>()) } else { d.name.clone() };
+            div()
+                .id(SharedString::from(format!("disp-{}", d.id)))
+                .px(px(8.))
+                .h(px(22.))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .rounded(px(5.))
+                .cursor_pointer()
+                .text_size(px(11.5))
+                .text_color(if on { theme.text } else { theme.text_placeholder })
+                .when(on, |d| d.bg(theme.element_selected))
+                .when(!on, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+                .when(d.is_virtual, |el| el.child(kit::dot(theme.accent, 5.)).tooltip(|window, cx| kit::Tooltip::view("Virtual monitor".into(), window, cx)))
+                .child(name)
+                .when_some(right_click, |el, f| el.on_mouse_down(MouseButton::Right, f))
+                .on_click(move |_, window, cx| view.update(cx, |v, cx| v.set_display(Some(id.clone()), window, cx)))
+        }))
+    });
+    // The monitor shown: its size (720p · 1080p · 1440p · 4K, the ones it
+    // has) and scale (100% · 200%), set on the machine.
+    let screen = showing.as_deref().filter(|id| *id != "all").and_then(|id| displays.iter().find(|d| d.id == id));
+    let chip = |id: String, label: String, on: bool, tip: &'static str| {
         div()
-            .id(SharedString::from(format!("res-{label}")))
+            .id(SharedString::from(id))
             .px(px(8.))
             .h(px(22.))
             .flex()
@@ -631,9 +838,42 @@ pub fn toolbar(view: &Entity<DesktopView>, extra: Vec<AnyElement>, cx: &App) -> 
             .text_color(if on { theme.text } else { theme.text_placeholder })
             .when(on, |d| d.bg(theme.element_selected))
             .when(!on, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-            .child(*label)
-            .on_click(move |_, window, cx| view.update(cx, |v, cx| v.set_resolution(width, window, cx)))
-    }));
+            .tooltip(move |window, cx| kit::Tooltip::view(tip.into(), window, cx))
+            .child(label)
+    };
+    let group = |chips: Vec<gpui::Stateful<gpui::Div>>| div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(chips);
+    let sizes = screen.and_then(|d| {
+        let current = (d.width.round() as u32, d.height.round() as u32);
+        let mut choices: Vec<((u32, u32), String)> = SIZES.iter().filter(|(size, _)| d.any_size || d.modes.contains(size)).map(|(size, label)| (*size, label.to_string())).collect();
+        if !choices.iter().any(|(size, _)| *size == current) {
+            choices.push((current, format!("{}×{}", current.0, current.1)));
+            choices.sort_by_key(|((w, h), _)| w * h);
+        }
+        (choices.len() > 1).then(|| {
+            group(
+                choices
+                    .into_iter()
+                    .map(|(size, label)| {
+                        let (view, id) = (view.clone(), d.id.clone());
+                        chip(format!("size-{}x{}", size.0, size.1), label, size == current, "The monitor's resolution")
+                            .on_click(move |_, window, cx| view.update(cx, |v, cx| v.change_display(id.clone(), Some(size), None, window, cx)))
+                    })
+                    .collect(),
+            )
+        })
+    });
+    let scales = screen.filter(|d| [1., 2.].iter().all(|s| d.scales.iter().any(|x| (x - s).abs() < 0.01))).map(|d| {
+        group(
+            [(1., "100%"), (2., "200%")]
+                .into_iter()
+                .map(|(scale, label)| {
+                    let (view, id) = (view.clone(), d.id.clone());
+                    chip(format!("scale-{label}"), label.to_string(), (d.scale - scale).abs() < 0.01, "How big things are (200%: twice as big, just as sharp)")
+                        .on_click(move |_, window, cx| view.update(cx, |v, cx| v.change_display(id.clone(), None, Some(scale), window, cx)))
+                })
+                .collect(),
+        )
+    });
     div()
         .flex()
         .flex_none()
@@ -659,7 +899,9 @@ pub fn toolbar(view: &Entity<DesktopView>, extra: Vec<AnyElement>, cx: &App) -> 
                     d.child(div().flex_none().flex().items_center().gap(px(5.)).text_size(px(12.)).text_color(theme.text_placeholder).child(kit::color_icon(&theme, "network", 12., theme.text_placeholder)).child(via))
                 }),
         )
-        .child(picker.flex_none())
+        .children(monitors.map(|m| m.flex_none()))
+        .children(sizes)
+        .children(scales)
         .children(extra)
         .into_any_element()
 }
@@ -690,7 +932,7 @@ impl Render for DesktopWindow {
 }
 
 /// Opens a machine's desktop in its own window.
-pub fn open_window(engine: Arc<Engine>, machine_id: String, name: String, cx: &mut App) {
+pub fn open_window(engine: Arc<Engine>, machine_id: String, display: Option<String>, name: String, cx: &mut App) {
     let bounds = Bounds::centered(None, gpui::size(px(1440.), px(900.)), cx);
     let options = gpui::WindowOptions {
         window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
@@ -701,7 +943,11 @@ pub fn open_window(engine: Arc<Engine>, machine_id: String, name: String, cx: &m
     };
     let opened = cx.open_window(options, |window, cx| {
         super::theme::apply(window, cx);
-        let view = cx.new(|cx| DesktopView::new(engine, machine_id, window, cx));
+        let view = cx.new(|cx| {
+            let mut v = DesktopView::new(engine, machine_id, window, cx);
+            v.set_display(display, window, cx);
+            v
+        });
         window.focus(&view.focus_handle(cx));
         cx.new(|_| DesktopWindow { view })
     });

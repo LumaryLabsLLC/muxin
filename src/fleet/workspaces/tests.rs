@@ -91,6 +91,7 @@ fn machine(id: &str, platform: &str, cpu: f64, working: usize, disk_free: u64, a
         unreachable: None,
         tailnet: None,
         cloud: None,
+        displays: Vec::new(),
     }
 }
 

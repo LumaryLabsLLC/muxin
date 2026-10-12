@@ -141,6 +141,8 @@ pub struct Appearance {
     pub split_ratio: f32,
     /// Machines whose desktop is an item in the sidebar.
     pub desktops: Vec<String>,
+    /// Terminals split into panes, each layout as text (see panes.rs).
+    pub panes: Vec<String>,
     /// Favorite machines: first in the sidebar (so ⌘1, ⌘2, …), with a star.
     pub favorite_machines: Vec<String>,
     /// How icons look (see kit::IconStyle): "minimal", "tiles", "soft", ...
@@ -168,6 +170,7 @@ impl Default for Appearance {
             github_folded_owners: Vec::new(),
             split_ratio: 0.5,
             desktops: Vec::new(),
+            panes: Vec::new(),
             favorite_machines: Vec::new(),
             icon_style: super::kit::IconStyle::default().id().into(),
             shortcuts: Default::default(),

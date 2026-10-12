@@ -70,15 +70,18 @@ pub fn session_env() -> Option<Vec<(String, String)>> {
     Some(Vec::new())
 }
 
-/// `muxen-agent screen [fps] [quality] [max_width] [tiles|frames]`: streams
-/// the screen on stdout and applies input from stdin until either closes.
+/// `muxen-agent screen [fps] [quality] [max_width] [tiles|frames] [display]`:
+/// streams a screen on stdout and applies input from stdin until either
+/// closes. `display` is one from `displays` (see displays.rs); without it, the
+/// whole desktop (Linux) or the main display (a Mac).
 pub fn run(args: &[String]) -> i32 {
     let num = |i: usize, default: u32| args.get(i).and_then(|a| a.parse::<u32>().ok()).unwrap_or(default);
     let (fps, quality, max_width) = (num(0, 30).clamp(1, 60), num(1, 75).clamp(20, 95), num(2, 1920).max(320));
     let tiles = args.get(3).map(String::as_str) == Some("tiles");
+    let display = args.get(4).map(String::as_str).filter(|d| !d.is_empty() && *d != "main");
     #[cfg(target_os = "linux")]
     {
-        match x11::X11::open() {
+        match x11::X11::open(display) {
             Ok(screen) => stream(screen, fps, quality as u8, max_width, tiles),
             Err(e) => {
                 hello(&serde_json::json!({ "error": e }));
@@ -88,7 +91,15 @@ pub fn run(args: &[String]) -> i32 {
     }
     #[cfg(target_os = "macos")]
     {
-        match mac::Mac::open(fps, max_width) {
+        let id = match display.map(|d| d.parse::<u32>()) {
+            None => 0,
+            Some(Ok(id)) => id,
+            Some(Err(_)) => {
+                hello(&serde_json::json!({ "error": format!("No display called {}.", display.unwrap_or_default()) }));
+                return 1;
+            }
+        };
+        match mac::Mac::open(fps, max_width, id) {
             Ok(screen) => stream(screen, fps, quality as u8, max_width, tiles),
             Err(e) => {
                 hello(&serde_json::json!({ "error": e }));
@@ -98,7 +109,7 @@ pub fn run(args: &[String]) -> i32 {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (fps, quality, max_width, tiles);
+        let _ = (fps, quality, max_width, tiles, display);
         hello(&serde_json::json!({ "error": "Showing the desktop works on Linux and macOS so far." }));
         1
     }
@@ -377,19 +388,56 @@ mod x11 {
     pub struct X11 {
         conn: RustConnection,
         root: u32,
+        /// The part of the desktop shown: one monitor's area, or all of it.
+        ox: i16,
+        oy: i16,
         sw: usize,
         sh: usize,
         shm: Option<(u32, *mut u8, usize)>,
         scratch: Vec<u8>,
         /// keysym → (keycode, needs shift)
         keys: HashMap<u32, (u8, bool)>,
+        /// The monitor shown (None: all of them), and when its place was last checked.
+        monitor: Option<String>,
+        checked: std::time::Instant,
+        /// Keys and buttons pressed and not yet let go: let go when the stream
+        /// ends, so none stays held (a key held down freezes the desktop's input).
+        pressed: Vec<u8>,
+        buttons: Vec<u8>,
+    }
+
+    impl Drop for X11 {
+        fn drop(&mut self) {
+            for code in self.pressed.drain(..) {
+                let _ = self.conn.xtest_fake_input(KEY_RELEASE_EVENT, code, 0, self.root, 0, 0, 0);
+            }
+            for b in self.buttons.drain(..) {
+                let _ = self.conn.xtest_fake_input(BUTTON_RELEASE_EVENT, b, 0, self.root, 0, 0, 0);
+            }
+            let _ = self.conn.flush();
+        }
+    }
+
+    /// Where a monitor is on the desktop (None: the whole desktop), right now.
+    fn area(conn: &RustConnection, root: u32, monitor: Option<&str>) -> Result<(i16, i16, usize, usize), String> {
+        use x11rb::protocol::randr::ConnectionExt as _;
+        let Some(name) = monitor else {
+            let g = conn.get_geometry(root).map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?;
+            return Ok((0, 0, g.width as usize, g.height as usize));
+        };
+        let monitors = conn.randr_get_monitors(root, true).ok().and_then(|c| c.reply().ok()).map(|r| r.monitors).unwrap_or_default();
+        let found = monitors.into_iter().find(|m| conn.get_atom_name(m.name).ok().and_then(|c| c.reply().ok()).is_some_and(|a| a.name == name.as_bytes()));
+        let m = found.ok_or_else(|| format!("No display called {name} here (it may have been turned off)."))?;
+        Ok((m.x, m.y, m.width as usize, m.height as usize))
     }
 
     impl X11 {
-        pub fn open() -> Result<X11, String> {
+        /// The desktop, or one monitor of it (a RandR monitor's name; "all": everything).
+        pub fn open(monitor: Option<&str>) -> Result<X11, String> {
             let (conn, screen_num) = x11rb::connect(None).map_err(|e| format!("Can't reach the desktop ({e}). Is someone logged in to a graphical session?"))?;
-            let screen = &conn.setup().roots[screen_num];
-            let (root, sw, sh) = (screen.root, screen.width_in_pixels as usize, screen.height_in_pixels as usize);
+            let root = conn.setup().roots[screen_num].root;
+            let monitor = monitor.filter(|m| *m != "all").map(str::to_string);
+            let (ox, oy, sw, sh) = area(&conn, root, monitor.as_deref())?;
             let shm = attach_shm(&conn, sw * sh * 4);
             let mut keys: HashMap<u32, (u8, bool)> = HashMap::new();
             let (min, max) = (conn.setup().min_keycode, conn.setup().max_keycode);
@@ -403,7 +451,7 @@ mod x11 {
                     }
                 }
             }
-            Ok(X11 { conn, root, sw, sh, shm, scratch: Vec::new(), keys })
+            Ok(X11 { conn, root, ox, oy, sw, sh, shm, scratch: Vec::new(), keys, monitor, checked: std::time::Instant::now(), pressed: Vec::new(), buttons: Vec::new() })
         }
     }
 
@@ -431,16 +479,27 @@ mod x11 {
 
         fn grab(&mut self) -> Option<Option<&[u8]>> {
             use x11rb::protocol::shm::ConnectionExt as _;
+            // Monitors get resized and moved: follow one that moved; one that
+            // changed size (or went) ends the stream, for one at its new size.
+            if self.checked.elapsed() >= std::time::Duration::from_secs(1) {
+                self.checked = std::time::Instant::now();
+                let (ox, oy, sw, sh) = area(&self.conn, self.root, self.monitor.as_deref()).ok()?;
+                if (sw, sh) != (self.sw, self.sh) {
+                    eprintln!("screen: the monitor is now {sw}x{sh}");
+                    return None;
+                }
+                (self.ox, self.oy) = (ox, oy);
+            }
             let (w, h) = (self.sw as u16, self.sh as u16);
             if let Some((seg, addr, size)) = self.shm {
-                if self.conn.shm_get_image(self.root, 0, 0, w, h, !0, ImageFormat::Z_PIXMAP.into(), seg, 0).ok().and_then(|c| c.reply().ok()).is_some() {
+                if self.conn.shm_get_image(self.root, self.ox, self.oy, w, h, !0, ImageFormat::Z_PIXMAP.into(), seg, 0).ok().and_then(|c| c.reply().ok()).is_some() {
                     return Some(Some(unsafe { std::slice::from_raw_parts(addr, size) }));
                 }
                 // Shared memory stopped working: copy through the socket from now on.
                 eprintln!("screen: shared-memory capture failed; using GetImage");
                 self.shm = None;
             }
-            self.scratch = self.conn.get_image(ImageFormat::Z_PIXMAP, self.root, 0, 0, w, h, !0).ok()?.reply().ok()?.data;
+            self.scratch = self.conn.get_image(ImageFormat::Z_PIXMAP, self.root, self.ox, self.oy, w, h, !0).ok()?.reply().ok()?.data;
             Some(Some(self.scratch.as_slice()))
         }
 
@@ -451,7 +510,8 @@ mod x11 {
         fn apply(&mut self, e: &Value, frame: (usize, usize)) {
             let (conn, root, keys) = (&self.conn, self.root, &self.keys);
             let scale = (self.sw as f64 / frame.0 as f64, self.sh as f64 / frame.1 as f64);
-            let at = |e: &Value| ((e["x"].as_f64().unwrap_or(0.) * scale.0) as i16, (e["y"].as_f64().unwrap_or(0.) * scale.1) as i16);
+            let (ox, oy) = (self.ox, self.oy);
+            let at = |e: &Value| ((e["x"].as_f64().unwrap_or(0.) * scale.0) as i16 + ox, (e["y"].as_f64().unwrap_or(0.) * scale.1) as i16 + oy);
             let fake = |kind: u8, detail: u8, x: i16, y: i16| {
                 let _ = conn.xtest_fake_input(kind, detail, 0, root, x, y, 0);
             };
@@ -464,7 +524,12 @@ mod x11 {
                     let (x, y) = at(e);
                     fake(MOTION_NOTIFY_EVENT, 0, x, y);
                     let b = e["b"].as_u64().unwrap_or(1).clamp(1, 9) as u8;
-                    fake(if e["down"].as_bool().unwrap_or(false) { BUTTON_PRESS_EVENT } else { BUTTON_RELEASE_EVENT }, b, 0, 0);
+                    let down = e["down"].as_bool().unwrap_or(false);
+                    fake(if down { BUTTON_PRESS_EVENT } else { BUTTON_RELEASE_EVENT }, b, 0, 0);
+                    self.buttons.retain(|x| *x != b);
+                    if down {
+                        self.buttons.push(b);
+                    }
                 }
                 "scroll" => {
                     let (x, y) = at(e);
@@ -504,9 +569,13 @@ mod x11 {
                     let sym = e["keysym"].as_u64().unwrap_or(0) as u32;
                     // Letters arrive lowercase; shift comes as its own key.
                     let found = keys.get(&sym).or_else(|| char::from_u32(sym).map(|c| c.to_ascii_lowercase() as u32).and_then(|s| keys.get(&s)));
-                    if let Some((code, _)) = found {
+                    if let Some(&(code, _)) = found {
                         let down = e["down"].as_bool().unwrap_or(false);
-                        fake(if down { KEY_PRESS_EVENT } else { KEY_RELEASE_EVENT }, *code, 0, 0);
+                        fake(if down { KEY_PRESS_EVENT } else { KEY_RELEASE_EVENT }, code, 0, 0);
+                        self.pressed.retain(|x| *x != code);
+                        if down {
+                            self.pressed.push(code);
+                        }
                     }
                 }
                 _ => {}
@@ -525,10 +594,10 @@ mod mac {
     type FrameFn = extern "C" fn(*mut std::ffi::c_void, *const u8, usize, usize, usize);
 
     unsafe extern "C" {
-        fn muxen_display(pixels_w: *mut usize, pixels_h: *mut usize, points_w: *mut f64, points_h: *mut f64);
+        fn muxen_display(id: u32, pixels_w: *mut usize, pixels_h: *mut usize, points_w: *mut f64, points_h: *mut f64, x: *mut f64, y: *mut f64);
         fn muxen_capture_allowed(ask: i32) -> i32;
         fn muxen_input_allowed(ask: i32) -> i32;
-        fn muxen_capture_start(fps: i32, width: usize, height: usize, f: FrameFn, ctx: *mut std::ffi::c_void, err: *mut u8, errlen: usize) -> i32;
+        fn muxen_capture_start(id: u32, fps: i32, width: usize, height: usize, f: FrameFn, ctx: *mut std::ffi::c_void, err: *mut u8, errlen: usize) -> i32;
         fn muxen_capture_stopped() -> i32;
         fn muxen_mouse(kind: u32, x: f64, y: f64, button: u32, clicks: i64);
         fn muxen_scroll(dy: i32, dx: i32);
@@ -554,14 +623,15 @@ mod mac {
         l.fresh = true;
     }
 
-    /// A Mac's main display: captured at the frame's size by ScreenCaptureKit,
+    /// One of a Mac's displays: captured at the frame's size by ScreenCaptureKit,
     /// input through CoreGraphics events.
     pub struct Mac {
         /// The frame size ScreenCaptureKit delivers.
         fw: usize,
         fh: usize,
-        /// The display in points (input coordinates).
+        /// The display in points (input coordinates), and where it sits on the desktop.
         points: (f64, f64),
+        origin: (f64, f64),
         latest: Arc<Mutex<Latest>>,
         frame: Vec<u8>,
         input: bool,
@@ -569,12 +639,31 @@ mod mac {
         held: [bool; 3],
         flags: u64,
         last_click: Option<(Instant, u32, f64, f64, i64)>,
+        /// Keys pressed and not yet let go, and where the pointer was: let go
+        /// when the stream ends, so none stays held.
+        pressed: Vec<u16>,
+        at: (f64, f64),
+    }
+
+    impl Drop for Mac {
+        fn drop(&mut self) {
+            for code in self.pressed.drain(..) {
+                unsafe { muxen_key(code, 0, 0) };
+            }
+            let (x, y) = self.at;
+            for (i, up) in [LEFT_UP, RIGHT_UP, OTHER_UP].into_iter().enumerate() {
+                if self.held[i] {
+                    unsafe { muxen_mouse(up, x, y, i as u32, 1) };
+                }
+            }
+        }
     }
 
     impl Mac {
-        pub fn open(fps: u32, max_width: u32) -> Result<Mac, String> {
-            let (mut pw, mut ph, mut ptw, mut pth) = (0usize, 0usize, 0f64, 0f64);
-            unsafe { muxen_display(&mut pw, &mut ph, &mut ptw, &mut pth) };
+        /// Display `id` (0: the main one).
+        pub fn open(fps: u32, max_width: u32, id: u32) -> Result<Mac, String> {
+            let (mut pw, mut ph, mut ptw, mut pth, mut ox, mut oy) = (0usize, 0usize, 0f64, 0f64, 0f64, 0f64);
+            unsafe { muxen_display(id, &mut pw, &mut ph, &mut ptw, &mut pth, &mut ox, &mut oy) };
             if pw == 0 || ph == 0 {
                 return Err("No display here.".into());
             }
@@ -588,18 +677,18 @@ mod mac {
             let mut err = [0u8; 512];
             // ScreenCaptureKit keeps calling with this pointer while the process lives.
             let ctx = Arc::into_raw(latest.clone()) as *mut std::ffi::c_void;
-            let started = unsafe { muxen_capture_start(fps as i32, fw, fh, on_frame, ctx, err.as_mut_ptr(), err.len()) };
+            let started = unsafe { muxen_capture_start(id, fps as i32, fw, fh, on_frame, ctx, err.as_mut_ptr(), err.len()) };
             if started != 0 {
                 let why = String::from_utf8_lossy(&err[..err.iter().position(|b| *b == 0).unwrap_or(err.len())]).into_owned();
                 return Err(format!("Can't capture the screen: {why}"));
             }
-            Ok(Mac { fw, fh, points: (ptw, pth), latest, frame: Vec::new(), input, held: [false; 3], flags: 0, last_click: None })
+            Ok(Mac { fw, fh, points: (ptw, pth), origin: (ox, oy), latest, frame: Vec::new(), input, held: [false; 3], flags: 0, last_click: None, pressed: Vec::new(), at: (ox, oy) })
         }
 
         fn point(&self, e: &Value, frame: (usize, usize)) -> (f64, f64) {
             let x = e["x"].as_f64().unwrap_or(0.) * self.points.0 / frame.0 as f64;
             let y = e["y"].as_f64().unwrap_or(0.) * self.points.1 / frame.1 as f64;
-            (x, y)
+            (self.origin.0 + x, self.origin.1 + y)
         }
     }
 
@@ -647,6 +736,7 @@ mod mac {
             match e["t"].as_str().unwrap_or("") {
                 "move" => {
                     let (x, y) = self.point(e, frame);
+                    self.at = (x, y);
                     let kind = if self.held[0] {
                         LEFT_DRAGGED
                     } else if self.held[1] {
@@ -679,6 +769,7 @@ mod mac {
                         self.last_click.map(|c| c.4).unwrap_or(1)
                     };
                     self.held[index] = down;
+                    self.at = (x, y);
                     unsafe { muxen_mouse(if down { kinds.0 } else { kinds.1 }, x, y, button, clicks) };
                 }
                 "scroll" => {
@@ -705,6 +796,10 @@ mod mac {
                     }
                     if let Some(code) = keycode(sym) {
                         unsafe { muxen_key(code, down as i32, self.flags) };
+                        self.pressed.retain(|x| *x != code);
+                        if down {
+                            self.pressed.push(code);
+                        }
                     }
                 }
                 _ => {}

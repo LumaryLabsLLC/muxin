@@ -186,7 +186,8 @@ pub async fn call_tool(engine: &Arc<Engine>, session: &Session, name: &str, args
     // A screenshot comes back as an image the model can look at.
     if name == "desktop_screenshot" {
         let machine = args["machine_id"].as_str().unwrap_or("").to_string();
-        return match api::desktop_screenshot(engine, &machine).await {
+        let display = args["display"].as_str().map(str::to_string);
+        return match api::desktop_screenshot(engine, &machine, display.as_deref()).await {
             Ok(shot) => {
                 use base64::Engine as _;
                 let about = format!(
@@ -338,6 +339,10 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "git_status" => ok(api::git_status(engine, &args::<api::GitStatusRequest>(a)?.machine_id).await?),
         "machine_connection" => ok(api::machine_connection(engine, &args::<api::GitStatusRequest>(a)?.machine_id).await?),
         "desktop_input" => ok(api::desktop_input(engine, args(a)?).await?),
+        "desktop_displays" => ok(json!({ "displays": api::desktop_displays(engine, args(a)?).await? })),
+        "desktop_add_display" => ok(api::desktop_add_display(engine, args(a)?).await?),
+        "desktop_remove_display" => ok(api::desktop_remove_display(engine, args(a)?).await?),
+        "desktop_set_display" => ok(api::desktop_set_display(engine, args(a)?).await?),
         "direct_connection" => ok(api::set_direct(engine, args(a)?).await?),
         "git_setup" => ok(api::git_setup(engine, args(a)?).await?),
         other => Err(ApiError::not_found(format!("Unknown tool: {other}"))),
@@ -359,6 +364,7 @@ fn schema(properties: Value, required: &[&str]) -> Value {
 }
 
 const MACHINE_ID: &str = "Machine id (a slug like \"mac-studio\"; the display name also works).";
+const DISPLAY_ID: &str = "One of the machine's displays, by its id from desktop_displays. Default: the whole desktop (Linux) or the main display (a Mac).";
 const WORKSPACE_ID: &str = "Workspace id from workspace_create or workspace_list, e.g. \"ws-7f3a2c\".";
 const WS_PATH: &str = "Path relative to the workspace folder, e.g. \"src/main.rs\". Absolute paths and \"..\" escapes are rejected.";
 const SESSION_ID: &str = "Session id from session_list or session_start: \"<machine-id>/<name>\", e.g. \"beelink/claude-3f9a\". A bare name works when unique.";
@@ -819,8 +825,11 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "desktop_screenshot",
-            "description": "A picture of a machine's screen (Linux with an X11 desktop, or a Mac on a direct connection). Coordinates for desktop_input are in its pixels.",
-            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
+            "description": "A picture of a machine's screen (Linux with an X11 desktop, or a Mac on a direct connection), or of one of its displays. Coordinates for desktop_input are in its pixels.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "display": { "type": "string", "description": DISPLAY_ID }
+            }), &["machine_id"]),
             "annotations": annotations("Desktop screenshot", true, false, false, false),
         }),
         json!({
@@ -828,9 +837,48 @@ pub fn tools() -> Vec<Value> {
             "description": "Use a machine's desktop like a person: events run in order. {type: move|click|scroll|key|text|wait}: click {x, y, button?: left|right|middle, double?}; move {x, y}; scroll {x, y, dy} (positive scrolls down); key {key: \"enter\" | \"ctrl+c\" | \"alt+tab\" ...}; text {text}; wait {ms}. Coordinates in desktop_screenshot pixels; take a screenshot after to see what happened. It acts on the user's real screen: only when asked.",
             "inputSchema": schema(json!({
                 "machine_id": { "type": "string", "description": MACHINE_ID },
+                "display": { "type": "string", "description": DISPLAY_ID },
                 "events": { "type": "array", "items": { "type": "object" } }
             }), &["machine_id", "events"]),
             "annotations": annotations("Desktop input", false, true, false, false),
+        }),
+        json!({
+            "name": "desktop_displays",
+            "description": "A machine's monitors: real ones and virtual ones Muxen added (virtual: true), each with an id to pass as `display`, its name, size and place on the desktop. On Linux, \"all\" is the whole desktop.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
+            "annotations": annotations("List displays", true, false, true, false),
+        }),
+        json!({
+            "name": "desktop_add_display",
+            "description": "Add a virtual monitor to a machine's desktop, like plugging in another screen (no screen needed): windows can move there, and you can screenshot and use it on its own (pass its id as `display`). Linux (X11) and macOS. On Linux it takes root: when sudo there wants a password, this fails and the user adds the monitor from the Muxen app, which asks for it. Stays until removed or the machine restarts. Only when asked.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "width": { "type": "integer", "minimum": 640, "maximum": 7680, "description": "Default: the main monitor's width." },
+                "height": { "type": "integer", "minimum": 480, "maximum": 4320, "description": "Default: the main monitor's height." },
+                "name": { "type": "string", "description": "What to call it, e.g. \"Agent screen\"." }
+            }), &["machine_id"]),
+            "annotations": annotations("Add virtual monitor", false, false, false, false),
+        }),
+        json!({
+            "name": "desktop_remove_display",
+            "description": "Remove a virtual monitor Muxen added (desktop_displays shows them as virtual: true). Windows on it move to the other monitors.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "display": { "type": "string", "description": DISPLAY_ID }
+            }), &["machine_id", "display"]),
+            "annotations": annotations("Remove virtual monitor", false, true, true, false),
+        }),
+        json!({
+            "name": "desktop_set_display",
+            "description": "Change a monitor's resolution (one of its `modes` from desktop_displays) or how much the desktop scales things up on it (`scales`; 2: twice as big and as sharp, like a Retina screen; on Linux X11 one scale applies to every monitor). A 4K monitor at scale 2 reads like 1080p but stays sharp. Changes the user's real desktop: only when asked.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "display": { "type": "string", "description": DISPLAY_ID },
+                "width": { "type": "integer", "description": "With height: the new resolution." },
+                "height": { "type": "integer" },
+                "scale": { "type": "number", "description": "1, 2, ... (Linux desktops that offer it)." }
+            }), &["machine_id", "display"]),
+            "annotations": annotations("Set monitor resolution or scale", false, false, true, false),
         }),
         json!({
             "name": "git_status",
@@ -895,7 +943,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 58);
+        assert_eq!(tools.len(), 62);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

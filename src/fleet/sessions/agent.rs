@@ -185,13 +185,20 @@ pub async fn gh_token(spec: &MachineSpec, gh: &str, hostname: &str) -> Result<St
 /// One request to the agent; its JSON reply, or the error it gave. Over the
 /// machine's live link when there is one, else a one-off ssh call.
 pub async fn ctl(spec: &MachineSpec, request: &Value) -> Result<Value, String> {
+    let reply = ctl_reply(spec, request).await?;
+    if reply["ok"].as_bool() == Some(true) {
+        Ok(reply)
+    } else {
+        Err(reply["error"].as_str().unwrap_or("the agent couldn't do that").to_string())
+    }
+}
+
+/// Like `ctl`, but the agent's whole reply, refusals included (for the
+/// details beside the error). Err only when it couldn't be asked.
+pub async fn ctl_reply(spec: &MachineSpec, request: &Value) -> Result<Value, String> {
     if let Some(link) = crate::fleet::link::get(spec).await {
         if let Ok(reply) = link.request(request.clone(), CTL_TIMEOUT).await {
-            return if reply["ok"].as_bool() == Some(true) {
-                Ok(reply)
-            } else {
-                Err(reply["error"].as_str().unwrap_or("the agent couldn't do that").to_string())
-            };
+            return Ok(reply);
         }
     }
     let json = request.to_string();
@@ -210,9 +217,5 @@ pub async fn ctl(spec: &MachineSpec, request: &Value) -> Result<Value, String> {
         .find(|l| l.trim_start().starts_with('{'))
         .and_then(|l| serde_json::from_str(l).ok())
         .ok_or_else(|| format!("The agent on {} gave no answer.", spec.name))?;
-    if reply["ok"].as_bool() == Some(true) {
-        Ok(reply)
-    } else {
-        Err(reply["error"].as_str().unwrap_or("the agent couldn't do that").to_string())
-    }
+    Ok(reply)
 }

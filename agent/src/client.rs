@@ -92,6 +92,11 @@ pub fn handle(req: &Value) -> Value {
         },
         "start" => request(&req, true),
         "rename" => rename(&req),
+        "displays" => crate::displays::list(),
+        "display_create" => crate::displays::create(&req),
+        "display_remove" => crate::displays::remove(&req),
+        "display_rename" => crate::displays::rename(&req),
+        "display_set" => crate::displays::set(&req),
         _ => request(&req, false),
     }
 }

@@ -10,6 +10,7 @@ use gpui::{AnyElement, ClipboardItem, Context, Focusable, FontWeight, SharedStri
 use super::dialogs::{ConfirmDialog, NewSessionDialog};
 use super::format;
 use super::kit::{self, Button, ButtonStyle, card, icon, section_title, spinner};
+use super::panes::Panes;
 use super::root::{Modal, Root, Route};
 use super::terminal::{TerminalEvent, TerminalView};
 use super::theme::{ActiveTheme, Theme, mono_font};
@@ -84,13 +85,28 @@ impl Root {
     /// Columns and rows a session's terminal gets in this window (its share of
     /// the width when the desktop is beside it).
     fn terminal_fit(&self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> (u16, u16) {
+        match self.pane_layout(id).and_then(|p| p.share(id)) {
+            Some(share) => self.fit_share(id, share, window, cx),
+            None => self.fit_area(id, 1., 1., window, cx),
+        }
+    }
+
+    /// The size of a pane with this share of the page (under its title bar).
+    fn fit_share(&self, id: &str, (w, h): (f32, f32), window: &mut Window, cx: &mut Context<Self>) -> (u16, u16) {
+        self.fit_area(id, w, h, window, cx)
+    }
+
+    fn fit_area(&self, id: &str, w: f32, h: f32, window: &mut Window, cx: &mut Context<Self>) -> (u16, u16) {
         let viewport = window.viewport_size();
         let sidebar = if self.sidebar_hidden { 0. } else { self.sidebar_width };
         let mut width = f32::from(viewport.width) - sidebar;
-        if self.split.contains(id) {
+        if self.page_split(id).is_some() {
             width *= self.split_ratio;
         }
-        TerminalView::fit(width, f32::from(viewport.height) - CHROME_HEIGHT, window, cx)
+        let height = f32::from(viewport.height) - CHROME_HEIGHT;
+        // A pane: its share, less its border and title bar.
+        let (width, height) = if (w, h) == (1., 1.) && self.pane_layout(id).is_none() { (width, height) } else { (width * w - 2., height * h - 26.) };
+        TerminalView::fit(width, height, window, cx)
     }
 
     pub(super) fn start_session(&mut self, req: StartSession, window: &mut Window, cx: &mut Context<Self>) {
@@ -129,9 +145,13 @@ impl Root {
 
     /// Attaches a terminal to the session, unless one is already attached.
     pub(super) fn open_terminal(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // Keys go to the session the page is on (the focused pane of a split).
+        let shown = self.route == Route::Session(id.to_string());
         if let Some(t) = self.terminals.get(id) {
             if !t.read(cx).exited() {
-                window.focus(&t.focus_handle(cx));
+                if shown {
+                    window.focus(&t.focus_handle(cx));
+                }
                 return;
             }
         }
@@ -184,9 +204,135 @@ impl Root {
                 cx.notify();
             }
         }));
-        window.focus(&view.focus_handle(cx));
+        if shown {
+            window.focus(&view.focus_handle(cx));
+        }
         self.terminals.insert(id.to_string(), view);
         self.refresh_machine_sessions(id.split('/').next().unwrap_or_default());
+    }
+
+    // -----------------------------------------------------------------------
+    // Panes: terminals split side by side or one above the other (panes.rs).
+
+    /// The layout a session is in, if it's split.
+    pub(super) fn pane_layout(&self, id: &str) -> Option<&Panes> {
+        self.panes.iter().find(|p| p.contains(id))
+    }
+
+    /// The session of a page whose desktop is shown beside it: `id`, or
+    /// another pane of its layout.
+    pub(super) fn page_split(&self, id: &str) -> Option<String> {
+        match self.pane_layout(id) {
+            Some(p) => p.ids().into_iter().find(|x| self.split.contains(*x)).map(str::to_string),
+            None => self.split.contains(id).then(|| id.to_string()),
+        }
+    }
+
+    fn save_panes(&self, cx: &mut Context<Self>) {
+        let saved: Vec<String> = self.panes.iter().map(Panes::encode).collect();
+        super::theme::remember(cx, |a| a.panes = saved);
+    }
+
+    /// Splits the shown session's pane: a new shell on its machine, in its
+    /// folder, to its right or below it.
+    pub(super) fn split_session(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Route::Session(id) = self.route.clone() else { return };
+        let Some(info) = self.snapshot.sessions.iter().find(|s| s.id == id).cloned() else { return };
+        if !info.persistent || self.engine.is_demo() {
+            self.notify_user("This session can't be split.", true, cx);
+            return;
+        }
+        // Exactly the size its pane will have (half of this one), so the shell
+        // isn't resized while it starts (zsh would mark its prompts with a stray %).
+        let (w, h) = self.pane_layout(&id).and_then(|p| p.share(&id)).unwrap_or((1., 1.));
+        let share = if down { (w, h / 2.) } else { (w / 2., h) };
+        let (cols, rows) = self.fit_share(&id, share, window, cx);
+        let req = StartSession { machine_id: info.machine_id.clone(), agent: "shell".into(), cwd: info.cwd.clone(), cols, rows, ..Default::default() };
+        let engine = self.engine.clone();
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.start_session(req).await }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(s) => {
+                    match this.panes.iter_mut().find(|p| p.contains(&id)) {
+                        Some(p) => {
+                            p.split(&id, s.id.clone(), down);
+                        }
+                        None => {
+                            let mut p = Panes::One(id.clone());
+                            p.split(&id, s.id.clone(), down);
+                            this.panes.push(p);
+                        }
+                    }
+                    this.save_panes(cx);
+                    this.focus_pane(&s.id, window, cx);
+                }
+                Err(e) => this.notify_user(e, true, cx),
+            });
+        });
+        self.track(task);
+    }
+
+    /// Shows another pane of the layout: keys go there.
+    pub(super) fn focus_pane(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let route = Route::Session(id.to_string());
+        if self.route != route {
+            // The same page: no step in Back.
+            self.route = route;
+            self.on_route_changed(window, cx);
+        }
+    }
+
+    /// The next (or previous) pane of the shown layout.
+    pub(super) fn step_pane(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Route::Session(id) = self.route.clone() else { return };
+        let Some(ids) = self.pane_layout(&id).map(|p| p.ids().into_iter().map(str::to_string).collect::<Vec<_>>()) else { return };
+        let at = ids.iter().position(|x| *x == id).unwrap_or(0) as isize;
+        let next = ids[(at + step).rem_euclid(ids.len() as isize) as usize].clone();
+        self.focus_pane(&next, window, cx);
+    }
+
+    /// Takes a pane out of its layout; the session goes on (in the sidebar).
+    fn close_pane(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(i) = self.panes.iter().position(|p| p.contains(id)) else { return };
+        let layout = self.panes.remove(i);
+        let rest = layout.without(id);
+        let next = rest.as_ref().and_then(|p| p.ids().first().map(|x| x.to_string()));
+        if let Some(rest) = rest.filter(|p| p.ids().len() > 1) {
+            self.panes.insert(i, rest);
+        }
+        self.save_panes(cx);
+        if self.route == Route::Session(id.to_string())
+            && let Some(next) = next
+        {
+            self.focus_pane(&next, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Sessions that ended leave their layouts (once their machine has been
+    /// asked, so nothing goes while sessions are still being found).
+    pub(super) fn prune_panes(&mut self, snapshot: &Snapshot, cx: &mut Context<Self>) {
+        let engine = self.engine.clone();
+        let gone = |id: &str| {
+            let machine = id.split('/').next().unwrap_or_default();
+            !snapshot.sessions.iter().any(|s| s.id == id) && engine.sessions_of(machine).is_some_and(|f| f.checked_at.is_some())
+        };
+        let before = self.panes.clone();
+        self.panes = std::mem::take(&mut self.panes)
+            .into_iter()
+            .filter_map(|p| {
+                let ids: Vec<String> = p.ids().into_iter().map(str::to_string).collect();
+                ids.iter().filter(|id| gone(id)).try_fold(p, |p, id| p.without(id))
+            })
+            .filter(|p| p.ids().len() > 1)
+            .collect();
+        if self.panes != before {
+            self.save_panes(cx);
+        }
     }
 
     /// Re-attaches a terminal whose connection dropped, a few times over about
@@ -325,9 +471,7 @@ impl Root {
         let machine_id = info.machine_id.clone();
         // Desktops: Linux (X11) machines so far.
         let desktop_capable = info.persistent && s.machines.iter().any(|m| m.id == info.machine_id && format::has_desktop(m) && !m.local);
-        let split = self.split.contains(&info.id);
-        let terminal = self.terminals.get(id).cloned();
-        let detached = terminal.as_ref().is_some_and(|t| t.read(cx).exited());
+        let split = self.page_split(&info.id).is_some();
         let (icon_name, (from, to)) = kit::agent_look(&info.agent);
         let exited = info.status == "exited";
 
@@ -396,6 +540,19 @@ impl Root {
                         })),
                 )
             })
+            // Another shell beside it or below it, like splitting a terminal.
+            .when(info.persistent && offline.is_none() && !self.engine.is_demo(), |d| {
+                d.child(
+                    Button::icon_only("session-split-right", "columns-2")
+                        .tooltip("Split right (⌘D)")
+                        .on_click(cx.listener(|this, _, window, cx| this.split_session(false, window, cx))),
+                )
+                .child(
+                    Button::icon_only("session-split-down", "rows-2")
+                        .tooltip("Split down (⇧⌘D)")
+                        .on_click(cx.listener(|this, _, window, cx| this.split_session(true, window, cx))),
+                )
+            })
             .when(exited, |d| {
                 d.child(
                     Button::new("session-restart", "Restart")
@@ -420,6 +577,96 @@ impl Root {
                 }
             })));
 
+        // The terminal, or the panes of its split.
+        let body = match self.pane_layout(id).cloned() {
+            Some(layout) => self.render_panes(&layout, id, window, cx),
+            None => self.session_body(&info, window, cx).into_any_element(),
+        };
+        let body = div().relative().flex_1().min_w(px(0.)).min_h(px(0.)).flex().child(body);
+        let panel = self.split_desktop(&info.id).map(|view| {
+            let (pop, close) = (machine_id.clone(), info.id.clone());
+            let to_sidebar = info.id.clone();
+            let extra = vec![
+                Button::icon_only("split-sidebar", "panel-left")
+                    .tooltip("Move to the sidebar")
+                    .on_click(cx.listener(move |this, _, window, cx| this.desktop_to_sidebar(&to_sidebar, window, cx)))
+                    .into_any_element(),
+                Button::icon_only("split-window", "external-link")
+                    .tooltip("Open in a window")
+                    .on_click(cx.listener(move |this, _, window, cx| this.pop_out_desktop(&pop, window, cx)))
+                    .into_any_element(),
+                Button::icon_only("split-close", "x")
+                    .tooltip("Hide the desktop")
+                    .on_click(cx.listener(move |this, _, window, cx| this.toggle_split(&close, window, cx)))
+                    .into_any_element(),
+            ];
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .h_full()
+                .flex()
+                .flex_col()
+                .child(super::desktop::toolbar(&view, extra, cx))
+                .child(div().flex_1().min_h(px(0.)).child(view))
+        });
+        let body = match panel {
+            Some(panel) => {
+                // Terminal | divider (drag to resize, double-click for half and half) | desktop
+                let resizing = self.split_resizing;
+                let hover = theme.border;
+                let divider = div()
+                    .id("split-divider")
+                    .group("split-divider")
+                    .flex_none()
+                    .w(px(6.))
+                    .h_full()
+                    .flex()
+                    .justify_center()
+                    .cursor_col_resize()
+                    .child(
+                        div()
+                            .w(px(if resizing { 2. } else { 1. }))
+                            .h_full()
+                            .when(resizing, |d| d.bg(theme.accent))
+                            .when(!resizing, |d| d.bg(theme.border_variant).group_hover("split-divider", |st| st.bg(hover).w(px(2.)))),
+                    )
+                    .on_drag(super::root::DraggedSplit, |_, _, _, cx| cx.new(|_| super::root::DraggedSplit))
+                    .on_click(cx.listener(|this, e: &gpui::ClickEvent, _, cx| {
+                        if e.click_count() == 2 {
+                            this.split_ratio = 0.5;
+                            this.finish_split_resize(cx);
+                        }
+                    }));
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .on_drag_move(cx.listener(Self::resize_split))
+                    .on_drop(cx.listener(|this, _: &super::root::DraggedSplit, _, cx| this.finish_split_resize(cx)))
+                    // The terminal pane was made to fill the page (flex_1: a zero basis);
+                    // in a split its basis is its share of the width.
+                    .child(body.flex_none().flex_basis(gpui::relative(self.split_ratio)).min_w(px(0.)))
+                    .child(divider)
+                    .child(panel)
+                    .into_any_element()
+            }
+            None => body.into_any_element(),
+        };
+        div().size_full().flex().flex_col().child(header).child(body).into_any_element()
+    }
+
+    /// A session's terminal, under what covers it while it can't be used
+    /// (its machine offline, reconnecting, disconnected).
+    fn session_body(&mut self, info: &SessionInfo, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = cx.theme();
+        let s = self.snapshot.clone();
+        if !self.terminals.contains_key(&info.id) && s.machines.iter().any(|m| m.id == info.machine_id && m.status != "offline") {
+            self.open_terminal(&info.id, window, cx);
+        }
+        let offline = s.machines.iter().find(|m| m.id == info.machine_id && m.status == "offline").cloned();
+        let terminal = self.terminals.get(&info.id).cloned();
+        let detached = terminal.as_ref().is_some_and(|t| t.read(cx).exited());
+        let exited = info.status == "exited";
         // Cut off while the machine is up (another network, a hiccup): attach
         // again by itself for a while before calling it disconnected.
         let resuming = if detached && !exited && info.persistent && offline.is_none() {
@@ -431,7 +678,7 @@ impl Root {
             false
         };
         let sid3 = info.id.clone();
-        let body = div()
+        div()
             .relative()
             .flex_1()
             .min_h(px(0.))
@@ -506,78 +753,71 @@ impl Root {
                             ),
                     ),
                 )
-            });
+            })
+    }
 
-        let panel = self.split_desktop(&info.id).map(|view| {
-            let (pop, close) = (machine_id.clone(), info.id.clone());
-            let to_sidebar = info.id.clone();
-            let extra = vec![
-                Button::icon_only("split-sidebar", "panel-left")
-                    .tooltip("Move to the sidebar")
-                    .on_click(cx.listener(move |this, _, window, cx| this.desktop_to_sidebar(&to_sidebar, window, cx)))
-                    .into_any_element(),
-                Button::icon_only("split-window", "external-link")
-                    .tooltip("Open in a window")
-                    .on_click(cx.listener(move |this, _, window, cx| this.pop_out_desktop(&pop, window, cx)))
-                    .into_any_element(),
-                Button::icon_only("split-close", "x")
-                    .tooltip("Hide the desktop")
-                    .on_click(cx.listener(move |this, _, window, cx| this.toggle_split(&close, window, cx)))
-                    .into_any_element(),
-            ];
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .h_full()
-                .flex()
-                .flex_col()
-                .child(super::desktop::toolbar(&view, extra, cx))
-                .child(div().flex_1().min_h(px(0.)).child(view))
-        });
-        let body = match panel {
-            Some(panel) => {
-                // Terminal | divider (drag to resize, double-click for half and half) | desktop
-                let resizing = self.split_resizing;
-                let hover = theme.border;
-                let divider = div()
-                    .id("split-divider")
-                    .group("split-divider")
+    /// A layout of panes: each session's terminal under a slim title bar, the
+    /// one keys go to outlined. A click picks a pane.
+    fn render_panes(&mut self, layout: &Panes, focused: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        match layout {
+            Panes::One(id) => {
+                let Some(info) = self.snapshot.sessions.iter().find(|s| &s.id == id).cloned() else {
+                    return div().flex_1().into_any_element();
+                };
+                let on = id == focused;
+                let body = self.session_body(&info, window, cx);
+                let (pick, close) = (id.clone(), id.clone());
+                let bar = div()
                     .flex_none()
-                    .w(px(6.))
-                    .h_full()
+                    .h(px(24.))
+                    .pl(px(10.))
+                    .pr(px(6.))
                     .flex()
-                    .justify_center()
-                    .cursor_col_resize()
+                    .items_center()
+                    .gap(px(6.))
+                    .bg(if on { theme.element } else { theme.surface })
+                    .border_b_1()
+                    .border_color(theme.border_variant)
+                    .text_size(px(11.5))
+                    .text_color(if on { theme.text } else { theme.text_placeholder })
+                    .child(div().flex_1().min_w(px(0.)).overflow_hidden().whitespace_nowrap().child(info.title.clone()))
                     .child(
                         div()
-                            .w(px(if resizing { 2. } else { 1. }))
-                            .h_full()
-                            .when(resizing, |d| d.bg(theme.accent))
-                            .when(!resizing, |d| d.bg(theme.border_variant).group_hover("split-divider", |st| st.bg(hover).w(px(2.)))),
-                    )
-                    .on_drag(super::root::DraggedSplit, |_, _, _, cx| cx.new(|_| super::root::DraggedSplit))
-                    .on_click(cx.listener(|this, e: &gpui::ClickEvent, _, cx| {
-                        if e.click_count() == 2 {
-                            this.split_ratio = 0.5;
-                            this.finish_split_resize(cx);
-                        }
-                    }));
+                            .id(SharedString::from(format!("pane-close-{id}")))
+                            .flex_none()
+                            .p(px(3.))
+                            .rounded(px(4.))
+                            .cursor_pointer()
+                            .hover(|st| st.bg(theme.ghost_hover))
+                            .tooltip(|window, cx| kit::Tooltip::view("Close the pane (the session keeps running)".into(), window, cx))
+                            .child(icon("x", 11., theme.text_placeholder))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_pane(&close, window, cx)
+                            })),
+                    );
                 div()
                     .flex_1()
+                    .min_w(px(0.))
                     .min_h(px(0.))
                     .flex()
-                    .on_drag_move(cx.listener(Self::resize_split))
-                    .on_drop(cx.listener(|this, _: &super::root::DraggedSplit, _, cx| this.finish_split_resize(cx)))
-                    // The terminal pane was made to fill the page (flex_1: a zero basis);
-                    // in a split its basis is its share of the width.
-                    .child(body.flex_none().flex_basis(gpui::relative(self.split_ratio)).min_w(px(0.)))
-                    .child(divider)
-                    .child(panel)
+                    .flex_col()
+                    .border_1()
+                    .border_color(if on { theme.accent.opacity(0.55) } else { gpui::transparent_black() })
+                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _, window, cx| this.focus_pane(&pick, window, cx)))
+                    .child(bar)
+                    .child(body)
                     .into_any_element()
             }
-            None => body.into_any_element(),
-        };
-        div().size_full().flex().flex_col().child(header).child(body).into_any_element()
+            Panes::Split { down, a, b } => {
+                let (a, b) = (self.render_panes(a, focused, window, cx), self.render_panes(b, focused, window, cx));
+                let line = div().flex_none().bg(theme.border_variant);
+                let line = if *down { line.h(px(1.)).w_full() } else { line.w(px(1.)).h_full() };
+                let half = |el: AnyElement| div().flex_1().min_w(px(0.)).min_h(px(0.)).flex().child(el);
+                div().flex_1().min_w(px(0.)).min_h(px(0.)).flex().when(*down, |d| d.flex_col()).child(half(a)).child(line).child(half(b)).into_any_element()
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -996,13 +1236,6 @@ impl Root {
                         d.child(Button::new("m-tailscale", "Set up Tailscale").style(ButtonStyle::Ghost).on_click(cx.listener({
                             let mid = mid.clone();
                             move |this, _, window, cx| this.setup_tailscale(&mid, window, cx)
-                        })))
-                    })
-                    // Seeing the desktop: Linux (X11) and Macs.
-                    .when(format::has_desktop(m), |d| {
-                        d.child(Button::new("m-desktop", "Show desktop").icon("monitor").on_click(cx.listener({
-                            let mid = mid.clone();
-                            move |this, _, window, cx| this.navigate(Route::Desktop(mid.clone()), window, cx)
                         })))
                     })
                     .child(button),

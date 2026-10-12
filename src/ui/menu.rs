@@ -23,6 +23,8 @@ pub enum MenuTarget {
     GithubAccounts,
     /// An agent workspace, by id.
     Workspace(String),
+    /// One of a machine's monitors.
+    Display { machine: String, display: String },
 }
 
 pub struct ContextMenu {
@@ -61,6 +63,12 @@ enum Action {
     AddAccount,
     RenameMachine(String),
     RenameSession(String),
+    AddDisplay(String),
+    ShowDisplay(String, String),
+    RenameDisplay(String, String),
+    RemoveDisplay(String, String),
+    /// A monitor's size or scale.
+    SetDisplay(String, String, Option<(u32, u32)>, Option<f64>),
 }
 
 enum Item {
@@ -107,6 +115,9 @@ impl Root {
                     }
                     if super::format::has_desktop(m) && !m.local {
                         items.push(needs_up(act("Show desktop", "monitor", Action::ShowDesktop(id.clone()))));
+                    }
+                    if super::format::has_desktop(m) && !s.demo {
+                        items.push(needs_up(act("Add virtual monitor…", "monitor", Action::AddDisplay(id.clone()))));
                     }
                     if !m.platform.starts_with("windows") {
                         items.push(needs_up(act("Copy files…", "folder", Action::CopyFiles(id.clone()))));
@@ -209,6 +220,39 @@ impl Root {
                 items.push(Item::Action { label: "End session…".into(), glyph: Glyph::Icon("power"), action: Action::End(id.clone()), danger: true });
                 items
             }
+            MenuTarget::Display { machine, display } => {
+                let Some(d) = s.machines.iter().find(|m| &m.id == machine).and_then(|m| m.displays.iter().find(|d| &d.id == display)) else { return Vec::new() };
+                let mut items = vec![
+                    act("Show", "monitor", Action::ShowDisplay(machine.clone(), display.clone())),
+                    act("Rename…", "pencil", Action::RenameDisplay(machine.clone(), display.clone())),
+                ];
+                // Every size it offers (from 1024 wide), and its scale.
+                let current = (d.width.round() as u32, d.height.round() as u32);
+                let sizes: Vec<(u32, u32)> = d.modes.iter().copied().filter(|(w, _)| *w >= 1024).collect();
+                if sizes.len() > 1 {
+                    items.push(Item::Separator);
+                    items.push(Item::Note("Resolution".into()));
+                    for size in sizes {
+                        let glyph = if size == current { Glyph::Selected } else { Glyph::None };
+                        let action = Action::SetDisplay(machine.clone(), display.clone(), Some(size), None);
+                        items.push(Item::Action { label: format!("{} × {}", size.0, size.1), glyph, action, danger: false });
+                    }
+                }
+                if [1., 2.].iter().all(|s| d.scales.iter().any(|x| (x - s).abs() < 0.01)) {
+                    items.push(Item::Separator);
+                    items.push(Item::Note("Scale".into()));
+                    for (scale, label) in [(1., "100%"), (2., "200% (twice as big, as sharp)")] {
+                        let glyph = if (d.scale - scale).abs() < 0.01 { Glyph::Selected } else { Glyph::None };
+                        let action = Action::SetDisplay(machine.clone(), display.clone(), None, Some(scale));
+                        items.push(Item::Action { label: label.into(), glyph, action, danger: false });
+                    }
+                }
+                if d.is_virtual {
+                    items.push(Item::Separator);
+                    items.push(Item::Action { label: "Remove monitor".into(), glyph: Glyph::Icon("trash-2"), action: Action::RemoveDisplay(machine.clone(), display.clone()), danger: true });
+                }
+                items
+            }
             MenuTarget::Repo(name) => {
                 let favorite = self.gh_is_favorite(name);
                 vec![
@@ -296,6 +340,11 @@ impl Root {
             Action::Check(machine) => self.engine.trigger_check(Some(machine)),
             Action::Runner(id, action) => self.runner_action(&id, action, cx),
             Action::FavoriteMachine(id, favorite) => self.set_favorite_machine(&id, favorite, cx),
+            Action::AddDisplay(id) => self.show_add_display(id, window, cx),
+            Action::ShowDisplay(machine, display) => self.show_display(machine, Some(display), window, cx),
+            Action::RenameDisplay(machine, display) => self.show_rename(super::dialogs::RenameTarget::Display(machine, display), window, cx),
+            Action::RemoveDisplay(machine, display) => self.remove_display(machine, display, window, cx),
+            Action::SetDisplay(machine, display, size, scale) => self.set_display(machine, display, size, scale, window, cx),
             Action::RenameMachine(id) => self.show_rename(super::dialogs::RenameTarget::Machine(id), window, cx),
             Action::RenameSession(id) => self.show_rename(super::dialogs::RenameTarget::Session(id), window, cx),
             Action::CloudPower(id, on) => self.cloud_power(&id, on, cx),

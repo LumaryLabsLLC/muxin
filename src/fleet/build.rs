@@ -192,6 +192,7 @@ pub fn build(input: &Inputs) -> Snapshot {
                     },
                 }
             }),
+            displays: Vec::new(),
         });
     }
 

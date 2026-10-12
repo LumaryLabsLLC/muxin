@@ -6,8 +6,8 @@ use gpui::{App, KeyBinding, Keystroke};
 
 use super::root::{
     AddMachine, CheckNow, CommandPalette, FocusFilter, GoBack, GoForward, GoToMachine1, GoToMachine2, GoToMachine3, GoToMachine4, GoToMachine5, GoToMachine6,
-    GoToMachine7, GoToMachine8, GoToMachine9, NewSession, OpenSettings, ShowGithub, ShowJobs, ShowOverview, ShowWorkspaces, SyncGitHub,
-    QuickOpen, ToggleActivity, ToggleSidebar,
+    GoToMachine7, GoToMachine8, GoToMachine9, NewSession, NextPane, OpenSettings, PreviousPane, ShowGithub, ShowJobs, ShowOverview, ShowWorkspaces,
+    SplitDown, SplitRight, SyncGitHub, QuickOpen, ToggleActivity, ToggleSidebar,
 };
 use super::theme::Appearance;
 
@@ -46,6 +46,10 @@ pub const ALL: &[Shortcut] = &[
     shortcut!("sync", "Sync GitHub", "secondary-shift-r", SyncGitHub),
     shortcut!("add-machine", "Add machine", "secondary-n", AddMachine),
     shortcut!("new-session", "New session", "secondary-t", NewSession),
+    shortcut!("split-right", "Split the terminal right", "secondary-d", SplitRight),
+    shortcut!("split-down", "Split the terminal down", "secondary-shift-d", SplitDown),
+    shortcut!("next-pane", "Next pane", "secondary-alt-right", NextPane),
+    shortcut!("previous-pane", "Previous pane", "secondary-alt-left", PreviousPane),
     shortcut!("filter", "Search machines and sessions", "secondary-f", FocusFilter),
     shortcut!("sidebar", "Hide or show the sidebar", "secondary-b", ToggleSidebar),
     shortcut!("back", "Back", "secondary-[", GoBack),

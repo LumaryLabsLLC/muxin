@@ -172,7 +172,8 @@ The MCP server has these tools:
 | `list_ssh_hosts` | Hosts to add: your `~/.ssh/config`, your Tailscale network, and this network. |
 | `list_files`, `copy_files`, `cancel_operation` | Browse a folder on a machine; copy files and folders between machines; stop a copy. |
 | `machine_connection`, `direct_connection` | How a machine is reached (direct, ssh, which network, Tailscale's view); pair it for direct connections. |
-| `desktop_screenshot`, `desktop_input` | Look at a Linux machine's screen; click, type and scroll there. |
+| `desktop_screenshot`, `desktop_input` | Look at a machine's screen (or one monitor of it); click, type and scroll there. |
+| `desktop_displays`, `desktop_add_display`, `desktop_remove_display`, `desktop_set_display` | A machine's monitors; add or remove virtual ones, change their resolution or scale. |
 | `session_list`, `session_start`, `session_read`, `session_send`, `session_rename`, `session_stop` | Agent sessions on the machines. |
 | `github_inbox`, `github_repos`, `github_repo`, `github_item`, `local_checkouts`, `git_sync`, … | The user's GitHub, and git checkouts on the machines. |
 | `workspace_create`, `workspace_list`, `workspace_get` | Check out a machine as a work environment; see what exists. |
@@ -304,9 +305,10 @@ muxen checkouts --machine beelink --path ~/code/api --git pull
 
 Start an AI agent on one of your machines and come back to it whenever you like, from the app, from your own terminal, or through another agent.
 
-- **Keeps running.** Sessions live in Muxen's agent on the machine (`~/.muxen/bin/muxen-agent`), a small background program that holds each session's terminal, the way tmux would. Closing the app, sleeping your laptop or losing the network only detaches; the agent keeps working until you end the session.
+- **Keeps running.** Sessions live in Muxen's agent on the machine (`~/.muxen/bin/muxen-agent`), a small background program that holds each session's terminal, the way tmux would. Closing the app, sleeping your laptop or losing the network only detaches; the agent keeps working until you end the session, and reopening it shows the screen as it is with its recent scrollback. A restart of the machine ends its sessions, as with tmux.
 - **Nothing to install.** When Muxen connects to a machine it uploads the agent build for that OS and CPU (macOS and Linux, x86_64 and arm64; static binaries, about 1 MB) and keeps it up to date. Windows machines run sessions in the app's terminal for now, so they end with the window.
-- **A real terminal in the app.** Everything goes to the agent: Esc, Ctrl-C, Tab, arrows, Option/Shift+Enter for newlines. ⌘C copies a selection, ⌘V pastes, the wheel scrolls back. Right-click a machine for a new terminal or agent session.
+- **Split panes.** ⌘D splits a terminal to the right, ⇧⌘D below it (or the buttons in its header): a new shell on the same machine, in the same folder. ⌥⌘← and ⌥⌘→ move between panes, or click one. Each pane is a session of its own, so it keeps running like any other; type `exit` to close it, or × on its bar to take it out of the split. Splits come back when you reopen Muxen.
+- **A real terminal in the app.** Everything goes to the agent: Esc, Ctrl-C, Tab, arrows, Option/Shift+Enter for newlines. ⌘C copies a selection, ⌘V pastes, the wheel scrolls back. Nerd Font icons (Neovim's file icons, prompt glyphs) show with any terminal font: Muxen brings the symbols. Right-click a machine for a new terminal or agent session.
 - **Names you choose.** Right-click a machine or a session and pick **Rename…** (or ⇧⌘P › Rename on its page). A machine keeps its id, so its runners, sessions and favorites stay with it; `config.toml` gets `id = "<old id>"` when the new name would give a different one. A session's title is kept by the agent on its machine (`~/.muxen/titles.json`), so every Muxen sees it; an empty title goes back to the one it started with.
 - **Your environment.** The agent starts in your login shell, in the folder you pick, so nvm/fnm/asdf and the CLI's own login work as they do in your terminal. Muxen finds which agent CLIs each machine has: `claude`, `codex`, `opencode`, `gemini`, `amp`.
 - **Agents can drive agents.** `session_start`, `session_read` (the screen as text), `session_send` (type into it) and `session_stop` are MCP tools and CLI commands too.
@@ -333,6 +335,16 @@ Muxen first reaches a machine with `ssh`, installs its small agent there, and fr
 - `MUXEN_NO_LINK=1` turns all of this off: one ssh connection per request, as before.
 
 **Desktop.** On a Linux machine with an X11 desktop, or a Mac, **Show desktop** (on its page, or its right-click menu) shows its screen live and sends your mouse and keyboard to it. On Linux ⌘ works as Ctrl; on a Mac it stays ⌘. An open desktop is listed under its machine in the sidebar (and keeps streaming while you look elsewhere); close it there.
+
+**Monitors, real and virtual.** A machine with more than one monitor gets a picker above its desktop: show one monitor at a time (on Linux, or all of them). **Add monitor** (or **Add virtual monitor…** in the machine's right-click menu) plugs in a monitor that isn't there, the way [DeskPad](https://github.com/Stengo/DeskPad) does on a Mac: pick a name and a size (720p to 4K), and it joins the desktop like a real one, to the right of the others. Windows move onto it, the machine's own tools (System Settings, RustDesk) see it, and while the machine's desktop is open, Muxen lists it under the Desktop item in the sidebar to open it directly. It starts at the main monitor's size and offers every common one (720p to 4K). Above a monitor, pick its resolution, and on Linux desktops that offer it, its scale: 200% makes things twice as big and just as sharp, so a 4K monitor reads like 1080p (the stream is always the screen's own size, so it stays crisp). Right-click a monitor (in the picker or the sidebar) to rename or remove it, and in the all-screens view, click a monitor's name to open it. On Cinnamon each virtual monitor gets copies of the main monitor's panels (menu, clock, dock with the same pinned apps), so it's usable on its own. It stays until you remove it (**Remove monitor**) or the machine restarts. Handy on a machine with no screen (a dummy HDMI plug, a server), or to give an agent a monitor of its own. On a Mac it's a CGVirtualDisplay. On Linux (X11) it's a software dummy plug: Muxen plugs a made-up monitor (at the size you picked) into a video output with nothing connected, and the desktop sets it up like a real one. That takes root, so when sudo wants a password Muxen asks for yours, only then, sends it to sudo over its encrypted connection, and keeps it in memory only until you quit. Nothing is installed.
+
+```sh
+muxen desktop displays beelink                     # its monitors (virtual ones marked)
+muxen desktop add beelink --size 2560x1440         # another monitor, "Display 2"
+muxen desktop shot beelink --display DisplayPort-0 # a screenshot of just that one
+muxen desktop set beelink HDMI-A-0 --size 3840x2160 --scale 2  # 4K, things twice as big
+muxen desktop remove beelink DisplayPort-0
+```
 
 - **Macs** ask once, on their own screen, to allow `muxen-agent` under Privacy & Security › Screen Recording (to see it) and Accessibility (to control it). The screen goes over ssh to the agent's background service in your session there, so no other network permission is needed. Release builds sign the agent with a Developer ID, so the permissions survive updates.
 

@@ -81,20 +81,30 @@ impl Root {
                 div()
                     .flex()
                     .gap(px(6.))
-                    .child({
-                        let mid = m.id.clone();
-                        Button::new("m-install", "Install runner")
-                            .icon("plus")
-                            .style(ButtonStyle::Primary)
-                            .disabled(m.host.is_empty() || busy || offline)
-                            .on_click(cx.listener(move |this, _, window, cx| this.show_install_dialog(&mid, window, cx)))
-                    })
+                    // What you come to a machine for first: a session, its desktop.
                     .child({
                         let mid = m.id.clone();
                         Button::new("m-session", "New session")
                             .icon("square-terminal")
+                            .style(ButtonStyle::Primary)
                             .disabled(m.host.is_empty() || offline)
                             .on_click(cx.listener(move |this, _, window, cx| this.show_new_session(Some(mid.clone()), window, cx)))
+                    })
+                    .when(super::format::has_desktop(&m) && !m.local, |d| {
+                        let mid = m.id.clone();
+                        d.child(
+                            Button::new("m-desktop", "Show desktop")
+                                .icon("monitor")
+                                .disabled(m.host.is_empty() || offline)
+                                .on_click(cx.listener(move |this, _, window, cx| this.show_display(mid.clone(), None, window, cx))),
+                        )
+                    })
+                    .child({
+                        let mid = m.id.clone();
+                        Button::new("m-install", "Install runner")
+                            .icon("plus")
+                            .disabled(m.host.is_empty() || busy || offline)
+                            .on_click(cx.listener(move |this, _, window, cx| this.show_install_dialog(&mid, window, cx)))
                     })
                     .when(!m.platform.starts_with("windows"), |d| {
                         let mid = m.id.clone();

@@ -25,6 +25,8 @@ mod detect;
 #[cfg(unix)]
 mod desktop;
 #[cfg(unix)]
+mod displays;
+#[cfg(unix)]
 mod direct;
 #[cfg(unix)]
 mod files;
@@ -65,6 +67,12 @@ fn main() {
         Some("migrate") => direct::migrate(),
         #[cfg(unix)]
         Some("screen") => desktop::run(&args[1..]),
+        #[cfg(unix)]
+        Some("displays") => displays::run_list(),
+        #[cfg(target_os = "macos")]
+        Some("vdisplay") => displays::run_holder(&args[1..]),
+        #[cfg(target_os = "macos")]
+        Some("display-mode") => displays::run_mode(&args[1..]),
         Some("clip") => clipboard::run(),
         #[cfg(unix)]
         Some("attach") => match args.get(1) {

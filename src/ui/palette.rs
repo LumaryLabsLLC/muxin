@@ -69,6 +69,8 @@ enum Command {
 #[derive(Clone)]
 enum Run {
     Go(Route),
+    /// A machine's desktop on one of its monitors (None: the main one).
+    Screen(String, Option<String>),
     Do(Command),
     /// A theme, by id.
     Theme(&'static str),
@@ -276,6 +278,7 @@ impl Root {
         self.close_palette(window, cx);
         match run {
             Run::Go(route) => self.navigate(route, window, cx),
+            Run::Screen(machine, display) => self.show_display(machine, display, window, cx),
             Run::Do(c) => match c {
                 Command::AddMachine => self.show_add_machine(window, cx),
                 Command::NewCloudMachine => self.show_cloud_dialog(window, cx),
@@ -384,11 +387,21 @@ impl Root {
                 out.push(item);
             }
             if format::has_desktop(m) && !m.local && m.status == "online" {
-                let mut item = Item::new("Desktop", "See and use its screen", "Desktop", Glyph::Icon("monitor"), Run::Go(Route::Desktop(m.id.clone())));
+                let mut item = Item::new("Desktop", "See and use its screen", "Desktop", Glyph::Icon("monitor"), Run::Screen(m.id.clone(), None));
                 item.indent = true;
                 item.group = Some(m.id.clone());
                 item.also = m.name.clone();
                 out.push(item);
+                // Its other monitors, virtual ones included.
+                for d in m.displays.iter().filter(|d| d.id != "all" && !d.main) {
+                    let kind = if d.is_virtual { "Virtual monitor" } else { "Monitor" };
+                    let detail = format!("{kind} · {}×{}", d.width as u32, d.height as u32);
+                    let mut item = Item::new(d.name.clone(), detail, "Desktop", Glyph::Icon("monitor"), Run::Screen(m.id.clone(), Some(d.id.clone())));
+                    item.indent = true;
+                    item.group = Some(m.id.clone());
+                    item.also = m.name.clone();
+                    out.push(item);
+                }
             }
         }
         // Sessions on machines that aren't in the fleet anymore.

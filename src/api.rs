@@ -2972,20 +2972,98 @@ pub async fn set_direct(engine: &Arc<Engine>, req: DirectRequest) -> ApiResult<c
 #[serde(deny_unknown_fields)]
 pub struct DesktopInputRequest {
     pub machine_id: String,
+    /// One of the machine's displays (desktop_displays); default: the whole desktop or the main display.
+    #[serde(default)]
+    pub display: Option<String>,
     pub events: Vec<crate::fleet::desktop::DesktopEvent>,
 }
 
-/// What's on a machine's screen (a JPEG, plus its size).
-pub async fn desktop_screenshot(engine: &Arc<Engine>, machine_id: &str) -> ApiResult<crate::fleet::desktop::Screenshot> {
+/// What's on a machine's screen, or one of its displays (a JPEG, plus its size).
+pub async fn desktop_screenshot(engine: &Arc<Engine>, machine_id: &str, display: Option<&str>) -> ApiResult<crate::fleet::desktop::Screenshot> {
     let m = find_machine(&engine.current(), machine_id)?.clone();
-    engine.desktop_screenshot(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))
+    engine.desktop_screenshot(&m.id, display).await.map_err(|e| ApiError::new("operation_failed", e))
 }
 
 /// Moves, clicks, scrolls and types on a machine's desktop.
 pub async fn desktop_input(engine: &Arc<Engine>, req: DesktopInputRequest) -> ApiResult<serde_json::Value> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
-    let n = engine.desktop_input(&m.id, &req.events).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    let n = engine.desktop_input(&m.id, req.display.as_deref(), &req.events).await.map_err(|e| ApiError::new("operation_failed", e))?;
     Ok(serde_json::json!({ "machine_id": m.id, "events": n, "next": "Take a desktop_screenshot to see the result." }))
+}
+
+/// A machine's monitors, virtual ones included.
+pub async fn desktop_displays(engine: &Arc<Engine>, req: MachineRequest) -> ApiResult<Vec<crate::fleet::model::DisplayInfo>> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    engine.displays(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddDisplayRequest {
+    pub machine_id: String,
+    /// Default 1920×1080.
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Agents don't type the user's password: the app asks for it.
+fn display_error(e: crate::fleet::desktop::AddDisplayError) -> ApiError {
+    match e {
+        crate::fleet::desktop::AddDisplayError::NeedsPassword(why) => ApiError::invalid(why)
+            .with_hint("Ask the user to add or remove this monitor from the Muxen app (the machine's desktop › Add monitor); it asks for their password there."),
+        crate::fleet::desktop::AddDisplayError::Failed(why) => ApiError::new("operation_failed", why),
+    }
+}
+
+/// Adds a virtual monitor to a machine's desktop.
+pub async fn desktop_add_display(engine: &Arc<Engine>, req: AddDisplayRequest) -> ApiResult<crate::fleet::model::DisplayInfo> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    // The main monitor's size unless told otherwise.
+    let known = if m.displays.is_empty() && (req.width.is_none() || req.height.is_none()) { engine.displays(&m.id).await.unwrap_or_default() } else { m.displays.clone() };
+    let screens: Vec<_> = known.iter().filter(|d| d.id != "all").collect();
+    let main = screens.iter().find(|d| d.main).or(screens.first()).map(|d| (d.width.round() as u32, d.height.round() as u32)).unwrap_or((1920, 1080));
+    let (w, h) = (req.width.unwrap_or(main.0), req.height.unwrap_or(main.1));
+    engine.add_display(&m.id, w, h, req.name.as_deref()).await.map_err(display_error)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetDisplayRequest {
+    pub machine_id: String,
+    pub display: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub scale: Option<f64>,
+}
+
+/// Sets a monitor's size (one it offers: see `modes`) or the desktop's scale on it.
+pub async fn desktop_set_display(engine: &Arc<Engine>, req: SetDisplayRequest) -> ApiResult<crate::fleet::model::DisplayInfo> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    let size = req.width.zip(req.height);
+    if size.is_none() && req.scale.is_none() {
+        return Err(ApiError::new("invalid", "Pass width and height, or scale."));
+    }
+    engine.set_display(&m.id, &req.display, size, req.scale).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    let shown = engine.current().machines.iter().find(|x| x.id == m.id).and_then(|x| x.displays.iter().find(|d| d.id == req.display).cloned());
+    shown.ok_or_else(|| ApiError::new("not_found", format!("{} isn't one of {}'s displays now.", req.display, m.name)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveDisplayRequest {
+    pub machine_id: String,
+    pub display: String,
+}
+
+/// Removes a virtual monitor Muxen added.
+pub async fn desktop_remove_display(engine: &Arc<Engine>, req: RemoveDisplayRequest) -> ApiResult<serde_json::Value> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    engine.remove_display(&m.id, &req.display).await.map_err(display_error)?;
+    Ok(serde_json::json!({ "machine_id": m.id, "removed": req.display }))
 }
 
 /// Git checkouts on the machines, re-read first.

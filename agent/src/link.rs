@@ -359,7 +359,8 @@ fn attach(req: &Value, out: &Out, attached: &Attached) -> Value {
 }
 
 /// Starts streaming the desktop on a channel: `{"op": "desktop", "channel",
-/// "fps", "quality", "max_width"}`. Replies with the frame size.
+/// "fps", "quality", "max_width", "display"}` (see displays.rs; empty: the
+/// whole desktop or the main display). Replies with the frame size.
 fn desktop(req: &Value, out: &Out, attached: &Attached) -> Value {
     let channel = req["channel"].as_u64().unwrap_or(0) as u32;
     if channel == CONTROL {
@@ -370,7 +371,8 @@ fn desktop(req: &Value, out: &Out, attached: &Attached) -> Value {
     };
     let arg = |k: &str, d: u64| req[k].as_u64().unwrap_or(d).to_string();
     let mode = if req["tiles"].as_bool() == Some(true) { "tiles" } else { "frames" };
-    let args = vec!["screen".to_string(), arg("fps", 30), arg("quality", 75), arg("max_width", 1920), mode.to_string()];
+    let display = req["display"].as_str().unwrap_or("").to_string();
+    let args = vec!["screen".to_string(), arg("fps", 30), arg("quality", 75), arg("max_width", 1920), mode.to_string(), display];
     let (program, mut frames) = match Program::start(&args, env) {
         Ok(p) => p,
         Err(e) => return json!({ "ok": false, "error": format!("couldn't start capturing the screen: {e}") }),

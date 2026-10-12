@@ -212,6 +212,43 @@ pub struct Machine {
     pub tailnet: Option<TailnetDevice>,
     /// A cloud machine Muxen created: where it runs and what it costs.
     pub cloud: Option<CloudInfo>,
+    /// Its monitors, virtual ones included, as last listed (empty until then).
+    pub displays: Vec<DisplayInfo>,
+}
+
+/// One of a machine's monitors: a real one, or a virtual one Muxen added.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct DisplayInfo {
+    /// What to pass as `display`: a RandR monitor's name on Linux ("all": the
+    /// whole desktop), the display's number on a Mac.
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// The main (primary) display.
+    #[serde(default)]
+    pub main: bool,
+    /// A virtual monitor Muxen added (and can remove).
+    #[serde(default, rename = "virtual")]
+    pub is_virtual: bool,
+    /// The sizes it can be set to, biggest first (empty: it can't be, or
+    /// nobody knows).
+    #[serde(default)]
+    pub modes: Vec<(u32, u32)>,
+    /// Any size can be given to it, not only `modes` (Linux).
+    #[serde(default)]
+    pub any_size: bool,
+    /// How much the desktop scales things up on it (2: twice as big, as
+    /// sharp); 0 when unknown.
+    #[serde(default)]
+    pub scale: f64,
+    /// The scales it can be set to (empty: it can't be).
+    #[serde(default)]
+    pub scales: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

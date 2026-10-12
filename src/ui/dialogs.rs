@@ -32,6 +32,8 @@ pub enum DialogEvent {
     StartSession(StartSession),
     /// Set up the workspace first, then start the session in its folder.
     StartInWorkspace(CreateWorkspace, StartSession),
+    /// A virtual monitor was added: (machine, display) to show.
+    DisplayAdded(String, String),
 }
 
 pub(super) fn frame(theme: &Theme, title: impl Into<SharedString>, intro: Option<SharedString>) -> gpui::Div {
@@ -602,6 +604,8 @@ impl InstallDialog {
 pub enum RenameTarget {
     Machine(String),
     Session(String),
+    /// A machine's display: (machine, display id).
+    Display(String, String),
 }
 
 pub struct RenameDialog {
@@ -653,6 +657,28 @@ impl RenameDialog {
                     cx.notify();
                 }
             },
+            // The machine keeps it: one round trip.
+            RenameTarget::Display(machine, display) => {
+                self.saving = true;
+                cx.notify();
+                let engine = self.engine.clone();
+                let job = engine.runtime().spawn({
+                    let engine = engine.clone();
+                    async move { engine.rename_display(&machine, &display, &text).await }
+                });
+                cx.spawn(async move |this, cx| {
+                    let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+                    let _ = this.update(cx, |this, cx| match result {
+                        Ok(()) => cx.emit(DialogEvent::Dismissed),
+                        Err(e) => {
+                            this.saving = false;
+                            this.error = Some(e);
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
             // The agent on the machine keeps it: one round trip.
             RenameTarget::Session(id) => {
                 self.saving = true;
@@ -688,6 +714,11 @@ impl Render for RenameDialog {
                 format!("Only the name Muxen shows changes. Its id ({id}), runners and sessions stay the same, and nothing on the machine changes."),
                 "Name",
             ),
+            RenameTarget::Display(..) => (
+                "Rename display",
+                format!("What Muxen calls this monitor on {}. Its windows and settings stay as they are.", self.machine),
+                "Name",
+            ),
             RenameTarget::Session(_) => (
                 "Rename session",
                 format!("Muxen's agent on {} keeps the title, so it shows wherever you use Muxen. What runs in the session isn't touched.", self.machine),
@@ -702,6 +733,280 @@ impl Render for RenameDialog {
                 Button::new("rn-save", if self.saving { "Saving…" } else { "Rename" })
                     .style(ButtonStyle::Primary)
                     .loading(self.saving)
+                    .key_hint("↵")
+                    .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
+                    .into_any_element(),
+            ]))
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+/// Sizes to pick from for a virtual monitor.
+const MONITOR_SIZES: &[(u32, u32)] = &[(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)];
+
+pub struct AddDisplayDialog {
+    engine: Arc<Engine>,
+    machine: String,
+    machine_name: String,
+    name: Entity<TextInput>,
+    /// The machine's password, when it asks for one (cleared once read).
+    password: Entity<TextInput>,
+    size: (u32, u32),
+    /// The size of the machine's main monitor, which a new one starts at.
+    main: Option<(u32, u32)>,
+    adding: bool,
+    /// The machine wants the password (sudo, on Linux): ask for it.
+    asking: bool,
+    error: Option<String>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl EventEmitter<DialogEvent> for AddDisplayDialog {}
+
+impl AddDisplayDialog {
+    pub fn new(engine: Arc<Engine>, machine: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let snap = engine.current();
+        let m = snap.machines.iter().find(|m| m.id == machine);
+        let machine_name = m.map(|m| m.name.clone()).unwrap_or_else(|| machine.clone());
+        // Named like plugging in another one: "Display 3" when there are two.
+        let n = m.map(|m| m.displays.iter().filter(|d| d.id != "all").count()).unwrap_or(1) + 1;
+        let screens: Vec<_> = m.map(|m| m.displays.iter().filter(|d| d.id != "all").collect()).unwrap_or_default();
+        let main = screens.iter().find(|d| d.main).or(screens.first()).map(|d| (d.width.round() as u32, d.height.round() as u32)).filter(|(w, h)| *w >= 640 && *h >= 480);
+        let name = cx.new(|cx| TextInput::new(cx, format!("Display {n}")));
+        let password = cx.new(|cx| TextInput::new(cx, "Password").secret());
+        let on_input = |this: &mut Self, _: &Entity<TextInput>, e: &InputEvent, window: &mut Window, cx: &mut Context<Self>| match e {
+            InputEvent::Submit => this.submit(window, cx),
+            InputEvent::Cancel => cx.emit(DialogEvent::Dismissed),
+            InputEvent::Changed => {
+                this.error = None;
+                cx.notify()
+            }
+        };
+        let subs = vec![cx.subscribe_in(&name, window, on_input), cx.subscribe_in(&password, window, on_input)];
+        AddDisplayDialog { engine, machine, machine_name, name, password, size: main.unwrap_or((1920, 1080)), main, adding: false, asking: false, error: None, _subscriptions: subs }
+    }
+
+    pub fn first_focus(&self, cx: &App) -> FocusHandle {
+        self.name.focus_handle(cx)
+    }
+
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.adding {
+            return;
+        }
+        if self.asking {
+            // Read once, cleared from the field, kept only in memory while Muxen runs.
+            let p = self.password.read(cx).text().to_string();
+            if p.is_empty() {
+                self.error = Some(format!("Type your password on {}.", self.machine_name));
+                cx.notify();
+                return;
+            }
+            self.password.update(cx, |i, cx| i.set_text("", cx));
+            self.engine.remember_password(&self.machine, p);
+        }
+        self.adding = true;
+        self.error = None;
+        cx.notify();
+        let typed = self.name.read(cx).text().trim().to_string();
+        let (engine, machine, (w, h)) = (self.engine.clone(), self.machine.clone(), self.size);
+        let job = engine.runtime().spawn({
+            let (engine, machine) = (engine.clone(), machine.clone());
+            async move { engine.add_display(&machine, w, h, Some(&typed).filter(|t| !t.is_empty()).map(|t| t.as_str())).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(crate::fleet::desktop::AddDisplayError::Failed(e.to_string())));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.adding = false;
+                match result {
+                    Ok(d) => cx.emit(DialogEvent::DisplayAdded(machine, d.id)),
+                    Err(crate::fleet::desktop::AddDisplayError::NeedsPassword(why)) => {
+                        // Asked for the first time, or the one given didn't work.
+                        if this.asking {
+                            this.error = Some(why);
+                        }
+                        this.asking = true;
+                        window.focus(&this.password.focus_handle(cx));
+                    }
+                    Err(e) => this.error = Some(e.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+impl Render for AddDisplayDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        // The usual sizes, and the main monitor's when it's another.
+        let mut choices = MONITOR_SIZES.to_vec();
+        if let Some(main) = self.main.filter(|m| !choices.contains(m)) {
+            choices.push(main);
+            choices.sort_by_key(|(w, h)| w * h);
+        }
+        let main = self.main;
+        let sizes: Vec<AnyElement> = choices
+            .into_iter()
+            .map(|(w, h)| {
+                let on = self.size == (w, h);
+                div()
+                    .id(SharedString::from(format!("mon-{w}x{h}")))
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(2.))
+                    .py(px(8.))
+                    .rounded(px(7.))
+                    .border_1()
+                    .border_color(if on { theme.accent } else { theme.border_variant })
+                    .bg(if on { theme.accent.opacity(0.1) } else { theme.element })
+                    .cursor_pointer()
+                    .hover(|st| st.border_color(theme.accent.opacity(0.6)))
+                    .child(div().text_size(px(12.5)).text_color(theme.text).child(format!("{w}×{h}")))
+                    .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(match (w, h) {
+                        _ if main == Some((w, h)) => "Same as main",
+                        (1280, 720) => "720p",
+                        (1920, 1080) => "1080p",
+                        (2560, 1440) => "1440p",
+                        _ => "4K",
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.size = (w, h);
+                        cx.notify()
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        if self.asking {
+            return password_frame(&theme, &self.machine_name, "plug in the new monitor")
+                .child(field(&theme, "Your password", self.password.clone(), None))
+                .children(error_line(&theme, &self.error))
+                .child(footer(vec![
+                    Button::new("ad-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                    Button::new("ad-pass", if self.adding { "Adding…" } else { "Add monitor" })
+                        .style(ButtonStyle::Primary)
+                        .loading(self.adding)
+                        .key_hint("↵")
+                        .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
+                        .into_any_element(),
+                ]))
+                .into_any_element();
+        }
+        frame(
+            &theme,
+            "Add a virtual monitor",
+            Some(format!("Like plugging another screen into {}: windows can move there, and Muxen shows it on its own. It stays until you remove it or the machine restarts.", self.machine_name).into()),
+        )
+        .child(field(&theme, "Name", self.name.clone(), None))
+        .child(div().flex().flex_col().gap(px(6.)).child(label(&theme, "Size").text_size(px(12.)).text_color(theme.text_muted)).child(div().flex().gap(px(8.)).children(sizes)))
+        .children(error_line(&theme, &self.error))
+        .child(footer(vec![
+            Button::new("ad-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+            Button::new("ad-add", if self.adding { "Adding…" } else { "Add monitor" })
+                .style(ButtonStyle::Primary)
+                .loading(self.adding)
+                .key_hint("↵")
+                .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
+                .into_any_element(),
+        ]))
+        .into_any_element()
+    }
+}
+
+/// Asking for the machine's password: what it's for, and where it goes.
+fn password_frame(theme: &Theme, machine: &str, what: &str) -> gpui::Div {
+    frame(
+        theme,
+        format!("Your password on {machine}"),
+        Some(format!("{machine} asks for it to {what}. Muxen sends it to sudo there over its encrypted connection, and keeps it only in memory until you quit.").into()),
+    )
+}
+
+/// The machine's password, to remove a virtual monitor (Linux asks sudo).
+pub struct MonitorPasswordDialog {
+    engine: Arc<Engine>,
+    machine: String,
+    machine_name: String,
+    display: String,
+    password: Entity<TextInput>,
+    busy: bool,
+    error: Option<String>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl EventEmitter<DialogEvent> for MonitorPasswordDialog {}
+
+impl MonitorPasswordDialog {
+    pub fn new(engine: Arc<Engine>, machine: String, display: String, error: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let machine_name = engine.current().machines.iter().find(|m| m.id == machine).map(|m| m.name.clone()).unwrap_or_else(|| machine.clone());
+        let password = cx.new(|cx| TextInput::new(cx, "Password").secret());
+        let sub = cx.subscribe_in(&password, window, |this: &mut Self, _, e: &InputEvent, _, cx| match e {
+            InputEvent::Submit => this.submit(cx),
+            InputEvent::Cancel => cx.emit(DialogEvent::Dismissed),
+            InputEvent::Changed => {
+                this.error = None;
+                cx.notify()
+            }
+        });
+        // A password that didn't work says so; a first ask doesn't need to.
+        let error = error.filter(|e| e.contains("didn't work"));
+        MonitorPasswordDialog { engine, machine, machine_name, display, password, busy: false, error, _subscriptions: vec![sub] }
+    }
+
+    pub fn first_focus(&self, cx: &App) -> FocusHandle {
+        self.password.focus_handle(cx)
+    }
+
+    fn submit(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let p = self.password.read(cx).text().to_string();
+        if p.is_empty() {
+            self.error = Some(format!("Type your password on {}.", self.machine_name));
+            cx.notify();
+            return;
+        }
+        self.password.update(cx, |i, cx| i.set_text("", cx));
+        self.engine.remember_password(&self.machine, p);
+        self.busy = true;
+        self.error = None;
+        cx.notify();
+        let (engine, machine, display) = (self.engine.clone(), self.machine.clone(), self.display.clone());
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.remove_display(&machine, &display).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(crate::fleet::desktop::AddDisplayError::Failed(e.to_string())));
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => cx.emit(DialogEvent::Dismissed),
+                Err(e) => {
+                    this.busy = false;
+                    this.error = Some(e.to_string());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+}
+
+impl Render for MonitorPasswordDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        password_frame(&theme, &self.machine_name, "unplug the virtual monitor")
+            .child(field(&theme, "Your password", self.password.clone(), None))
+            .children(error_line(&theme, &self.error))
+            .child(footer(vec![
+                Button::new("mp-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                Button::new("mp-go", if self.busy { "Removing…" } else { "Remove monitor" })
+                    .style(ButtonStyle::Primary)
+                    .loading(self.busy)
                     .key_hint("↵")
                     .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
                     .into_any_element(),

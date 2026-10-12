@@ -75,6 +75,8 @@ struct State {
     tailscale: Option<super::model::TailscaleStatus>,
     /// Cloud machines' power as the provider last reported it ("active", "off", ...).
     droplets: HashMap<String, String>,
+    /// Machines' monitors, as last listed (see fleet::desktop).
+    displays: HashMap<String, Vec<super::model::DisplayInfo>>,
     /// Stop flags of the operations that can be cancelled.
     cancels: HashMap<u64, Arc<std::sync::atomic::AtomicBool>>,
 }
@@ -146,6 +148,7 @@ impl Engine {
             tailnet: persisted.tailnet,
             tailscale: None,
             droplets: persisted.droplets,
+            displays: HashMap::new(),
             cancels: HashMap::new(),
         };
         let (tx, _) = watch::channel(Arc::new(Snapshot::default()));
@@ -224,6 +227,23 @@ impl Engine {
         self.rt.spawn(async move { me.tailnet_loop().await });
         let me = self.clone();
         self.rt.spawn(async move { me.network_loop().await });
+        // Monitors aren't kept between runs: ask the machines with a desktop
+        // now, not at the next check (which may be minutes away).
+        let me = self.clone();
+        self.rt.spawn(async move {
+            if me.demo.is_some() {
+                return;
+            }
+            let snap = me.current();
+            let ids: Vec<String> = snap
+                .machines
+                .iter()
+                .filter(|m| m.status != "offline" && !m.host.is_empty())
+                .filter(|m| m.platform.starts_with("darwin") || m.probe.as_ref().and_then(|p| p.desktop) == Some(true))
+                .map(|m| m.id.clone())
+                .collect();
+            futures::future::join_all(ids.iter().map(|id| me.displays(id))).await;
+        });
     }
 
     pub fn subscribe(&self) -> watch::Receiver<Arc<Snapshot>> {
@@ -589,6 +609,15 @@ impl Engine {
         self.publish(&mut st);
     }
 
+    /// What the machine's monitors are now (see fleet::desktop).
+    pub(crate) fn set_displays(&self, machine_id: &str, displays: Vec<super::model::DisplayInfo>) {
+        let mut st = self.state.lock().unwrap();
+        if st.displays.get(machine_id) != Some(&displays) {
+            st.displays.insert(machine_id.to_string(), displays);
+            self.publish(&mut st);
+        }
+    }
+
     /// Renames a direct session; its info afterwards.
     pub(crate) fn set_direct_title(&self, id: &str, title: &str) -> Option<SessionInfo> {
         let mut st = self.state.lock().unwrap();
@@ -929,6 +958,8 @@ impl Engine {
             let mut st = self.state.lock().unwrap();
             st.checking.remove(&id);
             let result = result.after(st.probes.get(&id));
+            // Its monitors are worth knowing when it has a desktop to show.
+            let desktop = result.os.as_deref() == Some("darwin") || result.desktop == Some(true);
             st.probes.insert(id.clone(), result);
             self.publish(&mut st);
             drop(st);
@@ -937,6 +968,9 @@ impl Engine {
                 let me = self.clone();
                 self.rt.spawn(async move {
                     let _ = me.refresh_sessions(&id).await;
+                    if desktop {
+                        let _ = me.displays(&id).await;
+                    }
                 });
             }
         }
@@ -1092,6 +1126,9 @@ impl Engine {
         snapshot.operations = st.operations.iter().cloned().collect();
         snapshot.workspaces = workspaces::snapshot_infos(&st.workspaces, &snapshot.machines, &st.inventory.machines);
         for m in &mut snapshot.machines {
+            if let Some(d) = st.displays.get(&m.id) {
+                m.displays = d.clone();
+            }
             if let Some(found) = st.sessions.get(&m.id) {
                 m.agents = found.agents.clone();
                 m.agent_version = found.agent_version.clone();

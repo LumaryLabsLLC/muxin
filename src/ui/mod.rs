@@ -14,6 +14,7 @@ mod kit;
 mod menu;
 mod overview;
 mod palette;
+mod panes;
 mod desktop;
 mod sessions;
 mod settings;

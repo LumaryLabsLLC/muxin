@@ -103,6 +103,8 @@ fn base_font(window: &Window) -> Font {
         FALLBACKS.iter().find(|f| has(f)).map(|f| SharedString::from(*f)).unwrap_or_else(|| mono_font().into())
     };
     let mut font = gpui::font(family);
+    // Icons the font lacks (Nerd Font glyphs): from the bundled symbols font.
+    font.fallbacks = Some(gpui::FontFallbacks::from_fonts(crate::ui::assets::NERD_SYMBOLS_NAMES.iter().map(|n| n.to_string()).collect()));
     // Ligatures would merge cells and break the grid.
     font.features = FontFeatures(Arc::new(vec![("calt".into(), 0), ("liga".into(), 0)]));
     font

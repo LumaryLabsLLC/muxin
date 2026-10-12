@@ -72,7 +72,10 @@ impl Engine {
             machine_id: spec.id.clone(),
             via: "none".into(),
             direct: paired.is_some(),
-            address: paired.as_ref().map(|p| format!("{}:{} (UDP)", p.host, p.port)),
+            address: paired.as_ref().map(|p| match spec.direct_address.as_deref().filter(|a| !a.trim().is_empty()) {
+                Some(a) => format!("{} (UDP, forwarded)", a.trim()),
+                None => format!("{}:{} (UDP)", p.host, p.port),
+            }),
             latency_ms: None,
             network: None,
             peer: None,
@@ -111,7 +114,8 @@ impl Engine {
         // Its local-network address didn't answer, so the connection took the
         // long way. Away from home that's expected; but when Tailscale itself
         // reaches the machine on this network, something here blocked us.
-        let lan = paired.as_ref().map(|p| p.lan.clone()).unwrap_or_default();
+        // (A machine reached at an address of its own has no local way to look for.)
+        let lan = if spec.direct_address.is_some() { Vec::new() } else { paired.as_ref().map(|p| p.lan.clone()).unwrap_or_default() };
         let long_way = out.via == "direct" && !lan.is_empty() && out.network.as_deref().is_some_and(|n| n != "Local network");
         let here = out.tailnet.as_ref().is_some_and(|d| d.path == "direct" && same_network(d, &lan));
         if long_way && (here || out.tailnet.is_none()) {

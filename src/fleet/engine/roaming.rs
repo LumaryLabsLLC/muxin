@@ -211,6 +211,10 @@ impl Engine {
             }
             direct::retry_now(id);
         }
+        // Reached at an address of its own (a forwarded port): no shorter way.
+        if self.machine(id).is_some_and(|(s, _)| s.direct_address.is_some()) {
+            return;
+        }
         let Some(paired) = direct::paired(id).filter(|p| !p.lan.is_empty()) else { return };
         if moves().lock().unwrap().get(id).is_some_and(|t| t.elapsed() < MOVE_HOME_PAUSE) {
             return;

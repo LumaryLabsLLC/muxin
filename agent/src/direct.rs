@@ -477,11 +477,12 @@ fn install_service() -> (&'static str, Option<String>) {
     #[cfg(windows)]
     {
         // A task at sign-in, in the user's own desktop session (where the
-        // screen and clipboard are), started now too; and a way in through
+        // screen and clipboard are), through a windowless console (nothing
+        // shows on their screen), started now too; and a way in through
         // Windows' firewall for the agent (administrators only).
         let script = format!(
             "$exe = {exe}\n\
-             $action = New-ScheduledTaskAction -Execute $exe -Argument 'listen'\n\
+             $action = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument ('--headless \"' + $exe + '\" listen')\n\
              $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME\n\
              $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited\n\
              $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew\n\
@@ -489,8 +490,8 @@ fn install_service() -> (&'static str, Option<String>) {
              try {{ Remove-NetFirewallRule -DisplayName {task} -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName {task} -Direction Inbound -Program $exe -Protocol UDP -Action Allow -Profile Any -ErrorAction Stop | Out-Null; $fw = 'yes' }} catch {{ $fw = 'no' }}\n\
              Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object {{ $_.CommandLine -match ' listen' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}\n\
              Start-ScheduledTask -TaskName {task}\n\
-             Start-Sleep -Milliseconds 800\n\
-             $running = @(Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object {{ $_.CommandLine -match ' listen' }}).Count -gt 0\n\
+             $running = $false\n\
+             foreach ($i in 1..20) {{ Start-Sleep -Milliseconds 250; if (@(Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object {{ $_.CommandLine -match ' listen' }}).Count) {{ $running = $true; break }} }}\n\
              \"fw=$fw running=$running\"",
             exe = crate::win::quote(&exe()),
             task = crate::win::quote(TASK)

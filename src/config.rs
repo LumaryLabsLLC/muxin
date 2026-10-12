@@ -298,6 +298,10 @@ pub struct MachineSpec {
     /// at its sessions until it's connected again (its sessions go on there).
     #[serde(default)]
     pub disconnected: bool,
+    /// Where a direct connection reaches it ("host:port"), when its own
+    /// addresses don't: a VM behind its host's NAT, a router's forwarded port.
+    #[serde(default)]
+    pub direct_address: Option<String>,
 }
 
 /// Where a cloud machine lives, as config.toml records it:

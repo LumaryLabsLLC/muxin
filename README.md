@@ -107,6 +107,7 @@ runners = ["mac-studio-01", "mac-studio-02"]   # expected runners; missing ones 
 # user = "ci"   port = 2222   ssh_options = ["-i", "~/.ssh/ci"]
 # discover = false                              # don't list runners found but not declared
 # notes = "Under the desk"
+# direct_address = "nas.example.com:47822"      # where a direct connection reaches it (NAT, a forwarded port)
 
 [[machine]]
 name = "StudioNAS"   # no runners: shown under "Other machines"

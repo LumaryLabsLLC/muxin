@@ -288,6 +288,17 @@ async fn connect(spec: &MachineSpec) -> Result<Arc<Link>, String> {
 }
 
 async fn connect_direct(spec: &MachineSpec, paired: &super::direct::Paired) -> Result<Arc<Link>, String> {
+    // Reached at an address of its own choosing (a forwarded port): that one only.
+    let mut paired = paired.clone();
+    if let Some(address) = spec.direct_address.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+        let (host, port) = match address.rsplit_once(':').map(|(h, p)| (h, p.parse::<u16>())) {
+            Some((h, Ok(p))) => (h.trim_matches(['[', ']']).to_string(), p),
+            _ => (address.to_string(), paired.port),
+        };
+        let ips: Vec<String> = tokio::net::lookup_host((host.as_str(), port)).await.map(|a| a.map(|s| s.ip().to_string()).collect()).unwrap_or_default();
+        paired = super::direct::Paired { lan: ips, tailnet: Vec::new(), host, port, ..paired };
+    }
+    let paired = &paired;
     let conn = super::direct::connect(&spec.id, paired).await?;
     let peer = conn.remote_address();
     let (mut send, recv) = conn.open_bi().await.map_err(|e| e.to_string())?;

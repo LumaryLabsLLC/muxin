@@ -272,7 +272,8 @@ pub fn reset(machine_id: &str) {
 }
 
 fn local_agent() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".muxen/bin/muxen-agent")
+    let bin = dirs::home_dir().unwrap_or_default().join(".muxen").join("bin");
+    bin.join(if cfg!(windows) { "muxen-agent.exe" } else { "muxen-agent" })
 }
 
 /// Directly when the machine is paired and reachable, else over ssh.
@@ -310,7 +311,7 @@ async fn connect_ssh(spec: &MachineSpec) -> Result<Arc<Link>, String> {
     } else {
         let mut c = Command::new("ssh");
         c.args(probe::ssh_args(spec));
-        c.arg(format!("{} link", super::sessions::agent::REMOTE_PATH));
+        c.arg(super::sessions::agent::command(spec, "link"));
         c
     };
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);

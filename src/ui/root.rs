@@ -1114,7 +1114,7 @@ impl Root {
     /// A machine's GPUs, for its page (none: no GPU card).
     pub(super) fn load_machine_gpus(&mut self, machine_id: &str, cx: &mut Context<Self>) {
         let Some(m) = self.snapshot.machines.iter().find(|m| m.id == machine_id) else { return };
-        if m.is_down() || m.host.is_empty() || m.platform.starts_with("windows") {
+        if m.is_down() || m.host.is_empty() {
             return;
         }
         let (engine, id) = (self.engine.clone(), machine_id.to_string());
@@ -1978,7 +1978,7 @@ impl Root {
             .id(SharedString::from(format!("side-m-{}", m.id)))
             .group("machine-row")
             // Files from the Finder dropped here are copied to the machine.
-            .when(!m.host.is_empty() && !m.platform.starts_with("windows"), |d| {
+            .when(!m.host.is_empty(), |d| {
                 let (mid, accent) = (m.id.clone(), theme.accent);
                 d.drag_over::<gpui::ExternalPaths>(move |st, _, _, _| st.bg(accent.opacity(0.18)))
                     .on_drop(cx.listener(move |this, paths: &gpui::ExternalPaths, window, cx| this.copy_dropped(&mid, paths.paths(), window, cx)))

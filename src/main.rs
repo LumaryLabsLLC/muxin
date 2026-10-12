@@ -1358,7 +1358,7 @@ fn main() -> ExitCode {
         }
         Some(Command::Usage(a)) => {
             let req = api::UsageRequest { days: Some(a.days), machine_id: a.machine };
-            run(&runtime, &a.agent, async move |e| api::usage(&e, req).await, |u| cli::usage(u))
+            run(&runtime, &a.agent, async move |e| api::usage(&e, req).await, cli::usage)
         }
         Some(Command::Ports(a)) => {
             let req = api::PortsRequest { machine_id: a.machine_id };
@@ -1462,7 +1462,35 @@ fn main() -> ExitCode {
     ExitCode::from(code)
 }
 
+/// Windows: started from Explorer or the Start menu, the window comes with a
+/// console of its own (a terminal window). Start again without one: a
+/// console that has no window, which every ssh and PowerShell Muxen starts
+/// then shares instead of each opening a window. True when it did (this
+/// process should end).
+#[cfg(windows)]
+fn without_console_window() -> bool {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Console::GetConsoleProcessList;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    if std::env::var_os("MUXEN_NO_CONSOLE").is_some() {
+        return false;
+    }
+    // Someone else on this console: started from a terminal, which stays.
+    let mut ids = [0u32; 2];
+    if unsafe { GetConsoleProcessList(ids.as_mut_ptr(), ids.len() as u32) } != 1 {
+        return false;
+    }
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(std::env::args_os().skip(1)).env("MUXEN_NO_CONSOLE", "1").creation_flags(CREATE_NO_WINDOW);
+    cmd.spawn().is_ok()
+}
+
 fn open(args: OpenArgs, runtime: &tokio::runtime::Runtime) -> u8 {
+    #[cfg(windows)]
+    if without_console_window() {
+        return 0;
+    }
     // The engine runs on tokio; the window runs on GPUI's main-thread executor.
     let _guard = runtime.enter();
     let engine = Engine::new(args.common.paths(), args.demo);

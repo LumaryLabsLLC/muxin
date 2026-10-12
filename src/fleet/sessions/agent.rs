@@ -20,6 +20,7 @@ use crate::ops::remote::sh_quote;
 use crate::probe::{self, ProbeResult};
 
 /// Where the agent lives on every machine (and how attach commands name it).
+/// Windows: `%USERPROFILE%\.muxen\bin\muxen-agent.exe` (see `command`).
 pub const REMOTE_PATH: &str = "~/.muxen/bin/muxen-agent";
 const CTL_TIMEOUT: Duration = Duration::from_secs(25);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(180);
@@ -30,6 +31,7 @@ pub fn target(probe: Option<&ProbeResult>) -> Option<String> {
     let os = match p.os.as_deref()? {
         "darwin" | "macos" => "darwin",
         "linux" => "linux",
+        "windows" => "windows",
         _ => return None,
     };
     let arch = match p.arch.as_deref()?.to_ascii_lowercase().as_str() {
@@ -56,10 +58,16 @@ pub fn builds_dir() -> Option<PathBuf> {
     dir.ancestors().map(|a| a.join("dist/agents")).find(|c| c.is_dir())
 }
 
+/// Where the build for `target` is.
+fn build_path(target: &str) -> Result<PathBuf, String> {
+    let dir = builds_dir().ok_or("Muxen can't find its agent builds (run scripts/build-agents.sh in a source checkout).")?;
+    let exe = if target.starts_with("windows") { ".exe" } else { "" };
+    Ok(dir.join(format!("muxen-agent-{target}{exe}")))
+}
+
 /// The build for `target` and its hash (what `muxen-agent hash` prints).
 fn build(target: &str) -> Result<(Vec<u8>, String), String> {
-    let dir = builds_dir().ok_or("Muxen can't find its agent builds (run scripts/build-agents.sh in a source checkout).")?;
-    let path = dir.join(format!("muxen-agent-{target}"));
+    let path = build_path(target)?;
     let bytes = std::fs::read(&path).map_err(|_| format!("Muxen has no agent build for {target} machines yet."))?;
     let hash = format!("{:016x}", fnv(&bytes));
     Ok((bytes, hash))
@@ -72,6 +80,42 @@ fn fnv(bytes: &[u8]) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
+}
+
+/// Which machines run Windows, by machine id, as their last check said (so
+/// links and requests know how to name the agent there).
+fn windows_machines() -> &'static Mutex<HashMap<String, bool>> {
+    static OS: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    OS.get_or_init(Default::default)
+}
+
+/// Remembers a machine's OS from its check.
+pub fn note_os(machine_id: &str, os: Option<&str>) {
+    if let Some(os) = os {
+        windows_machines().lock().unwrap().insert(machine_id.to_string(), os == "windows");
+    }
+}
+
+/// Whether a machine runs Windows (as far as its last check says).
+pub fn is_windows(spec: &MachineSpec) -> bool {
+    if spec.is_local() {
+        return cfg!(windows);
+    }
+    windows_machines().lock().unwrap().get(&spec.id).copied().unwrap_or(false)
+}
+
+/// The command line ssh hands the machine's shell to run `muxen-agent <args>`.
+/// On Windows it's PowerShell with an encoded command, which reads the same
+/// whether sshd's shell is cmd.exe or PowerShell.
+pub fn command(spec: &MachineSpec, args: &str) -> String {
+    if is_windows(spec) {
+        use base64::Engine as _;
+        let call = format!("& (Join-Path $env:USERPROFILE '.muxen\\bin\\muxen-agent.exe') {args}");
+        let utf16: Vec<u8> = call.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        format!("powershell -NoProfile -NonInteractive -EncodedCommand {}", base64::engine::general_purpose::STANDARD.encode(utf16))
+    } else {
+        format!("{REMOTE_PATH} {args}")
+    }
 }
 
 /// Machines already checked to have the right build, by machine id.
@@ -101,10 +145,17 @@ pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(
     if verified().lock().unwrap().get(&spec.id) == Some(&hash) {
         return Ok(());
     }
-    let installed = run_sh(spec, &format!("a={REMOTE_PATH}; if [ -x \"$a\" ]; then \"$a\" hash; else echo none; fi"), CTL_TIMEOUT).await?;
+    let windows = target.starts_with("windows");
+    note_os(&spec.id, Some(if windows { "windows" } else { "unix" }));
+    let installed = if windows {
+        run_ps(spec, "$a = Join-Path $env:USERPROFILE '.muxen\\bin\\muxen-agent.exe'; if (Test-Path $a) { & $a hash } else { 'none' }", CTL_TIMEOUT).await?
+    } else {
+        run_sh(spec, &format!("a={REMOTE_PATH}; if [ -x \"$a\" ]; then \"$a\" hash; else echo none; fi"), CTL_TIMEOUT).await?
+    };
     if installed.trim() != hash {
         tracing::info!("installing muxen-agent ({target}) on {}", spec.name);
-        let got = upload(spec, bytes).await?;
+        // Boxed: these futures are big, and `ensure` sits inside nearly every request's.
+        let got = if windows { Box::pin(upload_windows(spec, &build_path(&target)?)).await? } else { Box::pin(upload(spec, bytes)).await? };
         if got.trim() != hash {
             return Err(format!("The agent didn't install correctly on {} (got {}).", spec.name, got.trim()));
         }
@@ -157,10 +208,73 @@ async fn upload(spec: &MachineSpec, bytes: Vec<u8>) -> Result<String, String> {
     tokio::time::timeout(UPLOAD_TIMEOUT, work).await.map_err(|_| format!("{} took too long to receive the agent.", spec.name))?
 }
 
+/// Copies the build into place on Windows and prints its hash. The file goes
+/// over sftp (Windows' sshd stalls on a few hundred KB through a program's
+/// stdin), then PowerShell puts it in place. A running agent holds its file,
+/// but Windows lets it be renamed: the old one moves aside and goes once
+/// nothing runs it.
+async fn upload_windows(spec: &MachineSpec, build: &std::path::Path) -> Result<String, String> {
+    let fail = |e: String| format!("couldn't install the agent on {}: {e}", spec.name);
+    if spec.is_local() {
+        return Err(fail("Muxen doesn't set up its agent on this Windows computer yet.".into()));
+    }
+    // sftp takes ssh's options, but its own spelling of the port and user.
+    let mut args: Vec<String> = Vec::new();
+    let mut ssh = probe::ssh_args(spec).into_iter().filter(|a| a != "-T").peekable();
+    while let Some(a) = ssh.next() {
+        match a.as_str() {
+            "-p" => args.extend(["-P".into(), ssh.next().unwrap_or_default()]),
+            "-l" => args.extend(["-o".into(), format!("User={}", ssh.next().unwrap_or_default())]),
+            _ => args.push(a),
+        }
+    }
+    let batch = format!("-mkdir .muxen\n-mkdir .muxen/bin\nput \"{}\" .muxen/bin/muxen-agent.upload.exe\n", build.display());
+    let mut cmd = Command::new("sftp");
+    cmd.args(["-q", "-b", "-"]).args(&args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
+    let mut child = cmd.spawn().map_err(|e| fail(format!("couldn't run sftp: {e}")))?;
+    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    let mut stderr = child.stderr.take().ok_or("no stderr")?;
+    let sent = async move {
+        stdin.write_all(batch.as_bytes()).await.map_err(|e| e.to_string())?;
+        drop(stdin);
+        let mut err = String::new();
+        let _ = stderr.read_to_string(&mut err).await;
+        let status = child.wait().await.map_err(|e| e.to_string())?;
+        if status.success() { Ok(()) } else { Err(err.lines().last().unwrap_or("sftp failed").trim().to_string()) }
+    };
+    tokio::time::timeout(UPLOAD_TIMEOUT, sent).await.map_err(|_| fail("the copy took too long".into()))?.map_err(fail)?;
+    let script = "$ErrorActionPreference = 'Stop'\n\
+         $d = Join-Path $env:USERPROFILE '.muxen\\bin'\n\
+         $t = Join-Path $d 'muxen-agent.exe'\n\
+         if (Test-Path $t) { Move-Item -Force $t (Join-Path $d \"muxen-agent.old.$PID.exe\") }\n\
+         Move-Item -Force (Join-Path $d 'muxen-agent.upload.exe') $t\n\
+         Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object { $_.CommandLine -match ' gui-serve' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\n\
+         Get-ChildItem $d -Filter 'muxen-agent.old.*.exe' | ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }\n\
+         & $t hash\n";
+    run_ps(spec, script, CTL_TIMEOUT).await.map_err(fail)
+}
+
+/// Runs a short PowerShell script on a Windows machine (with the user's profile, like workspace commands).
+pub(crate) async fn run_ps(spec: &MachineSpec, script: &str, timeout: Duration) -> Result<String, String> {
+    let marker = transport::new_marker();
+    let limits = Limits { head: 1 << 20, tail: 1 << 20, line: 1 << 20 };
+    let out = Box::pin(transport::run(spec, true, &marker, transport::with_marker(&marker, true, script), timeout, limits, &[], None)).await?;
+    if out.timed_out {
+        return Err(format!("{} is unreachable: no answer within {}s.", spec.name, timeout.as_secs()));
+    }
+    if !out.started {
+        return Err(format!("{} is unreachable: {}", spec.name, out.reason()));
+    }
+    match out.status {
+        Some(0) => Ok(out.stdout),
+        _ => Err(out.reason()),
+    }
+}
+
 /// Runs a short sh script on the machine (login shell, like workspace commands).
 pub(crate) async fn run_sh(spec: &MachineSpec, script: &str, timeout: Duration) -> Result<String, String> {
     let marker = transport::new_marker();
-    let out = transport::run(spec, false, &marker, transport::with_marker(&marker, false, script), timeout, Limits::OUTPUT, &[], None).await?;
+    let out = Box::pin(transport::run(spec, false, &marker, transport::with_marker(&marker, false, script), timeout, Limits::OUTPUT, &[], None)).await?;
     if out.timed_out {
         return Err(format!("{} is unreachable: no answer within {}s.", spec.name, timeout.as_secs()));
     }
@@ -177,8 +291,13 @@ pub(crate) async fn run_sh(spec: &MachineSpec, script: &str, timeout: Duration) 
 /// same ssh connection as everything else and is never logged. (Not `--user`:
 /// on Linux that goes to the keyring, which can wait forever without a desktop.)
 pub async fn gh_token(spec: &MachineSpec, gh: &str, hostname: &str) -> Result<String, String> {
-    let script = format!("{} auth token --hostname {}\n", sh_quote(gh), sh_quote(hostname));
-    let token = run_sh(spec, &script, CTL_TIMEOUT).await?.trim().to_string();
+    let token = if is_windows(spec) {
+        let q = crate::ops::remote::ps_quote;
+        run_ps(spec, &format!("& {} auth token --hostname {}\n", q(gh), q(hostname)), CTL_TIMEOUT).await?
+    } else {
+        run_sh(spec, &format!("{} auth token --hostname {}\n", sh_quote(gh), sh_quote(hostname)), CTL_TIMEOUT).await?
+    };
+    let token = token.trim().to_string();
     if token.is_empty() || token.contains(char::is_whitespace) {
         return Err(format!("The GitHub CLI on {} gave no token. Sign it in again.", spec.name));
     }
@@ -206,8 +325,14 @@ pub async fn ctl_reply(spec: &MachineSpec, request: &Value) -> Result<Value, Str
         }
     }
     let json = request.to_string();
-    let script = format!("{REMOTE_PATH} ctl <<'__OR_REQUEST__'\n{json}\n__OR_REQUEST__\n");
-    let out = run_sh(spec, &script, CTL_TIMEOUT).await;
+    let out = if is_windows(spec) {
+        // UTF-8 to the agent (PowerShell 5.1 pipes in the console's code page otherwise).
+        let script = format!("$OutputEncoding = New-Object Text.UTF8Encoding $false\n$a = Join-Path $env:USERPROFILE '.muxen\\bin\\muxen-agent.exe'\n@'\n{json}\n'@ | & $a ctl\n");
+        run_ps(spec, &script, CTL_TIMEOUT).await
+    } else {
+        let script = format!("{REMOTE_PATH} ctl <<'__OR_REQUEST__'\n{json}\n__OR_REQUEST__\n");
+        run_sh(spec, &script, CTL_TIMEOUT).await
+    };
     let out = match out {
         Ok(o) => o,
         Err(e) => {

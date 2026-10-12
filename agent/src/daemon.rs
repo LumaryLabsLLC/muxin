@@ -6,7 +6,6 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,7 +19,8 @@ use alacritty_terminal::vte::ansi::Processor;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde_json::{Value, json};
 
-use crate::{detect, now, proto, screen, socket_path};
+use crate::sys::{self, Stream};
+use crate::{detect, now, proto, screen};
 
 /// With no sessions and no connections for this long, the server exits.
 const IDLE_EXIT: Duration = Duration::from_secs(120);
@@ -83,7 +83,7 @@ struct Inner {
     writer: Option<Box<dyn Write + Send>>,
     master: Option<Box<dyn MasterPty + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
-    clients: Vec<(u64, UnixStream)>,
+    clients: Vec<(u64, Stream)>,
     cols: u16,
     rows: u16,
     exit: Option<i32>,
@@ -134,26 +134,18 @@ impl State {
 }
 
 pub fn serve() -> i32 {
-    unsafe {
-        libc::signal(libc::SIGHUP, libc::SIG_IGN);
-    }
-    let path = socket_path();
-    if UnixStream::connect(&path).is_ok() {
+    sys::ignore_hangup();
+    if sys::connect().is_ok() {
         return 0; // already running
     }
-    let _ = std::fs::remove_file(&path);
-    let listener = match UnixListener::bind(&path) {
-        Ok(l) => l,
+    let listener = match sys::Listener::bind() {
+        Ok(l) => Arc::new(l),
         Err(e) => {
-            eprintln!("muxen-agent: can't listen on {}: {e}", path.display());
+            eprintln!("muxen-agent: can't listen for sessions: {e}");
             return 1;
         }
     };
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    eprintln!("muxen-agent {} serving on {}", crate::VERSION, path.display());
+    eprintln!("muxen-agent {} serving sessions", crate::VERSION);
     let state = Arc::new(State {
         sessions: Mutex::new(Vec::new()),
         events: Mutex::new(VecDeque::new()),
@@ -164,32 +156,33 @@ pub fn serve() -> i32 {
 
     // Exit once nothing has been running or connected for a while.
     let idle = state.clone();
-    let sock = path.clone();
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(10));
         let busy = !idle.sessions.lock().unwrap().is_empty() || idle.connections.load(Ordering::Relaxed) > 0;
         if busy {
             *idle.last_activity.lock().unwrap() = Instant::now();
         } else if idle.last_activity.lock().unwrap().elapsed() > IDLE_EXIT {
-            let _ = std::fs::remove_file(&sock);
+            sys::unlisten();
             std::process::exit(0);
         }
     });
 
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
-        let state = state.clone();
+    loop {
+        let Ok(mut stream) = listener.accept() else { continue };
+        let (state, listener) = (state.clone(), listener.clone());
         thread::spawn(move || {
+            if !listener.admit(&mut stream) {
+                return;
+            }
             state.connections.fetch_add(1, Ordering::Relaxed);
             handle(&state, stream);
             state.connections.fetch_sub(1, Ordering::Relaxed);
             *state.last_activity.lock().unwrap() = Instant::now();
         });
     }
-    0
 }
 
-fn handle(state: &Arc<State>, mut stream: UnixStream) {
+fn handle(state: &Arc<State>, mut stream: Stream) {
     let Ok(req) = proto::read_line(&mut stream) else { return };
     let op = req["op"].as_str().unwrap_or("");
     if op == "attach" {
@@ -241,24 +234,15 @@ fn list(state: &State) -> Value {
     json!({ "sessions": sessions, "events": events, "now": now() })
 }
 
-fn expand_home(dir: &str) -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
-    match dir.trim() {
-        "" | "~" => home,
-        d if d.starts_with("~/") => home.join(&d[2..]),
-        d => PathBuf::from(d),
-    }
-}
-
 fn start(state: &Arc<State>, req: &Value) -> Result<Value, String> {
     let name = str_of(req, "name").to_string();
-    if name.is_empty() || name.contains('/') {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
         return Err("a session needs a name without slashes".into());
     }
     if state.find(&name).is_some() {
         return Err(format!("there's already a session called {name}"));
     }
-    let cwd = expand_home(str_of(req, "cwd"));
+    let cwd = sys::expand_home(str_of(req, "cwd"));
     if !cwd.is_dir() {
         return Err(format!("{} isn't a folder on this machine.", cwd.display()));
     }
@@ -301,18 +285,26 @@ fn launch(state: &Arc<State>, s: &Arc<Session>) -> anyhow::Result<()> {
     };
     let pair = native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
     // The user's own shell as an interactive login shell, so the agent sees
-    // the same PATH and setup as in their terminal.
+    // the same PATH and setup as in their terminal (PowerShell on Windows,
+    // with its profile).
     let shell = detect::user_shell();
     let mut cmd = CommandBuilder::new(&shell);
-    if s.run.is_empty() {
-        cmd.arg("-l");
+    if cfg!(windows) {
+        cmd.arg("-NoLogo");
+        if !s.run.is_empty() {
+            cmd.args(["-Command", s.run.as_str()]);
+        }
     } else {
-        cmd.args(["-l", "-i", "-c", s.run.as_str()]);
+        if s.run.is_empty() {
+            cmd.arg("-l");
+        } else {
+            cmd.args(["-l", "-i", "-c", s.run.as_str()]);
+        }
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("SHELL", &shell);
     }
     cmd.cwd(&s.cwd);
-    cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    cmd.env("SHELL", &shell);
     cmd.env("MUXEN_SESSION", &s.name);
     cmd.env_remove("TMUX");
     let child = pair.slave.spawn_command(cmd)?;
@@ -488,7 +480,7 @@ fn read(state: &State, req: &Value) -> Result<Value, String> {
 
 /// Connects a client terminal: resize to it, send the current screen, then
 /// stream both ways until it goes away.
-fn attach(state: &State, mut stream: UnixStream, req: &Value) {
+fn attach(state: &State, mut stream: Stream, req: &Value) {
     let name = str_of(req, "name");
     let Some(s) = state.find(name) else {
         let _ = proto::write_line(&mut stream, &json!({ "ok": false, "error": format!("no session called {name}") }));

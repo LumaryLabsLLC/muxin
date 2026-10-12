@@ -4,17 +4,18 @@
 # to each machine (~/.muxen/bin) when it connects.
 #
 # Needs: rustup targets (x86_64-apple-darwin, aarch64-apple-darwin,
-# x86_64-unknown-linux-musl, aarch64-unknown-linux-musl), cargo-zigbuild and zig
-# for the Linux builds (static musl binaries that run on any distro).
+# x86_64-unknown-linux-musl, aarch64-unknown-linux-musl, x86_64-pc-windows-gnu),
+# cargo-zigbuild and zig for the Linux builds (static musl binaries that run on
+# any distro) and the Windows one.
 set -eu
 cd "$(dirname "$0")/.."
 out=dist/agents
 mkdir -p "$out"
 
-build() { # <target> <name> <cargo subcommand>
+build() { # <target> <name> <cargo subcommand> [<.exe>]
   echo "▸ $2"
   cargo "$3" --release -p muxen-agent --target "$1" --quiet
-  cp "target/$1/release/muxen-agent" "$out/muxen-agent-$2"
+  cp "target/$1/release/muxen-agent${4:-}" "$out/muxen-agent-$2${4:-}"
 }
 
 case "$(uname -s)" in
@@ -37,4 +38,5 @@ case "$(uname -s)" in
 esac
 build x86_64-unknown-linux-musl linux-x86_64 zigbuild
 build aarch64-unknown-linux-musl linux-aarch64 zigbuild
+build x86_64-pc-windows-gnu windows-x86_64 zigbuild .exe
 ls -lh "$out"

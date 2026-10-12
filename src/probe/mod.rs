@@ -16,7 +16,6 @@ const PROBE_SH: &str = include_str!("scripts/probe.sh");
 const PROBE_PS1: &str = include_str!("scripts/probe.ps1");
 const TIMEOUT: Duration = Duration::from_secs(45);
 /// `-Command -` runs stdin line by line and breaks multi-line blocks; read it whole instead.
-const PS_READ_STDIN: &str = "[Console]::In.ReadToEnd() | Invoke-Expression";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -254,7 +253,7 @@ async fn run(spec: &MachineSpec, shell: Shell) -> Result<String, RunError> {
             }
             Shell::Powershell => {
                 let mut c = Command::new("powershell");
-                c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PS_READ_STDIN]);
+                c.args(crate::ops::remote::ps_stdin_args());
                 c
             }
         }
@@ -263,9 +262,7 @@ async fn run(spec: &MachineSpec, shell: Shell) -> Result<String, RunError> {
         c.args(ssh_args(spec));
         c.arg(match shell {
             Shell::Sh => "sh -s".to_string(),
-            Shell::Powershell => {
-                format!("powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"{PS_READ_STDIN}\"")
-            }
+            Shell::Powershell => format!("powershell {}", crate::ops::remote::ps_stdin_args().join(" ")),
         });
         c
     };
@@ -277,6 +274,7 @@ async fn run(spec: &MachineSpec, shell: Shell) -> Result<String, RunError> {
     let mut stdin = child.stdin.take().expect("piped stdin");
     let output = async move {
         // The script is small; ignore write errors (e.g. ssh exiting early) and read why from stderr.
+        let script = if shell == Shell::Powershell { crate::ops::remote::ps_sendable(&script) } else { script };
         let _ = stdin.write_all(script.as_bytes()).await;
         drop(stdin);
         child.wait_with_output().await

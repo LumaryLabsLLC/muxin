@@ -68,7 +68,7 @@ pub fn usage(req: &Value) -> Value {
     let since = SystemTime::now() - Duration::from_secs(days * 86_400);
     let cutoff = utc_hour(since);
     // The user's home (crate::home_dir is the agent's own ~/.muxen).
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = crate::sys::user_home();
     let mut tally = Tally::default();
     let mut found = Vec::new();
 

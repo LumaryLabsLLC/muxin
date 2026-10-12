@@ -136,7 +136,7 @@ impl Root {
         // Look for checkouts on the machines once per visit.
         if !self.gh.scanned {
             self.gh.scanned = true;
-            for m in self.snapshot.machines.iter().filter(|m| m.status == "online" && !m.platform.starts_with("windows")) {
+            for m in self.snapshot.machines.iter().filter(|m| m.status == "online") {
                 let engine = self.engine.clone();
                 let id = m.id.clone();
                 engine.runtime().clone().spawn(async move {

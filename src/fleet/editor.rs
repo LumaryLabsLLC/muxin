@@ -34,7 +34,13 @@ pub fn installed() -> Vec<Editor> {
             .map(|d| d.join(cmd))
             .find(|f| f.is_file())
     };
+    #[cfg(not(windows))]
     let find = |app: &str, inside: &str, cmd: &str| apps(app).into_iter().map(|a| a.join(inside)).find(|p| p.is_file()).or_else(|| on_path(cmd));
+    #[cfg(windows)]
+    let find = |_: &str, _: &str, cmd: &str| {
+        let _ = (&apps, &on_path);
+        windows_editor(cmd)
+    };
     let mut out = Vec::new();
     for (id, name, app, inside, cmd) in [
         ("zed", "Zed", "Zed.app", "Contents/MacOS/cli", "zed"),
@@ -46,6 +52,25 @@ pub fn installed() -> Vec<Editor> {
         }
     }
     out
+}
+
+/// Windows: an editor's command (`code.cmd`, `cursor.cmd`, `zed.exe`) on
+/// PATH, or where its installer puts it for this user or everyone.
+#[cfg(windows)]
+fn windows_editor(cmd: &str) -> Option<PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default();
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
+    let known: Vec<PathBuf> = match cmd {
+        "code" => vec![local.join(r"Programs\Microsoft VS Code\bin\code.cmd"), program_files.join(r"Microsoft VS Code\bin\code.cmd")],
+        "cursor" => vec![local.join(r"Programs\cursor\resources\app\bin\cursor.cmd")],
+        "zed" => vec![local.join(r"Programs\Zed\bin\zed.exe"), local.join(r"Programs\Zed\Zed.exe")],
+        _ => Vec::new(),
+    };
+    let on_path = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .flat_map(|d| [format!("{cmd}.cmd"), format!("{cmd}.exe")].map(|f| d.join(f)));
+    known.into_iter().chain(on_path).find(|p| p.is_file())
 }
 
 /// The editor to use: the one chosen (by id) when it's here, else the first one here.
@@ -143,6 +168,12 @@ impl Engine {
             let home = dirs::home_dir().unwrap_or_default();
             let rest = path.trim_start_matches('~').trim_start_matches('/');
             home.join(rest).display().to_string()
+        } else if super::sessions::agent::is_windows(&spec) {
+            // "C:\Users\me\code" as "/c:/Users/me/code", as Remote - SSH names Windows folders.
+            let rest = path.trim_start_matches('~').trim_start_matches(['/', '\\']);
+            let script = format!("(Resolve-Path -LiteralPath (Join-Path $env:USERPROFILE {})).Path", crate::ops::remote::ps_quote(rest));
+            let found = super::sessions::agent::run_ps(&spec, &script, Duration::from_secs(15)).await.map_err(|e| format!("Couldn't find {path} on {}: {e}", spec.name))?;
+            windows_path(found.trim())
         } else {
             let rest = path.trim_start_matches('~').trim_start_matches('/');
             let script = if rest.is_empty() { "cd ~ && pwd".to_string() } else { format!("cd ~/{} && pwd", crate::ops::remote::sh_quote(rest)) };
@@ -155,6 +186,15 @@ impl Engine {
         let mut line = vec![editor.cli.display().to_string()];
         line.extend(args);
         Ok((editor.name.to_string(), line))
+    }
+}
+
+/// A Windows path as a URI path: `C:\x\y` as `/c:/x/y`.
+fn windows_path(p: &str) -> String {
+    let p = p.replace('\\', "/");
+    match p.split_once(':') {
+        Some((drive, rest)) if drive.len() == 1 => format!("/{}:{}", drive.to_ascii_lowercase(), rest.trim_end_matches('/')),
+        _ => p,
     }
 }
 
@@ -177,5 +217,7 @@ mod tests {
         assert_eq!(args(&zed, &spec("box.lan", Some("me"), Some(2222)), "/srv"), ["ssh://me@box.lan:2222/srv"]);
         assert_eq!(args(&code, &spec("beelink", None, None), "/home/adib/api"), ["--folder-uri", "vscode-remote://ssh-remote+beelink/home/adib/api"]);
         assert_eq!(args(&code, &spec("local", None, None), "/Users/me/x"), ["/Users/me/x"]);
+        assert_eq!(windows_path(r"C:\Users\adib\Downloads"), "/c:/Users/adib/Downloads");
+        assert_eq!(args(&code, &spec("win11", None, None), "/c:/Users/adib"), ["--folder-uri", "vscode-remote://ssh-remote+win11/c:/Users/adib"]);
     }
 }

@@ -1,11 +1,27 @@
 //! What's installed: the user's login shell, and which agent CLIs are on the
 //! PATH their interactive shell sets up (nvm, fnm, asdf live in rc files).
 
+#[cfg(unix)]
 use std::io::Read;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+/// The user's shell on Windows: PowerShell 7 when it's installed, else
+/// Windows PowerShell.
+#[cfg(windows)]
+pub fn user_shell() -> String {
+    let dirs: Vec<String> = std::env::var("PATH").map(|p| p.split(';').map(String::from).collect()).unwrap_or_default();
+    let installed = dirs.iter().chain([r"C:\Program Files\PowerShell\7".to_string()].iter()).map(|d| std::path::Path::new(d).join("pwsh.exe")).find(|p| p.is_file());
+    match installed {
+        Some(p) => p.display().to_string(),
+        None => std::env::var("SystemRoot").map(|r| format!(r"{r}\System32\WindowsPowerShell\v1.0\powershell.exe")).unwrap_or_else(|_| "powershell.exe".into()),
+    }
+}
+
 /// The user's login shell: $SHELL, else the password database, else /bin/sh.
+#[cfg(unix)]
 pub fn user_shell() -> String {
     if let Some(s) = std::env::var("SHELL").ok().filter(|s| !s.is_empty()) {
         return s;
@@ -23,7 +39,14 @@ pub fn user_shell() -> String {
     "/bin/sh".into()
 }
 
+/// The PATH folders (Windows keeps the user's in the environment, no rc files).
+#[cfg(windows)]
+pub fn path_dirs() -> Vec<String> {
+    std::env::var("PATH").map(|p| p.split(';').filter(|d| !d.is_empty()).map(String::from).collect()).unwrap_or_default()
+}
+
 /// The PATH an interactive login shell sets up, then this process's own.
+#[cfg(unix)]
 pub fn path_dirs() -> Vec<String> {
     let mut dirs: Vec<String> = interactive_path().map(|p| p.split(':').map(String::from).collect()).unwrap_or_default();
     if let Ok(p) = std::env::var("PATH") {
@@ -39,17 +62,33 @@ pub fn agents(names: &[String], dirs: &[String]) -> Vec<String> {
         .filter(|n| {
             dirs.iter().any(|d| {
                 let f = std::path::Path::new(d).join(n);
-                std::fs::metadata(&f).is_ok_and(|m| m.is_file() && {
-                    use std::os::unix::fs::PermissionsExt;
-                    m.permissions().mode() & 0o111 != 0
-                })
+                runnable(&f)
             })
         })
         .cloned()
         .collect()
 }
 
+/// Whether a command is there and can run (on Windows, with one of the
+/// extensions that run: claude.cmd, codex.exe, ...).
+#[cfg(unix)]
+fn runnable(f: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(f).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(windows)]
+fn runnable(f: &std::path::Path) -> bool {
+    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    exts.split(';').filter(|e| !e.is_empty()).chain([".ps1"]).any(|e| {
+        let mut name = f.as_os_str().to_owned();
+        name.push(e.to_ascii_lowercase());
+        std::path::Path::new(&name).is_file()
+    })
+}
+
 /// Asks an interactive login shell for its PATH, giving up after a few seconds.
+#[cfg(unix)]
 fn interactive_path() -> Option<String> {
     let mut child = Command::new(user_shell())
         .args(["-l", "-i", "-c", "printf '__OR_PATH=%s\\n' \"$PATH\""])

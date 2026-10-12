@@ -82,7 +82,7 @@ impl Root {
                     ),
             )
             .child({
-                let windows = m.platform.starts_with("windows");
+
                 let mut buttons: Vec<AnyElement> = Vec::new();
                 // Disconnected on purpose: connecting is what there is to do.
                 if disconnected {
@@ -109,7 +109,7 @@ impl Root {
                             .into_any_element(),
                     );
                 }
-                if !windows {
+                {
                     let mid = m.id.clone();
                     buttons.push(
                         Button::new("m-logs", "Logs")
@@ -135,7 +135,7 @@ impl Root {
                         .on_click(cx.listener(move |this, _, window, cx| this.show_install_dialog(&mid, window, cx)))
                         .into_any_element(),
                 );
-                if !windows {
+                {
                     let mid = m.id.clone();
                     buttons.push(
                         Button::new("m-copy", "Copy files")
@@ -244,11 +244,11 @@ impl Root {
         if !m.host.is_empty() {
             body = body.child(self.machine_sessions(&theme, &s, &m, cx));
             // Its servers, to open here (not for this computer, or one we can't reach).
-            if !m.platform.starts_with("windows") && !m.local && !offline {
+            if !m.local && !offline {
                 body = body.child(self.machine_servers(&theme, &m, cx));
             }
             // Connection and git are about a machine we can reach.
-            if !m.platform.starts_with("windows") && !offline {
+            if !offline {
                 if m.host != "local" {
                     body = body.child(self.machine_connection(&theme, &m, cx));
                 }

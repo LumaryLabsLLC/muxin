@@ -13,8 +13,26 @@ use crate::config::MachineSpec;
 use crate::fleet::Engine;
 use crate::probe::{self, ProbeResult, Shell};
 
-/// `-Command -` runs stdin line by line and breaks multi-line blocks; read it whole instead.
-const PS_READ_STDIN: &str = "[Console]::In.ReadToEnd() | Invoke-Expression";
+/// PowerShell scripts go over stdin and end with this line. (`-Command -` runs
+/// stdin line by line and breaks multi-line blocks, so the script is read
+/// whole; and Windows' OpenSSH doesn't always pass on the end of stdin once
+/// a script is a few KB, so reading to the end could wait forever.)
+pub(crate) const PS_END: &str = "#muxen-end";
+const PS_READ_STDIN: &str = "$ProgressPreference = 'SilentlyContinue'; $b = New-Object Text.StringBuilder; while ((($l = [Console]::In.ReadLine()) -ne $null) -and ($l -ne '#muxen-end')) { [void]$b.AppendLine($l) }; $b.ToString() | Invoke-Expression";
+
+/// PowerShell's arguments to run a script sent on stdin (see `ps_sendable`),
+/// encoded so no shell on the way changes them.
+pub(crate) fn ps_stdin_args() -> Vec<String> {
+    use base64::Engine as _;
+    let utf16: Vec<u8> = PS_READ_STDIN.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &encoded].map(String::from).to_vec()
+}
+
+/// A PowerShell script as it's sent: with its end line.
+pub(crate) fn ps_sendable(script: &str) -> String {
+    format!("{}\n{PS_END}\n", script.trim_end_matches(['\r', '\n']))
+}
 const STDERR_TAIL: usize = 4;
 
 /// The shell a machine speaks: pinned in config.toml, else what the last check used, else by OS.
@@ -88,6 +106,7 @@ pub async fn run(
 
     let work = async {
         // Ignore write errors (e.g. ssh exiting early); stderr says why.
+        let script = if shell == Shell::Powershell { ps_sendable(&script) } else { script };
         let _ = stdin.write_all(script.as_bytes()).await;
         drop(stdin);
 
@@ -149,7 +168,7 @@ fn command(spec: &MachineSpec, shell: Shell) -> Command {
             }
             Shell::Powershell => {
                 let mut c = Command::new("powershell");
-                c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PS_READ_STDIN]);
+                c.args(ps_stdin_args());
                 c
             }
         }
@@ -158,9 +177,7 @@ fn command(spec: &MachineSpec, shell: Shell) -> Command {
         c.args(probe::ssh_args(spec));
         c.arg(match shell {
             Shell::Sh => "sh -s".to_string(),
-            Shell::Powershell => {
-                format!("powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"{PS_READ_STDIN}\"")
-            }
+            Shell::Powershell => format!("powershell {}", ps_stdin_args().join(" ")),
         });
         c
     }

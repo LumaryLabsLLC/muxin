@@ -6,6 +6,7 @@
 use std::io::{self, Write};
 use std::sync::mpsc;
 use std::thread;
+#[cfg(unix)]
 use std::time::Duration;
 
 /// A clipboard's text (the frame kind on the link and on stdin/stdout).
@@ -43,10 +44,10 @@ pub fn run() -> i32 {
         mac::run(rx, changed);
         0
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
     {
-        let _ = (rx, changed);
-        1
+        crate::win_screen::clip(rx, changed);
+        0
     }
 }
 

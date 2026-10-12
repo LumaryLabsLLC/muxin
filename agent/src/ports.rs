@@ -32,7 +32,7 @@ struct Listening {
 
 /// `{"op": "ports"}`: the TCP ports something listens on, web servers first.
 pub fn list() -> Value {
-    let found = if cfg!(target_os = "macos") { lsof() } else { ss() };
+    let found = listeners();
     // One entry a port (IPv4 and IPv6 are usually both there), the one with a name.
     let mut by_port: HashMap<u16, Listening> = HashMap::new();
     for l in found {
@@ -88,11 +88,22 @@ pub fn list() -> Value {
 /// `{"op": "listening"}`: just the port numbers something listens on (no
 /// asking around: cheap enough to look every few seconds).
 pub fn listening() -> Value {
-    let found = if cfg!(target_os = "macos") { lsof() } else { ss() };
+    let found = listeners();
     let mut ports: Vec<u16> = found.into_iter().map(|l| l.port).collect();
     ports.sort_unstable();
     ports.dedup();
     json!({ "ok": true, "ports": ports })
+}
+
+/// What listens here, by the system's own tool.
+fn listeners() -> Vec<Listening> {
+    if cfg!(windows) {
+        crate::win::listening().into_iter().map(|(port, address, process, pid)| Listening { port, address, process, pid }).collect()
+    } else if cfg!(target_os = "macos") {
+        lsof()
+    } else {
+        ss()
+    }
 }
 
 /// Where to connect for a port listening on `address`: itself, or this

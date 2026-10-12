@@ -265,7 +265,7 @@ impl Root {
         for id in machines {
             // Only machines we can reach (an offline one says nothing about its servers).
             let Some(m) = self.snapshot.machines.iter().find(|m| m.id == id) else { continue };
-            if m.is_down() || m.local || m.status != "online" || m.platform.starts_with("windows") {
+            if m.is_down() || m.local || m.status != "online" {
                 continue;
             }
             let name = m.name.clone();

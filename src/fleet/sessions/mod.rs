@@ -189,15 +189,6 @@ impl Engine {
             return Err(format!("{} has no host to connect to.", spec.name));
         }
         spec.refuse_if_disconnected()?;
-        if matches!(shell_for(&spec, probe.as_ref()), Shell::Powershell) {
-            let found = MachineSessions {
-                checked_at: Some(Utc::now()),
-                error: Some("Sessions on Windows run while Muxen is open; they can't keep running in the background yet.".into()),
-                ..Default::default()
-            };
-            self.set_sessions(&spec.id, found.clone());
-            return Ok(found);
-        }
         let previous = self.sessions_of(&spec.id);
         let detect = previous.as_ref().and_then(|p| p.agents_checked_at).is_none_or(|t| Utc::now() - t > AGENTS_EVERY);
         let agents: Vec<&str> = if detect { AGENTS.iter().map(|a| a.command).filter(|c| !c.is_empty()).collect() } else { Vec::new() };
@@ -275,7 +266,7 @@ impl Engine {
         let title = unique_title(&title, &taken);
 
         let windows = matches!(shell_for(&spec, probe.as_ref()), Shell::Powershell);
-        if req.direct || windows {
+        if req.direct {
             return Ok(self.start_direct(&spec, kind, name, cwd, title, &req, windows));
         }
         if let Some(world) = self.demo_world() {
@@ -292,7 +283,7 @@ impl Engine {
         let run_line = match (&req.command, kind.command, prompt) {
             (Some(c), _, _) => c.clone(),
             (None, "", _) => String::new(),
-            (None, c, Some(p)) if kind.prompt_arg => format!("{c} {}", sh_quote(p)),
+            (None, c, Some(p)) if kind.prompt_arg => format!("{c} {}", if windows { ps_quote(p) } else { sh_quote(p) }),
             (None, c, _) => c.to_string(),
         };
         let request = json!({
@@ -453,7 +444,7 @@ impl Engine {
         // Same connection options as checks, but with a terminal.
         let mut args: Vec<String> = probe::ssh_args(&spec).into_iter().map(|a| if a == "-T" { "-tt".into() } else { a }).collect();
         args.push("--".into());
-        args.push(format!("{} attach {} --app", agent::REMOTE_PATH, sh_quote(name)));
+        args.push(if agent::is_windows(&spec) { agent::command(&spec, &format!("attach {name} --app")) } else { format!("{} attach {} --app", agent::REMOTE_PATH, sh_quote(name)) });
         Ok(AttachCommand { program: "ssh".into(), args })
     }
 
@@ -535,6 +526,16 @@ fn direct_command(spec: &MachineSpec, d: &DirectSession) -> AttachCommand {
         } else {
             format!("powershell -NoLogo -Command \"Set-Location {dir}; {}\"", d.run.replace('"', "\\\""))
         };
+        // This computer: PowerShell itself.
+        if spec.is_local() {
+            let mut args = vec!["-NoLogo".to_string()];
+            if d.run.is_empty() {
+                args.extend(["-NoExit".into(), "-Command".into(), format!("Set-Location {dir}")]);
+            } else {
+                args.extend(["-Command".into(), format!("Set-Location {dir}; {}", d.run)]);
+            }
+            return AttachCommand { program: "powershell".into(), args };
+        }
         let mut args: Vec<String> = probe::ssh_args(spec).into_iter().map(|a| if a == "-T" { "-tt".into() } else { a }).collect();
         args.push("--".into());
         args.push(script);
@@ -607,7 +608,7 @@ fn split_id(id: &str) -> Result<(&str, &str), String> {
 
 /// The paste-into-your-terminal attach command (detach with Ctrl-] then d).
 fn user_attach_command(spec: &MachineSpec, name: &str) -> String {
-    let attach = format!("{} attach {name}", agent::REMOTE_PATH);
+    let attach = if agent::is_windows(spec) { agent::command(spec, &format!("attach {name}")) } else { format!("{} attach {name}", agent::REMOTE_PATH) };
     if spec.is_local() {
         return attach;
     }

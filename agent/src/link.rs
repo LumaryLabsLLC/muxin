@@ -17,8 +17,6 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufWriter, Read, Write};
-use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -27,7 +25,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::{client, detect, now, proto, socket_path};
+use crate::sys::{self, Stream};
+use crate::{client, detect, now, proto};
 
 /// Channel 0: requests, replies and events.
 pub const CONTROL: u32 = 0;
@@ -71,7 +70,7 @@ fn read_frame(r: &mut impl Read) -> io::Result<(u32, u8, Vec<u8>)> {
 /// What a channel is connected to.
 enum Sink {
     /// A terminal attached to a session (the session server connection).
-    Session(UnixStream),
+    Session(Stream),
     /// The desktop: a `screen` program (its stdin takes input).
     Desktop(Program),
     /// Files going out (a tar stream; ACKs let more through).
@@ -105,7 +104,7 @@ impl Sink {
             }
             Sink::Logs(mut child) => {
                 // Its whole process group (`log stream` runs under a shell).
-                unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM) };
+                sys::kill_tree(child.id(), true);
                 let _ = child.kill();
                 let _ = child.wait();
             }
@@ -116,7 +115,8 @@ impl Sink {
 type Attached = Arc<Mutex<HashMap<u32, Sink>>>;
 
 /// A program run for a channel (`screen`, `clip`): here, or in the logged-in
-/// session through the background service (see gui.rs).
+/// session through the background service (see gui.rs), or on Windows
+/// through a scheduled task (see win_screen.rs).
 struct Program {
     input: Box<dyn Write + Send>,
     stop: Stop,
@@ -124,14 +124,21 @@ struct Program {
 
 enum Stop {
     Child(std::process::Child),
+    #[cfg(unix)]
     Socket(std::os::unix::net::UnixStream),
+    #[cfg(windows)]
+    Socket(std::net::TcpStream),
 }
 
 impl Program {
     /// Starts `muxen-agent <args>`; returns it and what it prints.
     fn start(args: &[String], env: Vec<(String, String)>) -> Result<(Program, Box<dyn Read + Send>), String> {
-        if crate::gui::needed() {
-            let stream = crate::gui::connect(args)?;
+        #[cfg(unix)]
+        let elsewhere = crate::gui::needed().then(|| crate::gui::connect(args));
+        #[cfg(windows)]
+        let elsewhere = (!crate::win_screen::in_desktop_session()).then(|| crate::win_screen::start_in_desktop(args));
+        if let Some(stream) = elsewhere {
+            let stream = stream?;
             let reader = stream.try_clone().map_err(|e| e.to_string())?;
             let writer = stream.try_clone().map_err(|e| e.to_string())?;
             return Ok((Program { input: Box::new(writer), stop: Stop::Socket(stream) }, Box::new(reader)));
@@ -140,6 +147,7 @@ impl Program {
         let log = std::fs::OpenOptions::new().create(true).append(true).open(crate::home_dir().join("screen.log"));
         let mut cmd = Command::new(exe);
         cmd.args(args).envs(env).stdin(Stdio::piped()).stdout(Stdio::piped());
+        sys::no_window(&mut cmd);
         match log {
             Ok(l) => cmd.stderr(l),
             Err(_) => cmd.stderr(Stdio::null()),
@@ -266,25 +274,29 @@ fn run_script(req: &Value) -> Value {
     let timeout = Duration::from_secs(req["timeout"].as_u64().unwrap_or(120).clamp(1, 3600));
     let login = req["login"].as_bool().unwrap_or(true);
     let shell = detect::user_shell();
-    let name = shell.rsplit('/').next().unwrap_or("");
-    let program = if login && ["bash", "zsh", "sh", "ksh", "dash"].contains(&name) { shell.clone() } else { "/bin/sh".to_string() };
-    let mut cmd = Command::new(program);
-    cmd.args(if login { &["-l", "-s"][..] } else { &["-s"][..] }).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if let Some(home) = std::env::var_os("HOME") {
-        cmd.current_dir(home);
-    }
+    let mut cmd = if cfg!(windows) {
+        // PowerShell reads the whole script, then runs it (with the user's profile unless `login` is off).
+        let mut c = Command::new(&shell);
+        if !login {
+            c.arg("-NoProfile");
+        }
+        c.args(["-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "[Console]::In.ReadToEnd() | Invoke-Expression"]);
+        c
+    } else {
+        let name = shell.rsplit('/').next().unwrap_or("");
+        let program = if login && ["bash", "zsh", "sh", "ksh", "dash"].contains(&name) { shell.clone() } else { "/bin/sh".to_string() };
+        let mut c = Command::new(program);
+        c.args(if login { &["-l", "-s"][..] } else { &["-s"][..] });
+        c
+    };
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).current_dir(sys::user_home());
     // Its own process group, so a timeout takes down whatever it started.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    sys::own_group(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return json!({ "ok": false, "error": format!("couldn't start a shell: {e}") }),
     };
-    let pid = child.id() as i32;
+    let pid = child.id();
     if let Some(mut stdin) = child.stdin.take() {
         thread::spawn(move || {
             let _ = stdin.write_all(script.as_bytes());
@@ -320,9 +332,7 @@ fn run_script(req: &Value) -> Value {
             Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(5)),
             _ => {
                 timed_out = true;
-                unsafe {
-                    libc::kill(-pid, libc::SIGKILL);
-                }
+                sys::kill_tree(pid, false);
                 let _ = child.wait();
                 break None;
             }
@@ -340,7 +350,7 @@ fn attach(req: &Value, out: &Out, attached: &Attached) -> Value {
     if channel == CONTROL {
         return json!({ "ok": false, "error": "attach needs a channel" });
     }
-    let mut stream = match UnixStream::connect(socket_path()) {
+    let mut stream = match sys::connect() {
         Ok(s) => s,
         Err(_) => return json!({ "ok": false, "error": "no sessions are running on this machine" }),
     };
@@ -441,12 +451,7 @@ fn logs(req: &Value, out: &Out, attached: &Attached) -> Value {
     };
     let mut cmd = Command::new(&program);
     cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    sys::own_group(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return json!({ "ok": false, "error": format!("couldn't run {program}: {e}") }),
@@ -635,7 +640,7 @@ fn watch(out: Out) {
     let mut last = String::new();
     loop {
         let now = now();
-        let signature = match UnixStream::connect(socket_path()) {
+        let signature = match sys::connect() {
             Err(_) => "no server".to_string(),
             Ok(mut s) => {
                 let list = proto::write_line(&mut s, &json!({ "op": "list" })).and_then(|_| proto::read_line(&mut s)).unwrap_or(Value::Null);
@@ -674,8 +679,10 @@ mod tests {
         f
     }
 
+    #[cfg(unix)]
     #[test]
     fn answers_requests_and_runs_scripts() {
+        use std::os::unix::net::UnixStream;
         let (mut app, agent) = UnixStream::pair().unwrap();
         let agent_out = agent.try_clone().unwrap();
         let server = thread::spawn(move || serve(Box::new(agent), Box::new(agent_out)));

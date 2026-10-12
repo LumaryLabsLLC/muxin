@@ -9,13 +9,34 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 use crate::logs::quick;
-use crate::root::{as_root, tool};
+#[cfg(unix)]
+use crate::root::as_root;
+use crate::root::tool;
 
 /// Processes sent back: the busiest.
 const MOST: usize = 300;
 
 /// `{"op": "processes"}`: processes (busiest first) and GPUs.
 pub fn list() -> Value {
+    #[cfg(windows)]
+    {
+        let mut procs = match crate::win::processes() {
+            Ok(p) => p,
+            Err(e) => return json!({ "ok": false, "error": e }),
+        };
+        let gpu_mem = nvidia_apps();
+        for p in &mut procs {
+            if let Some(m) = p["pid"].as_u64().and_then(|pid| gpu_mem.get(&(pid as u32))) {
+                p["gpu_memory"] = json!(m);
+            }
+        }
+        let total = procs.len();
+        procs.sort_by(|a, b| b["cpu"].as_f64().unwrap_or(0.).total_cmp(&a["cpu"].as_f64().unwrap_or(0.)).then(b["memory"].as_u64().cmp(&a["memory"].as_u64())));
+        procs.truncate(MOST);
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        return json!({ "ok": true, "processes": procs, "total": total, "cores": cores, "gpus": gpus() });
+    }
+    #[allow(unreachable_code)]
     let me = std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_default();
     let gpu_mem = nvidia_apps();
     let mut procs = ps();
@@ -125,6 +146,9 @@ pub fn gpus() -> Vec<Value> {
     if cfg!(target_os = "macos") {
         out.extend(apple());
     }
+    if cfg!(windows) {
+        out.extend(crate::win::gpus());
+    }
     out
 }
 
@@ -176,13 +200,33 @@ pub fn signal(req: &Value) -> Value {
     let Some(pid) = req["pid"].as_u64().filter(|p| *p > 1).map(|p| p as i32) else {
         return json!({ "ok": false, "error": "Which process?" });
     };
+    if pid as u32 == std::process::id() {
+        return json!({ "ok": false, "error": "That's Muxen's agent itself." });
+    }
+    #[cfg(windows)]
+    {
+        // Windows has no polite stop for a program without a window: both end it.
+        let out = crate::sys::no_window(std::process::Command::new("taskkill").args(["/F", "/PID", &pid.to_string()])).output();
+        return match out {
+            Ok(o) if o.status.success() => json!({ "ok": true }),
+            Ok(o) => {
+                let text = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                let error = if text.contains("not found") { "It has already ended.".to_string() } else if text.is_empty() { "Windows didn't end it.".to_string() } else { text };
+                json!({ "ok": false, "error": error })
+            }
+            Err(e) => json!({ "ok": false, "error": e.to_string() }),
+        };
+    }
+    #[cfg(unix)]
+    signal_unix(req, pid)
+}
+
+#[cfg(unix)]
+fn signal_unix(req: &Value, pid: i32) -> Value {
     let (sig, name) = match req["signal"].as_str().unwrap_or("TERM") {
         "KILL" => (libc::SIGKILL, "KILL"),
         _ => (libc::SIGTERM, "TERM"),
     };
-    if pid as u32 == std::process::id() {
-        return json!({ "ok": false, "error": "That's Muxen's agent itself." });
-    }
     if unsafe { libc::kill(pid, sig) } == 0 {
         return json!({ "ok": true });
     }

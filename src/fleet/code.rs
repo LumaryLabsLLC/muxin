@@ -12,7 +12,7 @@ use super::Engine;
 use super::model::Checkout;
 use super::sessions::agent;
 use crate::github::hub::repo_name;
-use crate::ops::remote::{sh_quote, shell_for};
+use crate::ops::remote::{ps_quote, sh_quote, shell_for};
 use crate::probe::Shell;
 
 impl Engine {
@@ -22,7 +22,7 @@ impl Engine {
         if self.demo_world().is_some() {
             return Ok(self.checkouts_of(&spec.id));
         }
-        if !spec.is_checkable() || matches!(shell_for(&spec, probe.as_ref()), Shell::Powershell) {
+        if !spec.is_checkable() {
             return Ok(Vec::new());
         }
         agent::ensure(&spec, probe.as_ref()).await?;
@@ -87,6 +87,17 @@ for f in "$HOME"/.ssh/id_*; do case "$f" in *.pub) ;; *) [ -f "$f" ] && echo "ke
 exit 0
 "#;
 
+/// The same, from PowerShell (Windows).
+const GIT_STATUS_PS1: &str = r#"$g = Get-Command git -ErrorAction SilentlyContinue
+if (-not $g) { 'git='; return }
+'git=' + ((git --version) -replace '^git version ', '' -replace '\.windows.*$', '')
+Set-Location $env:USERPROFILE
+'name=' + (git config user.name)
+'email=' + (git config user.email)
+git config --get-regexp '^credential\.' 2>$null | ForEach-Object { 'cred=' + $_ }
+Get-ChildItem (Join-Path $env:USERPROFILE '.ssh') -Filter 'id_*' -ErrorAction SilentlyContinue | Where-Object { $_.Extension -ne '.pub' } | ForEach-Object { 'key=' + $_.Name }
+"#;
+
 impl Engine {
     /// Reads how git is set up on a machine.
     pub async fn git_setup_status(self: &Arc<Self>, machine_id: &str) -> Result<GitSetup, String> {
@@ -94,10 +105,14 @@ impl Engine {
         if self.demo_world().is_some() {
             return Ok(GitSetup { git: Some("2.47.0".into()), ..Default::default() });
         }
-        if !spec.is_checkable() || matches!(shell_for(&spec, probe.as_ref()), Shell::Powershell) {
-            return Err(format!("Setting up git on {} isn't supported yet.", spec.name));
+        if !spec.is_checkable() {
+            return Err(format!("{} has no host to connect to.", spec.name));
         }
-        let out = agent::run_sh(&spec, GIT_STATUS_SH, std::time::Duration::from_secs(25)).await?;
+        let out = if matches!(shell_for(&spec, probe.as_ref()), Shell::Powershell) {
+            agent::run_ps(&spec, GIT_STATUS_PS1, std::time::Duration::from_secs(25)).await?
+        } else {
+            agent::run_sh(&spec, GIT_STATUS_SH, std::time::Duration::from_secs(25)).await?
+        };
         Ok(parse_git_setup(&out))
     }
 
@@ -105,17 +120,19 @@ impl Engine {
     /// makes git use the machine's GitHub CLI login for github.com
     /// (`gh auth setup-git`). Returns the new state.
     pub async fn git_setup_apply(self: &Arc<Self>, machine_id: &str, identity: Option<(String, String)>, credentials: bool) -> Result<GitSetup, String> {
-        let (spec, _) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
+        let (spec, probe) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
         if self.demo_world().is_some() {
             return Ok(GitSetup { git: Some("2.47.0".into()), uses_gh: credentials, ..Default::default() });
         }
-        let mut script = String::from("set -e\n");
+        let windows = matches!(shell_for(&spec, probe.as_ref()), Shell::Powershell);
+        let q = |s: &str| if windows { ps_quote(s) } else { sh_quote(s) };
+        let mut script = String::from(if windows { "$ErrorActionPreference = 'Stop'\n" } else { "set -e\n" });
         if let Some((name, email)) = &identity {
             let bad = |s: &str| s.trim().is_empty() || s.len() > 200 || s.chars().any(char::is_control);
             if bad(name) || bad(email) || !email.contains('@') || email.contains(char::is_whitespace) {
                 return Err("Give a name and an email address (like you@example.com).".into());
             }
-            script.push_str(&format!("git config --global user.name {}\ngit config --global user.email {}\n", sh_quote(name.trim()), sh_quote(email.trim())));
+            script.push_str(&format!("git config --global user.name {}\ngit config --global user.email {}\n", q(name.trim()), q(email.trim())));
         }
         if credentials {
             let gh = self.sessions_of(&spec.id).and_then(|s| s.gh);
@@ -123,10 +140,14 @@ impl Engine {
                 return Err(format!("Sign in to the GitHub CLI on {} first; git will then use that login.", spec.name));
             }
             let gh = gh.and_then(|g| g.path).unwrap_or_else(|| "gh".into());
-            script.push_str(&format!("{} auth setup-git --hostname github.com\n", sh_quote(&gh)));
+            script.push_str(&format!("{}{} auth setup-git --hostname github.com\n", if windows { "& " } else { "" }, q(&gh)));
         }
         if identity.is_some() || credentials {
-            agent::run_sh(&spec, &script, std::time::Duration::from_secs(30)).await?;
+            if windows {
+                agent::run_ps(&spec, &script, std::time::Duration::from_secs(30)).await?;
+            } else {
+                agent::run_sh(&spec, &script, std::time::Duration::from_secs(30)).await?;
+            }
         }
         self.git_setup_status(&spec.id).await
     }

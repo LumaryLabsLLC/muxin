@@ -2780,7 +2780,7 @@ pub async fn github_accounts(engine: &Arc<Engine>) -> ApiResult<AccountsOut> {
         .current()
         .machines
         .iter()
-        .filter(|m| m.host != "local" && m.gh.is_none() && m.status == "online" && !m.platform.starts_with("windows"))
+        .filter(|m| m.host != "local" && m.gh.is_none() && m.status == "online")
         .map(|m| m.id.clone())
         .collect();
     let (accounts, viewer, orgs, _) = futures::join!(

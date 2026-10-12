@@ -13,7 +13,6 @@
 use std::collections::HashSet;
 use std::io::Write;
 use std::net::{Ipv6Addr, SocketAddr};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, RwLock};
@@ -57,9 +56,16 @@ fn identity() -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), Strin
     Ok((CertificateDer::from(cert), PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key))))
 }
 
+/// Writes a file only this user can read (on Windows, the user's profile already is).
 fn write_private(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(path).map_err(|e| e.to_string())?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options.open(path).map_err(|e| e.to_string())?;
     f.write_all(bytes).map_err(|e| e.to_string())
 }
 
@@ -109,6 +115,7 @@ impl ClientCertVerifier for PairedApps {
 /// `muxen-agent listen`: serves links over QUIC until stopped.
 pub fn listen() -> i32 {
     // Programs that need the logged-in session start here (see gui.rs).
+    #[cfg(unix)]
     crate::gui::serve();
     let runtime = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
         Ok(r) => r,
@@ -158,9 +165,18 @@ async fn accept_loop() -> Result<(), String> {
     // reconnect instead of waiting for silence.
     let closing = endpoint.clone();
     tokio::spawn(async move {
-        use tokio::signal::unix::{SignalKind, signal};
-        let (Ok(mut term), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) else { return };
-        tokio::select! { _ = term.recv() => {}, _ = int.recv() => {} }
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let (Ok(mut term), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) else { return };
+            tokio::select! { _ = term.recv() => {}, _ = int.recv() => {} }
+        }
+        #[cfg(windows)]
+        {
+            if tokio::signal::ctrl_c().await.is_err() {
+                return;
+            }
+        }
         closing.close(0u32.into(), b"restarting");
         let _ = tokio::time::timeout(Duration::from_millis(500), closing.wait_idle()).await;
         std::process::exit(0);
@@ -193,11 +209,14 @@ fn udp_socket(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
 }
 
 async fn bridge(mut send: quinn::SendStream, mut recv: quinn::RecvStream) {
-    let Ok((ours, theirs)) = UnixStream::pair() else { return };
+    let Ok((ours, theirs)) = stream_pair() else { return };
     let Ok(theirs_out) = theirs.try_clone() else { return };
     std::thread::spawn(move || crate::link::serve(Box::new(theirs), Box::new(theirs_out)));
     let _ = ours.set_nonblocking(true);
+    #[cfg(unix)]
     let Ok(ours) = tokio::net::UnixStream::from_std(ours) else { return };
+    #[cfg(windows)]
+    let Ok(ours) = tokio::net::TcpStream::from_std(ours) else { return };
     let (mut from_link, mut to_link) = ours.into_split();
     // The app's side ending (closed, or gone quiet past the idle timeout) ends
     // the link's input too, so it lets go of what the connection had open
@@ -214,6 +233,27 @@ async fn bridge(mut send: quinn::SendStream, mut recv: quinn::RecvStream) {
         r
     };
     let _ = tokio::join!(up, down);
+}
+
+/// Two connected streams: one for the QUIC side, one for the link.
+#[cfg(unix)]
+fn stream_pair() -> std::io::Result<(std::os::unix::net::UnixStream, std::os::unix::net::UnixStream)> {
+    std::os::unix::net::UnixStream::pair()
+}
+
+/// Windows has no socket pairs: a loopback connection, taking only the one we made.
+#[cfg(windows)]
+fn stream_pair() -> std::io::Result<(std::net::TcpStream, std::net::TcpStream)> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let ours = std::net::TcpStream::connect(listener.local_addr()?)?;
+    loop {
+        let (theirs, from) = listener.accept()?;
+        if from == ours.local_addr()? {
+            let _ = ours.set_nodelay(true);
+            let _ = theirs.set_nodelay(true);
+            return Ok((ours, theirs));
+        }
+    }
 }
 
 /// `{"op": "pair", "client": "<app fingerprint>"}` on a link (so over ssh):
@@ -253,7 +293,35 @@ pub fn tailnet_addresses() -> Vec<String> {
     addresses().1
 }
 
+/// (local network, tailnet) addresses, as Windows lists them.
+#[cfg(windows)]
+fn addresses() -> (Vec<String>, Vec<String>) {
+    let (mut lan, mut tailnet) = (Vec::new(), Vec::new());
+    let rows = crate::win::ps_json("Get-NetIPAddress -AddressState Preferred | Where-Object { $_.InterfaceAlias -notmatch 'Loopback' } | Select-Object IPAddress, InterfaceAlias | ConvertTo-Json -Compress").unwrap_or_default();
+    for r in rows {
+        let (Some(ip), alias) = (r["IPAddress"].as_str().and_then(|a| a.parse::<std::net::IpAddr>().ok()), r["InterfaceAlias"].as_str().unwrap_or("")) else { continue };
+        if is_tailnet(ip) && (alias.contains("Tailscale") || ip.is_ipv6()) {
+            if !tailnet.contains(&ip.to_string()) {
+                tailnet.push(ip.to_string());
+            }
+            continue;
+        }
+        // Not WSL's, Hyper-V's or Docker's virtual switches, nor VPNs.
+        if ["vEthernet", "WSL", "Docker", "Hyper-V", "VirtualBox", "VMware", "Tailscale", "ZeroTier", "WireGuard"].iter().any(|p| alias.contains(p)) {
+            continue;
+        }
+        if let std::net::IpAddr::V4(v4) = ip {
+            if v4.is_private() && !lan.contains(&v4.to_string()) {
+                lan.push(v4.to_string());
+            }
+        }
+    }
+    tailnet.sort_by_key(|a| a.contains(':'));
+    (lan, tailnet)
+}
+
 /// (local network, tailnet) addresses.
+#[cfg(unix)]
 fn addresses() -> (Vec<String>, Vec<String>) {
     let (mut lan, mut tailnet) = (Vec::new(), Vec::new());
     unsafe {
@@ -318,7 +386,10 @@ fn is_tailnet(ip: std::net::IpAddr) -> bool {
 /// from before the rename (OpenRunner) becomes Muxen's, and an installed one
 /// is brought up to date.
 pub fn migrate() -> i32 {
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    if cfg!(windows) {
+        return 0;
+    }
+    let home = crate::sys::user_home();
     let old_unit = home.join(".config/systemd/user/openrunner-agent.service");
     let old_plist = home.join("Library/LaunchAgents/com.lumarylabs.openrunner-agent.plist");
     if old_unit.exists() {
@@ -326,8 +397,7 @@ pub fn migrate() -> i32 {
         let _ = std::fs::remove_file(&old_unit);
         let _ = run("systemctl", &["--user", "daemon-reload"]);
     } else if old_plist.exists() {
-        let uid = unsafe { libc::getuid() };
-        let _ = run("launchctl", &["bootout", &format!("gui/{uid}/com.lumarylabs.openrunner-agent")]);
+        let _ = run("launchctl", &["bootout", &format!("gui/{}/com.lumarylabs.openrunner-agent", uid())]);
         let _ = std::fs::remove_file(&old_plist);
     } else {
         refresh_unit();
@@ -344,6 +414,18 @@ pub fn unpair() -> Value {
     let _ = std::fs::remove_file(dir().join("trusted"));
     remove_service();
     json!({ "ok": true })
+}
+
+/// This user's id (launchd's domains are by user).
+fn uid() -> u32 {
+    #[cfg(unix)]
+    {
+        unsafe { libc::getuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 fn run(program: &str, args: &[&str]) -> bool {
@@ -368,6 +450,9 @@ fn systemd_unit() -> String {
 /// restart after an update already leaves sessions alone.
 fn refresh_unit() {
     let Ok(home) = std::env::var("HOME") else { return };
+    if cfg!(windows) {
+        return;
+    }
     let path = PathBuf::from(home).join(format!(".config/systemd/user/{SERVICE}.service"));
     let Ok(current) = std::fs::read_to_string(&path) else { return };
     let wanted = systemd_unit();
@@ -378,12 +463,49 @@ fn refresh_unit() {
 
 /// Starts the background service (installing it when needed), for what has
 /// to run in the logged-in session (see gui.rs).
+#[cfg_attr(windows, allow(dead_code))]
 pub fn start_service() {
     let _ = install_service();
 }
 
+/// The scheduled task that runs `listen` on Windows.
+#[cfg(windows)]
+const TASK: &str = "Muxen agent";
+
 /// Runs `listen` as a service of this user: (how, a note when it couldn't).
 fn install_service() -> (&'static str, Option<String>) {
+    #[cfg(windows)]
+    {
+        // A task at sign-in, in the user's own desktop session (where the
+        // screen and clipboard are), started now too; and a way in through
+        // Windows' firewall for the agent (administrators only).
+        let script = format!(
+            "$exe = {exe}\n\
+             $action = New-ScheduledTaskAction -Execute $exe -Argument 'listen'\n\
+             $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME\n\
+             $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited\n\
+             $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew\n\
+             Register-ScheduledTask -TaskName {task} -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null\n\
+             try {{ Remove-NetFirewallRule -DisplayName {task} -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName {task} -Direction Inbound -Program $exe -Protocol UDP -Action Allow -Profile Any -ErrorAction Stop | Out-Null; $fw = 'yes' }} catch {{ $fw = 'no' }}\n\
+             Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object {{ $_.CommandLine -match ' listen' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}\n\
+             Start-ScheduledTask -TaskName {task}\n\
+             Start-Sleep -Milliseconds 800\n\
+             $running = @(Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object {{ $_.CommandLine -match ' listen' }}).Count -gt 0\n\
+             \"fw=$fw running=$running\"",
+            exe = crate::win::quote(&exe()),
+            task = crate::win::quote(TASK)
+        );
+        return match crate::win::ps(&script) {
+            Ok(out) if out.contains("running=True") => ("task", (!out.contains("fw=yes")).then(|| "Windows' firewall may block it: allow muxen-agent.exe, or pair as an administrator".to_string())),
+            // Nobody signed in to the desktop: the task waits for that; meanwhile, run it until restart.
+            Ok(_) => match crate::sys::spawn_background(&["listen"], dir().join("listen.log")) {
+                Ok(()) => ("task", Some("starts when you sign in to Windows; running now until then".into())),
+                Err(e) => ("none", Some(format!("couldn't start it: {e}"))),
+            },
+            Err(e) => ("none", Some(format!("couldn't set up the task: {e}"))),
+        };
+    }
+    #[allow(unreachable_code)]
     let home = std::env::var("HOME").unwrap_or_default();
     if cfg!(target_os = "macos") {
         let plist_dir = PathBuf::from(&home).join("Library/LaunchAgents");
@@ -407,8 +529,7 @@ fn install_service() -> (&'static str, Option<String>) {
         if std::fs::write(&plist, body).is_err() {
             return ("none", Some("couldn't write the launchd agent".into()));
         }
-        let uid = unsafe { libc::getuid() };
-        let domain = format!("gui/{uid}");
+        let domain = format!("gui/{}", uid());
         let _ = run("launchctl", &["bootout", &format!("{domain}/{LAUNCHD_LABEL}")]);
         if run("launchctl", &["bootstrap", &domain, &plist.display().to_string()]) {
             return ("launchd", None);
@@ -425,30 +546,25 @@ fn install_service() -> (&'static str, Option<String>) {
         }
     }
     // No service manager for this user: run it in the background until reboot.
-    let spawned = {
-        use std::os::unix::process::CommandExt;
-        let log = std::fs::OpenOptions::new().create(true).append(true).open(dir().join("listen.log"));
-        let mut cmd = Command::new(exe());
-        cmd.arg("listen").stdin(Stdio::null()).stdout(Stdio::null());
-        if let Ok(l) = log {
-            cmd.stderr(l);
-        }
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-        cmd.spawn().is_ok()
-    };
+    let spawned = crate::sys::spawn_background(&["listen"], dir().join("listen.log")).is_ok();
     if spawned { ("background", Some("runs until the machine restarts".into())) } else { ("none", Some("couldn't start it".into())) }
 }
 
 fn remove_service() {
+    #[cfg(windows)]
+    {
+        let task = crate::win::quote(TASK);
+        let _ = crate::win::ps(&format!(
+            "Unregister-ScheduledTask -TaskName {task} -Confirm:$false -ErrorAction SilentlyContinue\n\
+             Remove-NetFirewallRule -DisplayName {task} -ErrorAction SilentlyContinue\n\
+             Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object {{ $_.CommandLine -match ' listen' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
+        ));
+        return;
+    }
+    #[allow(unreachable_code)]
     let home = std::env::var("HOME").unwrap_or_default();
     if cfg!(target_os = "macos") {
-        let uid = unsafe { libc::getuid() };
-        let _ = run("launchctl", &["bootout", &format!("gui/{uid}/{LAUNCHD_LABEL}")]);
+        let _ = run("launchctl", &["bootout", &format!("gui/{}/{LAUNCHD_LABEL}", uid())]);
         let _ = std::fs::remove_file(PathBuf::from(&home).join(format!("Library/LaunchAgents/{LAUNCHD_LABEL}.plist")));
     } else {
         let _ = run("systemctl", &["--user", "disable", "--now", &format!("{SERVICE}.service")]);

@@ -22,7 +22,7 @@ pub fn list(req: &Value) -> Value {
     // of seconds): `"stats": false` answers at once without it.
     let stats = req["stats"].as_bool() != Some(false);
     let ((services, services_note), (containers, containers_note), images, compose) = std::thread::scope(|scope| {
-        let svc = scope.spawn(|| if mac { brew(stats) } else { systemd(stats) });
+        let svc = scope.spawn(|| if cfg!(windows) { crate::win::services(stats) } else if mac { brew(stats) } else { systemd(stats) });
         let ctr = scope.spawn(|| containers(stats));
         let img = scope.spawn(|| docker.as_deref().map(images).unwrap_or_default());
         let cmp = scope.spawn(|| docker.as_deref().map(compose_projects).unwrap_or_default());
@@ -194,7 +194,7 @@ fn systemd(stats: bool) -> (Vec<Value>, Option<String>) {
 }
 
 /// Failed first (what needs looking at), then running, then the rest.
-fn rank(state: Option<&str>) -> u8 {
+pub(crate) fn rank(state: Option<&str>) -> u8 {
     match state {
         Some("failed" | "error") => 0,
         Some("running" | "started") => 1,
@@ -296,6 +296,7 @@ pub fn act(req: &Value) -> Value {
         return json!({ "ok": false, "error": "That name has odd characters." });
     }
     let done = match (kind, action) {
+        ("service", "start" | "stop" | "restart" | "enable" | "disable") if cfg!(windows) => crate::win::service_action(target, action),
         ("service", "start" | "stop" | "restart" | "enable" | "disable") if user => run("systemctl", &["--user", action, "--", target]),
         // The system's: as root. The action and unit arrive as $1 and $2.
         ("service", "start" | "stop" | "restart" | "enable" | "disable") => as_root("exec systemctl \"$1\" -- \"$2\"", &[action, target], password),

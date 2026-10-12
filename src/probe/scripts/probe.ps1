@@ -67,3 +67,45 @@ foreach ($d in ($dirs | Sort-Object -Unique)) {
   }
   $i++
 }
+
+# --- The machine --------------------------------------------------------------
+# Someone signed in to the desktop (Explorer runs in their session): there's a screen to show.
+if (Get-Process explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 }) { kv 'desktop' 'yes' } else { kv 'desktop' 'no' }
+# A battery means a laptop (PCSystemType 2 is "mobile").
+$cs = Get-CimInstance Win32_ComputerSystem
+if ($cs) { kv 'form_factor' ($(if ($cs.PCSystemType -eq 2) { 'laptop' } else { 'desktop' })) }
+# An administrator's ssh session is elevated: like passwordless sudo.
+$me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+if ($me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { kv 'sudo' 'passwordless' } else { kv 'sudo' 'password' }
+
+# --- Docker -------------------------------------------------------------------
+if (Get-Command docker -ErrorAction SilentlyContinue) {
+  $dv = (& docker version --format '{{.Server.Version}}' 2>$null | Select-Object -First 1)
+  if ($dv) { kv 'docker' $dv }
+  else { kv 'docker_error' ((& docker version 2>&1 | Out-String) -split "`n" | Where-Object { $_ -match 'error|cannot|denied' } | Select-Object -First 1) }
+}
+
+# --- The network card it's reached by (to wake it later), and what wants a look -
+$route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object { $_.RouteMetric + $_.InterfaceMetric } | Select-Object -First 1
+if ($route) {
+  $nic = Get-NetAdapter -InterfaceIndex $route.ifIndex
+  if ($nic -and $nic.MacAddress) { kv 'mac' ($nic.MacAddress.Replace('-', ':').ToLower()) }
+  $ip = Get-NetIPAddress -InterfaceIndex $route.ifIndex -AddressFamily IPv4 | Where-Object { $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -First 1
+  if ($ip) {
+    $bytes = ([Net.IPAddress]$ip.IPAddress).GetAddressBytes()
+    $bits = [int]$ip.PrefixLength
+    $brd = for ($k = 0; $k -lt 4; $k++) {
+      $keep = [Math]::Max(0, [Math]::Min(8, $bits - 8 * $k))
+      $bytes[$k] -bor (255 -shr $keep)
+    }
+    kv 'lan' ("{0}/{1} {2}" -f $ip.IPAddress, $bits, ($brd -join '.'))
+  }
+}
+# Updates waiting for a restart.
+$pending = (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') -or
+  (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending')
+if ($pending) { kv 'reboot_required' 'yes' }
+# Services that should run (automatic, not delayed) but stopped with an error.
+$failed = @(Get-CimInstance Win32_Service -Filter "StartMode='Auto' AND State='Stopped'" |
+  Where-Object { $_.ExitCode -ne 0 -and $_.ExitCode -ne 1077 -and -not $_.DelayedAutoStart } | Select-Object -ExpandProperty Name)
+if ($failed.Count -gt 0) { kv 'failed_units' ($failed -join ' ') }

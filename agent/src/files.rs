@@ -29,12 +29,7 @@ const WINDOW: u64 = 8 << 20;
 const MAX_ENTRIES: usize = 5000;
 
 pub fn expand_home(path: &str) -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
-    match path.trim() {
-        "" | "~" => home,
-        p if p.starts_with("~/") => home.join(&p[2..]),
-        p => PathBuf::from(p),
-    }
+    crate::sys::expand_home(path)
 }
 
 /// `{"op": "files", "path": "~/x"}`: what's in a folder, folders first.
@@ -154,7 +149,7 @@ pub fn pack(req: &Value, send: Send) -> Result<(Value, Arc<Credit>), String> {
     let channel = req["channel"].as_u64().unwrap_or(0) as u32;
     let dir = expand_home(req["dir"].as_str().unwrap_or("~"));
     let names: Vec<String> = req["names"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
-    if names.is_empty() || names.iter().any(|n| n.is_empty() || n.contains('/') || n == "." || n == "..") {
+    if names.is_empty() || names.iter().any(|n| n.is_empty() || n.contains('/') || n.contains('\\') || n == "." || n == "..") {
         return Err("Name the files and folders to copy (inside the folder, without slashes).".into());
     }
     if let Some(missing) = names.iter().find(|n| dir.join(n).symlink_metadata().is_err()) {
@@ -299,9 +294,7 @@ fn finish(child: &mut Child, failed: Option<String>, errors: &Arc<Mutex<String>>
 }
 
 pub fn kill(pid: u32) {
-    unsafe {
-        libc::kill(pid as i32, libc::SIGTERM);
-    }
+    crate::sys::kill_one(pid, true);
 }
 
 #[cfg(test)]

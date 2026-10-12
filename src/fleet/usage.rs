@@ -191,7 +191,7 @@ impl Engine {
     /// Every reachable machine's, side by side (a machine that can't say is left out, with why).
     pub async fn usage_all(self: &Arc<Self>, days: u32) -> Vec<(String, Result<MachineUsage, String>)> {
         // Not just the ones checked already: a machine not reached yet says why.
-        let ids: Vec<String> = self.current().machines.iter().filter(|m| !m.is_down() && !m.host.is_empty() && !m.platform.starts_with("windows")).map(|m| m.id.clone()).collect();
+        let ids: Vec<String> = self.current().machines.iter().filter(|m| !m.is_down() && !m.host.is_empty()).map(|m| m.id.clone()).collect();
         let results = futures::future::join_all(ids.iter().map(|id| self.usage(id, days))).await;
         ids.into_iter().zip(results).collect()
     }

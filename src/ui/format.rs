@@ -51,7 +51,7 @@ pub fn disk_low(m: &Machine) -> bool {
 /// Whether Muxen can show the machine's desktop (Linux with X11, macOS).
 pub fn has_desktop(m: &Machine) -> bool {
     // A Linux machine needs an X server; one checked before checks said is given the benefit of the doubt.
-    m.platform.starts_with("darwin") || (m.platform.starts_with("linux") && m.probe.as_ref().and_then(|p| p.desktop) != Some(false))
+    m.platform.starts_with("darwin") || ((m.platform.starts_with("linux") || m.platform.starts_with("windows")) && m.probe.as_ref().and_then(|p| p.desktop) != Some(false))
 }
 
 /// Gradient for a machine's icon tile, by OS.

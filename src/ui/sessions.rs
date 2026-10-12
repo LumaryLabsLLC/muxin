@@ -900,12 +900,11 @@ impl Root {
 
 
         let content = if sessions.is_empty() {
-            let text = match (runs_in_app(m), m.platform.starts_with("windows")) {
+            let text = match runs_in_app(m) {
                 _ if m.is_disconnected() => format!("Connect to {} to start Claude Code, Codex or a shell there.", m.name),
                 _ if m.is_down() => format!("Start Claude Code, Codex or a shell here once {} is back.", m.name),
-                (true, true) => "Run Claude Code, Codex or a shell here. On Windows, sessions run while Muxen is open.".to_string(),
-                (true, false) => format!("Run Claude Code, Codex or a shell here. {} so sessions run while Muxen is open.", m.sessions_error.clone().unwrap_or_default().trim_end_matches('.')),
-                _ => "Run Claude Code, Codex, OpenCode or a shell here. Sessions keep working on the machine after you close Muxen.".to_string(),
+                true => format!("Run Claude Code, Codex or a shell here. {} so sessions run while Muxen is open.", m.sessions_error.clone().unwrap_or_default().trim_end_matches('.')),
+                false => "Run Claude Code, Codex, OpenCode or a shell here. Sessions keep working on the machine after you close Muxen.".to_string(),
             };
             card(theme)
                 .p(px(16.))
@@ -1006,10 +1005,10 @@ impl Root {
     }
 }
 
-/// Sessions here can't live in Muxen's agent (Windows, or a platform it
-/// has no build for), so they run in this window and end with it.
+/// Sessions here can't live in Muxen's agent (a platform it has no build
+/// for), so they run in this window and end with it.
 pub(super) fn runs_in_app(m: &FleetMachine) -> bool {
-    m.platform.starts_with("windows") || (m.agent_version.is_none() && m.sessions_error.as_deref().is_some_and(|e| e.contains("no agent")))
+    m.agent_version.is_none() && m.sessions_error.as_deref().is_some_and(|e| e.contains("no agent"))
 }
 
 /// The unread marker: amber when the agent rang for you, the accent when it

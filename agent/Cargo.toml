@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 alacritty_terminal = "0.26"
 anyhow = "1"
+base64 = "0.22"
 libc = "0.2"
 portable-pty = "0.9"
 serde_json = "1"
@@ -23,6 +24,21 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macro
 # The desktop view (`screen`): X11 capture and input on Linux, JPEG frames.
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["xtest", "shm", "xfixes", "randr"] }
+
+# The console in raw mode for `attach`, on Windows.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Console",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_HiDpi",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+] }
+jpeg-encoder = "0.6"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 jpeg-encoder = "0.6"

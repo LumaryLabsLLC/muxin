@@ -18,7 +18,7 @@ const SKIP: &[&str] = &[
 const MAX_REPOS: usize = 300;
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    crate::sys::user_home()
 }
 
 fn expand(dir: &str) -> PathBuf {
@@ -163,9 +163,7 @@ fn run_with_timeout(cmd: &mut Command, limit: Duration) -> Result<(bool, String,
             return Ok((out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned()));
         }
         if started.elapsed() > limit {
-            unsafe {
-                libc::kill(id as i32, libc::SIGKILL);
-            }
+            crate::sys::kill_one(id, false);
             return Err(format!("timed out after {}s", limit.as_secs()));
         }
         thread::sleep(Duration::from_millis(50));

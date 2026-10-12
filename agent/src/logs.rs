@@ -24,6 +24,19 @@ const MAX_LINES: u64 = 5000;
 
 /// `{"op": "log_sources"}`: what there is to read here.
 pub fn sources() -> Value {
+    if cfg!(windows) {
+        let (docker, docker_note) = containers();
+        return json!({
+            "ok": true,
+            "system": crate::win::event_logs(),
+            "system_note": Value::Null,
+            "files": files(),
+            "docker": docker,
+            "docker_note": docker_note,
+            "services": crate::win::service_sources(),
+            "services_note": "A service's events from Windows' System and Application logs.",
+        });
+    }
     let mac = cfg!(target_os = "macos");
     let journal = !mac && which("journalctl");
     let mut system = Vec::new();
@@ -75,7 +88,7 @@ pub(crate) fn quick(program: &str, args: &[&str]) -> Option<String> {
 }
 
 fn journal_groups() -> bool {
-    let root = unsafe { libc::getuid() } == 0;
+    let root = crate::sys::is_root();
     root || quick("id", &["-Gn"]).is_some_and(|g| g.split_whitespace().any(|g| ["systemd-journal", "adm", "wheel", "sudo"].contains(&g)))
 }
 
@@ -155,7 +168,7 @@ fn containers() -> (Vec<Value>, Option<String>) {
 /// Log files worth offering: the usual places, and ones written lately under
 /// the home folder (an app's storage/logs, a runner's _diag), newest first.
 fn files() -> Vec<Value> {
-    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let home = crate::sys::user_home();
     let mut found: Vec<std::path::PathBuf> = Vec::new();
     // A big home folder takes long to look through: a couple of seconds at most.
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -168,7 +181,11 @@ fn files() -> Vec<Value> {
             }
         });
     };
-    add_dir(std::path::Path::new("/var/log"), 2, false);
+    if cfg!(windows) {
+        add_dir(&std::path::PathBuf::from(std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into())), 3, true);
+    } else {
+        add_dir(std::path::Path::new("/var/log"), 2, false);
+    }
     add_dir(&home.join(".muxen"), 1, false);
     if cfg!(target_os = "macos") {
         add_dir(&home.join("Library/Logs"), 3, true);
@@ -181,7 +198,7 @@ fn files() -> Vec<Value> {
             let meta = std::fs::metadata(&p).ok()?;
             let modified = meta.modified().ok()?;
             let readable = std::fs::File::open(&p).is_ok();
-            let shown = p.strip_prefix(&home).map(|r| format!("~/{}", r.display())).unwrap_or_else(|_| p.display().to_string());
+            let shown = p.strip_prefix(&home).map(|r| format!("~{}{}", std::path::MAIN_SEPARATOR, r.display())).unwrap_or_else(|_| p.display().to_string());
             let name = p.file_name()?.to_string_lossy().into_owned();
             Some((modified, json!({ "kind": "file", "target": p.display().to_string(), "name": name, "detail": shown, "size": meta.len(), "modified": modified.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0), "readable": readable })))
         })
@@ -224,6 +241,10 @@ pub fn command(source: &Value, lines: u64, follow: bool) -> Result<(String, Vec<
     let target = source["target"].as_str().unwrap_or("").to_string();
     let s = |v: &str| v.to_string();
     let mac = cfg!(target_os = "macos");
+    if cfg!(windows) && matches!(source["kind"].as_str(), Some("system" | "kernel" | "service" | "file")) {
+        let script = crate::win::log_script(source["kind"].as_str().unwrap_or(""), &target, lines.parse().unwrap_or(500), follow)?;
+        return Ok(crate::win::log_command(script));
+    }
     let journal = |extra: Vec<String>| {
         let mut args = vec![s("--no-pager"), s("-o"), s("short-iso"), s("-n"), lines.clone()];
         args.extend(extra);

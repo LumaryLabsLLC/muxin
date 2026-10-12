@@ -23,7 +23,6 @@ use crate::probe;
 /// of those shells, since ssh hands the remote command to the user's shell.
 const LOGIN_WRAPPER: &str =
     r#"case "$SHELL" in */bash|*/zsh|*/sh|*/ksh|*/dash) exec "$SHELL" -l -s;; *) exec sh -l -s;; esac"#;
-const PS_READ_STDIN: &str = "[Console]::In.ReadToEnd() | Invoke-Expression";
 /// After the script reports its exit status, give stragglers holding the
 /// output pipes (a server the command left running) this long, then hang up.
 const AFTER_EXIT_GRACE: Duration = Duration::from_secs(2);
@@ -61,7 +60,9 @@ pub struct Output {
 impl Output {
     /// A short reason for a failure: the script's `error: ...` line, else the last stderr lines.
     pub fn reason(&self) -> String {
-        let lines: Vec<&str> = self.stderr.lines().chain(self.preamble.lines()).map(str::trim).filter(|l| !l.is_empty()).collect();
+        // PowerShell's errors arrive as CLIXML when stderr isn't a terminal: their text.
+        let stderr = clixml_text(&self.stderr);
+        let lines: Vec<&str> = stderr.lines().chain(self.preamble.lines()).map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("At line:") && !l.starts_with('+')).collect();
         if let Some(e) = lines.iter().find_map(|l| l.strip_prefix("error: ")) {
             return e.to_string();
         }
@@ -72,6 +73,20 @@ impl Output {
             (true, None) => "The command on the machine was terminated.".into(),
         }
     }
+}
+
+/// The text of PowerShell's CLIXML error records (`<S S="Error">…</S>`), as
+/// lines; anything else as it is.
+pub fn clixml_text(stderr: &str) -> String {
+    if !stderr.contains("<S S=\"Error\">") {
+        return stderr.to_string();
+    }
+    let mut out = String::new();
+    for part in stderr.split("<S S=\"Error\">").skip(1) {
+        let text = part.split("</S>").next().unwrap_or("");
+        out.push_str(&text.replace("_x000D__x000A_", "\n").replace("&apos;", "'").replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"));
+    }
+    out
 }
 
 pub fn new_marker() -> String {
@@ -94,7 +109,7 @@ fn command(spec: &MachineSpec, windows: bool) -> Command {
     if spec.is_local() {
         if windows {
             let mut c = Command::new("powershell");
-            c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PS_READ_STDIN]);
+            c.args(crate::ops::remote::ps_stdin_args());
             c
         } else {
             let mut c = Command::new("/bin/sh");
@@ -105,7 +120,7 @@ fn command(spec: &MachineSpec, windows: bool) -> Command {
         let mut c = Command::new("ssh");
         c.args(probe::ssh_args(spec));
         c.arg(if windows {
-            format!("powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"{PS_READ_STDIN}\"")
+            format!("powershell {}", crate::ops::remote::ps_stdin_args().join(" "))
         } else {
             format!("sh -c '{LOGIN_WRAPPER}'")
         });
@@ -153,6 +168,7 @@ pub async fn run(
 
     let work = async {
         // The script is small (or a bounded file upload); write it whole, then close stdin.
+        let script = if windows { crate::ops::remote::ps_sendable(&script) } else { script };
         let writer = async {
             let _ = stdin.write_all(script.as_bytes()).await;
             drop(stdin);

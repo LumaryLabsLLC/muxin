@@ -6,24 +6,32 @@
 //! Mac's Local Network privacy doesn't come into it.
 
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+#[cfg(unix)]
 fn socket() -> PathBuf {
     crate::home_dir().join("gui.sock")
 }
 
+#[cfg(unix)]
 /// Whether programs that need the desktop session must be started by the
 /// background service: a Mac, from a link that came in over ssh.
 pub fn needed() -> bool {
     cfg!(target_os = "macos") && std::env::var_os("SSH_CONNECTION").is_some()
 }
 
+#[cfg(unix)]
 /// Serves the socket from the background service, on a thread of its own.
 pub fn serve() {
     let path = socket();
@@ -46,6 +54,7 @@ pub fn serve() {
     });
 }
 
+#[cfg(unix)]
 /// One connection: `{"run": ["screen", ...]}`, then the program's stdin and
 /// stdout are the connection, until either side closes.
 fn run(mut conn: UnixStream) {
@@ -87,6 +96,7 @@ fn run(mut conn: UnixStream) {
     let _ = child.wait();
 }
 
+#[cfg(unix)]
 /// Runs a program in the logged-in session (see `needed`): its stdin and
 /// stdout, as a socket. Starts the background service when it isn't running.
 pub fn connect(args: &[String]) -> Result<UnixStream, String> {

@@ -56,9 +56,17 @@ fn last_line(text: &str) -> String {
 /// and snap put them (the agent's background service starts with a bare PATH).
 pub fn tool(name: &str) -> Option<String> {
     let path = std::env::var("PATH").unwrap_or_default();
-    let dirs = path.split(':').map(str::to_string).chain(["/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin", "/snap/bin", "/usr/bin", "/bin"].map(String::from));
-    for dir in dirs.filter(|d| !d.is_empty()) {
-        let p = std::path::Path::new(&dir).join(name);
+    #[cfg(windows)]
+    let (dirs, file): (Vec<String>, String) = {
+        let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
+        let extra = [format!(r"{program_files}\Docker\Docker\resources\bin"), format!(r"{program_files}\NVIDIA Corporation\NVSMI")];
+        (path.split(';').map(str::to_string).chain(extra).collect(), format!("{name}.exe"))
+    };
+    #[cfg(not(windows))]
+    let (dirs, file): (Vec<String>, String) =
+        (path.split(':').map(str::to_string).chain(["/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin", "/snap/bin", "/usr/bin", "/bin"].map(String::from)).collect(), name.to_string());
+    for dir in dirs.iter().filter(|d| !d.is_empty()) {
+        let p = std::path::Path::new(dir).join(&file);
         if std::fs::metadata(&p).is_ok_and(|m| m.is_file()) {
             return Some(p.display().to_string());
         }

@@ -66,6 +66,13 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
         // (test runs stay off the main monitor); otherwise the primary display.
         let wants_builtin = initial_view.as_deref().is_some_and(|v| v.split(',').any(|p| p.trim() == "display:builtin"));
         let display = wants_builtin.then(|| builtin_display(cx)).flatten();
+        // No bigger than the screen it opens on (a laptop's, a VM's 1280×800).
+        let screen = display.and_then(|id| cx.find_display(id)).or_else(|| cx.primary_display()).map(|d| d.bounds().size);
+        let (w, h) = match screen {
+            // (Room for Windows' taskbar, the Dock, a panel.)
+            Some(s) => (w.min(f32::from(s.width) * 0.94).max(640.), h.min(f32::from(s.height) * 0.86).max(480.)),
+            None => (w, h),
+        };
         let bounds = Bounds::centered(display, size(px(w), px(h)), cx);
         let titlebar = if cfg!(target_os = "macos") {
             TitlebarOptions { title: Some("Muxen".into()), appears_transparent: true, traffic_light_position: Some(point(px(16.), px(19.))) }

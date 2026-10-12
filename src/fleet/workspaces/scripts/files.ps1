@@ -11,7 +11,8 @@ switch ($OR_ACTION) {
     $item = Get-Item -LiteralPath $full -Force
     if ($item.PSIsContainer) { [Console]::Error.WriteLine("error: $OR_REL is a folder"); exit 3 }
     Write-Output "size=$($item.Length)"
-    $stream = [IO.File]::OpenRead($full)
+    # Shared, so a log a command is still writing can be read.
+    $stream = [IO.File]::Open($full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
     try {
       $count = [Math]::Min([int64]$OR_MAX, $item.Length)
       $buf = New-Object byte[] $count

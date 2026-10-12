@@ -72,7 +72,7 @@ impl CopyDialog {
         let mut machines: Vec<(String, String, bool)> = snap
             .machines
             .iter()
-            .filter(|m| !m.host.is_empty() && !m.platform.starts_with("windows"))
+            .filter(|m| !m.host.is_empty())
             .map(|m| (m.id.clone(), m.name.clone(), !m.is_down()))
             .collect();
         // This computer first.

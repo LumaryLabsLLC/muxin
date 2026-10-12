@@ -2,28 +2,28 @@
 //! `attach` (this terminal becomes a window onto a session).
 
 use std::io::{self, Read, Write};
-use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::{detect, home_dir, now, proto, socket_path};
+use crate::sys::{self, Stream};
+use crate::{detect, home_dir, now, proto};
 
 /// Connects to the session server, starting it first when asked.
-fn connect(start: bool) -> io::Result<UnixStream> {
-    match UnixStream::connect(socket_path()) {
+pub fn connect(start: bool) -> io::Result<Stream> {
+    match sys::connect() {
         Ok(s) => Ok(s),
         Err(e) if !start => Err(e),
         Err(_) => {
-            spawn_server()?;
+            // In the background, so it outlives this ssh connection (logging to ~/.muxen/agent.log).
+            sys::spawn_background(&["serve"], home_dir().join("agent.log"))?;
             let mut last = None;
-            for _ in 0..100 {
+            // Windows takes a moment longer (the server starts through WMI).
+            for _ in 0..200 {
                 thread::sleep(Duration::from_millis(30));
-                match UnixStream::connect(socket_path()) {
+                match sys::connect() {
                     Ok(s) => return Ok(s),
                     Err(e) => last = Some(e),
                 }
@@ -31,23 +31,6 @@ fn connect(start: bool) -> io::Result<UnixStream> {
             Err(last.unwrap_or_else(|| io::Error::other("the session server didn't start")))
         }
     }
-}
-
-/// Starts `serve` in the background, in its own session so it outlives this
-/// ssh connection, logging to ~/.muxen/agent.log.
-fn spawn_server() -> io::Result<()> {
-    let exe = std::env::current_exe()?;
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(home_dir().join("agent.log"))?;
-    let mut cmd = Command::new(exe);
-    cmd.arg("serve").stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log).current_dir(home_dir());
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    cmd.spawn()?;
-    Ok(())
 }
 
 fn request(req: &Value, start: bool) -> Value {
@@ -92,11 +75,20 @@ pub fn handle(req: &Value) -> Value {
         },
         "start" => request(&req, true),
         "rename" => rename(&req),
+        #[cfg(unix)]
         "displays" => crate::displays::list(),
+        #[cfg(unix)]
         "display_create" => crate::displays::create(&req),
+        #[cfg(unix)]
         "display_remove" => crate::displays::remove(&req),
+        #[cfg(unix)]
         "display_rename" => crate::displays::rename(&req),
+        #[cfg(unix)]
         "display_set" => crate::displays::set(&req),
+        #[cfg(windows)]
+        "displays" => windows_displays(),
+        #[cfg(windows)]
+        "display_create" | "display_remove" | "display_rename" | "display_set" => json!({ "ok": false, "error": "Muxen can't add or change monitors on Windows yet." }),
         "log_sources" => crate::logs::sources(),
         "logs_read" => crate::logs::read(&req),
         "services" => crate::services::list(&req),
@@ -112,6 +104,22 @@ pub fn handle(req: &Value) -> Value {
         "wake" => crate::wake::wake(&req),
         _ => request(&req, false),
     }
+}
+
+/// Windows' monitors, as the signed-in desktop sees them (sshd's session has none).
+#[cfg(windows)]
+fn windows_displays() -> Value {
+    if crate::win_screen::in_desktop_session() {
+        return crate::win_screen::displays();
+    }
+    let mut stream = match crate::win_screen::start_in_desktop(&["displays".to_string()]) {
+        Ok(s) => s,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut text = String::new();
+    let _ = stream.read_to_string(&mut text);
+    serde_json::from_str(text.trim()).unwrap_or_else(|_| json!({ "ok": false, "error": "Windows didn't list its monitors." }))
 }
 
 /// Titles the user gave sessions, by session name (`~/.muxen/titles.json`).
@@ -185,7 +193,7 @@ fn discover(req: &Value) -> Value {
     let dirs = if names.is_empty() { Vec::new() } else { detect::path_dirs() };
     let agents = if names.is_empty() { Vec::new() } else { detect::agents(&names, &dirs) };
     let gh = if names.is_empty() { Value::Null } else { crate::repos::gh_status(&dirs) };
-    let running = UnixStream::connect(socket_path()).is_ok();
+    let running = sys::connect().is_ok();
     let list = if running { request(&json!({ "op": "list" }), false) } else { json!({}) };
     let mut sessions = list.get("sessions").cloned().unwrap_or_else(|| json!([]));
     let mut titles = read_titles();
@@ -211,8 +219,10 @@ fn discover(req: &Value) -> Value {
 }
 
 /// Saves the terminal's settings and puts it in raw mode; restores on drop.
+#[cfg(unix)]
 struct RawMode(Option<libc::termios>);
 
+#[cfg(unix)]
 impl RawMode {
     fn enable() -> RawMode {
         unsafe {
@@ -239,16 +249,64 @@ impl RawMode {
     }
 }
 
+/// Windows: the console's modes, saved; keys go through one by one as VT
+/// sequences, and output's escape sequences are drawn.
+#[cfg(windows)]
+struct RawMode(Option<(u32, u32)>);
+
+#[cfg(windows)]
+impl RawMode {
+    fn enable() -> RawMode {
+        use windows_sys::Win32::System::Console::*;
+        unsafe {
+            let (input, output) = (GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE));
+            let (mut in_mode, mut out_mode) = (0u32, 0u32);
+            if GetConsoleMode(input, &mut in_mode) == 0 {
+                return RawMode(None);
+            }
+            GetConsoleMode(output, &mut out_mode);
+            SetConsoleMode(input, (in_mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT);
+            SetConsoleMode(output, out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+            RawMode(Some((in_mode, out_mode)))
+        }
+    }
+
+    fn restore(&self) {
+        use windows_sys::Win32::System::Console::*;
+        if let Some((in_mode, out_mode)) = self.0 {
+            unsafe {
+                SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), in_mode);
+                SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), out_mode);
+            }
+        }
+    }
+}
+
 impl Drop for RawMode {
     fn drop(&mut self) {
         self.restore();
     }
 }
 
+#[cfg(unix)]
 fn window_size() -> Option<(u16, u16)> {
     unsafe {
         let mut ws: libc::winsize = std::mem::zeroed();
         (libc::ioctl(0, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0).then_some((ws.ws_col, ws.ws_row))
+    }
+}
+
+#[cfg(windows)]
+fn window_size() -> Option<(u16, u16)> {
+    use windows_sys::Win32::System::Console::*;
+    unsafe {
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+        if GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &mut info) == 0 {
+            return None;
+        }
+        let w = info.srWindow;
+        let (cols, rows) = ((w.Right - w.Left + 1) as u16, (w.Bottom - w.Top + 1) as u16);
+        (cols > 0).then_some((cols, rows))
     }
 }
 

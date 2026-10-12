@@ -113,6 +113,9 @@ impl Engine {
                 )
             }
         };
+        for (id, p) in &persisted.probes {
+            crate::fleet::sessions::agent::note_os(id, p.os.as_deref());
+        }
         let state = State {
             inventory,
             inventory_info,
@@ -960,6 +963,7 @@ impl Engine {
             let result = result.after(st.probes.get(&id));
             // Its monitors are worth knowing when it has a desktop to show.
             let desktop = result.os.as_deref() == Some("darwin") || result.desktop == Some(true);
+            crate::fleet::sessions::agent::note_os(&id, result.os.as_deref());
             st.probes.insert(id.clone(), result);
             self.publish(&mut st);
             drop(st);

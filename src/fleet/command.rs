@@ -23,10 +23,19 @@ fn sh_script(command: &str) -> String {
     )
 }
 
-/// PowerShell, for Windows machines.
+/// PowerShell, for Windows machines: the command in a script file of its
+/// own, run by its own PowerShell from the home folder, as in a terminal (its
+/// output formatted as text, its `exit` its exit status).
 fn ps_script(command: &str) -> String {
     format!(
-        "$OR_CMD = '{}'\nSet-Location $HOME\n$global:LASTEXITCODE = 0\ntry {{ & ([ScriptBlock]::Create($OR_CMD)) 2>&1 | ForEach-Object {{ \"$_\" }}; $c = if ($?) {{ $LASTEXITCODE }} else {{ 1 }} }} catch {{ [Console]::Error.WriteLine(\"error: $_\"); $c = 1 }}\n[Console]::Error.WriteLine(\"${{OR_MARK}}:exit=$c\")\n",
+        "$OR_CMD = '{}'\n\
+         $f = Join-Path ([IO.Path]::GetTempPath()) (\"muxen-run-$PID.ps1\")\n\
+         Set-Content -LiteralPath $f -Value $OR_CMD -Encoding UTF8\n\
+         Set-Location $env:USERPROFILE\n\
+         & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $f\n\
+         $c = $LASTEXITCODE\n\
+         Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue\n\
+         [Console]::Error.WriteLine(\"${{OR_MARK}}:exit=$c\")\n",
         command.replace('\'', "''")
     )
 }

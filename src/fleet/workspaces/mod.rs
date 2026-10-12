@@ -479,7 +479,7 @@ impl Engine {
     }
 
     /// rsync between a folder on this computer and the workspace. Returns rsync's summary.
-    pub async fn workspace_sync(&self, id: &str, local_path: &str, direction: SyncDirection, delete: bool) -> Result<String, String> {
+    pub async fn workspace_sync(self: &Arc<Self>, id: &str, local_path: &str, direction: SyncDirection, delete: bool) -> Result<String, String> {
         let rec = self.ready_workspace(id)?;
         let local = expand_home(local_path.trim());
         if local.as_os_str().is_empty() {
@@ -490,10 +490,11 @@ impl Engine {
             self.touch_workspace(&rec.info.id);
             return Ok(summary);
         }
-        if rec.windows {
-            return Err("Sync uses rsync, which Muxen doesn't support for Windows machines. Use workspace_write_file or git instead.".into());
-        }
         let spec = self.workspace_machine(&rec)?;
+        if rec.windows {
+            // Boxed: a copy's future is big, and this one sits inside every caller's.
+            return Box::pin(self.sync_through_agent(&rec, &spec, &local, direction, delete)).await;
+        }
         let have_rsync = tokio::process::Command::new("rsync")
             .arg("--version")
             .stdout(std::process::Stdio::null())
@@ -524,6 +525,41 @@ impl Engine {
         let out = String::from_utf8_lossy(&output.stdout);
         let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
         Ok(lines[lines.len().saturating_sub(16)..].join("\n"))
+    }
+
+    /// Sync with a Windows machine (no rsync there): the folder's contents
+    /// copied over through the agents, as Copy files does. Files are added and
+    /// replaced; nothing is deleted.
+    async fn sync_through_agent(self: &Arc<Self>, rec: &WorkspaceRecord, spec: &MachineSpec, local: &std::path::Path, direction: SyncDirection, delete: bool) -> Result<String, String> {
+        if delete {
+            return Err(format!("Syncing with {} adds and replaces files but doesn't delete any (it's a Windows machine): sync without delete.", spec.name));
+        }
+        let here = crate::config::Inventory::parse("[[machine]]\nname = \"This computer\"\nhost = \"local\"\n").map_err(|e| e.to_string())?.machines.remove(0);
+        let here = self.current().machines.iter().find(|m| m.local).and_then(|m| self.machine(&m.id)).map(|(s, _)| s).unwrap_or(here);
+        let skip = [".muxen", ".git", "node_modules", "target"];
+        let (from, dir, to, to_dir) = match direction {
+            SyncDirection::Push => {
+                if !local.is_dir() {
+                    return Err(format!("{} isn't a folder on this computer.", local.display()));
+                }
+                (here.clone(), local.display().to_string(), spec.clone(), rec.info.path.clone())
+            }
+            SyncDirection::Pull => {
+                std::fs::create_dir_all(local).map_err(|e| format!("Couldn't create {}: {e}", local.display()))?;
+                (spec.clone(), rec.info.path.clone(), here.clone(), local.display().to_string())
+            }
+        };
+        let listing = self.list_files(&from.id, &dir).await?;
+        let names: Vec<String> = listing.entries.iter().map(|e| e.name.clone()).filter(|n| !skip.contains(&n.as_str())).collect();
+        if names.is_empty() {
+            return Ok("Nothing to copy.".into());
+        }
+        let op = self.begin_op("copy", format!("Sync {} with {}", rec.info.id, spec.name), Some(spec.id.clone()), None);
+        let result = self.run_copy(op, &from, &dir, &names, &to, &to_dir, &std::sync::atomic::AtomicBool::new(false)).await;
+        self.op_finish(op, result.as_ref().map(|_| ()).map_err(|e| e.clone()));
+        let bytes = result?;
+        self.touch_workspace(&rec.info.id);
+        Ok(format!("Copied {} item{} ({}) {} {}.", names.len(), if names.len() == 1 { "" } else { "s" }, crate::util::bytes(bytes), if matches!(direction, SyncDirection::Push) { "to" } else { "from" }, spec.name))
     }
 
     /// Stops background commands and removes the workspace (and its folder unless `keep_files`).
@@ -759,7 +795,8 @@ impl Engine {
         let timeout_s = timeout.to_string();
         let log_s = log.clone().unwrap_or_default();
         let shell = if rec.windows { Shell::Powershell } else { Shell::Sh };
-        let params = [
+        let exports = env_exports(shell, env);
+        let mut params = vec![
             ("OR_DIR", Param::Str(&rec.info.path)),
             ("OR_CWD", Param::Str(cwd)),
             ("OR_CMD", Param::Str(command)),
@@ -768,7 +805,10 @@ impl Engine {
             ("OR_LOG", Param::Str(&log_s)),
             ("OR_ID", Param::Str(&rec.info.id)),
         ];
-        let exports = env_exports(shell, env);
+        // A background run on Windows doesn't inherit the environment: its script sets it.
+        if shell == Shell::Powershell {
+            params.push(("OR_ENVPS", Param::Str(&exports)));
+        }
         let script = match (&rec.info.container, shell) {
             (Some(container), Shell::Sh) => {
                 let image = rec.info.image.clone().unwrap_or_else(|| DEFAULT_IMAGE.to_string());

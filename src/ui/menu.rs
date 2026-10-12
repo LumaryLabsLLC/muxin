@@ -163,16 +163,12 @@ impl Root {
                     if super::format::has_desktop(m) && !m.local {
                         items.push(needs_up(act("Show desktop", "monitor", Action::ShowDesktop(id.clone()))));
                     }
-                    if super::format::has_desktop(m) && !s.demo {
+                    if super::format::has_desktop(m) && !s.demo && !m.platform.starts_with("windows") {
                         items.push(needs_up(act("Add virtual monitor…", "monitor", Action::AddDisplay(id.clone()))));
                     }
-                    if !m.platform.starts_with("windows") {
-                        items.push(needs_up(act("Logs", "scroll-text", Action::ShowLogs(id.clone()))));
-                        items.push(needs_up(act("Services", "layers", Action::ShowServices(id.clone()))));
-                    }
-                    if !m.platform.starts_with("windows") {
-                        items.push(needs_up(act("Copy files…", "folder", Action::CopyFiles(id.clone()))));
-                    }
+                    items.push(needs_up(act("Logs", "scroll-text", Action::ShowLogs(id.clone()))));
+                    items.push(needs_up(act("Services", "layers", Action::ShowServices(id.clone()))));
+                    items.push(needs_up(act("Copy files…", "folder", Action::CopyFiles(id.clone()))));
                     items.push(needs_up(act("Run a command…", "zap", Action::RunOn(id.clone()))));
                     items.push(Item::Separator);
                     if !m.is_disconnected() {

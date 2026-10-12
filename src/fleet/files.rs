@@ -78,7 +78,7 @@ impl Engine {
         if self.demo_world().is_some() {
             return Ok(demo_listing(&spec, path));
         }
-        let l = self.files_link(&spec).await.ok_or_else(|| format!("Browsing {} needs Muxen's agent there (Linux or macOS).", spec.name))?;
+        let l = self.files_link(&spec).await.ok_or_else(|| format!("Browsing {} needs Muxen's agent there.", spec.name))?;
         let r = l.request(json!({ "op": "files", "path": if path.trim().is_empty() { "~" } else { path } }), Duration::from_secs(20)).await?;
         if r["ok"].as_bool() != Some(true) {
             return Err(r["error"].as_str().unwrap_or("Couldn't list that folder.").to_string());
@@ -134,7 +134,7 @@ impl Engine {
 
     /// Copies and waits; returns the bytes moved (the tar stream's size).
     #[allow(clippy::too_many_arguments)]
-    async fn run_copy(self: &Arc<Self>, id: u64, from: &MachineSpec, dir: &str, names: &[String], to: &MachineSpec, to_dir: &str, cancel: &AtomicBool) -> Result<u64, String> {
+    pub(crate) async fn run_copy(self: &Arc<Self>, id: u64, from: &MachineSpec, dir: &str, names: &[String], to: &MachineSpec, to_dir: &str, cancel: &AtomicBool) -> Result<u64, String> {
         let src_place = format!("{}:{}", from.id, dir);
         let dst_place = format!("{}:{}", to.id, to_dir);
         self.op_log(id, format!("{} → {}", names.iter().map(|n| format!("{src_place}/{n}")).collect::<Vec<_>>().join(", "), dst_place));

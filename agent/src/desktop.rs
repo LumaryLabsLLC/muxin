@@ -15,7 +15,7 @@
 //! Coordinates are in frame pixels; the screen may be scaled down to fit
 //! `max_width`, and input is mapped back onto it.
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -28,7 +28,7 @@ pub const TILES: u8 = 23;
 
 /// DISPLAY and XAUTHORITY of this user's graphical session: our own when set,
 /// else borrowed from a process in that session.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub fn session_env() -> Option<Vec<(String, String)>> {
     let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     if let Some(display) = get("DISPLAY") {
@@ -64,9 +64,9 @@ pub fn session_env() -> Option<Vec<(String, String)>> {
     auth.exists().then(|| vec![("DISPLAY".into(), ":0".into()), ("XAUTHORITY".into(), auth.display().to_string())])
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(not(target_os = "linux"))]
 pub fn session_env() -> Option<Vec<(String, String)>> {
-    // The Mac's screen needs nothing from the environment.
+    // A Mac's or Windows' screen needs nothing from the environment.
     Some(Vec::new())
 }
 
@@ -107,11 +107,15 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
     {
-        let _ = (fps, quality, max_width, tiles, display);
-        hello(&serde_json::json!({ "error": "Showing the desktop works on Linux and macOS so far." }));
-        1
+        match crate::win_screen::WinScreen::open(display) {
+            Ok(screen) => stream(screen, fps, quality as u8, max_width, tiles),
+            Err(e) => {
+                hello(&serde_json::json!({ "error": e }));
+                1
+            }
+        }
     }
 }
 
@@ -123,7 +127,6 @@ fn hello(value: &Value) {
 }
 
 /// A screen to stream: frames of it, and input applied to it.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 trait Screen {
     /// Its size in the pixels `grab` returns.
     fn size(&self) -> (usize, usize);
@@ -144,7 +147,6 @@ trait Screen {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod frames {
     /// How the screen maps onto the frame: frame pixel x covers source columns
     /// `xs[x]..xs[x + 1]` (and the same for rows).
@@ -220,10 +222,23 @@ mod frames {
     pub const TILE: usize = 64;
 }
 
+/// Windows: GDI captures and SendInput (see win_screen.rs).
+#[cfg(windows)]
+impl Screen for crate::win_screen::WinScreen {
+    fn size(&self) -> (usize, usize) {
+        crate::win_screen::WinScreen::size(self)
+    }
+    fn grab(&mut self) -> Option<Option<&[u8]>> {
+        crate::win_screen::WinScreen::grab(self)
+    }
+    fn apply(&mut self, e: &Value, frame: (usize, usize)) {
+        crate::win_screen::WinScreen::apply(self, e, frame)
+    }
+}
+
 /// Streams a screen: `tiles`, only what changed as JPEG strips (the live
 /// view); otherwise the whole frame as one JPEG whenever anything changed
 /// (screenshots). Input arrives on stdin as it happens.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn stream(mut screen: impl Screen, fps: u32, quality: u8, max_width: u32, tiles: bool) -> i32 {
     use std::io::Write;
     use std::sync::mpsc;

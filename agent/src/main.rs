@@ -14,15 +14,10 @@
 //! muxen-agent serve           the session server (started on demand)
 //! ```
 
-#[cfg(unix)]
 mod client;
-#[cfg(unix)]
 mod clipboard;
-#[cfg(unix)]
 mod daemon;
-#[cfg(unix)]
 mod detect;
-#[cfg(unix)]
 mod desktop;
 #[cfg(unix)]
 mod displays;
@@ -33,20 +28,18 @@ mod usage;
 mod wake;
 mod root;
 mod services;
-#[cfg(unix)]
 mod direct;
-#[cfg(unix)]
 mod files;
-#[cfg(unix)]
 mod gui;
-#[cfg(unix)]
 mod link;
-#[cfg(unix)]
 mod proto;
-#[cfg(unix)]
 mod repos;
-#[cfg(unix)]
 mod screen;
+mod sys;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod win;
+#[cfg(windows)]
+mod win_screen;
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -64,29 +57,29 @@ fn main() {
             println!("{}", self_hash());
             0
         }
-        #[cfg(unix)]
         Some("ctl") => client::ctl(),
-        #[cfg(unix)]
         Some("link") => link::run(),
-        #[cfg(unix)]
         Some("listen") => direct::listen(),
-        #[cfg(unix)]
         Some("migrate") => direct::migrate(),
-        #[cfg(unix)]
         Some("screen") => desktop::run(&args[1..]),
         #[cfg(unix)]
         Some("displays") => displays::run_list(),
+        #[cfg(windows)]
+        Some("displays") => {
+            println!("{}", win_screen::displays());
+            0
+        }
+        #[cfg(windows)]
+        Some("gui-serve") => win_screen::gui_serve(),
         #[cfg(target_os = "macos")]
         Some("vdisplay") => displays::run_holder(&args[1..]),
         #[cfg(target_os = "macos")]
         Some("display-mode") => displays::run_mode(&args[1..]),
         Some("clip") => clipboard::run(),
-        #[cfg(unix)]
         Some("attach") => match args.get(1) {
             Some(name) => client::attach(name),
             None => usage(),
         },
-        #[cfg(unix)]
         Some("serve") => daemon::serve(),
         _ => usage(),
     };
@@ -116,8 +109,7 @@ pub fn fnv(bytes: &[u8]) -> u64 {
 
 /// `~/.muxen`, private to the user.
 pub fn home_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
-    let dir = home.join(".muxen");
+    let dir = sys::user_home().join(".muxen");
     let _ = std::fs::create_dir_all(&dir);
     #[cfg(unix)]
     {
@@ -129,6 +121,8 @@ pub fn home_dir() -> PathBuf {
 
 /// The session server's socket: `~/.muxen/agent.sock`, or a private
 /// folder under /tmp when the home path is too long for a Unix socket.
+/// (Windows: see sys.rs.)
+#[cfg(unix)]
 pub fn socket_path() -> PathBuf {
     let path = home_dir().join("agent.sock");
     if path.as_os_str().len() < 100 {

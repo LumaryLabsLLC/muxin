@@ -457,7 +457,7 @@ impl Root {
             return ended(&theme, id, cx);
         };
         // Attaching to a machine that's offline only waits for ssh to give up.
-        let reachable = s.machines.iter().any(|m| m.id == info.machine_id && m.status != "offline");
+        let reachable = s.machines.iter().any(|m| m.id == info.machine_id && !m.is_down());
         if !self.terminals.contains_key(id) && reachable {
             self.open_terminal(id, window, cx);
         }
@@ -466,7 +466,7 @@ impl Root {
         }
         let host = s.machines.iter().find(|m| m.id == info.machine_id).cloned();
         // Can't reach the machine: what we show is from before, and nothing runs we can see.
-        let offline = host.as_ref().filter(|m| m.status == "offline").cloned();
+        let offline = host.as_ref().filter(|m| m.is_down()).cloned();
         let machine = host.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| info.machine_id.clone());
         let machine_id = info.machine_id.clone();
         // Desktops: Linux (X11) machines so far.
@@ -660,10 +660,10 @@ impl Root {
     fn session_body(&mut self, info: &SessionInfo, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let theme = cx.theme();
         let s = self.snapshot.clone();
-        if !self.terminals.contains_key(&info.id) && s.machines.iter().any(|m| m.id == info.machine_id && m.status != "offline") {
+        if !self.terminals.contains_key(&info.id) && s.machines.iter().any(|m| m.id == info.machine_id && !m.is_down()) {
             self.open_terminal(&info.id, window, cx);
         }
-        let offline = s.machines.iter().find(|m| m.id == info.machine_id && m.status == "offline").cloned();
+        let offline = s.machines.iter().find(|m| m.id == info.machine_id && m.is_down()).cloned();
         let terminal = self.terminals.get(&info.id).cloned();
         let detached = terminal.as_ref().is_some_and(|t| t.read(cx).exited());
         let exited = info.status == "exited";
@@ -684,7 +684,8 @@ impl Root {
             .min_h(px(0.))
             .children(terminal.map(|t| t.into_any_element()))
             .when_some(offline.clone().filter(|_| !exited && info.persistent), |d, m| {
-                let title = m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("Can't reach {}", m.name));
+                let disconnected = m.is_disconnected();
+                let title = if disconnected { format!("Disconnected from {}", m.name) } else { m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("Can't reach {}", m.name)) };
                 let mid = m.id.clone();
                 d.child(
                     div().absolute().inset_0().bg(theme.scrim).flex().items_center().justify_center().child(
@@ -696,13 +697,19 @@ impl Root {
                             .bg(theme.elevated)
                             .child(kit::color_tile(if format::is_just_offline(&m) { "power" } else { "unplug" }, 36.))
                             .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(title))
-                            .child(div().text_size(px(12.5)).text_color(theme.text_muted).text_center().child("Shut down: this session ended. Asleep: it's still there."))
-                            .child(
+                            .child(div().text_size(px(12.5)).text_color(theme.text_muted).text_center().child(if disconnected {
+                                "This session keeps running there. Connect to see it again."
+                            } else {
+                                "Shut down: this session ended. Asleep: it's still there."
+                            }))
+                            .child(if disconnected {
+                                Button::new("session-connect", "Connect").icon("plug").on_click(cx.listener(move |this, _, _, cx| this.set_machine_connected(&mid, true, cx)))
+                            } else {
                                 Button::new("session-offline-check", "Try again")
                                     .icon("refresh-cw")
                                     .loading(m.checking)
-                                    .on_click(cx.listener(move |this, _, _, _| this.engine.trigger_check(Some(mid.clone())))),
-                            ),
+                                    .on_click(cx.listener(move |this, _, _, _| this.engine.trigger_check(Some(mid.clone()))))
+                            }),
                     ),
                 )
             })
@@ -827,7 +834,7 @@ impl Root {
         let id = s.id.clone();
         let (icon_name, (from, to)) = kit::agent_look(&s.agent);
         let exited = s.status == "exited";
-        let offline = self.snapshot.machines.iter().any(|m| m.id == s.machine_id && m.status == "offline");
+        let offline = self.snapshot.machines.iter().any(|m| m.id == s.machine_id && m.is_down());
         // Explicit width: GPUI 0.2 only ellipsizes text whose width it knows up front.
         let trailing = if exited { 40. } else if s.busy || s.attention.is_some() { 20. } else { 0. };
         let trailing = trailing + if exited && s.attention.is_some() { 14. } else { 0. };
@@ -885,7 +892,8 @@ impl Root {
 
         let content = if sessions.is_empty() {
             let text = match (runs_in_app(m), m.platform.starts_with("windows")) {
-                _ if m.status == "offline" => format!("Start Claude Code, Codex or a shell here once {} is back.", m.name),
+                _ if m.is_disconnected() => format!("Connect to {} to start Claude Code, Codex or a shell there.", m.name),
+                _ if m.is_down() => format!("Start Claude Code, Codex or a shell here once {} is back.", m.name),
                 (true, true) => "Run Claude Code, Codex or a shell here. On Windows, sessions run while Muxen is open.".to_string(),
                 (true, false) => format!("Run Claude Code, Codex or a shell here. {} so sessions run while Muxen is open.", m.sessions_error.clone().unwrap_or_default().trim_end_matches('.')),
                 _ => "Run Claude Code, Codex, OpenCode or a shell here. Sessions keep working on the machine after you close Muxen.".to_string(),
@@ -900,7 +908,7 @@ impl Root {
                 .child(
                     Button::new("m-session-empty", "New session")
                         .icon("plus")
-                        .disabled(m.status == "offline")
+                        .disabled(m.is_down())
                         .on_click(cx.listener(move |this, _, window, cx| this.show_new_session(Some(mid.clone()), window, cx))),
                 )
                 .into_any_element()
@@ -916,11 +924,11 @@ impl Root {
         let id = x.id.clone();
         let machine = with_machine.then(|| self.snapshot.machines.iter().find(|m| m.id == x.machine_id).map(|m| m.name.clone())).flatten();
         let (icon_name, (from, to)) = kit::agent_look(&x.agent);
-        let offline = self.snapshot.machines.iter().any(|m| m.id == x.machine_id && m.status == "offline");
+        let offline = self.snapshot.machines.iter().any(|m| m.id == x.machine_id && m.is_down());
         let state = if x.status == "exited" {
             div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!("Exited{}", x.exit_code.map(|c| format!(" ({c})")).unwrap_or_default())).into_any_element()
         } else if offline {
-            div().text_size(px(12.)).text_color(theme.text_placeholder).child("Machine offline").into_any_element()
+            div().text_size(px(12.)).text_color(theme.text_placeholder).child(if self.snapshot.machines.iter().any(|m| m.id == x.machine_id && m.is_disconnected()) { "Disconnected" } else { "Machine offline" }).into_any_element()
         } else if x.busy {
             div()
                 .flex()
@@ -1208,6 +1216,10 @@ impl Root {
                     .items_center()
                     .child(section_title(theme, "Connection", None))
                     .child(div().flex_1())
+                    .child(Button::new("m-disconnect", "Disconnect").icon("unplug").style(ButtonStyle::Ghost).tooltip("Stop connecting to it until you connect again. Its sessions keep running there.").on_click(cx.listener({
+                        let mid = mid.clone();
+                        move |this, _, _, cx| this.set_machine_connected(&mid, false, cx)
+                    })))
                     .child(Button::icon_only("m-conn-refresh", "refresh-cw").tooltip("Refresh").on_click(cx.listener({
                         let mid = mid.clone();
                         move |this, _, _, cx| this.load_machine_connection(&mid, cx)

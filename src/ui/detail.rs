@@ -28,7 +28,8 @@ impl Root {
         if let Some(v) = m.probe.as_ref().and_then(|p| p.os_version.clone()) {
             meta.push(v);
         }
-        let offline = m.status == "offline";
+        let offline = m.is_down();
+        let disconnected = m.is_disconnected();
         if offline {
             // Whatever we knew about its connection and git is stale now;
             // look again when it's back.
@@ -40,13 +41,16 @@ impl Root {
             None => "Not updated yet".into(),
         };
 
+        // Narrow: the buttons go under the name (and wrap), never off the edge.
         let header = div()
             .flex()
+            .flex_wrap()
             .items_start()
             .justify_between()
-            .gap(px(16.))
+            .gap(px(12.))
             .child(
                 div()
+                    .flex_none()
                     .flex()
                     .items_start()
                     .gap(px(12.))
@@ -77,83 +81,107 @@ impl Root {
                             .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(checked)),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(6.))
-                    // What you come to a machine for first: a session, its desktop.
-                    .child({
-                        let mid = m.id.clone();
-                        Button::new("m-session", "New session")
-                            .icon("square-terminal")
-                            .style(ButtonStyle::Primary)
+            .child({
+                let windows = m.platform.starts_with("windows");
+                let mut buttons: Vec<AnyElement> = Vec::new();
+                // Disconnected on purpose: connecting is what there is to do.
+                if disconnected {
+                    let mid = m.id.clone();
+                    buttons.push(Button::new("m-connect", "Connect").icon("plug").style(ButtonStyle::Primary).on_click(cx.listener(move |this, _, _, cx| this.set_machine_connected(&mid, true, cx))).into_any_element());
+                }
+                // What you come to a machine for first: a session, its desktop.
+                let mid = m.id.clone();
+                buttons.push(
+                    Button::new("m-session", "New session")
+                        .icon("square-terminal")
+                        .style(if disconnected { ButtonStyle::Outlined } else { ButtonStyle::Primary })
+                        .disabled(m.host.is_empty() || offline)
+                        .on_click(cx.listener(move |this, _, window, cx| this.show_new_session(Some(mid.clone()), window, cx)))
+                        .into_any_element(),
+                );
+                if super::format::has_desktop(&m) && !m.local {
+                    let mid = m.id.clone();
+                    buttons.push(
+                        Button::new("m-desktop", "Show desktop")
+                            .icon("monitor")
                             .disabled(m.host.is_empty() || offline)
-                            .on_click(cx.listener(move |this, _, window, cx| this.show_new_session(Some(mid.clone()), window, cx)))
-                    })
-                    .when(super::format::has_desktop(&m) && !m.local, |d| {
-                        let mid = m.id.clone();
-                        d.child(
-                            Button::new("m-desktop", "Show desktop")
-                                .icon("monitor")
-                                .disabled(m.host.is_empty() || offline)
-                                .on_click(cx.listener(move |this, _, window, cx| this.show_display(mid.clone(), None, window, cx))),
-                        )
-                    })
-                    .when(!m.platform.starts_with("windows"), |d| {
-                        let mid = m.id.clone();
-                        d.child(
-                            Button::new("m-logs", "Logs")
-                                .icon("scroll-text")
-                                .disabled(m.host.is_empty() || offline)
-                                .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Logs(mid.clone()), window, cx))),
-                        )
-                    })
-                    .when(!m.platform.starts_with("windows"), |d| {
-                        let mid = m.id.clone();
-                        d.child(
-                            Button::new("m-services", "Services")
-                                .icon("layers")
-                                .disabled(m.host.is_empty() || offline)
-                                .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Services(mid.clone()), window, cx))),
-                        )
-                    })
-                    .child({
-                        let mid = m.id.clone();
-                        Button::new("m-install", "Install runner")
-                            .icon("plus")
-                            .disabled(m.host.is_empty() || busy || offline)
-                            .on_click(cx.listener(move |this, _, window, cx| this.show_install_dialog(&mid, window, cx)))
-                    })
-                    .when(!m.platform.starts_with("windows"), |d| {
-                        let mid = m.id.clone();
-                        d.child(
-                            Button::new("m-copy", "Copy files")
-                                .icon("folder")
-                                .disabled(m.host.is_empty() || offline)
-                                .on_click(cx.listener(move |this, _, window, cx| this.show_copy_files(Some(mid.clone()), None, window, cx))),
-                        )
-                    })
-                    .child({
-                        let mid = m.id.clone();
+                            .on_click(cx.listener(move |this, _, window, cx| this.show_display(mid.clone(), None, window, cx)))
+                            .into_any_element(),
+                    );
+                }
+                if !windows {
+                    let mid = m.id.clone();
+                    buttons.push(
+                        Button::new("m-logs", "Logs")
+                            .icon("scroll-text")
+                            .disabled(m.host.is_empty() || offline)
+                            .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Logs(mid.clone()), window, cx)))
+                            .into_any_element(),
+                    );
+                    let mid = m.id.clone();
+                    buttons.push(
+                        Button::new("m-services", "Services")
+                            .icon("layers")
+                            .disabled(m.host.is_empty() || offline)
+                            .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Services(mid.clone()), window, cx)))
+                            .into_any_element(),
+                    );
+                }
+                let mid = m.id.clone();
+                buttons.push(
+                    Button::new("m-install", "Install runner")
+                        .icon("plus")
+                        .disabled(m.host.is_empty() || busy || offline)
+                        .on_click(cx.listener(move |this, _, window, cx| this.show_install_dialog(&mid, window, cx)))
+                        .into_any_element(),
+                );
+                if !windows {
+                    let mid = m.id.clone();
+                    buttons.push(
+                        Button::new("m-copy", "Copy files")
+                            .icon("folder")
+                            .disabled(m.host.is_empty() || offline)
+                            .on_click(cx.listener(move |this, _, window, cx| this.show_copy_files(Some(mid.clone()), None, window, cx)))
+                            .into_any_element(),
+                    );
+                }
+                if !disconnected {
+                    let mid = m.id.clone();
+                    buttons.push(
                         Button::new("m-check", "Refresh")
                             .tooltip("Read its status, CPU, memory, disk, runners and sessions again")
                             .icon("refresh-cw")
                             .loading(m.checking)
                             .disabled(m.host.is_empty())
                             .on_click(cx.listener(move |this, _, _, _| this.engine.trigger_check(Some(mid.clone()))))
-                    })
-                    .child({
-                        let machine = m.clone();
-                        Button::icon_only("m-remove", "trash-2")
-                            .style(ButtonStyle::Danger)
-                            .tooltip(if machine.cloud.is_some() { "Destroy" } else { "Remove from Muxen" })
-                            .on_click(cx.listener(move |this, _, window, cx| this.confirm_remove_machine(&machine, window, cx)))
-                    }),
-            );
+                            .into_any_element(),
+                    );
+                }
+                let remove = {
+                    let machine = m.clone();
+                    Button::icon_only("m-remove", "trash-2")
+                        .style(ButtonStyle::Danger)
+                        .tooltip(if machine.cloud.is_some() { "Destroy" } else { "Remove from Muxen" })
+                        .on_click(cx.listener(move |this, _, window, cx| this.confirm_remove_machine(&machine, window, cx)))
+                };
+                // Remove stays beside the button before it, never on a line of its own.
+                let last = buttons.pop();
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .min_w(px(0.))
+                    .gap(px(6.))
+                    .children(buttons)
+                    .child(div().flex_none().flex().items_center().gap(px(6.)).children(last).child(remove))
+            });
 
         let mut body = page("machine-page", &self.page_scroll).child(header);
         if let Some(c) = &m.cloud {
             body = body.child(self.cloud_card(&theme, &s, &m, c, busy, cx));
+        }
+
+        if disconnected {
+            body = body.child(self.disconnected_card(&theme, &m, cx));
         }
 
         // A powered-off cloud machine says so on its cloud card.
@@ -205,6 +233,10 @@ impl Root {
 
         if !m.host.is_empty() {
             body = body.child(self.machine_sessions(&theme, &s, &m, cx));
+            // Its servers, to open here (not for this computer, or one we can't reach).
+            if !m.platform.starts_with("windows") && !m.local && !offline {
+                body = body.child(self.machine_servers(&theme, &m, cx));
+            }
             // Connection and git are about a machine we can reach.
             if !m.platform.starts_with("windows") && !offline {
                 if m.host != "local" {
@@ -719,6 +751,30 @@ fn metric_card(theme: &Theme, title: &'static str, value: Option<String>, sub: O
 impl Root {
     /// Why the machine can't be reached, calmly: what probably happened, when
     /// it was last reached, a way to check again, and what ssh said (folded).
+    /// A machine disconnected on purpose: what that means, and Connect.
+    fn disconnected_card(&self, theme: &Theme, m: &Machine, cx: &mut Context<Self>) -> AnyElement {
+        let mid = m.id.clone();
+        let seen = m.probe.as_ref().map(|p| format!("Last updated {}.", format::ago(Some(p.checked_at)))).unwrap_or_default();
+        card(theme)
+            .p(px(16.))
+            .flex_row()
+            .items_center()
+            .gap(px(14.))
+            .child(div().size(px(34.)).flex_none().rounded_full().flex().items_center().justify_center().bg(theme.text_muted.opacity(0.12)).child(icon("unplug", 16., theme.text_muted)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .gap(px(4.))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(format!("Disconnected from {}", m.name)))
+                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(format!("Muxen isn't connecting to it, checking it or reading its sessions. Its sessions keep running there. {seen}"))),
+            )
+            .child(Button::new("m-connect-card", "Connect").icon("plug").on_click(cx.listener(move |this, _, _, cx| this.set_machine_connected(&mid, true, cx))))
+            .into_any_element()
+    }
+
     fn unreachable_card(&self, theme: &Theme, m: &Machine, u: &Unreachable, cx: &mut Context<Self>) -> AnyElement {
         let just_offline = u.kind == "offline";
         let (glyph, color) = match u.kind.as_str() {

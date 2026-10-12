@@ -803,3 +803,26 @@ pub fn services(l: &crate::fleet::services::ServiceList) -> String {
     }
     out
 }
+
+/// A machine's servers and ports, web servers first.
+pub fn ports(list: &[crate::fleet::ports::ListeningPort]) -> String {
+    if list.is_empty() {
+        return "Nothing is listening there.\n".into();
+    }
+    let mut out = String::new();
+    for p in list {
+        let what = [Some(p.name()), p.container.clone().filter(|c| Some(c) != p.title.as_ref()).map(|c| format!("container {c}")), (!p.process.is_empty() && p.title.is_some()).then(|| p.process.clone())]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let web = match p.status {
+            Some(s) if p.web => format!("http {s}"),
+            _ => String::new(),
+        };
+        let reach = if p.local_only() { "localhost only" } else { "" };
+        out.push_str(&format!("  {:<6} {:<48} {:<9} {}\n", p.port, what, web, reach).trim_end());
+        out.push('\n');
+    }
+    out
+}

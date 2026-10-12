@@ -215,6 +215,21 @@ pub fn set_workspaces(text: &str, machine_id: &str, allowed: bool) -> Result<Str
     finish(doc)
 }
 
+/// Disconnects a machine (`disconnected = true`) or connects it again
+/// (connected is the default, so the key goes).
+pub fn set_disconnected(text: &str, machine_id: &str, disconnected: bool) -> Result<String, String> {
+    let mut doc = parse(text)?;
+    let machines = machines_mut(&mut doc)?;
+    let index = find_machine(machines, machine_id)?;
+    let table = machines.get_mut(index).ok_or("Machine not found.")?;
+    if disconnected {
+        table["disconnected"] = value(true);
+    } else {
+        table.remove("disconnected");
+    }
+    finish(doc)
+}
+
 fn parse(text: &str) -> Result<DocumentMut, String> {
     text.parse::<DocumentMut>().map_err(|e| format!("config.toml has a syntax error, so it wasn't changed: {}", e.to_string().trim()))
 }
@@ -268,6 +283,19 @@ mod workspace_tests {
         let on = set_workspaces(&off, "box", true).unwrap();
         assert!(!on.contains("workspaces"), "{on}");
         assert!(Inventory::parse(&on).unwrap().machines[0].workspaces);
+    }
+
+    #[test]
+    fn disconnects_and_connects() {
+        let text = "[[machine]]\nname = \"Box\" # main box\nhost = \"box\"\n";
+        let off = set_disconnected(text, "box", true).unwrap();
+        assert!(off.contains("# main box") && off.contains("disconnected = true"), "{off}");
+        let m = &Inventory::parse(&off).unwrap().machines[0];
+        assert!(m.disconnected && m.is_checkable() && !m.is_connected());
+        assert!(m.refuse_if_disconnected().unwrap_err().contains("Box is disconnected"));
+        let on = set_disconnected(&off, "box", false).unwrap();
+        assert!(!on.contains("disconnected"), "{on}");
+        assert!(Inventory::parse(&on).unwrap().machines[0].is_connected());
     }
 }
 

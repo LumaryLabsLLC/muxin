@@ -187,6 +187,7 @@ impl Engine {
         if !spec.is_checkable() {
             return Err(format!("{} has no host to connect to.", spec.name));
         }
+        spec.refuse_if_disconnected()?;
         if matches!(shell_for(&spec, probe.as_ref()), Shell::Powershell) {
             let found = MachineSessions {
                 checked_at: Some(Utc::now()),

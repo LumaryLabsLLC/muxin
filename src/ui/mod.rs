@@ -16,6 +16,7 @@ mod menu;
 mod overview;
 mod palette;
 mod panes;
+mod ports;
 mod desktop;
 mod sessions;
 mod compose;

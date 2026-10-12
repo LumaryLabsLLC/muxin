@@ -55,6 +55,10 @@ enum Command {
     RemoveMachine(MachineArgs),
     /// Give a machine a new name (its id stays the same)
     RenameMachine(RenameMachineArgs),
+    /// Stop connecting to a machine (its sessions go on there) until `muxen connect`
+    Disconnect(MachineArgs),
+    /// Connect to a machine again (and check it)
+    Connect(MachineArgs),
     /// List runners
     Runners(RunnersArgs),
     /// Queued and running self-hosted jobs
@@ -98,6 +102,10 @@ enum Command {
     Logs(LogsArgs),
     /// A machine's services and containers; or start, stop, restart, enable or disable one
     Services(ServicesArgs),
+    /// What's listening on a machine (its servers and ports)
+    Ports(MachineArgs),
+    /// Open a machine's port on this computer (localhost) until Ctrl-C
+    Forward(ForwardArgs),
     /// Cloud machines: create DigitalOcean droplets to work in, power them, destroy them
     #[command(subcommand)]
     Cloud(CloudCommand),
@@ -484,6 +492,19 @@ enum DesktopCommand {
     Remove(DesktopRemoveArgs),
     /// Change a monitor's resolution or scale
     Set(DesktopSetArgs),
+}
+
+#[derive(Args)]
+struct ForwardArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// The port there
+    port: u16,
+    /// The port here (default: the same one, or the next free one)
+    #[arg(long)]
+    local: Option<u16>,
 }
 
 #[derive(Args)]
@@ -1112,6 +1133,14 @@ fn main() -> ExitCode {
                 format!("Removed {} ({}) from config.toml. Nothing on the machine changed.\n", m.name, m.id)
             })
         }
+        Some(Command::Connect(a)) => {
+            let req = api::ConnectMachineRequest { machine_id: a.machine_id, connected: true };
+            run(&runtime, &a.agent, async move |e| api::connect_machine(&e, req).await, |m| format!("Connected to {} ({}).\n", m.name, m.status))
+        }
+        Some(Command::Disconnect(a)) => {
+            let req = api::ConnectMachineRequest { machine_id: a.machine_id, connected: false };
+            run(&runtime, &a.agent, async move |e| api::connect_machine(&e, req).await, |m| format!("Disconnected from {}. Its sessions go on there; `muxen connect {}` connects again.\n", m.name, m.id))
+        }
         Some(Command::RenameMachine(a)) => {
             let req = api::RenameMachineRequest { machine_id: a.machine_id, name: a.name };
             run(&runtime, &a.agent, async move |e| api::rename_machine(&e, req).await, |m| format!("Renamed {} to {}.\n", m.id, m.name))
@@ -1209,6 +1238,25 @@ fn main() -> ExitCode {
         Some(Command::Desktop(cmd)) => desktop(cmd, &runtime),
         Some(Command::Logs(a)) => logs(a, &runtime),
         Some(Command::Services(a)) => services(a, &runtime),
+        Some(Command::Ports(a)) => {
+            let req = api::PortsRequest { machine_id: a.machine_id };
+            run(&runtime, &a.agent, async move |e| api::machine_ports(&e, req).await, |p| cli::ports(p))
+        }
+        Some(Command::Forward(a)) => {
+            let (machine, port, local) = (a.machine.clone(), a.port, a.local);
+            run(
+                &runtime,
+                &a.agent,
+                async move |e| {
+                    let f = api::forward_port(&e, api::ForwardRequest { machine_id: machine, port, local_port: local }).await?;
+                    eprintln!("Port {} of {} is at {} here. Ctrl-C stops.", f.port, f.machine_id, f.url());
+                    let _ = tokio::signal::ctrl_c().await;
+                    e.stop_forward(&f.machine_id, f.port);
+                    Ok(f)
+                },
+                |_| String::new(),
+            )
+        }
         Some(Command::Cloud(cmd)) => cloud(cmd, &runtime),
         Some(Command::Files(a)) => {
             let (machine, path) = a.target.split_once(':').map(|(m, p)| (m.to_string(), p.to_string())).unwrap_or((a.target.clone(), String::new()));

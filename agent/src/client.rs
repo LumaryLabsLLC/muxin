@@ -103,6 +103,8 @@ pub fn handle(req: &Value) -> Value {
         "service_action" => crate::services::act(&req),
         "compose_new" => crate::services::compose_new(&req),
         "compose_describe" => crate::services::compose_describe(&req),
+        "ports" => crate::ports::list(),
+        "listening" => crate::ports::listening(),
         _ => request(&req, false),
     }
 }

@@ -82,6 +82,10 @@ enum Sink {
     Clip(Program),
     /// A log being followed (journalctl, tail -F, docker logs -f, log stream).
     Logs(std::process::Child),
+    /// A TCP connection to a port here (a server forwarded to the app's
+    /// computer): what the app sends goes to its writer thread, so a slow
+    /// server doesn't hold up the link.
+    Tcp { to: mpsc::Sender<Vec<u8>>, stream: std::net::TcpStream },
 }
 
 impl Sink {
@@ -94,6 +98,11 @@ impl Sink {
             Sink::Pack(credit) => credit.close(),
 
             Sink::Unpack(u) => u.stop(),
+            Sink::Tcp { to, stream } => {
+                // What's queued still goes out (then the writer ends its half).
+                drop(to);
+                let _ = stream.shutdown(std::net::Shutdown::Read);
+            }
             Sink::Logs(mut child) => {
                 // Its whole process group (`log stream` runs under a shell).
                 unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM) };
@@ -169,7 +178,7 @@ pub fn serve(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>) -> 
         return 1;
     }
     loop {
-        let (channel, kind, payload) = match read_frame(&mut input) {
+        let (channel, kind, mut payload) = match read_frame(&mut input) {
             Ok(f) => f,
             Err(_) => break,
         };
@@ -204,6 +213,7 @@ pub fn serve(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>) -> 
                 Ok(())
             }
             Some(Sink::Unpack(u)) if kind == proto::DATA => u.write(&payload),
+            Some(Sink::Tcp { to, .. }) if kind == proto::DATA => to.send(std::mem::take(&mut payload)).map_err(|_| io::Error::other("closed")),
             Some(Sink::Clip(p)) if kind == crate::clipboard::CLIP => crate::gui::write(&mut p.input, kind, &payload),
             Some(Sink::Unpack(u)) if kind == crate::files::END => {
                 u.end();
@@ -232,6 +242,7 @@ fn handle(req: &Value, out: &Out, attached: &Attached) -> Value {
         "files" => crate::files::list(req),
         "clipboard" => clipboard(req, out, attached),
         "logs" => logs(req, out, attached),
+        "tcp" => tcp(req, out, attached),
         "pack" | "unpack" => files(req, out, attached),
         "watch" => {
             let out = out.clone();
@@ -443,9 +454,13 @@ fn logs(req: &Value, out: &Out, attached: &Attached) -> Value {
     let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
     attached.lock().unwrap().insert(channel, Sink::Logs(child));
     // Both outputs (docker writes a container's stderr to its own), a whole
-    // line at a time so the two don't cut into each other's lines.
-    let pump = |pipe: Box<dyn Read + Send>, last: bool| {
+    // line at a time so the two don't cut into each other's lines. One
+    // thread reads, another sends: a Compose project's last lines come one
+    // container after another, so they're put in time order first.
+    let sort_backlog = req["source"]["kind"] == "compose";
+    let pump = |pipe: Box<dyn Read + Send>, last: bool, sort_backlog: bool| {
         let (out, attached) = (out.clone(), attached.clone());
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
         thread::spawn(move || {
             let mut pipe = pipe;
             let mut pending: Vec<u8> = Vec::new();
@@ -456,20 +471,46 @@ fn logs(req: &Value, out: &Out, attached: &Attached) -> Value {
                     break;
                 }
                 pending.extend_from_slice(&chunk[..n]);
-                if let Some(end) = pending.iter().rposition(|b| *b == b'\n') {
-                    let lines: Vec<u8> = pending.drain(..=end).collect();
-                    // The app can't be reached: stop the program.
-                    if send(&out, channel, proto::DATA, &lines).is_err() {
-                        if let Some(s) = attached.lock().unwrap().remove(&channel) {
-                            s.close();
-                        }
-                        return;
-                    }
+                if let Some(end) = pending.iter().rposition(|b| *b == b'\n') && tx.send(pending.drain(..=end).collect()).is_err() {
+                    return;
                 }
             }
             if !pending.is_empty() {
                 pending.push(b'\n');
-                let _ = send(&out, channel, proto::DATA, &pending);
+                let _ = tx.send(pending);
+            }
+        });
+        thread::spawn(move || {
+            // The app can't be reached: stop the program.
+            let deliver = |lines: &[u8]| {
+                let sent = send(&out, channel, proto::DATA, lines).is_ok();
+                if !sent && let Some(s) = attached.lock().unwrap().remove(&channel) {
+                    s.close();
+                }
+                sent
+            };
+            if sort_backlog {
+                // The backlog: what comes before the first pause.
+                let mut backlog: Vec<u8> = Vec::new();
+                let started = Instant::now();
+                let mut wait = Duration::from_secs(5);
+                while let Ok(lines) = rx.recv_timeout(wait) {
+                    backlog.extend(lines);
+                    wait = Duration::from_millis(400);
+                    if started.elapsed() > Duration::from_secs(4) {
+                        break;
+                    }
+                }
+                let text = String::from_utf8_lossy(&backlog).into_owned();
+                let sorted = crate::logs::by_time(text.lines().collect());
+                if !sorted.is_empty() && !deliver(format!("{}\n", sorted.join("\n")).as_bytes()) {
+                    return;
+                }
+            }
+            for lines in rx {
+                if !deliver(&lines) {
+                    return;
+                }
             }
             // Stdout ended: the program stopped.
             if last && let Some(s) = attached.lock().unwrap().remove(&channel) {
@@ -479,11 +520,71 @@ fn logs(req: &Value, out: &Out, attached: &Attached) -> Value {
         });
     };
     if let Some(e) = stderr {
-        pump(Box::new(e), false);
+        pump(Box::new(e), false, false);
     }
     if let Some(o) = stdout {
-        pump(Box::new(o), true);
+        pump(Box::new(o), true, sort_backlog);
     }
+    json!({ "ok": true })
+}
+
+/// `{"op": "tcp", "channel", "port", "host"?}`: connects to a port here (or
+/// at `host`, 127.0.0.1 by default) and joins it to the channel: a server on
+/// this machine, reached from the app's computer.
+fn tcp(req: &Value, out: &Out, attached: &Attached) -> Value {
+    use std::net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
+    let channel = req["channel"].as_u64().unwrap_or(0) as u32;
+    if channel == CONTROL {
+        return json!({ "ok": false, "error": "a connection needs a channel" });
+    }
+    let Some(port) = req["port"].as_u64().filter(|p| (1..=65535).contains(p)).map(|p| p as u16) else {
+        return json!({ "ok": false, "error": "Which port?" });
+    };
+    let host = req["host"].as_str().filter(|h| !h.is_empty()).unwrap_or("127.0.0.1");
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return json!({ "ok": false, "error": format!("\"{host}\" isn't an address.") });
+    };
+    // A server listening only on IPv6's localhost answers there.
+    let mut tries = vec![SocketAddr::new(ip, port)];
+    if host == "127.0.0.1" {
+        tries.push(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port));
+    }
+    let Some(stream) = tries.iter().find_map(|a| TcpStream::connect_timeout(a, Duration::from_secs(5)).ok()) else {
+        return json!({ "ok": false, "error": format!("Nothing is listening on port {port} there.") });
+    };
+    let _ = stream.set_nodelay(true);
+    let (Ok(mut reader), Ok(mut writer)) = (stream.try_clone(), stream.try_clone()) else {
+        return json!({ "ok": false, "error": "couldn't use the connection" });
+    };
+    let (to, from) = mpsc::channel::<Vec<u8>>();
+    thread::spawn(move || {
+        for chunk in from {
+            if writer.write_all(&chunk).is_err() {
+                break;
+            }
+        }
+        let _ = writer.shutdown(Shutdown::Write);
+    });
+    attached.lock().unwrap().insert(channel, Sink::Tcp { to, stream });
+    let (out, attached) = (out.clone(), attached.clone());
+    thread::spawn(move || {
+        let mut buf = vec![0u8; 32 * 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if send(&out, channel, proto::DATA, &buf[..n]).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        // The server hung up (or the app can't be reached): tell the app.
+        if let Some(s) = attached.lock().unwrap().remove(&channel) {
+            s.close();
+            let _ = send(&out, channel, CLOSE, &[]);
+        }
+    });
     json!({ "ok": true })
 }
 

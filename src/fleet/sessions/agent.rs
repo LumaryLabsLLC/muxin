@@ -83,6 +83,7 @@ fn verified() -> &'static Mutex<HashMap<String, String>> {
 /// Makes sure the machine runs this Muxen's agent build, installing it if
 /// not. Cheap after the first time per machine.
 pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(), String> {
+    spec.refuse_if_disconnected()?;
     let target = target(probe).ok_or_else(|| match probe {
         Some(p) => format!("Muxen has no agent for {}-{} machines yet.", p.os.as_deref().unwrap_or("?"), p.arch.as_deref().unwrap_or("?")),
         None => format!("Muxen hasn't reached {} yet, so it doesn't know which agent build it needs. Refresh it first.", spec.name),
@@ -198,6 +199,7 @@ pub async fn ctl(spec: &MachineSpec, request: &Value) -> Result<Value, String> {
 /// Like `ctl`, but the agent's whole reply, refusals included (for the
 /// details beside the error). Err only when it couldn't be asked.
 pub async fn ctl_reply(spec: &MachineSpec, request: &Value) -> Result<Value, String> {
+    spec.refuse_if_disconnected()?;
     if let Some(link) = crate::fleet::link::get(spec).await {
         if let Ok(reply) = link.request(request.clone(), CTL_TIMEOUT).await {
             return Ok(reply);

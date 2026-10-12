@@ -42,6 +42,8 @@ enum Action {
     CopyFiles(String),
     NewAgent(String, &'static str),
     Check(String),
+    /// Connect to (true) or disconnect from (false) a machine.
+    Connect(String, bool),
     InstallRunner(String),
     Remove(String),
     Runner(String, RunnerAction),
@@ -105,8 +107,13 @@ impl Root {
                 let Some(m) = s.machines.iter().find(|m| &m.id == id) else { return Vec::new() };
                 let mut items = Vec::new();
                 if !m.host.is_empty() {
-                    // These need the machine up: dimmed while it's off or unreachable.
-                    let up = m.status != "offline";
+                    // Disconnected on purpose: connecting comes first.
+                    if m.is_disconnected() {
+                        items.push(act("Connect", "plug", Action::Connect(id.clone(), true)));
+                        items.push(Item::Separator);
+                    }
+                    // These need the machine up: dimmed while it's off, unreachable or disconnected.
+                    let up = !m.is_down();
                     let needs_up = |item: Item| match item {
                         Item::Action { label, glyph, .. } if !up => Item::Off { label, glyph },
                         other => other,
@@ -129,8 +136,13 @@ impl Root {
                         items.push(needs_up(act("Copy files…", "folder", Action::CopyFiles(id.clone()))));
                     }
                     items.push(Item::Separator);
-                    items.push(act("Refresh", "refresh-cw", Action::Check(id.clone())));
+                    if !m.is_disconnected() {
+                        items.push(act("Refresh", "refresh-cw", Action::Check(id.clone())));
+                    }
                     items.push(needs_up(act("Install runner…", "plus", Action::InstallRunner(id.clone()))));
+                    if !m.is_disconnected() && !m.local {
+                        items.push(act("Disconnect", "unplug", Action::Connect(id.clone(), false)));
+                    }
                     items.push(Item::Separator);
                 }
                 items.push(act("Rename…", "pencil", Action::RenameMachine(id.clone())));
@@ -346,6 +358,7 @@ impl Root {
             Action::ShowServices(machine) => self.navigate(Route::Services(machine), window, cx),
             Action::CopyFiles(machine) => self.show_copy_files(Some(machine), None, window, cx),
             Action::Check(machine) => self.engine.trigger_check(Some(machine)),
+            Action::Connect(machine, on) => self.set_machine_connected(&machine, on, cx),
             Action::Runner(id, action) => self.runner_action(&id, action, cx),
             Action::FavoriteMachine(id, favorite) => self.set_favorite_machine(&id, favorite, cx),
             Action::AddDisplay(id) => self.show_add_display(id, window, cx),

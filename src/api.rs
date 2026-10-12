@@ -150,6 +150,15 @@ pub struct CheckRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ConnectMachineRequest {
+    pub machine_id: String,
+    /// false disconnects. Default true.
+    #[serde(default = "default_true")]
+    pub connected: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenameMachineRequest {
     /// Machine id, e.g. "mac-studio". It stays the same after the rename.
     pub machine_id: String,
@@ -381,7 +390,7 @@ pub struct MachineSummary {
     pub id: String,
     pub name: String,
     pub host: String,
-    /// "online" | "offline" (unreachable) | "unchecked" | "manual" (no host)
+    /// "online" | "offline" (unreachable) | "unchecked" | "manual" (no host) | "disconnected" (on purpose: connect_machine)
     pub status: String,
     pub checking: bool,
     /// e.g. "darwin-arm64", "linux-x64", "windows-x64"
@@ -1174,6 +1183,20 @@ pub async fn add_machine(engine: &Arc<Engine>, req: AddMachineRequest, surface: 
     Ok(AddMachineResponse { machine_id: id, machine, next })
 }
 
+/// Disconnects from a machine (Muxen stops connecting to it, checking it and
+/// looking at its sessions, which go on there) or connects again (and checks
+/// it, waiting for that).
+pub async fn connect_machine(engine: &Arc<Engine>, req: ConnectMachineRequest) -> ApiResult<MachineSummary> {
+    engine.refresh_from_disk();
+    let id = find_machine(&engine.current(), &req.machine_id)?.id.clone();
+    engine.set_connected(&id, req.connected).map_err(op_error)?;
+    if req.connected {
+        engine.run_check(Some(vec![id.clone()])).await;
+    }
+    let s = engine.current();
+    Ok(machine_summary(find_machine(&s, &id)?))
+}
+
 /// Gives a machine a new name; its id (and everything tied to it) stays.
 pub async fn rename_machine(engine: &Arc<Engine>, req: RenameMachineRequest) -> ApiResult<MachineSummary> {
     engine.refresh_from_disk();
@@ -1888,7 +1911,7 @@ pub fn workspaces_list(engine: &Arc<Engine>) -> WorkspacesResponse {
     let all = current_workspaces(engine);
     let s = engine.current();
     // Unchecked machines count: creating a workspace checks the machine first.
-    let available: Vec<String> = s.machines.iter().filter(|m| m.workspaces_allowed && m.status != "offline").map(|m| m.id.clone()).collect();
+    let available: Vec<String> = s.machines.iter().filter(|m| m.workspaces_allowed && !m.is_down()).map(|m| m.id.clone()).collect();
     let ready = all.iter().filter(|w| w.status == "ready").count();
     WorkspacesResponse {
         summary: format!(
@@ -2457,7 +2480,7 @@ fn session_machines(engine: &Arc<Engine>, only: Option<&str>) -> ApiResult<Vec<M
     let s = engine.current();
     match only {
         Some(id) => Ok(vec![find_machine(&s, id)?.clone()]),
-        None => Ok(s.machines.iter().filter(|m| !m.host.is_empty() && m.status != "offline").cloned().collect()),
+        None => Ok(s.machines.iter().filter(|m| !m.host.is_empty() && !m.is_down()).cloned().collect()),
     }
 }
 
@@ -3216,8 +3239,10 @@ pub struct ComposeActionRequest {
     pub machine_id: String,
     /// The project's name, as machine_services lists it.
     pub project: String,
-    /// up, down, restart or pull.
+    /// up, down, restart or pull; with `service`: start, stop or restart.
     pub action: String,
+    /// One of its services, to start, stop or restart just that one.
+    pub service: Option<String>,
     pub wait: Option<bool>,
 }
 
@@ -3225,8 +3250,41 @@ pub async fn compose_action(engine: &Arc<Engine>, req: ComposeActionRequest) -> 
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
     let list = engine.services(&m.id, false).await.map_err(|e| ApiError::new("operation_failed", e))?;
     let project = list.compose.into_iter().find(|p| p.name == req.project).ok_or_else(|| ApiError::new("not_found", format!("{} has no Compose project called {}.", m.name, req.project)))?;
-    let op = engine.compose_action(&m.id, &project, &req.action).map_err(|e| ApiError::new("invalid", e))?;
+    let op = match req.service.as_deref().filter(|s| !s.is_empty()) {
+        Some(service) => engine.compose_service_action(&m.id, &project, service, &req.action),
+        None => engine.compose_action(&m.id, &project, &req.action),
+    }
+    .map_err(|e| ApiError::new("invalid", e))?;
     operation_result(engine, op, req.wait.unwrap_or(true)).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortsRequest {
+    pub machine_id: String,
+}
+
+/// What's listening on a machine: each TCP port with its program or Docker
+/// container, and for web servers the status and title of their front page.
+pub async fn machine_ports(engine: &Arc<Engine>, req: PortsRequest) -> ApiResult<Vec<crate::fleet::ports::ListeningPort>> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    engine.ports(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForwardRequest {
+    pub machine_id: String,
+    pub port: u16,
+    /// The port on this computer (default: the same, or the next free one).
+    pub local_port: Option<u16>,
+}
+
+/// Opens a machine's port on this computer (localhost), for as long as this
+/// process runs.
+pub async fn forward_port(engine: &Arc<Engine>, req: ForwardRequest) -> ApiResult<crate::fleet::ports::Forward> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    engine.forward(&m.id, req.port, None, req.local_port).await.map_err(|e| ApiError::new("invalid", e))
 }
 
 #[derive(Debug, Deserialize)]

@@ -73,6 +73,9 @@ pub fn machine_tile(m: &Machine) -> (u32, u32) {
 /// The line under a machine's name in the sidebar ("Ubuntu 26.04 · x64"),
 /// with a color role: "muted" or "error".
 pub fn machine_subtitle(m: &Machine) -> (String, &'static str) {
+    if m.is_disconnected() {
+        return ("Disconnected".into(), "muted");
+    }
     if m.checking && m.probe.is_none() {
         return ("Connecting…".into(), "muted");
     }
@@ -171,7 +174,9 @@ pub fn is_powered_off(m: &Machine) -> bool {
 
 /// A machine that can't be reached, in a word or two: "Offline", "Can't connect".
 pub fn unreachable_word(m: &Machine) -> &'static str {
-    if is_powered_off(m) {
+    if m.is_disconnected() {
+        "Disconnected"
+    } else if is_powered_off(m) {
         "Powered off"
     } else if is_just_offline(m) {
         "Offline"

@@ -294,6 +294,10 @@ pub struct MachineSpec {
     /// A cloud machine Muxen created (and can power off or destroy).
     #[serde(default)]
     pub cloud: Option<CloudRef>,
+    /// Disconnected on purpose: Muxen doesn't connect to it, check it or look
+    /// at its sessions until it's connected again (its sessions go on there).
+    #[serde(default)]
+    pub disconnected: bool,
 }
 
 /// Where a cloud machine lives, as config.toml records it:
@@ -350,6 +354,20 @@ impl MachineSpec {
 
     pub fn is_checkable(&self) -> bool {
         !self.host.trim().is_empty()
+    }
+
+    /// Muxen may reach it: it has a host and isn't disconnected.
+    pub fn is_connected(&self) -> bool {
+        self.is_checkable() && !self.disconnected
+    }
+
+    /// Err for a machine disconnected on purpose: what the user sees instead
+    /// of Muxen reaching it.
+    pub fn refuse_if_disconnected(&self) -> Result<(), String> {
+        if self.disconnected {
+            return Err(format!("{} is disconnected. Connect to it first.", self.name));
+        }
+        Ok(())
     }
 }
 

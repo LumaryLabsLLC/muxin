@@ -200,7 +200,11 @@ impl DesktopView {
                 let offline = {
                     let snap = rx.borrow_and_update();
                     snap.machines.iter().find(|m| m.id == id).and_then(|m| {
-                        (m.status == "offline").then(|| m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("Can't reach {}", m.name)))
+                        if m.is_disconnected() {
+                            Some(format!("Disconnected from {}: connect to it to see its desktop", m.name))
+                        } else {
+                            (m.status == "offline").then(|| m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("Can't reach {}", m.name)))
+                        }
                     })
                 };
                 if last.as_ref() != Some(&offline) {

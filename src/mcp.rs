@@ -292,6 +292,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "add_machine" => ok(api::add_machine(engine, args(a)?, Surface::Mcp).await?),
         "remove_machine" => ok(json!({ "removed": api::remove_machine(engine, args(a)?).await? })),
         "rename_machine" => ok(json!({ "renamed": api::rename_machine(engine, args(a)?).await? })),
+        "connect_machine" => ok(json!({ "machine": api::connect_machine(engine, args(a)?).await? })),
         "install_runners" => ok(api::install_runners(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "runner_action" => ok(api::runner_action(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "cancel_run" => ok(api::cancel_run(engine, args(a)?, Surface::Mcp, |_| {}).await?),
@@ -351,6 +352,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "docker_pull" => ok(api::docker_pull(engine, args(a)?).await?),
         "compose_action" => ok(api::compose_action(engine, args(a)?).await?),
         "compose_project" => ok(api::compose_project(engine, args(a)?).await?),
+        "machine_ports" => ok(json!({ "ports": api::machine_ports(engine, args(a)?).await? })),
         "direct_connection" => ok(api::set_direct(engine, args(a)?).await?),
         "git_setup" => ok(api::git_setup(engine, args(a)?).await?),
         other => Err(ApiError::not_found(format!("Unknown tool: {other}"))),
@@ -440,6 +442,15 @@ pub fn tools() -> Vec<Value> {
                 "name": { "type": "string", "description": "The new display name, e.g. \"Studio\"." }
             }), &["machine_id", "name"]),
             "annotations": annotations("Rename machine", false, false, true, false),
+        }),
+        json!({
+            "name": "connect_machine",
+            "description": "Disconnect from a machine (connected: false) or connect to it again. Disconnected, Muxen closes its connection and stops checking it and reading its sessions (status \"disconnected\"); its sessions keep running there, and anything that would reach it fails with \"<name> is disconnected\". Connecting checks it again. Saved in config.toml; nothing on the machine changes. Only when asked.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "connected": { "type": "boolean", "description": "false disconnects; true (the default) connects." }
+            }), &["machine_id"]),
+            "annotations": annotations("Connect or disconnect a machine", false, false, true, false),
         }),
         json!({
             "name": "install_runners",
@@ -951,6 +962,12 @@ pub fn tools() -> Vec<Value> {
             "annotations": annotations("Pull an image", false, false, true, false),
         }),
         json!({
+            "name": "machine_ports",
+            "description": "What's listening on a machine: each TCP port (port, address it listens on, host to connect to) with its program or Docker container, and for web servers (web: true) the status and title of their front page. Read-only. The user opens them on their computer from the Muxen app (machine page › Servers), or with `muxen forward <machine> <port>`.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
+            "annotations": annotations("List a machine's servers", true, false, true, false),
+        }),
+        json!({
             "name": "compose_project",
             "description": "A Docker Compose project's parts on a machine (machine_services lists the projects): each service's image (or build folder), the ports it opens on the machine, what it waits for (depends_on with its condition), its networks, volumes and the machine's files it mounts, whether it has a health check, and its containers' state and health; the project's networks and volumes. Environment values aren't included, only how many. Read-only.",
             "inputSchema": schema(json!({
@@ -961,11 +978,12 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "compose_action",
-            "description": "Bring a Docker Compose project up (detached), down, restart it or pull its images, on a machine (machine_services lists the projects). down stops and removes its containers. Waits unless wait is false. Only when asked.",
+            "description": "Bring a Docker Compose project up (detached), down, restart it or pull its images, on a machine (machine_services lists the projects). down stops and removes its containers. With service: start (with what it waits for), stop or restart just that service. Waits unless wait is false. Only when asked.",
             "inputSchema": schema(json!({
                 "machine_id": { "type": "string", "description": MACHINE_ID },
                 "project": { "type": "string" },
-                "action": { "type": "string", "enum": ["up", "down", "restart", "pull"] },
+                "action": { "type": "string", "enum": ["up", "down", "restart", "pull", "start", "stop"] },
+                "service": { "type": "string", "description": "One of the project's services (compose_project lists them): start, stop or restart only it." },
                 "wait": { "type": "boolean" }
             }), &["machine_id", "project", "action"]),
             "annotations": annotations("Compose up, down, restart or pull", false, true, false, false),
@@ -1033,7 +1051,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 70);
+        assert_eq!(tools.len(), 72);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

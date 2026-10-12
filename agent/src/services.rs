@@ -79,7 +79,22 @@ fn unit_usage(units: &[String], user: bool) -> std::collections::HashMap<String,
 }
 
 /// Docker's images.
+/// Docker's images, each with the containers that use it (and whether they run).
 fn images(docker: &str) -> Vec<Value> {
+    let mut users: std::collections::HashMap<String, Vec<Value>> = std::collections::HashMap::new();
+    let ids = quick(docker, &["ps", "-aq", "--no-trunc"]).unwrap_or_default();
+    let ids: Vec<&str> = ids.split_whitespace().collect();
+    if !ids.is_empty() {
+        let mut args = vec!["inspect", "--format", "{{.Image}}\t{{.State.Running}}\t{{.Name}}"];
+        args.extend(ids.iter().copied());
+        for l in quick(docker, &args).unwrap_or_default().lines() {
+            let f: Vec<&str> = l.split('\t').collect();
+            let [image, running, name] = f[..] else { continue };
+            // `docker images` gives the image's id cut to 12 characters.
+            let id: String = image.trim_start_matches("sha256:").chars().take(12).collect();
+            users.entry(id).or_default().push(json!({ "name": name.trim_start_matches('/'), "running": running == "true" }));
+        }
+    }
     quick(docker, &["images", "--format", "{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}"])
         .unwrap_or_default()
         .lines()
@@ -87,7 +102,8 @@ fn images(docker: &str) -> Vec<Value> {
             let f: Vec<&str> = l.split('\t').collect();
             let [id, repo, tag, size, created] = f[..] else { return None };
             let name = if repo == "<none>" { id.to_string() } else if tag == "<none>" { repo.to_string() } else { format!("{repo}:{tag}") };
-            Some(json!({ "id": id, "name": name, "repository": repo, "tag": tag, "size": size, "created": created }))
+            let used_by = users.get(id).cloned().unwrap_or_default();
+            Some(json!({ "id": id, "name": name, "repository": repo, "tag": tag, "size": size, "created": created, "used_by": used_by }))
         })
         .collect()
 }

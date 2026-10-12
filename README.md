@@ -164,6 +164,8 @@ The MCP server has these tools:
 | `list_jobs` | Queued and running jobs, including which ones no runner can take. |
 | `check_machines` | Runs the read-only machine check over ssh now. |
 | `add_machine`, `remove_machine`, `rename_machine` | Edit `config.toml`. Nothing on the machine changes. |
+| `connect_machine` | Disconnect from a machine (`connected: false`) or connect again. Its sessions keep running there. |
+| `machine_ports` | What's listening on a machine: ports, programs or containers, and web servers' page titles. |
 | `install_runners` | Downloads, registers and starts runners on a machine. |
 | `runner_action` | Starts, stops, restarts or removes a runner, or reads its logs. |
 | `get_operation`, `list_operations` | Progress and output of long operations. |
@@ -176,7 +178,7 @@ The MCP server has these tools:
 | `desktop_displays`, `desktop_add_display`, `desktop_remove_display`, `desktop_set_display` | A machine's monitors; add or remove virtual ones, change their resolution or scale. |
 | `log_sources`, `logs_read` | A machine's logs: its system log, files, containers and services, and their last lines. |
 | `machine_services`, `service_action` | A machine's services, containers, images and Compose projects (with CPU and memory); start, stop, restart, enable or disable one. |
-| `docker_run`, `docker_pull`, `compose_action` | Run a container, pull an image, bring a Compose project up or down. |
+| `docker_run`, `docker_pull`, `compose_action` | Run a container, pull an image, bring a Compose project up or down (or start, stop, restart one of its services). |
 | `compose_project` | A Compose project's parts: services, ports, what waits for what, networks, volumes, health. |
 | `session_list`, `session_start`, `session_read`, `session_send`, `session_rename`, `session_stop` | Agent sessions on the machines. |
 | `github_inbox`, `github_repos`, `github_repo`, `github_item`, `local_checkouts`, `git_sync`, … | The user's GitHub, and git checkouts on the machines. |
@@ -214,6 +216,10 @@ muxen jobs
 muxen add-machine --name <name> --host <ssh-host> [--no-check]
 muxen remove-machine <id>
 muxen rename-machine <id> <new name>      # the id stays the same
+muxen ports beelink                       # what's listening there (web servers first)
+muxen forward beelink 3000                # its port 3000 at localhost:3000 here, until Ctrl-C
+muxen disconnect <id>                     # stop connecting to it (its sessions go on there)
+muxen connect <id>                        # connect again, and check it
 muxen install <machine-id> [--scope acme] [--count N | --name a --name b] [--label gpu] [--mode auto|service|background|docker] [--image IMAGE] [--docker-socket] [--no-wait]
 muxen runner <start|stop|restart|logs|remove> <runner-id> [--delete-files]
 muxen watch <org|owner/repo>... / unwatch ...
@@ -337,6 +343,9 @@ Muxen first reaches a machine with `ssh`, installs its small agent there, and fr
 - **Over ssh** (the default): one ssh connection per machine, kept open and reconnected when it drops.
 - **Direct**: on a machine's page, **Connect directly** pairs the app with its agent (each trusts only the other's certificate, swapped over ssh) and runs the agent's listener as a user service there (systemd or launchd) on UDP port 47821. Muxen then connects over QUIC, falling back to ssh whenever the direct connection is down.
 - `MUXEN_NO_LINK=1` turns all of this off: one ssh connection per request, as before.
+- **Disconnect** (a machine's right-click menu, or its Connection section) stops all of it for that machine: Muxen closes the connection and stops checking it and reading its sessions, which keep running there. It shows as Disconnected until you **Connect** (its page, its menu, or search). It's kept in `config.toml` as `disconnected = true`.
+
+**Servers.** A machine's page lists what's listening there: web servers first, with their page's title (a dev server, a Docker container's site), then its other ports. **Open** puts one on this computer at `localhost` (the same port number when it's free) and opens it in your browser; no desktop needed. Each connection goes through the machine's live connection, so it works over ssh or direct alike, even for servers that listen only on the machine itself. Open ports are listed under their machine in the sidebar (click to open, × to close) and come back when Muxen starts. **Open a port** takes any port number. From a terminal: `muxen ports <machine>` and `muxen forward <machine> <port>`.
 
 **Desktop.** On a Linux machine with an X11 desktop, or a Mac, **Show desktop** (on its page, or its right-click menu) shows its screen live and sends your mouse and keyboard to it. On Linux ⌘ works as Ctrl; on a Mac it stays ⌘. An open desktop is listed under its machine in the sidebar (and keeps streaming while you look elsewhere); close it there.
 
@@ -405,7 +414,7 @@ A machine's services, and its Docker containers: **Services** on its page (or ri
 - **What they use:** CPU and memory for each running service and container; sort by them to find what's busy.
 - **Docker, all of it:**
   - **Containers:** run one (image, name, ports, environment, volumes, restart policy, command), start, stop, restart, remove, a shell inside it (a terminal session), its log.
-  - **Compose:** each project Docker knows, with **Up**, **Down**, **Restart**, **Pull**, its log, and **Edit** (its compose file in your editor, in a terminal on the machine). **New project** makes `~/compose/<name>/compose.yaml` to start from. Click a project to see it as a picture: its services as boxes, an arrow to what each waits for (green when it waits until that's healthy), the ports each opens on the machine, its networks as colored tags, the files it mounts, and its volumes at the right; each box shows the image, state, health, CPU and memory, with its logs and a shell.
+  - **Compose:** each project Docker knows, with **Up**, **Down**, **Restart**, **Pull**, its log, and **Edit** (its compose file in your editor, in a terminal on the machine). **New project** makes `~/compose/<name>/compose.yaml` to start from. Click a project to see it three ways: a **Picture** (its services as boxes, an arrow to what each waits for, green when it waits until that's healthy; the ports each opens on the machine, its networks as colored tags, the files it mounts, its volumes at the right; each box with the image, state, health, CPU and memory), a **List** (the same as a table, with Start, Stop and Restart for each service, then its volumes, mounted files and networks), and its **Logs** (every service's lines in time order, each in its color, with a chip to show one service's).
   - **Images:** pull one, run it, remove it, or remove every unused one.
   - Pulls, runs and Compose up/down run as operations: their output shows as they go, and in Activity.
 - Stop, Restart, Remove and Down ask first, and say so when stopping one (ssh, Tailscale, the network) could cut Muxen off from the machine. The log button opens its log in **Logs**.

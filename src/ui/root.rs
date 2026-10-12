@@ -258,6 +258,13 @@ pub struct Root {
     /// How each machine is reached (the machine page's Connection card), and changes in flight.
     pub(super) machine_conn: std::collections::HashMap<String, super::github::Load<crate::fleet::connection::Connection>>,
     pub(super) conn_changing: std::collections::HashSet<String>,
+    /// What's listening on each machine (the machine page's Servers), the
+    /// machines whose other ports are shown, and the field to open one by number.
+    pub(super) machine_ports: std::collections::HashMap<String, super::github::Load<Vec<crate::fleet::ports::ListeningPort>>>,
+    pub(super) ports_more: std::collections::HashSet<String>,
+    /// Forwarded ports seen listening there (so one that stops can be closed here).
+    pub(super) forward_seen: std::collections::HashSet<(String, u16)>,
+    pub(super) port_input: Entity<TextInput>,
     /// Machines whose "can't reach it" card shows what ssh said.
     pub(super) offline_details: std::collections::HashSet<String>,
     /// The open right-click menu.
@@ -353,6 +360,22 @@ impl Root {
             }
         });
 
+        // The machine page's "Open a port": a number, then Return.
+        let port_input = cx.new(|cx| TextInput::new(cx, "Port, e.g. 3000"));
+        subscriptions.push(cx.subscribe_in(&port_input, window, |this, input, e: &InputEvent, _, cx| {
+            if *e != InputEvent::Submit {
+                return;
+            }
+            let text = input.read(cx).text().trim().trim_start_matches(':').to_string();
+            let Route::Machine(machine) = this.route.clone() else { return };
+            match text.parse::<u16>() {
+                Ok(port) if port > 0 => {
+                    input.update(cx, |i, cx| i.set_text("", cx));
+                    this.open_port(&machine, port, None, true, cx);
+                }
+                _ => this.notify_user(format!("\"{text}\" isn't a port number."), true, cx),
+            }
+        }));
         let mut ws = Root {
             engine,
             snapshot,
@@ -394,6 +417,10 @@ impl Root {
             git_fixing: Default::default(),
             machine_conn: Default::default(),
             conn_changing: Default::default(),
+            machine_ports: Default::default(),
+            ports_more: Default::default(),
+            forward_seen: Default::default(),
+            port_input,
             offline_details: Default::default(),
             last_notice: None,
             refocus: false,
@@ -406,6 +433,18 @@ impl Root {
             _subscriptions: subscriptions,
         };
         ws.record_pulse();
+        ws.restore_forwards(cx);
+        // Servers starting and stopping: forwards whose server stopped close,
+        // and the machine page shown keeps its Servers current.
+        let watch = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(8)).await;
+                if this.update(cx, |this, cx| this.watch_servers(cx)).is_err() {
+                    break;
+                }
+            }
+        });
+        ws._tasks.push(watch);
         ws
     }
 
@@ -509,6 +548,12 @@ impl Root {
                 page.update(cx, |p, cx| p.stop_recording(cx));
             }
         }
+        // A machine's page: what's listening there, fresh (keeping what was shown meanwhile).
+        if let Route::Machine(id) = self.route.clone()
+            && self.machine_ports.contains_key(&id)
+        {
+            self.load_machine_ports(&id, cx);
+        }
         // A desktop streams only while it's shown: its page, or beside a session.
         let showing = match &self.route {
             Route::Desktop(id) => Some(id.clone()),
@@ -548,13 +593,15 @@ impl Root {
                     // Its Logs buttons: that log in the machine's log viewer.
                     let machine = id.clone();
                     let sub = cx.subscribe_in(&view, window, move |this, _, e: &super::services::ServicesEvent, window, cx| match e {
-                        super::services::ServicesEvent::OpenLogs(source) => {
+                        // A Compose service's port: open here, in the browser.
+                        super::services::ServicesEvent::Port(port) => this.open_port(&machine, *port, None, true, cx),
+                        super::services::ServicesEvent::Logs(source) => {
                             let logs = this.logs_view(&machine, window, cx);
                             logs.update(cx, |v, cx| v.show_source(source.clone(), window, cx));
                             this.navigate(Route::Logs(machine.clone()), window, cx);
                         }
                         // A container's shell, an editor on a compose file: a terminal session.
-                        super::services::ServicesEvent::OpenTerminal { cwd, command, title } => {
+                        super::services::ServicesEvent::Terminal { cwd, command, title } => {
                             let req = crate::fleet::sessions::StartSession {
                                 machine_id: machine.clone(),
                                 agent: "shell".into(),
@@ -737,13 +784,22 @@ impl Root {
                     self.navigate(Route::Session(first), window, cx);
                 }
             }
-            "machine-logs" => self.navigate(Route::Logs(arg.into()), window, cx),
+            // "machine-logs:<machine>", or "machine-logs:<machine>@compose/<project>" for that log.
+            "machine-logs" => {
+                let (machine, what) = arg.split_once('@').unwrap_or((arg, ""));
+                self.navigate(Route::Logs(machine.into()), window, cx);
+                if let Some(project) = what.strip_prefix("compose/") {
+                    let source = crate::fleet::logs::LogSource { kind: "compose".into(), target: project.into(), name: project.into(), project: Some(project.into()), ..Default::default() };
+                    let view = self.logs_view(machine, window, cx);
+                    view.update(cx, |v, cx| v.show_source(source, window, cx));
+                }
+            }
             // "machine-services:<machine>" or "machine-services:<machine>@<tab>".
             "machine-services" => {
                 let (machine, tab) = arg.split_once('@').unwrap_or((arg, ""));
                 self.navigate(Route::Services(machine.into()), window, cx);
                 if let Some(view) = self.service_pages.get(machine).cloned() {
-                    view.update(cx, |v, cx| v.show_tab(tab, cx));
+                    view.update(cx, |v, cx| v.show_tab(tab, window, cx));
                 }
             }
             // The session shown, split: a new shell beside it or below it.
@@ -955,6 +1011,13 @@ impl Root {
     }
 
     /// Powers a cloud machine on or off.
+    /// Connects to a machine again, or disconnects from it (its sessions go on there).
+    pub(super) fn set_machine_connected(&mut self, machine_id: &str, connected: bool, cx: &mut Context<Self>) {
+        if let Err(e) = self.engine.set_connected(machine_id, connected) {
+            self.notify_user(e, true, cx);
+        }
+    }
+
     pub(super) fn cloud_power(&mut self, machine_id: &str, on: bool, cx: &mut Context<Self>) {
         match self.engine.cloud_power(machine_id, on) {
             Ok(op) => self.show_operation(op, cx),
@@ -1491,6 +1554,7 @@ impl Root {
 
         rows.push(self.section_header("Machines", runner_machines.len(), true, cx).into_any_element());
         let pinned_desktops = cx.global::<super::theme::Appearance>().desktops.clone();
+        let forwards = self.engine.forwards();
         for (n, m) in runner_machines.iter().enumerate() {
             // While ⌘ is held: the shortcut that goes to it.
             let hint = if self.show_keys { super::shortcuts::machine_keys(cx, n + 1).map(|k| super::shortcuts::label(&k)) } else { None };
@@ -1509,7 +1573,8 @@ impl Root {
             // Collapsed: the machine carries its sessions' unread dot.
             let alert = (!open).then(|| sessions.iter().find_map(|x| x.attention.clone().map(|k| (k, x.exit_code)))).flatten();
             let has_desktop = pinned_desktops.contains(&m.id);
-            rows.push(self.machine_row(&theme, m, open, !sessions.is_empty() || has_desktop || self.logs.contains_key(&m.id) || self.service_pages.contains_key(&m.id), alert, selected_machine.as_deref() == Some(&m.id), hint, cx).into_any_element());
+            let has_forwards = forwards.iter().any(|f| f.machine_id == m.id);
+            rows.push(self.machine_row(&theme, m, open, !sessions.is_empty() || has_desktop || has_forwards || self.logs.contains_key(&m.id) || self.service_pages.contains_key(&m.id), alert, selected_machine.as_deref() == Some(&m.id), hint, cx).into_any_element());
             if open {
                 // Agent sessions first: they're what you come back to.
                 for x in sessions {
@@ -1533,6 +1598,10 @@ impl Root {
                 }
                 if self.service_pages.contains_key(&m.id) {
                     rows.push(self.tool_row(&theme, m, Route::Services(m.id.clone()), "layers", "Services", None, cx).into_any_element());
+                }
+                // Its ports open on this computer.
+                for f in forwards.iter().filter(|f| f.machine_id == m.id) {
+                    rows.push(self.forward_row(&theme, m, f, cx));
                 }
                 // Runners as one line; a search shows the ones it found.
                 if !machine_match {

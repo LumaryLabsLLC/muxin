@@ -73,7 +73,7 @@ impl CopyDialog {
             .machines
             .iter()
             .filter(|m| !m.host.is_empty() && !m.platform.starts_with("windows"))
-            .map(|m| (m.id.clone(), m.name.clone(), m.status != "offline"))
+            .map(|m| (m.id.clone(), m.name.clone(), !m.is_down()))
             .collect();
         // This computer first.
         machines.sort_by_key(|(id, _, _)| !snap.machines.iter().any(|m| &m.id == id && m.local));

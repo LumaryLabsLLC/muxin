@@ -121,13 +121,14 @@ pub fn build(input: &Inputs) -> Snapshot {
 
         let status = match probe {
             _ if !spec.is_checkable() => "manual",
+            _ if spec.disconnected => "disconnected",
             None => "unchecked",
             Some(p) if p.ok => "online",
             Some(_) => "offline",
         };
         let device = input.tailnet.get(&spec.id);
         let powered_off = spec.cloud.is_some() && input.droplets.get(&spec.id).is_some_and(|s| s == "off");
-        let unreachable = probe.filter(|p| !p.ok && spec.is_checkable()).map(|p| {
+        let unreachable = probe.filter(|p| !p.ok && spec.is_connected()).map(|p| {
             if powered_off {
                 powered_off_reason(spec, p)
             } else {
@@ -810,7 +811,7 @@ fn attention(
         .iter()
         .filter(|r| r.state == "offline")
         .filter(|r| match &r.machine_id {
-            Some(mid) => machines.iter().any(|m| &m.id == mid && m.status != "offline"),
+            Some(mid) => machines.iter().any(|m| &m.id == mid && !m.is_down()),
             None => true,
         })
         .collect();

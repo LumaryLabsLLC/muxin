@@ -75,6 +75,7 @@ pub async fn run(
     secrets: &[String],
     timeout: Duration,
 ) -> Result<(), String> {
+    spec.refuse_if_disconnected()?;
     let mut cmd = command(spec, shell);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| {

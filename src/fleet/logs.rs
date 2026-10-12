@@ -52,6 +52,9 @@ pub struct LogSource {
     /// A service's state: running, failed, exited, dead, ...
     #[serde(default)]
     pub state: Option<String>,
+    /// The Compose project a container is part of (and a project's own name).
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 impl LogSource {

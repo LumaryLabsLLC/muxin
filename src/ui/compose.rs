@@ -17,10 +17,13 @@ use super::services::{cpu, memory};
 use super::theme::Theme;
 use crate::fleet::services::{ComposeGraph, ComposeMount, ComposeService};
 
-/// What a box's buttons ask for, with the container's name.
+/// What a box's buttons ask for: a service's logs (by its name), a shell in
+/// a container (by the container's).
 pub enum NodeAction {
     Logs(String),
     Shell(String),
+    /// A port it publishes, opened in the browser here (localhost).
+    OpenPort(u16),
 }
 
 pub type OnNode = Rc<dyn Fn(NodeAction, &mut Window, &mut App)>;
@@ -63,9 +66,11 @@ impl Spot {
     }
 }
 
-/// The machine's folders and files it reads (named volumes are boxes of their own).
-fn binds(s: &ComposeService) -> Vec<&ComposeMount> {
-    s.volumes.iter().filter(|m| m.kind == "bind").collect()
+/// What a box lists: the machine's folders and files it reads, and its named
+/// volumes too when they're not boxes of their own (`inline`: no room).
+fn mounts(s: &ComposeService, inline: bool) -> Vec<&ComposeMount> {
+    let named = s.volumes.iter().filter(|m| inline && m.kind == "volume" && !m.source.is_empty());
+    named.chain(s.volumes.iter().filter(|m| m.kind == "bind")).collect()
 }
 
 /// Its networks, when they say something (not just Docker's default one).
@@ -74,7 +79,7 @@ fn shows_networks(s: &ComposeService) -> bool {
 }
 
 /// A box's height: what it has to show.
-fn height(s: &ComposeService) -> f32 {
+fn height(s: &ComposeService, inline: bool) -> f32 {
     let mut h = 12. + 22. + 6. + 16. + 6. + 16. + 12.;
     if !s.ports.is_empty() {
         h += 6. + 20.;
@@ -82,7 +87,7 @@ fn height(s: &ComposeService) -> f32 {
     if shows_networks(s) {
         h += 6. + 20.;
     }
-    let b = binds(s).len();
+    let b = mounts(s, inline).len();
     if b > 0 {
         h += 6. + 16. * if b > MOUNTS_SHOWN { MOUNTS_SHOWN + 1 } else { b } as f32;
     }
@@ -97,6 +102,8 @@ struct Layout {
     h: f32,
     /// The gap between columns.
     gap: f32,
+    /// Named volumes listed in their services' boxes (no room for a column of them).
+    inline: bool,
 }
 
 /// Puts items in a column, each as near as it can to where it wants to be
@@ -146,7 +153,11 @@ fn layout(g: &ComposeGraph, avail: f32) -> Layout {
     let mut memo = vec![None; n];
     let cols: Vec<usize> = (0..n).map(|i| column(i, &dependents, &mut memo, 0)).collect();
     let ncols = cols.iter().copied().max().map(|c| c + 1).unwrap_or(0);
-    let has_volumes = g.services.iter().any(|s| s.volumes.iter().any(|m| m.kind == "volume" && !m.source.is_empty()));
+    let named = g.services.iter().any(|s| s.volumes.iter().any(|m| m.kind == "volume" && !m.source.is_empty()));
+    // No room for a column of volumes even at its narrowest: they go in the boxes.
+    let narrowest = 2. * PAD + ncols as f32 * NODE_MIN_W + ncols as f32 * GAP_MIN + VOL_MIN_W;
+    let inline = named && avail > 0. && narrowest > avail;
+    let has_volumes = named && !inline;
     let (mut node_w, mut gap, mut vol_w) = (NODE_W, COL_GAP, if has_volumes { VOL_W } else { 0. });
     let gaps = (ncols + usize::from(has_volumes)).saturating_sub(1) as f32;
     let wide = |node_w: f32, gap: f32, vol_w: f32| 2. * PAD + ncols as f32 * node_w + gaps * gap + vol_w;
@@ -170,17 +181,17 @@ fn layout(g: &ComposeGraph, avail: f32) -> Layout {
             .map(|i| {
                 let ys: Vec<f32> = dependents[i].iter().map(|&d| spots[d].cy()).collect();
                 let want = (!ys.is_empty()).then(|| ys.iter().sum::<f32>() / ys.len() as f32);
-                (i, want, height(&g.services[i]))
+                (i, want, height(&g.services[i], inline))
             })
             .collect();
         for (i, top) in stack(items) {
-            spots[i] = Spot { x: col_x(c), y: top, w: node_w, h: height(&g.services[i]) };
+            spots[i] = Spot { x: col_x(c), y: top, w: node_w, h: height(&g.services[i], inline) };
         }
     }
     // Named volumes, at the right, beside the services that use them.
     let mut users: Vec<(String, Vec<usize>)> = Vec::new();
     for (i, s) in g.services.iter().enumerate() {
-        for m in s.volumes.iter().filter(|m| m.kind == "volume" && !m.source.is_empty()) {
+        for m in s.volumes.iter().filter(|m| has_volumes && m.kind == "volume" && !m.source.is_empty()) {
             match users.iter_mut().find(|(name, _)| *name == m.source) {
                 Some((_, list)) => list.push(i),
                 None => users.push((m.source.clone(), vec![i])),
@@ -200,7 +211,7 @@ fn layout(g: &ComposeGraph, avail: f32) -> Layout {
     volumes.sort_by(|a, b| a.1.y.total_cmp(&b.1.y));
     let w = left + wide(node_w, gap, vol_w);
     let h = spots.iter().map(Spot::bottom).chain(volumes.iter().map(|(_, s)| s.bottom())).fold(0., f32::max) + PAD;
-    Layout { services: spots, volumes, w, h, gap }
+    Layout { services: spots, volumes, w, h, gap, inline }
 }
 
 /// A color for each network, the same each time.
@@ -301,7 +312,7 @@ pub fn diagram(g: &ComposeGraph, usage: &Usage, theme: &Theme, width: Rc<Cell<f3
     .w(px(l.w))
     .h(px(l.h));
 
-    let boxes = g.services.iter().enumerate().map(|(i, s)| service_box(i, s, l.services[i], usage, &nets, theme, &on));
+    let boxes = g.services.iter().enumerate().map(|(i, s)| service_box(i, s, l.services[i], l.inline, usage, &nets, theme, &on));
     let vols = l.volumes.iter().map(|(name, spot)| {
         let external = g.volumes.iter().any(|v| v.name == *name && v.external);
         let used_by: Vec<&str> = g.services.iter().filter(|s| s.volumes.iter().any(|m| m.kind == "volume" && m.source == *name)).map(|s| s.name.as_str()).collect();
@@ -347,23 +358,11 @@ pub fn diagram(g: &ComposeGraph, usage: &Usage, theme: &Theme, width: Rc<Cell<f3
             .text_color(color)
             .child(text)
     });
-    let measure = canvas(
-        move |b, window, _| {
-            let w = f32::from(b.size.width);
-            if (width.get() - w).abs() > 0.5 {
-                width.set(w);
-                window.request_animation_frame();
-            }
-        },
-        |_, _, _, _| {},
-    )
-    .absolute()
-    .size_full();
     div()
         .flex_1()
         .min_h(px(0.))
         .relative()
-        .child(measure)
+        .child(measure(width))
         .child(
             div()
                 .id("compose-diagram")
@@ -376,7 +375,7 @@ pub fn diagram(g: &ComposeGraph, usage: &Usage, theme: &Theme, width: Rc<Cell<f3
 }
 
 #[allow(clippy::too_many_arguments)]
-fn service_box(n: usize, s: &ComposeService, spot: Spot, usage: &Usage, nets: &HashMap<String, Hsla>, theme: &Theme, on: &OnNode) -> AnyElement {
+fn service_box(n: usize, s: &ComposeService, spot: Spot, inline: bool, usage: &Usage, nets: &HashMap<String, Hsla>, theme: &Theme, on: &OnNode) -> AnyElement {
     let running = s.running();
     let health = s.health();
     let failed = health == "unhealthy" || s.containers.iter().any(|c| c.state == "restarting" || (c.state == "exited" && !c.status.starts_with("Exited (0)")));
@@ -415,7 +414,7 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, usage: &Usage, nets: &H
     let first = s.containers.first().map(|c| c.name.clone());
     let buttons = first.map(|container| {
         let (logs, shell) = (on.clone(), on.clone());
-        let (c1, c2) = (container.clone(), container);
+        let (c1, c2) = (s.name.clone(), container);
         div()
             .flex()
             .items_center()
@@ -455,8 +454,12 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, usage: &Usage, nets: &H
                     "127.0.0.1" | "::1" => "this machine only (localhost)".to_string(),
                     ip => ip.to_string(),
                 };
-                format!("Open on {on_what} at port {}, into the container's port {}", p.published, p.target)
+                format!("Open on {on_what} at port {}, into the container's port {}. Click to open it in your browser here.", p.published, p.target)
             };
+            let open = (p.protocol != "udp").then(|| p.published.parse::<u16>().ok()).flatten().map(|port| {
+                let on = on.clone();
+                move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| on(NodeAction::OpenPort(port), window, cx)
+            });
             div()
                 .id(SharedString::from(format!("cmp-port-{n}-{k}")))
                 .flex_none()
@@ -470,6 +473,7 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, usage: &Usage, nets: &H
                 .text_size(px(11.5))
                 .text_color(theme.text_accent)
                 .tooltip(move |window, cx| kit::Tooltip::view(tip.clone().into(), window, cx))
+                .when_some(open, |d, open| d.cursor_pointer().hover(|st| st.bg(theme.accent.opacity(0.24))).on_click(open))
                 .child(icon("plug", 11., theme.text_accent))
                 .child(label)
         }))
@@ -489,7 +493,7 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, usage: &Usage, nets: &H
             }))
             .into_any_element()
     });
-    let all_binds = binds(s);
+    let all_binds = mounts(s, inline);
     let more = all_binds.len().saturating_sub(MOUNTS_SHOWN);
     let shown = if more > 0 { &all_binds[..MOUNTS_SHOWN] } else { &all_binds[..] };
     let mounts = (!all_binds.is_empty()).then(|| {
@@ -497,9 +501,14 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, usage: &Usage, nets: &H
             .flex()
             .flex_col()
             .children(shown.iter().enumerate().map(|(k, m)| {
-                let file = m.source.rsplit('/').next().is_some_and(|last| last.contains('.') && !last.starts_with('.'));
+                let volume = m.kind == "volume";
+                let file = !volume && m.source.rsplit('/').next().is_some_and(|last| last.contains('.') && !last.starts_with('.'));
                 let text = format!("{} → {}{}", m.source, m.target, if m.read_only { " (read-only)" } else { "" });
-                let tip = format!("This machine's {} {}, seen inside as {}{}", if file { "file" } else { "folder" }, m.source, m.target, if m.read_only { ", read-only" } else { "" });
+                let tip = if volume {
+                    format!("The Docker volume {}, seen inside as {}: its data stays when the container's recreated", m.source, m.target)
+                } else {
+                    format!("This machine's {} {}, seen inside as {}{}", if file { "file" } else { "folder" }, m.source, m.target, if m.read_only { ", read-only" } else { "" })
+                };
                 div()
                     .id(SharedString::from(format!("cmp-bind-{n}-{k}")))
                     .flex()
@@ -507,7 +516,7 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, usage: &Usage, nets: &H
                     .gap(px(5.))
                     .h(px(16.))
                     .tooltip(move |window, cx| kit::Tooltip::view(tip.clone().into(), window, cx))
-                    .child(icon(if file { "file" } else { "folder" }, 11., theme.text_placeholder))
+                    .child(icon(if volume { "hard-drive" } else if file { "file" } else { "folder" }, 11., if volume { theme.info } else { theme.text_placeholder }))
                     .child(div().w(px(inner - 16.)).truncate().text_size(px(11.)).text_color(theme.text_muted).child(text))
             }))
             .when(more > 0, |d| d.child(div().h(px(16.)).text_size(px(11.)).text_color(theme.text_placeholder).child(format!("+{more} more"))))
@@ -558,6 +567,23 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, usage: &Usage, nets: &H
         .children(networks)
         .children(mounts)
         .into_any_element()
+}
+
+/// Measures the space it's put in into `width`, drawing the page again when
+/// that changes (GPUI only cuts text off, with …, at a width it's told).
+pub fn measure(width: Rc<Cell<f32>>) -> impl IntoElement {
+    canvas(
+        move |b, window, _| {
+            let w = f32::from(b.size.width);
+            if (width.get() - w).abs() > 0.5 {
+                width.set(w);
+                window.request_animation_frame();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
 }
 
 /// The key under the picture's toolbar: what the lines and colors mean.

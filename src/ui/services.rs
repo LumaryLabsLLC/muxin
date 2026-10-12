@@ -20,6 +20,7 @@ use crate::fleet::Engine;
 use crate::fleet::desktop::AddDisplayError;
 use crate::fleet::logs::LogSource;
 use super::compose::{self as picture, NodeAction};
+use super::logs::LogsView;
 use crate::fleet::services::{ComposeGraph, ComposeProject, DockerRun, Image, Service, ServiceList};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -28,6 +29,14 @@ enum Tab {
     Containers,
     Compose,
     Images,
+}
+
+/// How a Compose project is shown.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProjectMode {
+    Picture,
+    List,
+    Logs,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,11 +49,13 @@ enum Sort {
 
 /// What the page asks the rest of the app to do.
 pub enum ServicesEvent {
+    /// One of the machine's ports, opened in the browser here (localhost).
+    Port(u16),
     /// Show this log in the machine's log viewer.
-    OpenLogs(LogSource),
+    Logs(LogSource),
     /// A terminal on the machine running `command` in `cwd` (a container's
     /// shell, an editor on a compose file).
-    OpenTerminal { cwd: String, command: String, title: String },
+    Terminal { cwd: String, command: String, title: String },
 }
 
 impl EventEmitter<ServicesEvent> for ServicesView {}
@@ -85,6 +96,9 @@ pub struct ServicesView {
     /// The Compose project shown as a picture (its name), and its parts.
     project: Option<String>,
     graph: Option<Result<ComposeGraph, String>>,
+    project_mode: ProjectMode,
+    /// The open project's log (its Logs view), while it's open.
+    project_logs: Option<Entity<LogsView>>,
     scroll: UniformListScrollHandle,
     /// The list's width, measured as it's drawn: GPUI only cuts off text
     /// (with …) when told its width, so the rows work it out from this.
@@ -174,6 +188,8 @@ impl ServicesView {
             new_compose: None,
             project: None,
             graph: None,
+            project_mode: ProjectMode::Picture,
+            project_logs: None,
             scroll: UniformListScrollHandle::new(),
             width: Rc::new(Cell::new(0.)),
             focus: cx.focus_handle(),
@@ -206,10 +222,17 @@ impl ServicesView {
     }
 
     /// Shows a tab by name (services, containers, compose, images).
-    pub fn show_tab(&mut self, name: &str, cx: &mut Context<Self>) {
-        if let Some(project) = name.strip_prefix("compose/") {
+    pub fn show_tab(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // compose/<project>, then /list or /logs for those.
+        if let Some(rest) = name.strip_prefix("compose/") {
+            let (project, mode) = rest.split_once('/').unwrap_or((rest, ""));
             self.tab = Tab::Compose;
             self.open_project(project.to_string(), cx);
+            match mode {
+                "list" => self.set_mode(ProjectMode::List, None, window, cx),
+                "logs" => self.set_mode(ProjectMode::Logs, None, window, cx),
+                _ => self.set_mode(ProjectMode::Picture, None, window, cx),
+            }
             return;
         }
         self.tab = match name {
@@ -428,9 +451,45 @@ impl ServicesView {
     fn open_project(&mut self, name: String, cx: &mut Context<Self>) {
         self.project = Some(name);
         self.graph = None;
+        self.project_logs = None;
+        if self.project_mode == ProjectMode::Logs {
+            self.project_mode = ProjectMode::Picture;
+        }
         self.confirming = None;
         self.fetch_graph(cx);
         cx.notify();
+    }
+
+    /// Picture, list or log; the log narrowed to `only` (a service) when given.
+    fn set_mode(&mut self, mode: ProjectMode, only: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.project_mode = mode;
+        if mode == ProjectMode::Logs
+            && let Some(name) = self.project.clone()
+        {
+            match &self.project_logs {
+                Some(logs) => logs.update(cx, |l, cx| l.set_only(only, cx)),
+                None => {
+                    let source = self.known_project(&name).log_source();
+                    let services = self.graph.as_ref().and_then(|g| g.as_ref().ok()).map(|g| g.services.iter().map(|s| s.name.clone()).collect()).unwrap_or_default();
+                    let (engine, machine) = (self.engine.clone(), self.machine.clone());
+                    self.project_logs = Some(cx.new(|cx| LogsView::embedded(engine, machine, source, services, only, window, cx)));
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Starts, stops or restarts one of the open project's services (stopping asks first).
+    fn compose_service(&mut self, project: ComposeProject, service: String, action: &'static str, confirmed: bool, cx: &mut Context<Self>) {
+        if action == "stop" && !confirmed {
+            self.confirming = Some((format!("compose:{}/{service}", project.name), action));
+            cx.notify();
+            return;
+        }
+        self.confirming = None;
+        let what = format!("{action} {service}");
+        let result = self.engine.compose_service_action(&self.machine, &project, &service, action);
+        self.watch(result, what, cx);
     }
 
     fn known_project(&self, name: &str) -> ComposeProject {
@@ -456,6 +515,10 @@ impl ServicesView {
                 // A failed look keeps the picture there was.
                 if result.is_ok() || !matches!(this.graph, Some(Ok(_))) {
                     this.graph = Some(result);
+                }
+                if let (Some(logs), Some(Ok(g))) = (&this.project_logs, &this.graph) {
+                    let names = g.services.iter().map(|s| s.name.clone()).collect();
+                    logs.update(cx, |l, cx| l.set_services(names, cx));
                 }
                 cx.notify();
             });
@@ -494,7 +557,7 @@ impl ServicesView {
                     Ok(file) => {
                         this.new_compose = None;
                         let folder = file.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
-                        cx.emit(ServicesEvent::OpenTerminal { cwd: folder, command: "${EDITOR:-nano} compose.yaml; exec \"$SHELL\" -l".into(), title: format!("{name} · compose") });
+                        cx.emit(ServicesEvent::Terminal { cwd: folder, command: "${EDITOR:-nano} compose.yaml; exec \"$SHELL\" -l".into(), title: format!("{name} · compose") });
                     }
                     Err(e) => this.error = Some(e),
                 }
@@ -561,6 +624,7 @@ impl Render for ServicesView {
                     this.tab = tab;
                     this.confirming = None;
                     this.project = None;
+                    this.project_logs = None;
                     cx.notify();
                 }))
         }));
@@ -580,7 +644,7 @@ impl Render for ServicesView {
                     .into_any_element(),
             ],
             Tab::Images => vec![
-                div().w(px(240.)).child(self.pull.clone()).into_any_element(),
+                div().flex_none().w(px(220.)).child(self.pull.clone()).into_any_element(),
                 Button::new("svc-pull", "Pull").icon("arrow-down").on_click(cx.listener(|this, _, window, cx| this.pull_image(window, cx))).into_any_element(),
                 Button::new("svc-prune", "Remove unused")
                     .icon("trash-2")
@@ -614,19 +678,22 @@ impl Render for ServicesView {
             ],
             _ => Vec::new(),
         };
+        // Narrow: it wraps (fields keep their width) rather than squeezing them.
         let toolbar = div()
             .flex_none()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap(px(8.))
-            .h(px(44.))
+            .min_h(px(44.))
+            .py(px(6.))
             .px(px(14.))
             .border_b_1()
             .border_color(theme.border_variant)
             .child(tabs)
             .child(div().flex_1())
             .children(extra)
-            .child(div().w(px(200.)).child(self.find.clone()))
+            .child(div().flex_none().w(px(180.)).child(self.find.clone()))
             .child(Button::icon_only("svc-refresh", "refresh-cw").tooltip("Refresh").on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))));
 
         // Bars under the toolbar: the password, operations under way, the last error.
@@ -858,6 +925,37 @@ const W_STATE: f32 = 190.;
 const W_BOOT: f32 = 92.;
 const W_ACTIONS: f32 = 300.;
 const ROW_H: f32 = 50.;
+/// Images: when it was made, and the containers made from it.
+const W_CREATED: f32 = 130.;
+const W_USED: f32 = 220.;
+/// The size of an image.
+const W_SIZE: f32 = 80.;
+
+/// Which columns fit at the page's width, and how wide (the header and the
+/// rows follow the same): as it narrows, buttons turn to icons, then the
+/// lesser columns go, so names keep room.
+#[derive(Clone, Copy)]
+struct Cols {
+    /// What the name and detail get.
+    text: f32,
+    /// Buttons as icons (their words in a tooltip).
+    compact: bool,
+    /// CPU and memory (services, containers).
+    usage: bool,
+    /// The state or status column.
+    state: f32,
+    /// At boot (services).
+    boot: bool,
+    /// Created and Used by (images).
+    created: bool,
+    used: bool,
+    actions: f32,
+}
+
+/// A row's button: its word and icon, or just the icon when there's no room.
+fn word_or_icon(id: SharedString, label: &'static str, glyph: &'static str, compact: bool) -> Button {
+    if compact { Button::icon_only(id, glyph).tooltip(label) } else { Button::new(id, label).icon(glyph).style(ButtonStyle::Ghost) }
+}
 
 /// About how wide `text` is at `size` (for a name with a pill after it).
 fn about(text: &str, size: f32) -> f32 {
@@ -879,10 +977,63 @@ fn clipped(id: String, text: String, size: f32, color: gpui::Hsla, w: f32) -> gp
 }
 
 impl ServicesView {
+    /// The columns that fit now (see Cols).
+    fn cols(&self) -> Cols {
+        // Not measured yet: as if wide (it's measured on the first frame).
+        let w = if self.width.get() > 0. { self.width.get() } else { 2000. };
+        let roomy = |text: f32| text >= 220.;
+        let mut c = Cols { text: 0., compact: false, usage: true, state: W_STATE, boot: self.tab == Tab::Services, created: true, used: true, actions: W_ACTIONS };
+        match self.tab {
+            Tab::Services | Tab::Containers => {
+                let text = |c: &Cols| w - 28. - 17. - if c.usage { W_CPU + W_MEM + 20. } else { 0. } - c.state - 10. - if c.boot { W_BOOT + 10. } else { 0. } - c.actions - 10.;
+                if !roomy(text(&c)) {
+                    (c.compact, c.actions) = (true, 170.);
+                }
+                if !roomy(text(&c)) {
+                    c.boot = false;
+                }
+                if !roomy(text(&c)) {
+                    c.state = 130.;
+                }
+                if !roomy(text(&c)) {
+                    c.usage = false;
+                }
+                c.text = text(&c).max(110.);
+            }
+            Tab::Compose => {
+                c.actions = 360.;
+                let text = |c: &Cols| w - 28. - 17. - c.state - 10. - c.actions - 10.;
+                if !roomy(text(&c)) {
+                    (c.compact, c.actions) = (true, 210.);
+                }
+                if !roomy(text(&c)) {
+                    c.state = 130.;
+                }
+                c.text = text(&c).max(110.);
+            }
+            Tab::Images => {
+                c.actions = 170.;
+                let text = |c: &Cols| w - 28. - 24. - W_SIZE - 10. - if c.created { W_CREATED + 10. } else { 0. } - if c.used { W_USED + 10. } else { 0. } - c.actions - 10.;
+                if !roomy(text(&c)) {
+                    c.used = false;
+                }
+                if !roomy(text(&c)) {
+                    (c.compact, c.actions) = (true, 76.);
+                }
+                if !roomy(text(&c)) {
+                    c.created = false;
+                }
+                c.text = text(&c).max(110.);
+            }
+        }
+        c
+    }
+
     /// The column names above the list (CPU, Memory and State sort it).
     fn header(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let label = |text: &'static str| div().text_size(px(11.)).text_color(theme.text_placeholder).child(text);
+        let c = self.cols();
+        let label = |text: &'static str| div().whitespace_nowrap().overflow_hidden().text_size(px(11.)).text_color(theme.text_placeholder).child(text);
         let sortable = |id: &'static str, text: &'static str, sort: Sort, w: f32, right: bool, cx: &mut Context<Self>| {
             let on = self.sort == sort;
             div()
@@ -929,24 +1080,24 @@ impl ServicesView {
             Tab::Services | Tab::Containers => frame
                 .child(div().flex_none().w(px(7.)))
                 .child(div().flex_1().min_w(px(0.)).child(label(if self.tab == Tab::Services { "Name" } else { "Name · image" })))
-                .child(sortable("svc-h-cpu", "CPU", Sort::Cpu, W_CPU, true, cx))
-                .child(sortable("svc-h-mem", "Memory", Sort::Memory, W_MEM, true, cx))
-                .child(sortable("svc-h-state", if self.tab == Tab::Services { "State" } else { "Status" }, Sort::State, W_STATE, false, cx))
-                .when(self.tab == Tab::Services, |d| d.child(div().flex_none().w(px(W_BOOT)).child(label("At boot"))))
-                .child(div().flex_none().w(px(W_ACTIONS)))
+                .when(c.usage, |d| d.child(sortable("svc-h-cpu", "CPU", Sort::Cpu, W_CPU, true, cx)).child(sortable("svc-h-mem", "Memory", Sort::Memory, W_MEM, true, cx)))
+                .child(sortable("svc-h-state", if self.tab == Tab::Services { "State" } else { "Status" }, Sort::State, c.state, false, cx))
+                .when(c.boot, |d| d.child(div().flex_none().w(px(W_BOOT)).child(label("At boot"))))
+                .child(div().flex_none().w(px(c.actions)))
                 .into_any_element(),
             Tab::Compose => frame
                 .child(div().flex_none().w(px(7.)))
                 .child(div().flex_1().min_w(px(0.)).child(label("Project · files")))
-                .child(div().flex_none().w(px(W_STATE)).pl(px(12.)).child(label("Status")))
-                .child(div().flex_none().w(px(360.)))
+                .child(div().flex_none().w(px(c.state)).pl(px(12.)).child(label("Status")))
+                .child(div().flex_none().w(px(c.actions)))
                 .into_any_element(),
             Tab::Images => frame
                 .child(div().flex_none().w(px(14.)))
                 .child(div().flex_1().min_w(px(0.)).child(label("Image · id")))
-                .child(div().flex_none().w(px(80.)).flex().justify_end().child(label("Size")))
-                .child(div().flex_none().w(px(W_STATE)).pl(px(12.)).child(label("Created")))
-                .child(div().flex_none().w(px(240.)))
+                .child(div().flex_none().w(px(W_SIZE)).flex().justify_end().child(label("Size")))
+                .when(c.created, |d| d.child(div().flex_none().w(px(W_CREATED)).pl(px(12.)).child(label("Created"))))
+                .when(c.used, |d| d.child(div().flex_none().w(px(W_USED)).child(label("Used by"))))
+                .child(div().flex_none().w(px(c.actions)))
                 .into_any_element(),
         }
     }
@@ -956,7 +1107,8 @@ impl ServicesView {
         let theme = *theme;
         let services_tab = self.tab == Tab::Services;
         // What's left for the name and detail: the width less the fixed columns and gaps.
-        let text_w = self.width.get() - 28. - 7. - W_CPU - W_MEM - W_STATE - W_ACTIONS - 50. - if services_tab { W_BOOT + 10. } else { 0. };
+        let c = self.cols();
+        let text_w = c.text;
         uniform_list("svc-rows", items.len(), move |range, _, _| {
             range
                 .map(|n| {
@@ -975,7 +1127,7 @@ impl ServicesView {
                     let state = if container { s.status.clone() } else { s.state.clone() };
                     let act = |id: &str, label: &'static str, icon_name: &'static str, action: &'static str| {
                         let (view, s) = (view.clone(), s.clone());
-                        Button::new(SharedString::from(format!("svc-{id}-{n}")), label).icon(icon_name).style(ButtonStyle::Ghost).on_click(move |_, window, cx| {
+                        word_or_icon(SharedString::from(format!("svc-{id}-{n}")), label, icon_name, c.compact).on_click(move |_, window, cx| {
                             let _ = view.update(cx, |v, cx| v.act(s.clone(), action, false, window, cx));
                         })
                     };
@@ -1018,7 +1170,7 @@ impl ServicesView {
                             let logs = {
                                 let (view, source) = (view.clone(), s.log_source());
                                 Button::icon_only(SharedString::from(format!("svc-logs-{n}")), "scroll-text").tooltip("Its logs").on_click(move |_, _, cx| {
-                                    let _ = view.update(cx, |_, cx| cx.emit(ServicesEvent::OpenLogs(source.clone())));
+                                    let _ = view.update(cx, |_, cx| cx.emit(ServicesEvent::Logs(source.clone())));
                                 })
                             };
                             let mut row = div().flex().items_center().gap(px(4.)).child(logs);
@@ -1026,7 +1178,7 @@ impl ServicesView {
                                 let (view, name) = (view.clone(), s.name.clone());
                                 row = row.child(Button::icon_only(SharedString::from(format!("svc-shell-{n}")), "square-terminal").tooltip("A shell inside it").on_click(move |_, _, cx| {
                                     let command = format!("docker exec -it {name} sh -c 'command -v bash >/dev/null && exec bash || exec sh'");
-                                    let _ = view.update(cx, |_, cx| cx.emit(ServicesEvent::OpenTerminal { cwd: "~".into(), command, title: format!("{name} · shell") }));
+                                    let _ = view.update(cx, |_, cx| cx.emit(ServicesEvent::Terminal { cwd: "~".into(), command, title: format!("{name} · shell") }));
                                 }));
                             }
                             if running {
@@ -1098,11 +1250,13 @@ impl ServicesView {
                                 )
                                 .child(clipped(format!("svc-detail-{n}"), detail, 11.5, theme.text_placeholder, text_w)),
                         )
-                        .child(div().flex_none().w(px(W_CPU)).flex().justify_end().text_size(px(12.)).text_color(theme.text_muted).child(cpu(s.cpu)))
-                        .child(div().flex_none().w(px(W_MEM)).flex().justify_end().text_size(px(12.)).text_color(theme.text_muted).child(memory(s.memory)))
-                        .child(div().flex_none().w(px(W_STATE)).pl(px(12.)).child(clipped(format!("svc-state-{n}"), state, 12., if failed { theme.error } else { theme.text_muted }, W_STATE - 12.)))
-                        .when(services_tab, |d| d.child(div().flex_none().w(px(W_BOOT)).flex().children(boot)))
-                        .child(div().flex_none().w(px(W_ACTIONS)).flex().justify_end().child(actions))
+                        .when(c.usage, |d| {
+                            d.child(div().flex_none().w(px(W_CPU)).flex().justify_end().text_size(px(12.)).text_color(theme.text_muted).child(cpu(s.cpu)))
+                                .child(div().flex_none().w(px(W_MEM)).flex().justify_end().text_size(px(12.)).text_color(theme.text_muted).child(memory(s.memory)))
+                        })
+                        .child(div().flex_none().w(px(c.state)).pl(px(12.)).child(clipped(format!("svc-state-{n}"), state, 12., if failed { theme.error } else { theme.text_muted }, c.state - 12.)))
+                        .when(services_tab && c.boot, |d| d.child(div().flex_none().w(px(W_BOOT)).flex().children(boot)))
+                        .child(div().flex_none().w(px(c.actions)).flex().justify_end().child(actions))
                 })
                 .collect()
         })
@@ -1127,6 +1281,7 @@ impl ServicesView {
         let back = Button::new("cmp-back", "Compose").icon("arrow-left").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, _, cx| {
             this.project = None;
             this.graph = None;
+            this.project_logs = None;
             this.confirming = None;
             cx.notify();
         }));
@@ -1157,13 +1312,13 @@ impl ServicesView {
             };
             let logs = {
                 let source = project.log_source();
-                Button::icon_only("cmp-p-logs", "scroll-text").tooltip("Its logs").on_click(cx.listener(move |_, _, _, cx| cx.emit(ServicesEvent::OpenLogs(source.clone()))))
+                Button::icon_only("cmp-p-logs", "external-link").tooltip("Its log on the Logs page").on_click(cx.listener(move |_, _, _, cx| cx.emit(ServicesEvent::Logs(source.clone()))))
             };
             let edit = {
                 let (folder, file, name) = (project.folder().to_string(), project.first_file().to_string(), name.clone());
                 Button::icon_only("cmp-p-edit", "pencil").tooltip("Edit its compose file").on_click(cx.listener(move |_, _, _, cx| {
                     let command = format!("${{EDITOR:-nano}} '{}'; exec \"$SHELL\" -l", file.replace('\'', "'\\''"));
-                    cx.emit(ServicesEvent::OpenTerminal { cwd: folder.clone(), command, title: format!("{name} · compose") });
+                    cx.emit(ServicesEvent::Terminal { cwd: folder.clone(), command, title: format!("{name} · compose") });
                 }))
             };
             let mut row = div().flex().items_center().gap(px(4.)).child(logs).child(edit).child(act("cmp-p-pull", "Pull", "arrow-down", "pull", cx));
@@ -1177,9 +1332,11 @@ impl ServicesView {
         let bar = div()
             .flex_none()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap(px(10.))
-            .h(px(48.))
+            .min_h(px(48.))
+            .py(px(6.))
             .pl(px(6.))
             .pr(px(14.))
             .border_b_1()
@@ -1188,8 +1345,29 @@ impl ServicesView {
             .child(kit::dot(if running { theme.success } else { theme.text_placeholder }, 8.))
             .child(div().flex_none().text_size(px(14.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme.text).child(name.clone()))
             .child(div().flex_none().text_size(px(12.)).text_color(theme.text_muted).child(project.status.clone()))
-            .child(div().flex_1().min_w(px(0.)).overflow_hidden().whitespace_nowrap().text_size(px(12.)).text_color(theme.text_placeholder).child(project.first_file().to_string()))
-            .child(actions);
+            .child(div().flex_none().ml(px(6.)).flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(
+                [(ProjectMode::Picture, "Picture", "workflow"), (ProjectMode::List, "List", "list"), (ProjectMode::Logs, "Logs", "scroll-text")].into_iter().map(|(mode, label, glyph)| {
+                    let on = self.project_mode == mode;
+                    div()
+                        .id(SharedString::from(format!("cmp-mode-{label}")))
+                        .px(px(9.))
+                        .h(px(24.))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .rounded(px(5.))
+                        .cursor_pointer()
+                        .text_size(px(12.))
+                        .text_color(if on { theme.text } else { theme.text_placeholder })
+                        .when(on, |d| d.bg(theme.element_selected))
+                        .when(!on, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+                        .child(icon(glyph, 12., if on { theme.text } else { theme.text_placeholder }))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, window, cx| this.set_mode(mode, None, window, cx)))
+                }),
+            ))
+            .child(div().flex_1().min_w(px(60.)).overflow_hidden().whitespace_nowrap().text_size(px(12.)).text_color(theme.text_placeholder).child(project.first_file().to_string()))
+            .child(div().flex_none().child(actions));
         let body = match &self.graph {
             None => div()
                 .flex_1()
@@ -1203,20 +1381,19 @@ impl ServicesView {
                 .child(format!("Reading {name}'s compose file…"))
                 .into_any_element(),
             Some(Err(e)) => div().flex_1().flex().items_center().justify_center().px(px(40.)).text_size(px(13.)).text_color(theme.error).child(e.clone()).into_any_element(),
+            _ if self.project_mode == ProjectMode::Logs && self.project_logs.is_some() => div().flex_1().min_h(px(0.)).flex().flex_col().children(self.project_logs.clone()).into_any_element(),
             Some(Ok(g)) if g.services.is_empty() => empty(&theme, "It has no services yet: Edit adds them.".into()),
+            Some(Ok(g)) if self.project_mode == ProjectMode::List => self.project_list(g, data, &project, cx),
             Some(Ok(g)) => {
                 let usage: picture::Usage = data.containers.iter().map(|c| (c.name.clone(), (c.cpu, c.memory))).collect();
-                let images: std::collections::HashMap<String, String> = g.services.iter().flat_map(|s| s.containers.iter().map(move |c| (c.name.clone(), s.image.clone()))).collect();
                 let view = cx.entity().downgrade();
-                let on: picture::OnNode = Rc::new(move |action, _, cx| {
-                    let _ = view.update(cx, |_, cx| match action {
-                        NodeAction::Logs(container) => {
-                            let detail = images.get(&container).cloned().unwrap_or_default();
-                            cx.emit(ServicesEvent::OpenLogs(LogSource { kind: "docker".into(), target: container.clone(), name: container, detail, ..Default::default() }));
-                        }
+                let on: picture::OnNode = Rc::new(move |action, window, cx| {
+                    let _ = view.update(cx, |v, cx| match action {
+                        NodeAction::Logs(service) => v.set_mode(ProjectMode::Logs, Some(service), window, cx),
+                        NodeAction::OpenPort(port) => cx.emit(ServicesEvent::Port(port)),
                         NodeAction::Shell(container) => {
                             let command = format!("docker exec -it {container} sh -c 'command -v bash >/dev/null && exec bash || exec sh'");
-                            cx.emit(ServicesEvent::OpenTerminal { cwd: "~".into(), command, title: format!("{container} · shell") });
+                            cx.emit(ServicesEvent::Terminal { cwd: "~".into(), command, title: format!("{container} · shell") });
                         }
                     });
                 });
@@ -1226,10 +1403,261 @@ impl ServicesView {
         div().flex_1().min_h(px(0.)).flex().flex_col().child(bar).child(body).into_any_element()
     }
 
+    /// A Compose project as a list: its services (what each uses, its state,
+    /// ports, what it waits for, networks, and what can be done to it), then
+    /// its volumes, the machine's files it mounts and its networks.
+    fn project_list(&self, g: &ComposeGraph, data: &ServiceList, project: &ComposeProject, cx: &mut Context<Self>) -> AnyElement {
+        const C_CPU: f32 = 56.;
+        const C_MEM: f32 = 70.;
+        const C_STATE: f32 = 150.;
+        const C_PORTS: f32 = 120.;
+        const C_WAITS: f32 = 170.;
+        const C_NETS: f32 = 130.;
+        const C_ACTIONS: f32 = 270.;
+        let theme = cx.theme();
+        let usage: std::collections::HashMap<&str, (Option<f64>, Option<u64>)> = data.containers.iter().map(|c| (c.name.as_str(), (c.cpu, c.memory))).collect();
+        let nets: std::collections::HashMap<String, gpui::Hsla> = picture::network_colors(g).into_iter().collect();
+        // The columns that fit, the name taking what's left.
+        let mut text_w = self.width.get() - 28. - 8. - C_CPU - C_MEM - C_STATE - C_ACTIONS - 50. - (C_PORTS + 10.) - (C_WAITS + 10.) - (C_NETS + 10.);
+        let show_nets = text_w >= 180.;
+        if !show_nets {
+            text_w += C_NETS + 10.;
+        }
+        let show_waits = text_w >= 180.;
+        if !show_waits {
+            text_w += C_WAITS + 10.;
+        }
+        let show_ports = text_w >= 160.;
+        if !show_ports {
+            text_w += C_PORTS + 10.;
+        }
+        let text_w = text_w.max(120.);
+        let label = |text: &'static str| div().text_size(px(11.)).text_color(theme.text_placeholder).child(text);
+        let head = |left: &'static str| div().flex_none().w_full().flex().items_center().gap(px(10.)).h(px(28.)).px(px(14.)).border_b_1().border_color(theme.border_variant).bg(theme.surface).child(div().flex_none().w(px(8.))).child(div().flex_1().child(label(left)));
+        let section = |title: String| div().flex_none().pt(px(18.)).pb(px(6.)).px(px(14.)).text_size(px(12.)).font_weight(gpui::FontWeight::MEDIUM).text_color(theme.text_muted).child(title);
+        let services_head = head("Service · image")
+            .child(div().flex_none().w(px(C_CPU)).flex().justify_end().child(label("CPU")))
+            .child(div().flex_none().w(px(C_MEM)).flex().justify_end().child(label("Memory")))
+            .child(div().flex_none().w(px(C_STATE)).pl(px(12.)).child(label("State")))
+            .when(show_ports, |d| d.child(div().flex_none().w(px(C_PORTS)).child(label("Ports"))))
+            .when(show_waits, |d| d.child(div().flex_none().w(px(C_WAITS)).child(label("Waits for"))))
+            .when(show_nets, |d| d.child(div().flex_none().w(px(C_NETS)).child(label("Networks"))))
+            .child(div().flex_none().w(px(C_ACTIONS)));
+        let rows = g.services.iter().enumerate().map(|(n, s)| {
+            let running = s.running();
+            let health = s.health();
+            let failed = health == "unhealthy" || s.containers.iter().any(|c| c.state == "restarting" || (c.state == "exited" && !c.status.starts_with("Exited (0)")));
+            let dot = if failed {
+                theme.error
+            } else if running {
+                theme.success
+            } else {
+                theme.text_placeholder
+            };
+            let (mut used_cpu, mut used_mem) = (None::<f64>, None::<u64>);
+            for c in &s.containers {
+                if let Some((c_cpu, c_mem)) = usage.get(c.name.as_str()) {
+                    if let Some(v) = c_cpu {
+                        used_cpu = Some(used_cpu.unwrap_or(0.) + v);
+                    }
+                    if let Some(v) = c_mem {
+                        used_mem = Some(used_mem.unwrap_or(0) + v);
+                    }
+                }
+            }
+            let state = if running { s.state() } else { s.containers.first().map(|c| c.status.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| s.state()) };
+            let what = if s.build.is_empty() { s.image.clone() } else { format!("Built from {}", s.build) };
+            let ports = s.ports.iter().map(|p| if p.published.is_empty() { p.target.clone() } else { format!(":{} → {}", p.published, p.target) }).collect::<Vec<_>>().join(", ");
+            let waits = s
+                .depends_on
+                .iter()
+                .map(|d| match d.condition.as_str() {
+                    "service_healthy" => format!("{} (healthy)", d.name),
+                    "service_completed_successfully" => format!("{} (done)", d.name),
+                    _ => d.name.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let key = format!("compose:{}/{}", project.name, s.name);
+            let actions: AnyElement = match &self.confirming {
+                Some((k, _)) if *k == key => {
+                    let (yes, no, p2, svc) = (cx.entity().downgrade(), cx.entity().downgrade(), project.clone(), s.name.clone());
+                    confirm_row(
+                        &theme,
+                        5000 + n,
+                        format!("Stop {}?", s.name),
+                        false,
+                        "Stop",
+                        "circle-stop",
+                        move |_, cx| {
+                            let _ = yes.update(cx, |v, cx| v.compose_service(p2.clone(), svc.clone(), "stop", true, cx));
+                        },
+                        move |cx| {
+                            let _ = no.update(cx, |v, cx| {
+                                v.confirming = None;
+                                cx.notify();
+                            });
+                        },
+                    )
+                }
+                _ => {
+                    let svc = s.name.clone();
+                    let mut row = div().flex().items_center().gap(px(4.)).child(Button::icon_only(SharedString::from(format!("cmp-l-logs-{n}")), "scroll-text").tooltip("Its logs").on_click(cx.listener({
+                        let svc = svc.clone();
+                        move |this, _, window, cx| this.set_mode(ProjectMode::Logs, Some(svc.clone()), window, cx)
+                    })));
+                    if running && let Some(container) = s.containers.iter().find(|c| c.state == "running").map(|c| c.name.clone()) {
+                        row = row.child(Button::icon_only(SharedString::from(format!("cmp-l-shell-{n}")), "square-terminal").tooltip("A shell inside it").on_click(cx.listener(move |_, _, _, cx| {
+                            let command = format!("docker exec -it {container} sh -c 'command -v bash >/dev/null && exec bash || exec sh'");
+                            cx.emit(ServicesEvent::Terminal { cwd: "~".into(), command, title: format!("{container} · shell") });
+                        })));
+                    }
+                    let act = |id: &'static str, text: &'static str, glyph: &'static str, action: &'static str, cx: &mut Context<Self>| {
+                        let (p, svc) = (project.clone(), svc.clone());
+                        Button::new(SharedString::from(format!("cmp-l-{id}-{n}")), text).icon(glyph).style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, _, cx| this.compose_service(p.clone(), svc.clone(), action, false, cx)))
+                    };
+                    if running {
+                        row = row.child(act("restart", "Restart", "rotate-ccw", "restart", cx)).child(act("stop", "Stop", "circle-stop", "stop", cx));
+                    } else {
+                        row = row.child(act("start", "Start", "play", "start", cx));
+                    }
+                    row.into_any_element()
+                }
+            };
+            div()
+                .flex_none()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .h(px(ROW_H))
+                .px(px(14.))
+                .border_b_1()
+                .border_color(theme.border_variant)
+                .child(kit::dot(dot, 8.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(clipped(format!("cmp-l-name-{n}"), s.name.clone(), 13., theme.text, about(&s.name, 13.).min(text_w - 80.)))
+                                .when(s.replicas.is_some_and(|r| r > 1), |d| d.child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(format!("×{}", s.replicas.unwrap_or(1)))))
+                                .when(!health.is_empty(), |d| {
+                                    let color = match health {
+                                        "healthy" => theme.success,
+                                        "unhealthy" => theme.error,
+                                        _ => theme.warning,
+                                    };
+                                    d.child(kit::pill(health.to_string(), color))
+                                }),
+                        )
+                        .child(clipped(format!("cmp-l-what-{n}"), what, 11.5, theme.text_placeholder, text_w)),
+                )
+                .child(div().flex_none().w(px(C_CPU)).flex().justify_end().text_size(px(12.)).text_color(theme.text_muted).child(if running { cpu(used_cpu) } else { String::new() }))
+                .child(div().flex_none().w(px(C_MEM)).flex().justify_end().text_size(px(12.)).text_color(theme.text_muted).child(if running { memory(used_mem) } else { String::new() }))
+                .child(div().flex_none().w(px(C_STATE)).pl(px(12.)).child(clipped(format!("cmp-l-state-{n}"), state, 12., if failed { theme.error } else { theme.text_muted }, C_STATE - 12.)))
+                .when(show_ports, |d| {
+                    // Click: its first port, open here in the browser.
+                    let first = s.ports.iter().filter(|p| p.protocol != "udp").find_map(|p| p.published.parse::<u16>().ok());
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("cmp-l-portcell-{n}")))
+                            .flex_none()
+                            .w(px(C_PORTS))
+                            .when_some(first, |d, port| d.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| cx.emit(ServicesEvent::Port(port)))))
+                            .child(clipped(format!("cmp-l-ports-{n}"), ports, 12., theme.text_accent, C_PORTS)),
+                    )
+                })
+                .when(show_waits, |d| d.child(div().flex_none().w(px(C_WAITS)).child(clipped(format!("cmp-l-waits-{n}"), waits, 12., theme.text_muted, C_WAITS))))
+                .when(show_nets, |d| {
+                    let names: Vec<String> = if s.network_mode.is_empty() { s.networks.clone() } else { vec![s.network_mode.clone()] };
+                    d.child(div().flex_none().w(px(C_NETS)).overflow_hidden().flex().items_center().gap(px(8.)).children(names.into_iter().map(|name| {
+                        let color = nets.get(&name).copied().unwrap_or(theme.text_muted);
+                        div().flex_none().flex().items_center().gap(px(4.)).text_size(px(11.5)).text_color(theme.text_muted).child(kit::dot(color, 6.)).child(name)
+                    })))
+                })
+                .child(div().flex_none().w(px(C_ACTIONS)).flex().justify_end().child(actions))
+        });
+        let line = |cells: Vec<AnyElement>| div().flex_none().w_full().flex().items_center().gap(px(10.)).h(px(34.)).px(px(14.)).border_b_1().border_color(theme.border_variant).children(cells);
+        let cell = |text: String, w: f32, color: gpui::Hsla| div().flex_none().w(px(w)).truncate().text_size(px(12.)).text_color(color).child(text).into_any_element();
+        let wide = (self.width.get() - 28. - 30.).max(400.);
+        // Volumes, with who keeps what in each.
+        let volumes: Vec<AnyElement> = g
+            .volumes
+            .iter()
+            .map(|v| {
+                let users: Vec<String> = g.services.iter().flat_map(|s| s.volumes.iter().filter(|m| m.kind == "volume" && m.source == v.name).map(move |m| format!("{} → {}", s.name, m.target))).collect();
+                line(vec![
+                    icon("hard-drive", 13., theme.info).into_any_element(),
+                    cell(v.name.clone(), 200., theme.text),
+                    cell(if v.external { "external volume".into() } else { "volume".into() }, 120., theme.text_placeholder),
+                    cell(if users.is_empty() { "Not used".into() } else { users.join(", ") }, wide - 360., theme.text_muted),
+                ])
+                .into_any_element()
+            })
+            .collect();
+        // The machine's files and folders the services see.
+        let files: Vec<AnyElement> = g
+            .services
+            .iter()
+            .flat_map(|s| s.volumes.iter().filter(|m| m.kind == "bind").map(move |m| (s.name.clone(), m.clone())))
+            .map(|(svc, m)| {
+                let file = m.source.rsplit('/').next().is_some_and(|last| last.contains('.') && !last.starts_with('.'));
+                line(vec![
+                    icon(if file { "file" } else { "folder" }, 13., theme.text_placeholder).into_any_element(),
+                    cell(m.source.clone(), (wide - 330.) / 2., theme.text),
+                    cell(svc, 120., theme.text_muted),
+                    cell(format!("inside as {}", m.target), (wide - 330.) / 2., theme.text_muted),
+                    cell(if m.read_only { "read-only".into() } else { String::new() }, 80., theme.text_placeholder),
+                ])
+                .into_any_element()
+            })
+            .collect();
+        // Networks, with who's on each.
+        let networks: Vec<AnyElement> = picture::network_colors(g)
+            .into_iter()
+            .map(|(name, color)| {
+                let on: Vec<&str> = g.services.iter().filter(|s| s.networks.contains(&name)).map(|s| s.name.as_str()).collect();
+                let external = g.networks.iter().any(|x| x.name == name && x.external);
+                line(vec![
+                    kit::dot(color, 8.).into_any_element(),
+                    cell(name.clone(), 200., theme.text),
+                    cell(if external { "external network".into() } else { "network".into() }, 120., theme.text_placeholder),
+                    cell(on.join(", "), wide - 360., theme.text_muted),
+                ])
+                .into_any_element()
+            })
+            .collect();
+        let content = div()
+            .flex()
+            .flex_col()
+            .pb(px(24.))
+            .child(services_head)
+            .children(rows)
+            .when(!volumes.is_empty(), |d| d.child(section(format!("Volumes · {}", volumes.len()))).children(volumes))
+            .when(!files.is_empty(), |d| d.child(section(format!("From this machine · {}", files.len()))).children(files))
+            .when(!networks.is_empty(), |d| d.child(section(format!("Networks · {}", networks.len()))).children(networks));
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .relative()
+            .child(picture::measure(self.width.clone()))
+            .child(div().id("compose-list").absolute().size_full().overflow_y_scroll().child(content))
+            .into_any_element()
+    }
+
     fn compose_rows(&self, items: Vec<ComposeProject>, view: gpui::WeakEntity<Self>, theme: &Theme) -> AnyElement {
         let confirming = self.confirming.clone();
         let theme = *theme;
-        let text_w = self.width.get() - 28. - 7. - W_STATE - 360. - 30.;
+        let c = self.cols();
+        let text_w = c.text;
         uniform_list("compose-rows", items.len(), move |range, _, _| {
             range
                 .map(|n| {
@@ -1237,7 +1665,7 @@ impl ServicesView {
                     let running = p.running();
                     let do_it = |id: &str, label: &'static str, icon_name: &'static str, action: &'static str| {
                         let (view, p) = (view.clone(), p.clone());
-                        Button::new(SharedString::from(format!("cmp-{id}-{n}")), label).icon(icon_name).style(ButtonStyle::Ghost).on_click(move |_, _, cx| {
+                        word_or_icon(SharedString::from(format!("cmp-{id}-{n}")), label, icon_name, c.compact).on_click(move |_, _, cx| {
                             let _ = view.update(cx, |v, cx| v.compose(p.clone(), action, false, cx));
                         })
                     };
@@ -1266,14 +1694,14 @@ impl ServicesView {
                             let logs = {
                                 let (view, source) = (view.clone(), p.log_source());
                                 Button::icon_only(SharedString::from(format!("cmp-logs-{n}")), "scroll-text").tooltip("Its logs").on_click(move |_, _, cx| {
-                                    let _ = view.update(cx, |_, cx| cx.emit(ServicesEvent::OpenLogs(source.clone())));
+                                    let _ = view.update(cx, |_, cx| cx.emit(ServicesEvent::Logs(source.clone())));
                                 })
                             };
                             let edit = {
                                 let (view, folder, file, name) = (view.clone(), p.folder().to_string(), p.first_file().to_string(), p.name.clone());
                                 Button::icon_only(SharedString::from(format!("cmp-edit-{n}")), "pencil").tooltip("Edit its compose file").on_click(move |_, _, cx| {
                                     let command = format!("${{EDITOR:-nano}} '{}'; exec \"$SHELL\" -l", file.replace('\'', "'\\''"));
-                                    let _ = view.update(cx, |_, cx| cx.emit(ServicesEvent::OpenTerminal { cwd: folder.clone(), command, title: format!("{name} · compose") }));
+                                    let _ = view.update(cx, |_, cx| cx.emit(ServicesEvent::Terminal { cwd: folder.clone(), command, title: format!("{name} · compose") }));
                                 })
                             };
                             let parts = {
@@ -1312,8 +1740,8 @@ impl ServicesView {
                                 .child(clipped(format!("cmp-name-{n}"), p.name.clone(), 13., theme.text, text_w))
                                 .child(clipped(format!("cmp-files-{n}"), p.files.clone(), 11.5, theme.text_placeholder, text_w)),
                         )
-                        .child(div().flex_none().w(px(W_STATE)).pl(px(12.)).child(clipped(format!("cmp-status-{n}"), p.status.clone(), 12., theme.text_muted, W_STATE - 12.)))
-                        .child(div().flex_none().w(px(360.)).flex().justify_end().child(actions))
+                        .child(div().flex_none().w(px(c.state)).pl(px(12.)).child(clipped(format!("cmp-status-{n}"), p.status.clone(), 12., theme.text_muted, c.state - 12.)))
+                        .child(div().flex_none().w(px(c.actions)).flex().justify_end().child(actions))
                 })
                 .collect()
         })
@@ -1325,7 +1753,8 @@ impl ServicesView {
     fn image_rows(&self, items: Vec<Image>, view: gpui::WeakEntity<Self>, theme: &Theme) -> AnyElement {
         let (confirming, busy) = (self.confirming.clone(), self.busy.clone());
         let theme = *theme;
-        let text_w = self.width.get() - 28. - 14. - 80. - W_STATE - 240. - 40.;
+        let c = self.cols();
+        let text_w = c.text;
         uniform_list("image-rows", items.len(), move |range, _, _| {
             range
                 .map(|n| {
@@ -1361,18 +1790,32 @@ impl ServicesView {
                                 .flex()
                                 .items_center()
                                 .gap(px(4.))
-                                .child(Button::new(SharedString::from(format!("img-run-{n}")), "Run").icon("play").style(ButtonStyle::Ghost).on_click(move |_, window, cx| {
+                                .child(word_or_icon(SharedString::from(format!("img-run-{n}")), "Run", "play", c.compact).on_click(move |_, window, cx| {
                                     let _ = run_view.update(cx, |v, cx| v.open_run(&image, window, cx));
                                 }))
-                                .child(Button::icon_only(SharedString::from(format!("img-rm-{n}")), "trash-2").tooltip("Remove").on_click(move |_, window, cx| {
-                                    let _ = rm_view.update(cx, |v, cx| v.act(s2.clone(), "remove", false, window, cx));
-                                }))
+                                .child(
+                                    Button::icon_only(SharedString::from(format!("img-rm-{n}")), "trash-2")
+                                        // Docker won't remove an image a container is made from.
+                                        .disabled(!i.used_by.is_empty())
+                                        .tooltip(if i.used_by.is_empty() { "Remove" } else { "In use: remove its containers first" })
+                                        .on_click(move |_, window, cx| {
+                                            let _ = rm_view.update(cx, |v, cx| v.act(s2.clone(), "remove", false, window, cx));
+                                        }),
+                                )
                                 .into_any_element()
                         }
                     };
+                    // In use: green while a container made from it runs, a ring otherwise.
+                    let running = i.running();
+                    let used = i.used_by.iter().map(|u| if u.running { u.name.clone() } else { format!("{} (stopped)", u.name) }).collect::<Vec<_>>().join(", ");
+                    let mark = div().flex_none().size(px(14.)).flex().items_center().justify_center().child(if running {
+                        kit::dot(theme.success, 9.)
+                    } else {
+                        div().size(px(9.)).rounded_full().border_1().border_color(if i.used_by.is_empty() { theme.text_placeholder.opacity(0.5) } else { theme.text_muted })
+                    });
                     row(&theme)
                         .h(px(ROW_H))
-                        .child(icon("box", 14., theme.text_placeholder))
+                        .child(mark)
                         .child(
                             div()
                                 .flex_1()
@@ -1381,11 +1824,13 @@ impl ServicesView {
                                 .flex_col()
                                 .gap(px(2.))
                                 .child(clipped(format!("img-name-{n}"), i.name.clone(), 13., theme.text, text_w))
-                                .child(clipped(format!("img-id-{n}"), i.id.clone(), 11.5, theme.text_placeholder, text_w)),
+                                // No Used by column: who uses it goes under its name.
+                                .child(clipped(format!("img-id-{n}"), if c.used || used.is_empty() { i.id.clone() } else { format!("{} · used by {used}", i.id) }, 11.5, theme.text_placeholder, text_w)),
                         )
-                        .child(div().flex_none().w(px(80.)).flex().justify_end().text_size(px(12.)).text_color(theme.text_muted).child(i.size.clone()))
-                        .child(div().flex_none().w(px(W_STATE)).pl(px(12.)).text_size(px(12.)).text_color(theme.text_placeholder).child(i.created.clone()))
-                        .child(div().flex_none().w(px(240.)).flex().justify_end().child(actions))
+                        .child(div().flex_none().w(px(W_SIZE)).flex().justify_end().text_size(px(12.)).text_color(theme.text_muted).child(i.size.clone()))
+                        .when(c.created, |d| d.child(div().flex_none().w(px(W_CREATED)).pl(px(12.)).text_size(px(12.)).text_color(theme.text_placeholder).child(i.created.clone())))
+                        .when(c.used, |d| d.child(div().flex_none().w(px(W_USED)).child(clipped(format!("img-used-{n}"), used.clone(), 12., if running { theme.text_muted } else { theme.text_placeholder }, W_USED))))
+                        .child(div().flex_none().w(px(c.actions)).flex().justify_end().child(actions))
                 })
                 .collect()
         })

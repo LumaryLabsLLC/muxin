@@ -464,7 +464,7 @@ impl Root {
                             .child(
                                 Button::new("ws-new-here", "New workspace")
                                     .icon("plus")
-                                    .disabled(!allowed || m.status == "offline")
+                                    .disabled(!allowed || m.is_down())
                                     .on_click(cx.listener(move |this, _, window, cx| this.show_new_workspace(Some(new_on.clone()), window, cx))),
                             ),
                     ),

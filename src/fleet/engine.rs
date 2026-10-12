@@ -238,7 +238,7 @@ impl Engine {
             let ids: Vec<String> = snap
                 .machines
                 .iter()
-                .filter(|m| m.status != "offline" && !m.host.is_empty())
+                .filter(|m| !m.is_down() && !m.host.is_empty())
                 .filter(|m| m.platform.starts_with("darwin") || m.probe.as_ref().and_then(|p| p.desktop) == Some(true))
                 .map(|m| m.id.clone())
                 .collect();
@@ -820,13 +820,13 @@ impl Engine {
         // At startup, look everywhere the last check reached.
         let reachable: Vec<String> = {
             let st = self.state.lock().unwrap();
-            st.inventory.machines.iter().filter(|m| m.is_checkable() && st.probes.get(&m.id).is_some_and(|p| p.ok)).map(|m| m.id.clone()).collect()
+            st.inventory.machines.iter().filter(|m| m.is_connected() && st.probes.get(&m.id).is_some_and(|p| p.ok)).map(|m| m.id.clone()).collect()
         };
         let mut first: FuturesUnordered<_> = reachable.iter().map(|id| self.refresh_sessions(id)).collect();
         while first.next().await.is_some() {}
         loop {
             tokio::time::sleep(sessions::REFRESH_EVERY).await;
-            let ids = self.machines_with_sessions();
+            let ids: Vec<String> = self.machines_with_sessions().into_iter().filter(|id| self.machine(id).is_some_and(|(spec, _)| !spec.disconnected)).collect();
             // A slow machine doesn't hold up the rest for long.
             let mut pending: FuturesUnordered<_> = ids.iter().map(|id| tokio::time::timeout(Duration::from_secs(15), self.refresh_sessions(id))).collect();
             while pending.next().await.is_some() {}
@@ -850,7 +850,7 @@ impl Engine {
                 st.inventory
                     .machines
                     .iter()
-                    .filter(|m| m.is_checkable() && !m.is_local() && !st.checking.contains(&m.id))
+                    .filter(|m| m.is_connected() && !m.is_local() && !st.checking.contains(&m.id))
                     .filter(|m| {
                         // Tailscale says when a machine on the tailnet is back
                         // (see roaming.rs); those only need an occasional look.
@@ -912,7 +912,7 @@ impl Engine {
                 .inventory
                 .machines
                 .iter()
-                .filter(|m| m.is_checkable())
+                .filter(|m| m.is_connected())
                 .filter(|m| only.as_ref().is_none_or(|ids| ids.contains(&m.id)))
                 .filter(|m| !st.checking.contains(&m.id))
                 .cloned()
@@ -1134,8 +1134,9 @@ impl Engine {
                 m.agent_version = found.agent_version.clone();
                 m.gh = found.gh.clone();
                 m.sessions_error = found.error.clone();
-                // What we last saw there; nothing is working while it's offline.
-                let offline = m.status == "offline";
+                // What we last saw there; nothing is working while it's offline
+                // (or disconnected: nothing we can see).
+                let offline = m.is_down();
                 snapshot.sessions.extend(found.sessions.iter().cloned().map(|mut s| {
                     s.attention = st.attention.get(&s.id).cloned().or(s.attention);
                     s.busy &= !offline;

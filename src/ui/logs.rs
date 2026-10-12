@@ -1,7 +1,8 @@
 //! A machine's logs, live: its system log, log files, Docker containers and
 //! services (see fleet/logs.rs and the agent's logs.rs). The last lines,
 //! then new ones as they're written, over the machine's link; a filter,
-//! pause and follow.
+//! pause and follow. Embedded (a Compose project's page), it shows one log
+//! with a chip for each of the project's services to narrow it.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -92,6 +93,11 @@ pub struct LogsView {
     char_w: f32,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
+    /// Part of another page: one log, no list of logs to pick from.
+    embedded: bool,
+    /// A Compose project's services (embedded), and the one shown (None: all).
+    services: Vec<String>,
+    only: Option<String>,
     remote: Option<Arc<Remote>>,
     stream: Option<Task<()>>,
     _tasks: Vec<Task<()>>,
@@ -106,6 +112,38 @@ impl Focusable for LogsView {
 
 impl LogsView {
     pub fn new(engine: Arc<Engine>, machine: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::make(engine, machine, window, cx);
+        view.load_sources(true, window, cx);
+        view
+    }
+
+    /// One log inside another page: a Compose project's, with its services.
+    pub fn embedded(engine: Arc<Engine>, machine: String, source: LogSource, services: Vec<String>, only: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::make(engine, machine, window, cx);
+        view.embedded = true;
+        view.services = services;
+        view.only = only;
+        view.open(source, window, cx);
+        view
+    }
+
+    /// Shows one service's lines (None: all of them).
+    pub fn set_only(&mut self, only: Option<String>, cx: &mut Context<Self>) {
+        if self.only != only {
+            self.only = only;
+            self.refilter();
+            cx.notify();
+        }
+    }
+
+    pub fn set_services(&mut self, services: Vec<String>, cx: &mut Context<Self>) {
+        if self.services != services {
+            self.services = services;
+            cx.notify();
+        }
+    }
+
+    fn make(engine: Arc<Engine>, machine: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let filter = cx.new(|cx| TextInput::new(cx, "Filter"));
         let path = cx.new(|cx| TextInput::new(cx, "A file's path, then Return"));
         let find = cx.new(|cx| TextInput::new(cx, "Find"));
@@ -129,7 +167,7 @@ impl LogsView {
                 }
             }),
         ];
-        let mut view = LogsView {
+        LogsView {
             engine,
             machine,
             sources: None,
@@ -153,13 +191,14 @@ impl LogsView {
             char_w: 7.2,
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
+            embedded: false,
+            services: Vec::new(),
+            only: None,
             remote: None,
             stream: None,
             _tasks: Vec::new(),
             _subscriptions: subs,
-        };
-        view.load_sources(true, window, cx);
-        view
+        }
     }
 
     /// The log shown, for the sidebar ("Everything", "nginx", ...).
@@ -194,7 +233,7 @@ impl LogsView {
     /// Shows a log picked elsewhere (a service's, from the Services page).
     pub fn show_source(&mut self, source: LogSource, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = match source.kind.as_str() {
-            "docker" => Tab::Docker,
+            "docker" | "compose" => Tab::Docker,
             "service" => Tab::Services,
             "file" => Tab::Files,
             _ => Tab::System,
@@ -319,7 +358,7 @@ impl LogsView {
         } else {
             let filter = self.filter_text();
             for i in start..self.lines.len() {
-                if keeps(&self.lines[i], &filter) {
+                if keeps(&self.lines[i], &filter, self.only.as_deref()) {
                     self.note_longest(i);
                     self.shown.push(i);
                 }
@@ -347,7 +386,7 @@ impl LogsView {
         self.shown.clear();
         self.longest = None;
         for i in 0..self.lines.len() {
-            if keeps(&self.lines[i], &filter) {
+            if keeps(&self.lines[i], &filter, self.only.as_deref()) {
                 self.note_longest(i);
                 self.shown.push(i);
             }
@@ -452,9 +491,24 @@ fn chars(line: &str, from: usize, to: usize) -> &str {
     &line[a.min(b)..b]
 }
 
-/// Whether a line holds the filter (any case).
-fn keeps(line: &str, filter: &str) -> bool {
-    filter.is_empty() || line.to_lowercase().contains(filter)
+/// Whether a line holds the filter (any case), and is the service's when
+/// one is picked.
+fn keeps(line: &str, filter: &str, only: Option<&str>) -> bool {
+    (filter.is_empty() || line.to_lowercase().contains(filter)) && only.is_none_or(|svc| service_of(line) == Some(svc))
+}
+
+/// The Compose service a line is from ("web-1    | ..." is web's).
+fn service_of(line: &str) -> Option<&str> {
+    let (left, _) = line.split_once('|')?;
+    let name = left.trim();
+    Some(name.rsplit_once('-').filter(|(_, n)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())).map(|(s, _)| s).unwrap_or(name))
+}
+
+/// A service's color: by its place among the project's services, else by its name.
+pub fn service_color(name: &str, services: &[String]) -> gpui::Hsla {
+    const HUES: [f32; 8] = [0.58, 0.11, 0.47, 0.92, 0.76, 0.33, 0.02, 0.66];
+    let i = services.iter().position(|s| s == name).unwrap_or_else(|| name.bytes().fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize)));
+    gpui::hsla(HUES[i % HUES.len()], 0.6, 0.66, 1.)
 }
 
 /// A line's color by what it says: errors, warnings, debug noise.
@@ -523,18 +577,48 @@ impl Render for LogsView {
             State::Live => "Live".to_string(),
             State::Ended(why) => why.clone(),
         };
+        // Embedded: a chip for each service (All, web, api, ...) and how it's going.
+        let chips = self.embedded.then(|| {
+            let mut all: Vec<(Option<String>, String)> = vec![(None, "All".to_string())];
+            all.extend(self.services.iter().map(|s| (Some(s.clone()), s.clone())));
+            let services = self.services.clone();
+            div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(all.into_iter().map(|(svc, label)| {
+                let on = self.only == svc;
+                let color = svc.as_deref().map(|s| service_color(s, &services));
+                div()
+                    .id(SharedString::from(format!("logs-only-{label}")))
+                    .px(px(9.))
+                    .h(px(24.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(if on { theme.text } else { theme.text_placeholder })
+                    .when(on, |d| d.bg(theme.element_selected))
+                    .when(!on, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+                    .children(color.map(|c| kit::dot(c, 7.)))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_only(svc.clone(), cx)))
+            }))
+        });
         let toolbar = div()
             .flex_none()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap(px(8.))
-            .h(px(44.))
+            .min_h(px(44.))
+            .py(px(6.))
             .px(px(14.))
             .border_b_1()
             .border_color(theme.border_variant)
-            .child(tabs)
+            .when(!self.embedded, |d| d.child(tabs))
+            .children(chips)
+            .when(self.embedded, |d| d.child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(status.clone())))
             .child(div().flex_1())
-            .child(div().w(px(220.)).child(self.filter.clone()))
+            .child(div().flex_none().w(px(200.)).child(self.filter.clone()))
             .child(
                 Button::new("logs-pause", if self.paused { "Resume" } else { "Pause" })
                     .icon(if self.paused { "play" } else { "pause" })
@@ -573,6 +657,19 @@ impl Render for LogsView {
         };
         let find = self.find.read(cx).text().trim().to_lowercase();
         let list: Vec<LogSource> = list.into_iter().filter(|x| find.is_empty() || x.name.to_lowercase().contains(&find) || x.detail.to_lowercase().contains(&find)).collect();
+        // Docker: each Compose project, its containers under it, then the rest.
+        let list: Vec<(LogSource, bool)> = if self.tab == Tab::Docker {
+            let mut ordered = Vec::new();
+            for p in list.iter().filter(|x| x.kind == "compose") {
+                ordered.push((p.clone(), false));
+                ordered.extend(list.iter().filter(|x| x.kind == "docker" && x.project == p.project).map(|x| (x.clone(), true)));
+            }
+            let grouped = |x: &LogSource| x.kind == "compose" || list.iter().any(|p| p.kind == "compose" && p.project.is_some() && p.project == x.project);
+            ordered.extend(list.iter().filter(|x| !grouped(x)).map(|x| (x.clone(), false)));
+            ordered
+        } else {
+            list.into_iter().map(|x| (x, false)).collect()
+        };
         let current = self.source.clone();
         let picker = div()
             .id("logs-sources")
@@ -595,7 +692,7 @@ impl Render for LogsView {
             })
             .children(note.map(|n| div().p(px(8.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(n)))
             .when(list.is_empty() && !find.is_empty(), |d| d.child(div().p(px(8.)).text_size(px(11.5)).text_color(theme.text_placeholder).child("Nothing matches.")))
-            .children(list.into_iter().enumerate().map(|(i, s)| {
+            .children(list.into_iter().enumerate().map(|(i, (s, nested))| {
                 let on = current.as_ref().is_some_and(|c| c.kind == s.kind && c.target == s.target);
                 let locked = s.readable == Some(false);
                 let stopped = s.running == Some(false) || s.state.as_deref().is_some_and(|st| st != "running");
@@ -607,11 +704,15 @@ impl Render for LogsView {
                     _ => None,
                 };
                 let pick = s.clone();
+                let compose = s.kind == "compose";
+                let inset = if nested { 14. } else { 0. };
                 div()
                     .id(SharedString::from(format!("logs-src-{i}")))
                     .flex_none()
                     .flex()
                     .flex_col()
+                    .ml(px(inset))
+                    .when(nested, |d| d.border_l_1().border_color(theme.border_variant).rounded_l_none())
                     .px(px(8.))
                     .py(px(5.))
                     .rounded(px(6.))
@@ -626,10 +727,11 @@ impl Render for LogsView {
                             .text_size(px(12.5))
                             .text_color(if locked || stopped { theme.text_placeholder } else { theme.text })
                             .children(dot.map(|c| kit::dot(c, 6.)))
-                            .child(div().w(px(190.)).truncate().child(s.name.clone()))
+                            .when(compose, |d| d.child(icon("layers", 12., theme.text_muted)))
+                            .child(div().w(px(190. - inset - if compose { 18. } else { 0. })).truncate().when(compose, |d| d.font_weight(FontWeight::MEDIUM)).child(s.name.clone()))
                             .when(locked, |d| d.child(icon("lock", 11., theme.text_placeholder))),
                     )
-                    .when(!s.detail.is_empty(), |d| d.child(div().w(px(220.)).truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(s.detail.clone())))
+                    .when(!s.detail.is_empty(), |d| d.child(div().w(px(220. - inset)).truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(s.detail.clone())))
                     .on_click(cx.listener(move |this, _, window, cx| this.open(pick.clone(), window, cx)))
             }));
 
@@ -637,6 +739,9 @@ impl Render for LogsView {
         let shown = self.shown.clone();
         let lines = self.lines.clone();
         let colors = theme;
+        // A Compose project's lines start with their service: in its color.
+        let compose = self.source.as_ref().is_some_and(|s| s.kind == "compose");
+        let services = self.services.clone();
         let body = if self.source.is_none() {
             div().flex_1().flex().items_center().justify_center().child(kit::empty_state(&theme, "scroll-text", "Pick a log on the left.")).into_any_element()
         } else {
@@ -657,6 +762,10 @@ impl Render for LogsView {
                                 // An empty line inside the selection still shows it.
                                 let mid = if mid.is_empty() && n != r1 { " ".to_string() } else { mid };
                                 row.child(head).child(div().bg(selected_bg).child(mid)).child(tail)
+                            }
+                            None if compose && let Some(bar) = line.find('|') => {
+                                let color = service_of(&line).map(|s| service_color(s, &services)).unwrap_or(colors.text_muted);
+                                row.child(div().text_color(color).child(line[..=bar].to_string())).child(line[bar + 1..].to_string())
                             }
                             None => row.child(line),
                         }
@@ -723,7 +832,7 @@ impl Render for LogsView {
                     .flex_1()
                     .min_h(px(0.))
                     .flex()
-                    .child(picker)
+                    .when(!self.embedded, |d| d.child(picker))
                     .child(
                         div()
                             .flex_1()
@@ -731,7 +840,7 @@ impl Render for LogsView {
                             .h_full()
                             .flex()
                             .flex_col()
-                            .children(source_line)
+                            .when(!self.embedded, |d| d.children(source_line))
                             // Scrolling up stops following; the Follow button turns it back on.
                             .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _, cx| {
                                 let up = match e.delta {
@@ -751,7 +860,17 @@ impl Render for LogsView {
 
 #[cfg(test)]
 mod tests {
-    use super::chars;
+    use super::{chars, keeps, service_of};
+
+    #[test]
+    fn knows_a_lines_service() {
+        assert_eq!(service_of("web-1    | 2026-10-12T16:11:56Z start"), Some("web"));
+        assert_eq!(service_of("my-api-12 | up"), Some("my-api"));
+        assert_eq!(service_of("cache | up"), Some("cache"));
+        assert_eq!(service_of("no bar"), None);
+        assert!(keeps("web-1 | GET / 200", "get", Some("web")));
+        assert!(!keeps("api-1 | GET / 200", "", Some("web")));
+    }
 
     #[test]
     fn cuts_by_character() {

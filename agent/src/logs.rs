@@ -117,19 +117,39 @@ fn containers() -> (Vec<Value>, Option<String>) {
         return (Vec::new(), None);
     }
     let docker = crate::root::tool("docker").unwrap_or_else(|| "docker".into());
-    let Some(text) = quick(&docker, &["ps", "-a", "--format", "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}"]) else {
+    let Some(text) = quick(&docker, &["ps", "-a", "--format", "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}\t{{.Label \"com.docker.compose.project\"}}"]) else {
         return (Vec::new(), Some("Docker didn't answer: is it running, and may this user use it (the docker group)?".into()));
     };
     let mut list: Vec<Value> = text
         .lines()
         .filter_map(|l| {
             let f: Vec<&str> = l.split('\t').collect();
-            let [id, name, image, state, status] = f[..] else { return None };
-            Some(json!({ "kind": "docker", "target": id, "name": name, "detail": format!("{image} · {status}"), "running": state == "running" }))
+            let [id, name, image, state, status, project] = f[..] else { return None };
+            let project = (!project.is_empty()).then_some(project);
+            Some(json!({ "kind": "docker", "target": id, "name": name, "detail": format!("{image} · {status}"), "running": state == "running", "project": project }))
         })
         .collect();
     list.sort_by_key(|c| c["running"] != true);
-    (list, None)
+    // Each Compose project's containers together, in one log.
+    let mut projects: Vec<(String, usize, usize)> = Vec::new();
+    for c in &list {
+        if let Some(p) = c["project"].as_str() {
+            match projects.iter_mut().find(|(name, ..)| name == p) {
+                Some((_, n, up)) => {
+                    *n += 1;
+                    *up += usize::from(c["running"] == true);
+                }
+                None => projects.push((p.to_string(), 1, usize::from(c["running"] == true))),
+            }
+        }
+    }
+    projects.sort();
+    let mut out: Vec<Value> = projects
+        .into_iter()
+        .map(|(name, n, up)| json!({ "kind": "compose", "target": name, "name": name, "detail": format!("Compose · {up} of {n} running"), "running": up > 0, "project": name }))
+        .collect();
+    out.extend(list);
+    (out, None)
 }
 
 /// Log files worth offering: the usual places, and ones written lately under
@@ -309,9 +329,44 @@ pub fn read(req: &Value) -> Value {
         return json!({ "ok": false, "error": err.lines().last().unwrap_or("It didn't work.").trim() });
     }
     text.push_str(&err);
-    let kept: Vec<&str> = text.lines().filter(|l| filter.is_empty() || l.to_lowercase().contains(&filter)).collect();
+    let mut kept: Vec<&str> = text.lines().filter(|l| filter.is_empty() || l.to_lowercase().contains(&filter)).collect();
+    if req["source"]["kind"] == "compose" {
+        kept = by_time(kept);
+    }
     let from = kept.len().saturating_sub(lines as usize);
     json!({ "ok": true, "lines": kept[from..] })
+}
+
+/// Compose's lines ("web-1  | 2026-10-12T16:11:51.427785108Z ...") in time
+/// order: it gives each container's last lines one container after another.
+/// A line without a time stays after the line before it.
+pub(crate) fn by_time<S: AsRef<str>>(lines: Vec<S>) -> Vec<S> {
+    let mut last = String::new();
+    let mut keyed: Vec<(String, S)> = lines
+        .into_iter()
+        .map(|l| {
+            if let Some(t) = stamp(l.as_ref()) {
+                last = t;
+            }
+            (last.clone(), l)
+        })
+        .collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    keyed.into_iter().map(|(_, l)| l).collect()
+}
+
+/// A Compose line's time, written so times sort as text (nine places of
+/// fraction, however many Docker gave).
+fn stamp(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once('|')?;
+    let word = rest.trim_start().split_whitespace().next()?;
+    let b = word.as_bytes();
+    if b.len() < 20 || b[4] != b'-' || b[10] != b'T' {
+        return None;
+    }
+    let (secs, after) = word.split_at(19);
+    let frac: String = after.strip_prefix('.').map(|f| f.chars().take_while(char::is_ascii_digit).collect()).unwrap_or_default();
+    Some(format!("{secs}.{frac:0<9}"))
 }
 
 /// How many lines a stream starts with.
@@ -322,6 +377,25 @@ pub fn initial_lines(req: &Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn puts_compose_lines_in_time_order() {
+        let lines = vec![
+            "cache-1  | 2026-10-12T16:11:51.4277Z ready",
+            "cache-1  | 2026-10-12T16:20:12.587451332Z saving",
+            "web-1    | 2026-10-12T16:11:56.612834458Z starting",
+            "web-1    |   at line 2",
+            "api-1    | 2026-10-12T16:11:51.42778Z up",
+        ];
+        assert_eq!(by_time(lines), vec![
+            "cache-1  | 2026-10-12T16:11:51.4277Z ready",
+            "api-1    | 2026-10-12T16:11:51.42778Z up",
+            "web-1    | 2026-10-12T16:11:56.612834458Z starting",
+            "web-1    |   at line 2",
+            "cache-1  | 2026-10-12T16:20:12.587451332Z saving",
+        ]);
+        assert_eq!(stamp("no bar here"), None);
+    }
 
     #[test]
     fn builds_commands() {

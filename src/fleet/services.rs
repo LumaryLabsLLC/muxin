@@ -39,6 +39,24 @@ pub struct Image {
     pub size: String,
     #[serde(default)]
     pub created: String,
+    /// The containers made from it, running or not.
+    #[serde(default)]
+    pub used_by: Vec<ImageUser>,
+}
+
+/// A container made from an image.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ImageUser {
+    pub name: String,
+    #[serde(default)]
+    pub running: bool,
+}
+
+impl Image {
+    /// Whether a running container uses it.
+    pub fn running(&self) -> bool {
+        self.used_by.iter().any(|u| u.running)
+    }
 }
 
 /// A Docker Compose project, with its files.

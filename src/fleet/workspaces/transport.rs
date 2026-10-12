@@ -126,6 +126,7 @@ pub async fn run(
     secrets: &[String],
     on_line: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) -> Result<Output, String> {
+    spec.refuse_if_disconnected()?;
     // Over the machine's live link when there is one: no ssh handshake. Scripts
     // that stream their output (operation logs) and big uploads still use ssh.
     if !windows && !spec.is_local() && on_line.is_none() && script.len() < 8 << 20 {

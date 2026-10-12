@@ -37,6 +37,33 @@ pub struct Connection {
 }
 
 impl Engine {
+    /// Disconnects from a machine or connects to it again. Disconnected,
+    /// Muxen closes its link and stops checking it and looking at its
+    /// sessions (they go on there) until it's connected again; it's saved in
+    /// config.toml (`disconnected = true`), so it lasts. Connecting checks it.
+    pub fn set_connected(self: &Arc<Self>, machine_id: &str, connected: bool) -> Result<(), String> {
+        let (spec, _) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
+        if !spec.is_checkable() {
+            return Err(format!("{} has no host to connect to.", spec.name));
+        }
+        if spec.disconnected != connected {
+            return Ok(());
+        }
+        let edit = |text: &str| crate::ops::inventory_edit::set_disconnected(text, &spec.id, !connected);
+        match self.demo_world() {
+            Some(w) => w.edit_inventory(edit)?,
+            None => crate::ops::inventory_edit::edit_file(self.inventory_path(), edit)?,
+        }
+        // The new setting first, so nothing connects again in between.
+        self.reload_inventory_now();
+        if connected {
+            self.trigger_check(Some(spec.id.clone()));
+        } else {
+            link::reset(&spec.id);
+        }
+        Ok(())
+    }
+
     /// How Muxen reaches the machine right now (measured, connecting if needed).
     pub async fn connection(self: &Arc<Self>, machine_id: &str) -> Result<Connection, String> {
         let (spec, _) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;

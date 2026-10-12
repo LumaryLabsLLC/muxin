@@ -145,6 +145,9 @@ pub struct Appearance {
     pub panes: Vec<String>,
     /// Favorite machines: first in the sidebar (so ⌘1, ⌘2, …), with a star.
     pub favorite_machines: Vec<String>,
+    /// Machines' ports open on this computer, as "machine:port:local port"
+    /// (opened again at launch).
+    pub forwards: Vec<String>,
     /// How icons look (see kit::IconStyle): "minimal", "tiles", "soft", ...
     pub icon_style: String,
     /// Shortcuts the user changed: id → keys ("" for none). See shortcuts.rs.
@@ -172,6 +175,7 @@ impl Default for Appearance {
             desktops: Vec::new(),
             panes: Vec::new(),
             favorite_machines: Vec::new(),
+            forwards: Vec::new(),
             icon_style: super::kit::IconStyle::default().id().into(),
             shortcuts: Default::default(),
             path: None,

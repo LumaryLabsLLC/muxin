@@ -72,6 +72,8 @@ enum Run {
     /// A machine's desktop on one of its monitors (None: the main one).
     Screen(String, Option<String>),
     Do(Command),
+    /// Connect to a machine that's disconnected.
+    Connect(String),
     /// A theme, by id.
     Theme(&'static str),
 }
@@ -279,6 +281,7 @@ impl Root {
         match run {
             Run::Go(route) => self.navigate(route, window, cx),
             Run::Screen(machine, display) => self.show_display(machine, display, window, cx),
+            Run::Connect(machine) => self.set_machine_connected(&machine, true, cx),
             Run::Do(c) => match c {
                 Command::AddMachine => self.show_add_machine(window, cx),
                 Command::NewCloudMachine => self.show_cloud_dialog(window, cx),
@@ -380,6 +383,13 @@ impl Root {
             let mut head = Item::new(m.name.clone(), format::machine_subtitle(m).0, "Machine", Glyph::Machine(format::machine_icon(m), format::machine_tile(m)), Run::Go(Route::Machine(m.id.clone())));
             head.group = Some(m.id.clone());
             out.push(head);
+            if m.is_disconnected() {
+                let mut item = Item::new("Connect", "Muxen connects to it again", "Machine", Glyph::Icon("plug"), Run::Connect(m.id.clone()));
+                item.indent = true;
+                item.group = Some(m.id.clone());
+                item.also = m.name.clone();
+                out.push(item);
+            }
             for x in s.sessions.iter().filter(|x| x.machine_id == m.id) {
                 let mut item = session(x, &m.name);
                 item.indent = true;

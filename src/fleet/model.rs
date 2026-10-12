@@ -188,7 +188,8 @@ pub struct Machine {
     pub platform: String,
     /// "runner" when it hosts runners, otherwise "other".
     pub kind: String,
-    /// "online" | "offline" | "unchecked" | "manual"
+    /// "online" | "offline" | "unchecked" | "manual" | "disconnected" (on
+    /// purpose: Muxen leaves it alone until it's connected again)
     pub status: String,
     pub checking: bool,
     pub notes: Option<String>,
@@ -214,6 +215,17 @@ pub struct Machine {
     pub cloud: Option<CloudInfo>,
     /// Its monitors, virtual ones included, as last listed (empty until then).
     pub displays: Vec<DisplayInfo>,
+}
+
+impl Machine {
+    /// Muxen can't use it now: it's offline, or disconnected on purpose.
+    pub fn is_down(&self) -> bool {
+        matches!(self.status.as_str(), "offline" | "disconnected")
+    }
+
+    pub fn is_disconnected(&self) -> bool {
+        self.status == "disconnected"
+    }
 }
 
 /// One of a machine's monitors: a real one, or a virtual one Muxen added.

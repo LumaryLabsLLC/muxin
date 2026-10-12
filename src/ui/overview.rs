@@ -202,7 +202,7 @@ impl Root {
         let inner = width - 2. - 32.;
         let (from, to) = format::machine_tile(m);
         let (subtitle, tone) = format::machine_subtitle(m);
-        let offline = m.status == "offline";
+        let offline = m.is_down();
         let desktop = cx.global::<super::theme::Appearance>().desktops.contains(&m.id);
 
         // What's running: its agents (working ones first), its desktop, its runners.
@@ -633,6 +633,7 @@ fn status_word(m: &Machine) -> &'static str {
         "offline" if format::is_just_offline(m) => "offline",
         "offline" => "can't connect",
         "manual" => "no host",
+        "disconnected" => "disconnected",
         _ => "unchecked",
     }
 }

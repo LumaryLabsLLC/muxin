@@ -221,6 +221,9 @@ pub fn current(machine_id: &str) -> Option<Arc<Link>> {
 /// The machine's link, connecting if there isn't one (unless that failed a
 /// moment ago). None means: use plain ssh this time.
 pub async fn get(spec: &MachineSpec) -> Option<Arc<Link>> {
+    if spec.disconnected {
+        return None;
+    }
     // An escape hatch: plain ssh for everything.
     if std::env::var_os("MUXEN_NO_LINK").is_some() {
         return None;

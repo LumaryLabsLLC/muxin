@@ -27,6 +27,7 @@ mod desktop;
 #[cfg(unix)]
 mod displays;
 mod logs;
+mod ports;
 mod root;
 mod services;
 #[cfg(unix)]

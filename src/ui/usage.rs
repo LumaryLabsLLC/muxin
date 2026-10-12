@@ -183,7 +183,8 @@ impl Root {
                 .p(px(16.))
                 .gap(px(6.))
                 .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(label.to_string()))
-                .child(div().text_size(px(24.)).font_family(mono_font()).text_color(theme.text).child(value))
+                // A long value (a model's name) smaller, on one line.
+                .child(div().text_size(px(if value.chars().count() > 10 { 17. } else { 24. })).font_family(mono_font()).text_color(theme.text).overflow_hidden().whitespace_nowrap().child(value))
                 .child(div().text_size(px(12.)).text_color(theme.text_placeholder).overflow_hidden().whitespace_nowrap().child(sub))
         };
         body = body.child(

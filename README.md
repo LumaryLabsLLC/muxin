@@ -501,7 +501,7 @@ muxen cloud destroy dev-1
 
 Not yet on Windows: Docker runners and Docker workspaces, adding virtual monitors.
 
-**The app on Windows** is built on Windows (GPUI compiles its shaders with the Windows SDK's `fxc.exe`): install Rust and Visual Studio's C++ build tools with the Windows SDK, run `scripts/build-agents.sh` on a Mac or Linux (it makes the Windows agent too, with `cargo-zigbuild`), then `scripts\package-windows.ps1` on Windows. That makes `dist\Muxen-windows-x64.zip`: `muxen.exe` and its `agents\`. Started from Explorer it shows no console window; from a terminal it's the same CLI as elsewhere. Secrets go in Windows' Credential Manager.
+**The app on Windows** is built on Windows (GPUI compiles its shaders with the Windows SDK's `fxc.exe`): install Rust and Visual Studio's C++ build tools with the Windows SDK, run `scripts/build-agents.sh` on a Mac or Linux (it makes the Windows agent too, with `cargo-zigbuild`), then `scripts\package-windows.ps1` on Windows. That makes `dist\Muxen-Setup-x64.exe` (an installer, with [Inno Setup](https://jrsoftware.org/isinfo.php): for this user, no administrator needed, a Start menu entry, optionally `muxen` on the PATH, an uninstaller) and `dist\Muxen-windows-x64.zip` (`muxen.exe` and its `agents\`). Started from Explorer it shows no console window; from a terminal it's the same CLI as elsewhere. Secrets go in Windows' Credential Manager.
 
 ## Develop
 

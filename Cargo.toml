@@ -57,7 +57,9 @@ winresource = "0.1"
 
 # Starting without a console window (see main.rs `without_console_window`).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_Security_Credentials"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_Security_Credentials", "Win32_Graphics_Dwm"] }
+# The window's handle, to color its title bar like the theme.
+raw-window-handle = { version = "0.6", optional = true }
 
 [workspace]
 members = [".", "agent"]

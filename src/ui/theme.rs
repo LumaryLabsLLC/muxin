@@ -200,13 +200,18 @@ impl Appearance {
         }
     }
 
-    /// The theme to show given the system's light/dark appearance.
-    pub fn resolve(&self, system: WindowAppearance) -> Theme {
-        let dark = match self.mode {
+    /// Whether the dark theme shows, given the system's light/dark appearance.
+    pub fn is_dark(&self, system: WindowAppearance) -> bool {
+        match self.mode {
             Mode::Dark => true,
             Mode::Light => false,
             Mode::System => matches!(system, WindowAppearance::Dark | WindowAppearance::VibrantDark),
-        };
+        }
+    }
+
+    /// The theme to show given the system's light/dark appearance.
+    pub fn resolve(&self, system: WindowAppearance) -> Theme {
+        let dark = self.is_dark(system);
         let (id, fallback) = if dark { (&self.dark, DEFAULT_DARK) } else { (&self.light, DEFAULT_LIGHT) };
         themes::find(id).filter(|p| p.dark == dark).or_else(|| themes::find(fallback)).expect("default themes exist").theme()
     }
@@ -230,7 +235,31 @@ pub fn apply(window: &Window, cx: &mut App) {
     super::terminal::set_font(&cx.global::<Appearance>().terminal_font);
     let style = super::kit::IconStyle::from_id(&cx.global::<Appearance>().icon_style);
     super::kit::set_look(super::kit::Look::new(style, &theme));
+    #[cfg(windows)]
+    title_bar(window, cx.global::<Appearance>().is_dark(window.appearance()), &theme);
     cx.set_global(theme);
+}
+
+/// Windows draws the title bar: dark when the theme is, in the theme's own
+/// background and text colors (Windows 11; older versions keep theirs).
+#[cfg(windows)]
+fn title_bar(window: &Window, dark: bool, theme: &Theme) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+    let hwnd = h.hwnd.get() as *mut std::ffi::c_void;
+    // COLORREF: 0x00BBGGRR.
+    let colorref = |c: gpui::Hsla| {
+        let c = gpui::Rgba::from(c);
+        ((c.b * 255.) as u32) << 16 | ((c.g * 255.) as u32) << 8 | (c.r * 255.) as u32
+    };
+    let set = |attribute: i32, value: u32| unsafe {
+        DwmSetWindowAttribute(hwnd, attribute as u32, &value as *const u32 as *const std::ffi::c_void, 4);
+    };
+    set(DWMWA_USE_IMMERSIVE_DARK_MODE as i32, dark as u32);
+    set(DWMWA_CAPTION_COLOR as i32, colorref(theme.sidebar));
+    set(DWMWA_TEXT_COLOR as i32, colorref(theme.text));
 }
 
 pub const TERMINAL_FONT_SIZE: f32 = 13.;

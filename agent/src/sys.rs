@@ -137,11 +137,29 @@ pub fn spawn_background(args: &[&str], log: PathBuf) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
         let _ = log;
+        // Out of whatever job this runs in, without a window. That works
+        // unless the job forbids it (sshd's ends everything in it when the
+        // session closes): then through WMI, which starts it outside.
+        let direct = Command::new(&exe)
+            .args(args)
+            .current_dir(&home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB)
+            .spawn();
+        if direct.is_ok() {
+            return Ok(());
+        }
         let quote = |s: &str| s.replace('\'', "''");
         let line = std::iter::once(format!("\"{}\"", exe.display())).chain(args.iter().map(|a| a.to_string())).collect::<Vec<_>>().join(" ");
+        // Hidden (ShowWindow 0), should this be a desktop session.
         let script = format!(
-            "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{ CommandLine = '{}'; CurrentDirectory = '{}' }}; exit $r.ReturnValue",
+            "$startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{{ ShowWindow = [uint16]0 }}; $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{ CommandLine = '{}'; CurrentDirectory = '{}'; ProcessStartupInformation = $startup }}; exit $r.ReturnValue",
             quote(&line),
             quote(&home.display().to_string())
         );

@@ -208,15 +208,30 @@ async fn upload(spec: &MachineSpec, bytes: Vec<u8>) -> Result<String, String> {
     tokio::time::timeout(UPLOAD_TIMEOUT, work).await.map_err(|_| format!("{} took too long to receive the agent.", spec.name))?
 }
 
-/// Copies the build into place on Windows and prints its hash. The file goes
-/// over sftp (Windows' sshd stalls on a few hundred KB through a program's
-/// stdin), then PowerShell puts it in place. A running agent holds its file,
-/// but Windows lets it be renamed: the old one moves aside and goes once
-/// nothing runs it.
+/// Puts an uploaded build (`muxen-agent.upload.exe`) in place on Windows and
+/// prints its hash. A running agent holds its file, but Windows lets it be
+/// renamed: the old one moves aside and goes once nothing runs it; the
+/// desktop helper, running the old build, goes now.
+const SWAP_PS1: &str = "$ErrorActionPreference = 'Stop'\n\
+         $d = Join-Path $env:USERPROFILE '.muxen\\bin'\n\
+         $t = Join-Path $d 'muxen-agent.exe'\n\
+         if (Test-Path $t) { Move-Item -Force $t (Join-Path $d \"muxen-agent.old.$PID.exe\") }\n\
+         Move-Item -Force (Join-Path $d 'muxen-agent.upload.exe') $t\n\
+         Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object { $_.CommandLine -match ' gui-serve' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\n\
+         Get-ChildItem $d -Filter 'muxen-agent.old.*.exe' | ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }\n\
+         & $t hash\n";
+
+/// Copies the build into place on Windows and prints its hash: over sftp
+/// (Windows' sshd stalls on a few hundred KB through a program's stdin), or
+/// a copy on this computer; then SWAP_PS1.
 async fn upload_windows(spec: &MachineSpec, build: &std::path::Path) -> Result<String, String> {
     let fail = |e: String| format!("couldn't install the agent on {}: {e}", spec.name);
     if spec.is_local() {
-        return Err(fail("Muxen doesn't set up its agent on this Windows computer yet.".into()));
+        // This computer: a copy, then the same swap.
+        let bin = dirs::home_dir().unwrap_or_default().join(".muxen").join("bin");
+        std::fs::create_dir_all(&bin).map_err(|e| fail(e.to_string()))?;
+        std::fs::copy(build, bin.join("muxen-agent.upload.exe")).map_err(|e| fail(e.to_string()))?;
+        return run_ps(spec, SWAP_PS1, CTL_TIMEOUT).await.map_err(fail);
     }
     // sftp takes ssh's options, but its own spelling of the port and user.
     let mut args: Vec<String> = Vec::new();
@@ -243,15 +258,7 @@ async fn upload_windows(spec: &MachineSpec, build: &std::path::Path) -> Result<S
         if status.success() { Ok(()) } else { Err(err.lines().last().unwrap_or("sftp failed").trim().to_string()) }
     };
     tokio::time::timeout(UPLOAD_TIMEOUT, sent).await.map_err(|_| fail("the copy took too long".into()))?.map_err(fail)?;
-    let script = "$ErrorActionPreference = 'Stop'\n\
-         $d = Join-Path $env:USERPROFILE '.muxen\\bin'\n\
-         $t = Join-Path $d 'muxen-agent.exe'\n\
-         if (Test-Path $t) { Move-Item -Force $t (Join-Path $d \"muxen-agent.old.$PID.exe\") }\n\
-         Move-Item -Force (Join-Path $d 'muxen-agent.upload.exe') $t\n\
-         Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object { $_.CommandLine -match ' gui-serve' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\n\
-         Get-ChildItem $d -Filter 'muxen-agent.old.*.exe' | ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }\n\
-         & $t hash\n";
-    run_ps(spec, script, CTL_TIMEOUT).await.map_err(fail)
+    run_ps(spec, SWAP_PS1, CTL_TIMEOUT).await.map_err(fail)
 }
 
 /// Runs a short PowerShell script on a Windows machine (with the user's profile, like workspace commands).

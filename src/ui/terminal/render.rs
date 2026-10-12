@@ -104,7 +104,13 @@ fn base_font(window: &Window) -> Font {
     };
     let mut font = gpui::font(family);
     // Icons the font lacks (Nerd Font glyphs): from the bundled symbols font.
-    font.fallbacks = Some(gpui::FontFallbacks::from_fonts(crate::ui::assets::NERD_SYMBOLS_NAMES.iter().map(|n| n.to_string()).collect()));
+    // On Windows, then its own monochrome symbols, before the system's
+    // fallback reaches Segoe UI Emoji (Claude Code's ⏺ as a blue square).
+    let mut fallbacks: Vec<String> = crate::ui::assets::NERD_SYMBOLS_NAMES.iter().map(|n| n.to_string()).collect();
+    if cfg!(windows) {
+        fallbacks.extend(["Segoe UI Symbol", "Cascadia Mono", "Consolas"].map(String::from));
+    }
+    font.fallbacks = Some(gpui::FontFallbacks::from_fonts(fallbacks));
     // Ligatures would merge cells and break the grid.
     font.features = FontFeatures(Arc::new(vec![("calt".into(), 0), ("liga".into(), 0)]));
     font

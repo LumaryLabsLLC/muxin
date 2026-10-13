@@ -2,7 +2,7 @@
 name = "muxen"
 version = "0.1.0"
 edition = "2024"
-description = "A fast native dashboard for your fleet of self-hosted GitHub Actions runners, built with GPUI"
+description = "All your machines, one app. For you and your AI agents."
 license = "LicenseRef-Proprietary"
 publish = false
 repository = "https://github.com/LumaryLabsLLC/muxin"

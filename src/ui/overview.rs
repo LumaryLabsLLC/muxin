@@ -42,7 +42,7 @@ impl Root {
         if let Some(err) = &s.inventory.error {
             body = body.child(callout(&theme, "error", "config.toml has an error", err.clone(), None));
         }
-        if !s.attention.is_empty() {
+        if s.attention.iter().any(|a| !on_cards(a)) {
             body = body.child(self.heads_up(&theme, &s, content_width, cx));
         }
         body.child(self.render_machine_grid(&theme, &s, content_width, cx)).child(self.render_agents(&theme, &s, cx))
@@ -107,11 +107,11 @@ impl Root {
     /// What needs a look, one compact line each; the first few unless opened.
     fn heads_up(&self, theme: &Theme, s: &Snapshot, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
         const SHOWN: usize = 3;
-        let hidden = if self.heads_up_open { 0 } else { s.attention.len().saturating_sub(SHOWN) };
-        let mut rows: Vec<AnyElement> = s
-            .attention
+        let items: Vec<_> = s.attention.iter().filter(|a| !on_cards(a)).collect();
+        let hidden = if self.heads_up_open { 0 } else { items.len().saturating_sub(SHOWN) };
+        let mut rows: Vec<AnyElement> = items
             .iter()
-            .take(s.attention.len() - hidden)
+            .take(items.len() - hidden)
             .enumerate()
             .map(|(i, a)| {
                 let color = theme.level(&a.level);
@@ -149,7 +149,7 @@ impl Root {
                     .into_any_element()
             })
             .collect();
-        if s.attention.len() > SHOWN {
+        if items.len() > SHOWN {
             let label = if hidden > 0 { format!("Show {hidden} more") } else { "Show fewer".to_string() };
             rows.push(
                 div()
@@ -246,12 +246,15 @@ impl Root {
                 now.push(now_row_owned(theme, kit::tile("workflow", rf, rt, 18.).into_any_element(), label, state, color, inner));
             }
         }
+        // The subtitle already says it can't be reached: this line says why.
         let empty_line = if offline {
             Some(match &m.unreachable {
+                _ if m.is_disconnected() => "Connect to it from its page to see what's running.".into(),
                 Some(u) if u.kind == "offline" => match u.last_seen_at {
                     Some(t) => format!("Asleep or off the network. Last seen {}.", format::ago(Some(t))),
                     None => "Asleep or off the network.".into(),
                 },
+                Some(u) if !u.detail.is_empty() => u.detail.clone(),
                 Some(u) => u.title.clone(),
                 None => "Can't connect.".into(),
             })
@@ -340,7 +343,7 @@ impl Root {
                     .flex_col()
                     .min_h(px(NOW_ROW_H * NOW_ROWS as f32))
                     .children(now)
-                    .children(empty_line.map(|t| div().pt(px(4.)).text_size(px(12.)).text_color(if offline && !format::is_just_offline(m) { theme.error } else { theme.text_placeholder }).child(t))),
+                    .children(empty_line.map(|t| div().pt(px(4.)).text_size(px(12.)).text_color(theme.text_placeholder).child(t))),
             )
             .child(div().pt(px(10.)).border_t_1().border_color(theme.border_variant).child(footer))
             .on_mouse_down(gpui::MouseButton::Right, {
@@ -707,4 +710,9 @@ fn job_title(theme: &Theme, j: &Job, width: Option<f32>) -> impl IntoElement {
             j.workflow,
             j.branch.as_ref().map(|b| format!(" · {b}")).unwrap_or_default()
         )))
+}
+
+/// Shown on the machine cards below the heads-up, so not repeated in it.
+fn on_cards(a: &crate::fleet::model::Attention) -> bool {
+    a.id == "unreachable"
 }

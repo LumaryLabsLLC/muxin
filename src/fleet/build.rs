@@ -414,7 +414,24 @@ pub fn explain_unreachable(spec: &MachineSpec, p: &ProbeResult, retrying: bool, 
     let again = if retrying { "Reconnects when it's back." } else { "Check again when it's back." };
     let (title, detail, hint) = match kind {
         "offline" => (format!("{name} is offline"), format!("Shut down, asleep, or off the network. {again}"), None),
-        "refused" => (format!("{name} isn't accepting connections"), "Starting up, or Remote Login (ssh) is off.".to_string(), None),
+        // ssh got to the machine it goes through (ProxyJump), and nothing
+        // answered behind it.
+        "refused" if ["stdio forwarding failed", "open failed: connect failed"].iter().any(|w| error.contains(w)) => {
+            (format!("{name} isn't answering"), format!("The machine it's reached through is up, but nothing answers behind it: {name} is off, or its ssh server isn't running."), None)
+        }
+        "refused" => {
+            let os = p.os.as_deref().or(spec.platform.as_deref()).unwrap_or("").to_ascii_lowercase();
+            let ssh = if os.starts_with("darwin") || os.starts_with("macos") {
+                "Remote Login (ssh) is off"
+            } else if os.starts_with("windows") {
+                "OpenSSH Server isn't running"
+            } else if os.is_empty() {
+                "ssh is off"
+            } else {
+                "its ssh server isn't running"
+            };
+            (format!("{name} isn't accepting connections"), format!("Starting up, or {ssh}."), None)
+        }
         "auth" => {
             // "adib@box.local: Permission denied (...)": who ssh signed in as.
             let user = error
@@ -1249,6 +1266,24 @@ mod tests {
         assert_eq!(u.kind, "auth");
         assert!(u.detail.contains("password for adib"), "{}", u.detail);
         assert!(u.hint.unwrap().starts_with("ssh-copy-id -i "));
+    }
+
+    #[test]
+    fn says_why_ssh_was_refused() {
+        let inv = inventory("[[machine]]\nname = \"Win11\"\nhost = \"win11\"\n");
+        let refused = |error: &str, os: Option<&str>| ProbeResult { ok: false, error: Some(error.into()), os: os.map(Into::into), ..Default::default() };
+
+        // Through a jump host that's up, with nothing behind it.
+        let p = refused("channel 0: open failed: connect failed: Connection refused\nstdio forwarding failed\nConnection closed by UNKNOWN port 65535", None);
+        let u = explain_unreachable(&inv.machines[0], &p, true, None, None);
+        assert_eq!(u.kind, "refused");
+        assert!(u.detail.contains("reached through is up"), "{}", u.detail);
+
+        // Straight to it: what's off depends on its OS.
+        let p = refused("ssh: connect to host win11 port 22: Connection refused", Some("windows"));
+        assert!(explain_unreachable(&inv.machines[0], &p, true, None, None).detail.contains("OpenSSH Server"));
+        let p = refused("ssh: connect to host win11 port 22: Connection refused", Some("Darwin"));
+        assert!(explain_unreachable(&inv.machines[0], &p, true, None, None).detail.contains("Remote Login"));
     }
 
     #[test]

@@ -1314,7 +1314,7 @@ mod tests {
         send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"status","arguments":{}}})).await;
         let status: Value = recv().await;
         assert_eq!(status["result"]["isError"], false);
-        assert_eq!(status["result"]["structuredContent"]["counts"]["machines"], 7);
+        assert_eq!(status["result"]["structuredContent"]["counts"]["machines"], 9);
         assert!(status["result"]["content"][0]["text"].as_str().unwrap().contains("\"summary\""));
 
         // Tool failures are results with isError, carrying a code an agent can branch on.

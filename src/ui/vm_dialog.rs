@@ -32,9 +32,14 @@ impl EventEmitter<DialogEvent> for VmDialog {}
 impl VmDialog {
     /// `host`: the machine to put it on (opened from its page), else the best one.
     pub fn new(engine: Arc<Engine>, host: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // "beacon@windows-11": that machine, with that system chosen.
+        let (host, system) = match host.as_deref().and_then(|h| h.split_once('@')) {
+            Some((h, s)) => (Some(h.to_string()), Some(s.to_string())),
+            None => (host, None),
+        };
         let options = engine.vm_options();
         // Windows where some machine can run it, else Linux.
-        let system = if options.hosts.iter().any(|h| h.systems.iter().any(|s| s == "windows-11")) { "windows-11" } else { "ubuntu-24.04" }.to_string();
+        let system = system.filter(|s| crate::ops::vm::system(s).is_some()).unwrap_or_else(|| if options.hosts.iter().any(|h| h.systems.iter().any(|s| s == "windows-11")) { "windows-11" } else { "ubuntu-24.04" }.to_string());
         let name = cx.new(|cx| TextInput::new(cx, "win-dev").with_text(free_name(&engine, &system)));
         let subs = vec![cx.subscribe_in(&name, window, |this: &mut Self, _, e: &InputEvent, _, cx| match e {
             InputEvent::Submit => this.submit(cx),
@@ -125,6 +130,9 @@ impl Focusable for VmDialog {
 impl Render for VmDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        // What the machines can run arrives with their checks (just after start, say).
+        self.options = self.engine.vm_options();
+        self.pick_host();
         let cancel = Button::new("vm-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element();
         let chip = |id: SharedString, text: String, selected: bool, enabled: bool| {
             div()

@@ -16,6 +16,7 @@ const ORG: &str = "acme";
 /// NAS, a MacBook that's usually asleep, and a cloud machine created days ago.
 fn inventory_text(now: DateTime<Utc>) -> String {
     let created = (now - chrono::Duration::days(3) - chrono::Duration::hours(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let vm_created = (now - chrono::Duration::days(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     format!(
         r#"[[machine]]
 name = "Forge"
@@ -53,6 +54,24 @@ notes = "The travel MacBook, usually asleep."
 name = "Vault"
 host = "vault"
 notes = "Build cache and backups."
+
+[[machine]]
+name = "win-test"
+host = "127.0.0.1"
+user = "ci"
+port = 2201
+ssh_options = ["-J", "beacon", "-o", "HostKeyAlias=muxen-win-test"]
+direct_address = "beacon:47830"
+vm = {{ host = "beacon", os = "windows", version = "windows-11", container = "muxen-win-test", web_port = 8007, created_at = "{vm_created}" }}
+
+[[machine]]
+name = "sandbox"
+host = "127.0.0.1"
+user = "ci"
+port = 2202
+ssh_options = ["-J", "ci@forge.local", "-o", "HostKeyAlias=muxen-sandbox"]
+direct_address = "forge.local:47831"
+vm = {{ host = "forge", os = "linux", version = "ubuntu-24.04", container = "muxen-sandbox", created_at = "{vm_created}" }}
 "#
     )
 }
@@ -84,6 +103,8 @@ const HARDWARE: &[Hardware] = &[
     Hardware { id: "pebble", os: "linux", arch: "x86_64", os_version: "Fedora Linux 42 (Workstation Edition)", cores: 8, mem_gb: 32, base_mem: 0.36, disk_total_gb: 1000, disk_free_gb: 512.0, up_hours: 6, reachable: true, desktop: true, docker: Some("28.5.2"), sudo: Some("passwordless") },
     Hardware { id: "dev-1", os: "linux", arch: "x86_64", os_version: "Ubuntu 24.04.3 LTS", cores: 2, mem_gb: 4, base_mem: 0.31, disk_total_gb: 80, disk_free_gb: 61.0, up_hours: 3 * 24 + 5, reachable: true, desktop: false, docker: Some("29.1.3"), sudo: Some("passwordless") },
     Hardware { id: "harbor", os: "darwin", arch: "arm64", os_version: "macOS 26.1", cores: 12, mem_gb: 36, base_mem: 0.3, disk_total_gb: 1000, disk_free_gb: 470.0, up_hours: 3, reachable: false, desktop: true, docker: None, sudo: None },
+    Hardware { id: "win-test", os: "windows", arch: "AMD64", os_version: "Microsoft Windows 11 Pro", cores: 4, mem_gb: 8, base_mem: 0.38, disk_total_gb: 64, disk_free_gb: 38.0, up_hours: 22, reachable: true, desktop: true, docker: None, sudo: None },
+    Hardware { id: "sandbox", os: "linux", arch: "aarch64", os_version: "Ubuntu 24.04.3 LTS", cores: 4, mem_gb: 8, base_mem: 0.12, disk_total_gb: 2000, disk_free_gb: 1240.0, up_hours: 20, reachable: true, desktop: false, docker: None, sudo: Some("passwordless") },
     Hardware { id: "vault", os: "linux", arch: "aarch64", os_version: "Debian GNU/Linux 12 (bookworm)", cores: 4, mem_gb: 8, base_mem: 0.22, disk_total_gb: 4000, disk_free_gb: 41.0, up_hours: 54 * 24 + 11, reachable: true, desktop: false, docker: Some("28.5.1"), sudo: Some("password") },
     // Not in the demo's machines; tests add it to try Windows.
     Hardware { id: "test-windows", os: "windows", arch: "AMD64", os_version: "Microsoft Windows 11 Pro", cores: 8, mem_gb: 32, base_mem: 0.33, disk_total_gb: 1000, disk_free_gb: 700.0, up_hours: 30, reachable: true, desktop: false, docker: None, sudo: None },
@@ -170,6 +191,27 @@ const GENERIC: Hardware = Hardware {
     docker: Some("29.1.3"),
     sudo: Some("password"),
 };
+
+/// The containers the demo's VMs run in, on their hosts.
+fn demo_containers(machine_id: &str) -> Vec<crate::probe::PublishedContainer> {
+    use crate::probe::{PublishedContainer, PublishedPort};
+    let port = |ip: &str, host_port: u16, target: &str| PublishedPort { host_ip: ip.into(), host_port, target: target.into() };
+    match machine_id {
+        "beacon" => vec![PublishedContainer {
+            name: "muxen-win-test".into(),
+            state: "running".into(),
+            image: "dockurr/windows".into(),
+            ports: vec![port("127.0.0.1", 2201, "22/tcp"), port("127.0.0.1", 8007, "8006/tcp"), port("", 47830, "47821/udp")],
+        }],
+        "forge" => vec![PublishedContainer {
+            name: "muxen-sandbox".into(),
+            state: "running".into(),
+            image: "ubuntu:24.04".into(),
+            ports: vec![port("127.0.0.1", 2202, "22/tcp"), port("", 47831, "47821/udp")],
+        }],
+        _ => Vec::new(),
+    }
+}
 
 fn hardware(machine_id: &str) -> &'static Hardware {
     HARDWARE.iter().find(|h| h.id == machine_id).unwrap_or(&GENERIC)
@@ -340,10 +382,15 @@ impl World {
             lan_broadcast: Some("192.168.1.255".into()),
             reboot_required: hw.id == "pebble",
             failed_units: Vec::new(),
-            virt: None,
-            published: Vec::new(),
+            // The demo's VMs: Windows in Beacon, a Linux container on Forge.
+            virt: match hw.id {
+                "win-test" => Some("qemu".into()),
+                "sandbox" => Some("docker".into()),
+                _ => None,
+            },
+            published: demo_containers(hw.id),
             route: None,
-            kvm: false,
+            kvm: hw.id == "beacon",
         }
     }
 
@@ -739,19 +786,19 @@ impl World {
                 vec!["claude", "opencode"],
                 vec![session("opencode-c40d", "opencode", "OpenCode", "OpenCode · api", "/home/ci/api", true, 5, 0)],
             ),
-            "pebble" | "dev-1" => (vec!["claude", "codex"], Vec::new()),
+            "pebble" | "dev-1" | "sandbox" => (vec!["claude", "codex"], Vec::new()),
+            "win-test" => (vec!["claude"], Vec::new()),
             _ => (Vec::new(), Vec::new()),
         };
-        let windows = hardware(machine_id).os == "windows";
         MachineSessions {
             checked_at: Some(now),
-            agent_version: (!windows).then(|| "0.1.0".into()),
+            agent_version: Some("0.1.0".into()),
             agents: agents.into_iter().map(String::from).collect(),
             agents_checked_at: Some(now),
-            gh: (!windows).then(|| crate::fleet::model::GhCli { installed: true, logged_in: machine_id != "beacon", account: (machine_id != "beacon").then(|| "octocat".into()), path: None }),
+            gh: Some(crate::fleet::model::GhCli { installed: true, logged_in: machine_id != "beacon", account: (machine_id != "beacon").then(|| "octocat".into()), path: None }),
             sessions,
             events: Vec::new(),
-            error: windows.then(|| "Sessions on Windows run while Muxen is open; they can't keep running in the background yet.".into()),
+            error: None,
         }
     }
 

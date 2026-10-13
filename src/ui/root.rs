@@ -700,7 +700,14 @@ impl Root {
         match kind {
             "jobs" => self.navigate(Route::Jobs, window, cx),
             "usage" => self.navigate(Route::Usage, window, cx),
-            "schedules" => self.navigate(Route::Schedules, window, cx),
+            // "schedules", or "schedules:<machine>/<id>" with that one's runs open.
+            "schedules" => {
+                self.navigate(Route::Schedules, window, cx);
+                if let Some((m, id)) = arg.split_once('/') {
+                    self.schedule_open = Some((m.to_string(), id.to_string()));
+                    self.open_schedule_log(m, id, cx);
+                }
+            }
             // "schedule" or "schedule:<machine>": the New schedule dialog.
             "schedule" => self.show_schedule_dialog((!arg.is_empty()).then(|| arg.to_string()), window, cx),
             "run-big" => self.run_expanded = Some(arg.to_string()),

@@ -168,7 +168,8 @@ impl Engine {
             .current()
             .machines
             .iter()
-            .filter(|m| !m.host.is_empty() && m.status == "online")
+            // Not offline or disconnected: one not checked yet (just after start) is asked too.
+            .filter(|m| !m.host.is_empty() && !m.is_down())
             .filter(|m| machine_id.is_none_or(|id| m.id == id))
             .map(|m| (m.id.clone(), m.name.clone()))
             .collect();
@@ -238,10 +239,70 @@ impl Engine {
     async fn schedule_ctl(self: &Arc<Self>, machine_id: &str, request: Value) -> Result<Value, String> {
         let (spec, probe) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
         if self.demo_world().is_some() {
-            return Ok(json!({ "ok": true, "schedules": [], "scheduler": "cron", "runs": [], "output": "" }));
+            return Ok(demo_reply(&spec.id, &request));
         }
         agent_cli::ensure(&spec, probe.as_ref()).await?;
         agent_cli::ctl(&spec, &request).await
+    }
+}
+
+/// The demo's schedules: tests every night on Beacon, Claude going through
+/// new issues every weekday morning on Forge, and Vault's backups.
+fn demo_reply(machine_id: &str, request: &Value) -> Value {
+    let now = chrono::Utc::now().timestamp();
+    let hours = |h: i64| now - h * 3600;
+    let (scheduler, list): (&str, Value) = match machine_id {
+        "beacon" => (
+            "cron",
+            json!([
+                { "id": "s-n8t4qa", "name": "Nightly tests", "enabled": true, "when": { "every": "day", "at": "02:00" },
+                  "what": { "kind": "command", "command": "cd ~/api && make test", "cwd": "~/api" },
+                  "last_run": { "started": hours(8), "ok": true, "exit_code": 0, "seconds": 252 }, "running": false },
+                { "id": "s-d1sk7r", "name": "Disk report", "enabled": true, "when": { "every": "hours", "n": 6, "at": "00:00" },
+                  "what": { "kind": "command", "command": "df -h / /data" },
+                  "last_run": { "started": hours(2), "ok": true, "exit_code": 0, "seconds": 1 }, "running": false },
+            ]),
+        ),
+        "forge" => (
+            "launchd",
+            json!([
+                { "id": "s-tr1age", "name": "Triage new issues", "enabled": true, "when": { "every": "weekdays", "at": "09:00" },
+                  "what": { "kind": "agent", "agent": "claude", "prompt": "Go through new issues in acme/api: label them, and reply to duplicates", "cwd": "~/code/api" },
+                  "last_run": { "started": hours(1), "ok": true, "session": "claude-tr1a51" }, "running": false },
+            ]),
+        ),
+        "vault" => (
+            "cron",
+            json!([
+                { "id": "s-bkup3x", "name": "Backups", "enabled": true, "when": { "every": "day", "at": "03:30" },
+                  "what": { "kind": "command", "command": "restic backup /srv/data --tag nightly" },
+                  "last_run": { "started": hours(7), "ok": false, "exit_code": 1, "seconds": 41 }, "running": false },
+            ]),
+        ),
+        _ => ("cron", json!([])),
+    };
+    match request["op"].as_str().unwrap_or("") {
+        "schedules" => json!({ "ok": true, "schedules": list, "scheduler": scheduler }),
+        "schedule_log" => {
+            let id = request["schedule_id"].as_str().unwrap_or("");
+            let (runs, output): (Vec<Value>, &str) = match id {
+                "s-n8t4qa" => (
+                    (0..6).map(|d| json!({ "started": hours(8 + 24 * d), "ok": d != 3, "exit_code": if d == 3 { 2 } else { 0 }, "seconds": 240 + d * 7 })).collect(),
+                    "go test ./...\nok   acme/api/auth      2.114s\nok   acme/api/billing   8.902s\nok   acme/api/checkout  41.337s\nok   acme/api/orders    12.508s\nok   acme/api/search    3.776s\nPASS: 412 tests in 4m12s\n",
+                ),
+                "s-d1sk7r" => (
+                    (0..6).map(|d| json!({ "started": hours(2 + 6 * d), "ok": true, "exit_code": 0, "seconds": 1 })).collect(),
+                    "Filesystem      Size  Used Avail Use% Mounted on\n/dev/nvme0n1p2  1.8T  190G  1.6T  11% /\n/dev/sda1       7.3T  4.1T  3.2T  57% /data\n",
+                ),
+                "s-tr1age" => ((0..5).map(|d| json!({ "started": hours(1 + 24 * d), "ok": true, "session": format!("claude-tr1a{}", 51 - d) })).collect(), ""),
+                _ => (
+                    (0..5).map(|d| json!({ "started": hours(7 + 24 * d), "ok": d != 0, "exit_code": if d == 0 { 1 } else { 0 }, "seconds": 41 + d * 300 })).collect(),
+                    "repository 6f1c2b8e opened (version 2)\nusing parent snapshot 4a9d0e21\nFatal: unable to save snapshot: Save(<data/7a3f1c2e>): no space left on device\n",
+                ),
+            };
+            json!({ "ok": true, "runs": runs.clone(), "run": runs.first(), "output": output })
+        }
+        _ => json!({ "ok": true }),
     }
 }
 

@@ -129,6 +129,10 @@ impl AddMachineDialog {
         cx.spawn(async move |this, cx| {
             if let Ok(found) = job.await {
                 let _ = this.update(cx, |this, cx| {
+                    // The demo's own aliases, not this computer's.
+                    if this.engine.demo_world().is_some() {
+                        this.hosts = found.hosts.clone();
+                    }
                     this.tailnet = found.tailnet.into_iter().filter(|t| t.machine_id.is_none()).collect();
                     this.network = Some(found.network);
                     cx.notify();
@@ -136,7 +140,8 @@ impl AddMachineDialog {
             }
         })
         .detach();
-        AddMachineDialog { engine, name, host, hosts: ssh_hosts(), tailnet: Vec::new(), network: None, note: None, error: None, _subscriptions: subs }
+        let hosts = if engine.demo_world().is_some() { Vec::new() } else { ssh_hosts() };
+        AddMachineDialog { engine, name, host, hosts, tailnet: Vec::new(), network: None, note: None, error: None, _subscriptions: subs }
     }
 
     pub fn first_focus(&self, cx: &App) -> FocusHandle {

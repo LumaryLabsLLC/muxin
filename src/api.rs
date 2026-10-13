@@ -644,6 +644,17 @@ pub struct TailnetHost {
     pub machine_id: Option<String>,
 }
 
+/// Made-up suggestions for the demo's Add machine dialog.
+fn demo_ssh_hosts() -> SshHostsResponse {
+    let tail = |name: &str, os: &str| TailnetHost { name: name.into(), host: format!("{name}.tail0000.ts.net"), dns_name: format!("{name}.tail0000.ts.net."), os: os.into(), online: true, machine_id: None };
+    let net = |name: &str, ssh: bool, mac: bool| crate::fleet::discover::NetworkHost { name: name.into(), host: format!("{name}.local"), addresses: vec!["192.168.1.60".into()], ssh, mac };
+    SshHostsResponse {
+        hosts: vec!["build-box".into(), "gpu-rig".into(), "nas".into()],
+        tailnet: vec![tail("studio", "macOS"), tail("render-01", "linux")],
+        network: vec![net("living-room-mac", false, true), net("pi-garage", true, false)],
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Conversions
 
@@ -1086,6 +1097,10 @@ pub fn settings(engine: &Arc<Engine>) -> SettingsOut {
 }
 
 pub async fn ssh_hosts(engine: &Arc<Engine>) -> SshHostsResponse {
+    // The demo makes its own up: nothing of this computer's shows in it.
+    if engine.demo_world().is_some() {
+        return demo_ssh_hosts();
+    }
     let hosts = crate::ops::ssh_hosts();
     // Listening on the local network takes a moment; do it meanwhile.
     let listening = tokio::task::spawn_blocking(|| crate::fleet::discover::browse(Duration::from_millis(2500)));
@@ -2286,9 +2301,9 @@ mod tests {
     async fn status_reads_the_demo_machines() {
         let engine = demo();
         let s = status(&engine, StatusRequest { refresh: true }, Surface::Mcp).await.unwrap();
-        assert_eq!(s.counts.machines, 7);
+        assert_eq!(s.counts.machines, 9);
         assert!(s.demo && s.github.live);
-        assert!(s.summary.contains("7 machines"), "{}", s.summary);
+        assert!(s.summary.contains("9 machines"), "{}", s.summary);
         let harbor = s.machines.iter().find(|m| m.id == "harbor").unwrap();
         assert_eq!(harbor.status, "offline");
         assert!(harbor.error.is_some());

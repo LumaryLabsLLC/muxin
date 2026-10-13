@@ -40,6 +40,11 @@ impl Root {
         cx.notify();
     }
 
+    /// Shows a schedule's runs (for `--view schedules:<machine>/<id>`).
+    pub(super) fn open_schedule_log(&mut self, machine: &str, id: &str, cx: &mut Context<Self>) {
+        self.load_schedule_log(machine, id, None, cx);
+    }
+
     /// A schedule's runs and one's output.
     fn load_schedule_log(&mut self, machine: &str, id: &str, started: Option<i64>, cx: &mut Context<Self>) {
         let key = (machine.to_string(), id.to_string());

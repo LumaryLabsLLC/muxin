@@ -1,0 +1,166 @@
+# Builds a release for every platform when a version tag (v1.2.3) is pushed, and
+# puts it in a draft GitHub release to look over and publish. scripts/release.sh
+# makes the tag. Run by hand (Actions › release › Run workflow), it builds the
+# same files without a release, to try the pipeline.
+#
+# Signed and notarized when the signing secrets are set (see RELEASING.md);
+# without them the macOS app is an unsigned test build.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Set when the Developer ID certificate is a secret: then sign and notarize.
+  SIGNED: ${{ secrets.MACOS_CERT_P12 != '' }}
+
+jobs:
+  # The agent for every platform: the app ships them all and installs the right
+  # one on each machine. Built on a Mac, which signs the macOS ones.
+  agents:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: The tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says $version"; exit 1; }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - name: Signing identity
+        if: env.SIGNED == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: scripts/ci/macos-keychain.sh
+      - run: MUXEN_RELEASE=$([ "$SIGNED" = true ] && echo 1) scripts/build-agents.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agents
+          path: dist/agents
+          if-no-files-found: error
+
+  macos:
+    needs: agents
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: agents
+          path: dist/agents
+      - run: chmod +x dist/agents/*
+      - name: Signing identity
+        if: env.SIGNED == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: scripts/ci/macos-keychain.sh
+      - name: Build, sign and notarize
+        if: env.SIGNED == 'true'
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          scripts/bundle-macos.sh --release --skip-agents
+          scripts/notarize-macos.sh
+      - name: Build (unsigned test build)
+        if: env.SIGNED != 'true'
+        run: |
+          scripts/bundle-macos.sh --universal --skip-agents
+          scripts/notarize-macos.sh --no-notarize
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/Muxen-*-macos.dmg
+          if-no-files-found: error
+
+  linux:
+    needs: agents
+    # The oldest Ubuntu GitHub runs: the app needs this glibc (2.35) or newer.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: GPUI's libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig-dev libx11-xcb-dev libxcb1-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: agents
+          path: dist/agents
+      - run: chmod +x dist/agents/*
+      - run: scripts/package-linux.sh --skip-agents
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/Muxen-*-linux-*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    needs: agents
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: agents
+          path: dist/agents
+      - name: Inno Setup, for the installer
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup --no-progress -y }
+      - run: scripts/package-windows.ps1
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/Muxen-*-windows-x64.zip
+            dist/Muxen-*-windows-x64-setup.exe
+          if-no-files-found: error
+
+  # A draft release with every file and their checksums, for a tag.
+  release:
+    needs: [macos, linux, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '{macos,linux,windows}'
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum Muxen-* > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          signed=$([ "$SIGNED" = true ] && echo "" || echo " (unsigned test build)")
+          gh release create "$GITHUB_REF_NAME" dist/Muxen-* dist/SHA256SUMS.txt \
+            --draft --title "Muxen ${GITHUB_REF_NAME#v}$signed" --generate-notes

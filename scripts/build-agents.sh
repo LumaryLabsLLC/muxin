@@ -7,6 +7,9 @@
 # x86_64-unknown-linux-musl, aarch64-unknown-linux-musl, x86_64-pc-windows-gnu),
 # cargo-zigbuild and zig for the Linux builds (static musl binaries that run on
 # any distro) and the Windows one.
+#
+# MUXEN_RELEASE=1 signs the macOS ones for notarization (hardened runtime and a
+# secure timestamp), as scripts/bundle-macos.sh --release needs.
 set -eu
 cd "$(dirname "$0")/.."
 out=dist/agents
@@ -26,11 +29,20 @@ case "$(uname -s)" in
     # and Accessibility permissions across updates (an ad-hoc signature
     # changes with every build, and the permissions go with it).
     identity=${MUXEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -n1)}
+    if [ "${MUXEN_RELEASE:-}" = 1 ]; then
+      sign_flags="--options runtime --timestamp"
+    else
+      sign_flags="--timestamp=none"
+    fi
     if [ -n "$identity" ]; then
       for f in "$out"/muxen-agent-darwin-*; do
-        codesign --force --timestamp=none --identifier com.lumarylabs.muxen-agent -s "$identity" "$f"
+        # shellcheck disable=SC2086
+        codesign --force $sign_flags --identifier com.lumarylabs.muxen-agent -s "$identity" "$f"
       done
       echo "▸ signed the macOS agents ($identity)"
+    elif [ "${MUXEN_RELEASE:-}" = 1 ]; then
+      echo "error: a release needs a Developer ID Application certificate in the keychain" >&2
+      exit 1
     else
       echo "▸ no Developer ID certificate: the macOS agents are ad-hoc signed"
     fi

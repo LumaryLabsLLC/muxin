@@ -49,9 +49,11 @@ To run `muxen` from a terminal, use **Settings › General › Command line › 
 
 To get a real app with the Muxen icon:
 
-- **macOS:** `./scripts/bundle-macos.sh` builds `dist/Muxen.app` (ad-hoc signed). Drag it to Applications. Agents can still use the binary inside it: `Muxen.app/Contents/MacOS/muxen mcp`.
-- **Linux:** install `assets/linux/muxen.desktop` and `assets/brand/icon-512.png` (as `muxen.png`).
-- **Windows:** the icon is `assets/brand/muxen.ico`.
+- **macOS:** `./scripts/bundle-macos.sh` builds `dist/Muxen.app`, signed with the Developer ID when it's in your keychain. Drag it to Applications. Agents can still use the binary inside it: `Muxen.app/Contents/MacOS/muxen mcp`.
+- **Linux:** `./scripts/package-linux.sh` makes a tarball; its `install.sh` puts Muxen in `~/.local` with an entry in your app menu.
+- **Windows:** `scripts\package-windows.ps1` makes the installer.
+
+Releases (a notarized DMG, the Linux tarball and the Windows installer) are built by GitHub Actions from a version tag: see [RELEASING.md](RELEASING.md).
 
 ## Quick start
 

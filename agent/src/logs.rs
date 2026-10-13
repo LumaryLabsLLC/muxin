@@ -424,17 +424,22 @@ mod tests {
         std::fs::write(&file, "one\ntwo\n").unwrap();
         let path = file.display().to_string();
         let (p, a) = command(&json!({ "kind": "file", "target": path }), 50, true).unwrap();
-        assert_eq!(p, "tail");
-        assert_eq!(a, ["-n", "50", "-F", "--", path.as_str()]);
-        let read = read(&json!({ "source": { "kind": "file", "target": path }, "lines": 1 }));
-        assert_eq!(read["lines"], json!(["two"]));
+        if cfg!(windows) {
+            // Windows reads files, its event logs and services with PowerShell (win::log_script).
+            assert_eq!(p, "powershell");
+        } else {
+            assert_eq!(p, "tail");
+            assert_eq!(a, ["-n", "50", "-F", "--", path.as_str()]);
+            let read = read(&json!({ "source": { "kind": "file", "target": path }, "lines": 1 }));
+            assert_eq!(read["lines"], json!(["two"]));
+            assert!(command(&json!({ "kind": "file", "target": "/nonexistent/x.log" }), 10, false).unwrap_err().contains("no /nonexistent"));
+        }
         let (p, a) = command(&json!({ "kind": "docker", "target": "abc123" }), 10, false).unwrap();
-        assert!(p.ends_with("docker"), "{p}");
+        assert!(p.trim_end_matches(".exe").ends_with("docker"), "{p}");
         assert_eq!(a.join(" "), "logs --timestamps --tail 10 abc123");
         assert!(command(&json!({ "kind": "docker", "target": "--privileged" }), 10, false).is_err());
-        assert!(command(&json!({ "kind": "file", "target": "/nonexistent/x.log" }), 10, false).unwrap_err().contains("no /nonexistent"));
         assert!(command(&json!({ "kind": "nope" }), 10, false).is_err());
-        if !cfg!(target_os = "macos") {
+        if !cfg!(target_os = "macos") && !cfg!(windows) {
             let (p, a) = command(&json!({ "kind": "service", "target": "nginx.service", "user": true }), 20, true).unwrap();
             assert_eq!((p.as_str(), a.join(" ").as_str()), ("journalctl", "--no-pager -o short-iso -n 20 --user -u nginx.service -f"));
         }

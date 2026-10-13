@@ -29,6 +29,9 @@ or_pid=$!
   or_kill_tree "$or_pid" KILL
 ) < /dev/null > /dev/null &
 or_watch=$!
+# Not a job of this shell: killing it later must not make bash print "Killed"
+# on stderr (a login bash reports it as it exits, e.g. from ~/.bash_logout).
+disown "$or_watch" 2>/dev/null || true
 wait "$or_pid"
 or_code=$?
 or_kill_tree "$or_watch" KILL

@@ -1362,6 +1362,21 @@ pub async fn cloud_power(engine: &Arc<Engine>, req: CloudMachineRequest, surface
     finish_action(engine, op, req.wait, 300, DEFAULT_TAIL, Some(m.id), Vec::new(), surface, on_line).await
 }
 
+/// Powers a machine on or off: a cloud machine through its provider, or a VM
+/// (or container) in Docker on another of the user's machines by starting or
+/// stopping that container there.
+pub async fn machine_power(engine: &Arc<Engine>, req: CloudMachineRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<ActionResponse> {
+    let s = freshen(engine).await;
+    let m = find_machine(&s, &req.machine_id)?.clone();
+    let on = match req.power.as_deref() {
+        Some("on") => true,
+        Some("off") => false,
+        _ => return Err(ApiError::invalid("power must be \"on\" or \"off\".")),
+    };
+    let op = engine.machine_power(&m.id, on).map_err(op_error)?;
+    finish_action(engine, op, req.wait, 420, DEFAULT_TAIL, Some(m.id), Vec::new(), surface, on_line).await
+}
+
 /// Cancels the workflow run a queued or running job belongs to.
 pub async fn cancel_run(engine: &Arc<Engine>, req: CancelRunRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<ActionResponse> {
     freshen(engine).await;

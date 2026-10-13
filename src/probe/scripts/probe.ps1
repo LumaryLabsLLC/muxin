@@ -78,6 +78,18 @@ if ($cs) { kv 'form_factor' ($(if ($cs.PCSystemType -eq 2) { 'laptop' } else { '
 $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if ($me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { kv 'sudo' 'passwordless' } else { kv 'sudo' 'password' }
 
+# --- What it runs in, when it's virtual ------------------------------------------
+$cs = Get-CimInstance Win32_ComputerSystem
+$virt = switch -Regex ("$($cs.Manufacturer) $($cs.Model)") {
+  'QEMU' { 'qemu'; break }
+  'VMware' { 'vmware'; break }
+  'VirtualBox|innotek' { 'oracle'; break }
+  'Parallels' { 'parallels'; break }
+  'Xen' { 'xen'; break }
+  'Microsoft Corporation Virtual Machine' { 'microsoft'; break }
+}
+if ($virt) { kv 'virt' $virt }
+
 # --- Docker -------------------------------------------------------------------
 if (Get-Command docker -ErrorAction SilentlyContinue) {
   $dv = (& docker version --format '{{.Server.Version}}' 2>$null | Select-Object -First 1)

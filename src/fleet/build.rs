@@ -60,6 +60,7 @@ pub fn build(input: &Inputs) -> Snapshot {
 
     let mut claimed: HashSet<String> = HashSet::new();
     let mut machines = Vec::new();
+    let parents = parents(input);
     let mut runners = Vec::new();
 
     for spec in &input.inventory.machines {
@@ -128,9 +129,12 @@ pub fn build(input: &Inputs) -> Snapshot {
         };
         let device = input.tailnet.get(&spec.id);
         let powered_off = spec.cloud.is_some() && input.droplets.get(&spec.id).is_some_and(|s| s == "off");
+        let parent = parents.get(&spec.id).cloned();
         let unreachable = probe.filter(|p| !p.ok && spec.is_connected()).map(|p| {
             if powered_off {
                 powered_off_reason(spec, p)
+            } else if let Some(u) = parent.as_ref().and_then(|h| parent_reason(spec, p, h, input)) {
+                u
             } else {
                 explain_unreachable(spec, p, input.settings.check_interval_minutes > 0, device, input.tailscale)
             }
@@ -166,6 +170,7 @@ pub fn build(input: &Inputs) -> Snapshot {
             sessions_error: None,
             gh: None,
             unreachable,
+            parent,
             tailnet: device.cloned(),
             cloud: spec.cloud.as_ref().map(|c| {
                 use crate::cloud::usage;
@@ -390,6 +395,111 @@ pub fn unreachable_kind(error: &str) -> &'static str {
     } else {
         "error"
     }
+}
+
+/// Which of the user's machines each one runs on or is reached through, by
+/// machine id. ssh going through a machine (ProxyJump) to its own loopback or
+/// address means it runs there (a VM or a container with a forwarded port);
+/// to anywhere else, only that it's reached through it. ssh going straight to
+/// a machine's address on another port, or to this computer's loopback, means
+/// it runs there too. A container publishing that port names what it runs in.
+fn parents(input: &Inputs) -> HashMap<String, ParentMachine> {
+    let specs = &input.inventory.machines;
+    let probe = |id: &str| input.probes.get(id);
+    let route = |id: &str| probe(id).and_then(|p| p.route.as_ref());
+    let bare = |host: &str| {
+        let h = host.trim();
+        let h = h.rsplit_once('@').map(|(_, h)| h).unwrap_or(h);
+        h.split(':').next().unwrap_or(h).to_ascii_lowercase()
+    };
+    let loopback = |h: &str| h == "localhost" || h == "::1" || h.starts_with("127.");
+    // The names and addresses a machine goes by.
+    let names = |o: &MachineSpec| -> Vec<String> {
+        let mut out = vec![bare(&o.host)];
+        if let Some(r) = route(&o.id) {
+            out.push(r.hostname.to_ascii_lowercase());
+        }
+        if let Some(ip) = probe(&o.id).and_then(|p| p.lan_ip.clone()) {
+            out.push(ip);
+        }
+        if let Some(d) = input.tailnet.get(&o.id) {
+            out.extend(d.ips.iter().cloned());
+            out.push(d.dns_name.trim_end_matches('.').to_ascii_lowercase());
+        }
+        out.retain(|n| !n.is_empty());
+        out
+    };
+
+    let mut out = HashMap::new();
+    for spec in specs.iter().filter(|s| !s.is_local()) {
+        let Some(r) = route(&spec.id) else { continue };
+        let target = r.hostname.to_ascii_lowercase();
+        let others = || specs.iter().filter(|o| o.id != spec.id);
+        let (host, inside) = match &r.jump {
+            Some(jump) => {
+                let jump = jump.to_ascii_lowercase();
+                let Some(o) = others().find(|o| names(o).contains(&jump)) else { continue };
+                (o, loopback(&target) || names(o).contains(&target))
+            }
+            None if loopback(&target) => match others().find(|o| o.is_local()) {
+                Some(o) => (o, true),
+                None => continue,
+            },
+            None => match others().find(|o| !o.is_local() && names(o).contains(&target) && route(&o.id).is_none_or(|or| or.port != r.port)) {
+                Some(o) => (o, true),
+                None => continue,
+            },
+        };
+        let container = inside
+            .then(|| probe(&host.id).and_then(|p| p.published.iter().find(|c| c.ports.iter().any(|p| p.host_port == r.port && p.target.ends_with("/tcp")))))
+            .flatten();
+        let relation = match probe(&spec.id).and_then(|p| p.virt.as_deref()) {
+            _ if !inside => "through",
+            Some("docker" | "podman" | "lxc" | "lxc-libvirt" | "systemd-nspawn" | "openvz" | "container" | "wsl") => "container",
+            Some(_) => "vm",
+            None => "inside",
+        };
+        out.insert(
+            spec.id.clone(),
+            ParentMachine {
+                machine_id: host.id.clone(),
+                name: host.name.clone(),
+                relation: relation.into(),
+                container: container.map(|c| c.name.clone()),
+                container_state: container.map(|c| c.state.clone()),
+            },
+        );
+    }
+    out
+}
+
+/// Why a machine on (or behind) another one can't be reached, when that
+/// one explains it: it's offline itself, or the container it runs in is stopped.
+fn parent_reason(spec: &MachineSpec, p: &ProbeResult, parent: &ParentMachine, input: &Inputs) -> Option<Unreachable> {
+    let host = input.inventory.machines.iter().find(|m| m.id == parent.machine_id)?;
+    let host_probe = input.probes.get(&host.id).filter(|_| host.is_connected());
+    let (name, pname) = (spec.name.as_str(), parent.name.as_str());
+    let error = p.error.clone().unwrap_or_default();
+    if let Some(hp) = host_probe.filter(|hp| !hp.ok) {
+        let down = matches!(unreachable_kind(hp.error.as_deref().unwrap_or("")), "offline");
+        return Some(Unreachable {
+            kind: "host-down".into(),
+            title: if down { format!("{pname} is offline") } else { format!("Can't reach {pname}") },
+            detail: if parent.inside() { format!("{name} runs on it.") } else { format!("{name} is reached through it.") },
+            hint: None,
+            last_seen_at: p.last_seen_at,
+            error,
+        });
+    }
+    let container = parent.container.as_deref()?;
+    (parent.container_state.as_deref() != Some("running")).then(|| Unreachable {
+        kind: "stopped".into(),
+        title: format!("{name} is stopped"),
+        detail: format!("Its container {container} on {pname} isn't running. Start it to use it."),
+        hint: None,
+        last_seen_at: p.last_seen_at,
+        error,
+    })
 }
 
 /// A cloud machine the user (or the provider) powered off: nothing's wrong.
@@ -1266,6 +1376,46 @@ mod tests {
         assert_eq!(u.kind, "auth");
         assert!(u.detail.contains("password for adib"), "{}", u.detail);
         assert!(u.hint.unwrap().starts_with("ssh-copy-id -i "));
+    }
+
+    #[test]
+    fn knows_a_vm_runs_on_another_machine() {
+        use crate::probe::{PublishedContainer, PublishedPort, SshRoute};
+        let inv = inventory("[[machine]]\nname = \"Beelink\"\nhost = \"beelink\"\n\n[[machine]]\nname = \"Win11\"\nhost = \"win11\"\n\n[[machine]]\nname = \"Inner\"\nhost = \"inner\"\n");
+        let route = |jump: Option<&str>, hostname: &str, port: u16| Some(SshRoute { jump: jump.map(Into::into), hostname: hostname.into(), port });
+        let zn = |state: &str| PublishedContainer {
+            name: "zn-win11".into(),
+            state: state.into(),
+            image: "dockurr/windows".into(),
+            ports: vec![PublishedPort { host_ip: "127.0.0.1".into(), host_port: 2222, target: "22/tcp".into() }],
+        };
+        let mut probes = HashMap::new();
+        probes.insert("beelink".to_string(), ProbeResult { route: route(None, "adib-ser", 22), published: vec![zn("running")], ..probe_with(Vec::new()) });
+        probes.insert("win11".to_string(), ProbeResult { route: route(Some("beelink"), "127.0.0.1", 2222), virt: Some("qemu".into()), ..probe_with(Vec::new()) });
+        // Through Beelink to another machine on its network: only reached through it.
+        probes.insert("inner".to_string(), ProbeResult { route: route(Some("beelink"), "10.0.0.9", 22), ..probe_with(Vec::new()) });
+        let snap = run(&inv, &Settings::default(), &probes, None);
+        let parent = |id: &str| snap.machines.iter().find(|m| m.id == id).unwrap().parent.clone();
+        let p = parent("win11").unwrap();
+        assert_eq!((p.machine_id.as_str(), p.relation.as_str(), p.container.as_deref()), ("beelink", "vm", Some("zn-win11")));
+        assert_eq!(p.label(), "VM on Beelink");
+        assert_eq!(parent("inner").unwrap().relation, "through");
+        assert_eq!(parent("beelink"), None);
+
+        // Its container stopped: Win11 is stopped, not broken.
+        let failed = |error: &str| ProbeResult { ok: false, error: Some(error.into()), route: route(Some("beelink"), "127.0.0.1", 2222), ..Default::default() };
+        probes.get_mut("beelink").unwrap().published = vec![zn("exited")];
+        probes.insert("win11".to_string(), failed("channel 0: open failed: connect failed: Connection refused\nstdio forwarding failed"));
+        let snap = run(&inv, &Settings::default(), &probes, None);
+        let u = snap.machines.iter().find(|m| m.id == "win11").unwrap().unreachable.clone().unwrap();
+        assert_eq!(u.kind, "stopped");
+        assert!(u.detail.contains("zn-win11 on Beelink"), "{}", u.detail);
+
+        // Beelink itself is off: that's the reason.
+        probes.insert("beelink".to_string(), ProbeResult { ok: false, error: Some("ssh: connect to host adib-ser port 22: Operation timed out".into()), route: route(None, "adib-ser", 22), ..Default::default() });
+        let snap = run(&inv, &Settings::default(), &probes, None);
+        let u = snap.machines.iter().find(|m| m.id == "win11").unwrap().unreachable.clone().unwrap();
+        assert_eq!((u.kind.as_str(), u.title.as_str()), ("host-down", "Beelink is offline"));
     }
 
     #[test]

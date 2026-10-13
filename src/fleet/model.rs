@@ -215,6 +215,43 @@ pub struct Machine {
     pub cloud: Option<CloudInfo>,
     /// Its monitors, virtual ones included, as last listed (empty until then).
     pub displays: Vec<DisplayInfo>,
+    /// Another of the user's machines it runs on (a VM or container there),
+    /// or is reached through (a jump host).
+    pub parent: Option<ParentMachine>,
+}
+
+/// The machine another one runs on or is reached through, as Muxen worked it
+/// out from ~/.ssh/config, the machines' checks and their Docker containers.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentMachine {
+    pub machine_id: String,
+    pub name: String,
+    /// "vm": a virtual machine on it; "container": a container on it;
+    /// "inside": something on it, kind unknown; "through": a different
+    /// machine that ssh reaches through it (a jump host).
+    pub relation: String,
+    /// The Docker container it runs in there, when one publishes its ssh port.
+    pub container: Option<String>,
+    /// That container's state as the parent's last check saw it ("running", "exited", ...).
+    pub container_state: Option<String>,
+}
+
+impl ParentMachine {
+    /// It runs on the parent (not just reached through it).
+    pub fn inside(&self) -> bool {
+        self.relation != "through"
+    }
+
+    /// "VM on Beelink", "Container on Beelink", "On Beelink", "Through Beelink".
+    pub fn label(&self) -> String {
+        match self.relation.as_str() {
+            "vm" => format!("VM on {}", self.name),
+            "container" => format!("Container on {}", self.name),
+            "through" => format!("Through {}", self.name),
+            _ => format!("On {}", self.name),
+        }
+    }
 }
 
 impl Machine {
@@ -335,7 +372,10 @@ pub struct Probe {
 pub struct Unreachable {
     /// "offline" (no answer: shut down, asleep, off the network) | "refused" |
     /// "auth" | "unknown-host" | "host-key" | "tailscale-off" (this computer's
-    /// Tailscale is off or signed out, and the machine is on the tailnet) | "error"
+    /// Tailscale is off or signed out, and the machine is on the tailnet) |
+    /// "powered-off" (a cloud machine) | "host-down" (the machine it runs on or
+    /// is reached through is off) | "stopped" (its container there isn't
+    /// running) | "error"
     pub kind: String,
     /// e.g. "Beelink is offline".
     pub title: String,

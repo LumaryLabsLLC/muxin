@@ -340,6 +340,9 @@ impl World {
             lan_broadcast: Some("192.168.1.255".into()),
             reboot_required: hw.id == "pebble",
             failed_units: Vec::new(),
+            virt: None,
+            published: Vec::new(),
+            route: None,
         }
     }
 

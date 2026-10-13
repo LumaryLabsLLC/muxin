@@ -301,6 +301,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "cloud_create" => ok(api::cloud_create(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "cloud_destroy" => ok(api::cloud_destroy(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "cloud_power" => ok(api::cloud_power(engine, args(a)?, Surface::Mcp, |_| {}).await?),
+        "machine_power" => ok(api::machine_power(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "get_operation" => ok(api::operation(engine, args(a)?)?),
         "cancel_operation" => ok(api::cancel_operation(engine, args(a)?)?),
         "list_files" => ok(api::list_files(engine, args(a)?).await?),
@@ -526,6 +527,12 @@ pub fn tools() -> Vec<Value> {
             "description": "Power a cloud machine on or off. DigitalOcean still bills a droplet while it's off; only cloud_destroy stops the cost.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string" }, "power": { "type": "string", "enum": ["on", "off"] }, "wait": { "type": "boolean" } }), &["machine_id", "power"]),
             "annotations": annotations("Cloud power", false, false, true, true),
+        }),
+        json!({
+            "name": "machine_power",
+            "description": "Power a machine on or off. A cloud machine: through its provider (as cloud_power). A VM or container that runs in Docker on another of the user's machines (get_machine's `parent` names the machine and its `container`): starts or stops that container there; stopping gives it two minutes to shut down cleanly, and starting waits until it answers ssh. It changes the user's machines: only when asked.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID }, "power": { "type": "string", "enum": ["on", "off"] }, "wait": { "type": "boolean" } }), &["machine_id", "power"]),
+            "annotations": annotations("Power a machine on or off", false, false, true, true),
         }),
         json!({
             "name": "cancel_run",
@@ -1115,7 +1122,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 79);
+        assert_eq!(tools.len(), 80);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

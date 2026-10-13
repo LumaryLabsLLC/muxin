@@ -9,6 +9,7 @@ mod dialogs;
 mod files;
 mod format;
 mod github;
+mod hosted;
 mod input;
 mod kit;
 mod logs;

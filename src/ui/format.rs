@@ -70,9 +70,15 @@ pub fn machine_tile(m: &Machine) -> (u32, u32) {
     }
 }
 
-/// The line under a machine's name in the sidebar ("Ubuntu 26.04 · x64"),
-/// with a color role: "muted" or "error".
+/// The line under a machine's name ("Ubuntu 26.04 · x64", "Windows 11 · VM
+/// on Beelink"), with a color role: "muted" or "error".
 pub fn machine_subtitle(m: &Machine) -> (String, &'static str) {
+    machine_subtitle_in(m, false)
+}
+
+/// The same; `nested` under the machine it runs on, which needn't be named
+/// again ("Windows 11 · VM").
+pub fn machine_subtitle_in(m: &Machine, nested: bool) -> (String, &'static str) {
     if m.is_disconnected() {
         return ("Disconnected".into(), "muted");
     }
@@ -84,18 +90,26 @@ pub fn machine_subtitle(m: &Machine) -> (String, &'static str) {
         if is_powered_off(m) {
             return ("Powered off".into(), "muted");
         }
-        return match (is_just_offline(m), seen) {
-            (true, Some(t)) => (format!("Offline · seen {}", ago(Some(t))), "muted"),
-            (true, None) => ("Offline".into(), "muted"),
-            (false, _) => (unreachable_reason(m).into(), "error"),
+        return match (m.unreachable.as_ref().map(|u| u.kind.as_str()), is_just_offline(m), seen) {
+            (Some("stopped" | "host-down"), _, _) => (unreachable_reason(m), "muted"),
+            (_, true, Some(t)) => (format!("Offline · seen {}", ago(Some(t))), "muted"),
+            (_, true, None) => ("Offline".into(), "muted"),
+            (_, false, _) => (unreachable_reason(m), "error"),
         };
     }
-    let arch = m.platform.split_once('-').map(|(_, a)| a).unwrap_or("");
+    // Where it runs takes the place of its architecture.
+    let place = m.parent.as_ref().map(|p| match (nested, p.relation.as_str()) {
+        (true, "vm") => "VM".to_string(),
+        (true, "container") => "Container".to_string(),
+        (true, _) => String::new(),
+        (false, _) => p.label(),
+    });
+    let arch = place.unwrap_or_else(|| m.platform.split_once('-').map(|(_, a)| a).unwrap_or("").to_string());
     let os = os_label(m);
     let line = match (os.is_empty(), arch.is_empty()) {
         (false, false) => format!("{os} · {arch}"),
         (false, true) => os,
-        (true, false) => arch.to_string(),
+        (true, false) => arch,
         (true, true) if m.host.is_empty() || m.local => "Not checked".into(),
         (true, true) => m.host.clone(),
     };
@@ -164,12 +178,17 @@ mod tests {
 /// Offline in the everyday sense (shut down, asleep, off the network), as
 /// opposed to on but refusing us: nothing for the user to fix.
 pub fn is_just_offline(m: &Machine) -> bool {
-    m.status == "offline" && m.unreachable.as_ref().is_some_and(|u| matches!(u.kind.as_str(), "offline" | "powered-off"))
+    m.status == "offline" && m.unreachable.as_ref().is_some_and(|u| matches!(u.kind.as_str(), "offline" | "powered-off" | "stopped" | "host-down"))
 }
 
 /// A cloud machine that's powered off (and still billed).
 pub fn is_powered_off(m: &Machine) -> bool {
     m.status == "offline" && m.unreachable.as_ref().is_some_and(|u| u.kind == "powered-off")
+}
+
+/// A VM or container on another machine that's stopped there.
+pub fn is_stopped(m: &Machine) -> bool {
+    m.status == "offline" && m.unreachable.as_ref().is_some_and(|u| u.kind == "stopped")
 }
 
 /// A machine that can't be reached, in a word or two: "Offline", "Can't connect".
@@ -178,6 +197,8 @@ pub fn unreachable_word(m: &Machine) -> &'static str {
         "Disconnected"
     } else if is_powered_off(m) {
         "Powered off"
+    } else if is_stopped(m) {
+        "Stopped"
     } else if is_just_offline(m) {
         "Offline"
     } else {
@@ -186,7 +207,13 @@ pub fn unreachable_word(m: &Machine) -> &'static str {
 }
 
 /// Why it can't be reached, short enough for the sidebar.
-pub fn unreachable_reason(m: &Machine) -> &'static str {
+pub fn unreachable_reason(m: &Machine) -> String {
+    let parent = m.parent.as_ref().map(|p| p.name.as_str()).unwrap_or("Its host");
+    match m.unreachable.as_ref().map(|u| u.kind.as_str()) {
+        Some("stopped") => return "Stopped".into(),
+        Some("host-down") => return m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("{parent} is offline")),
+        _ => {}
+    }
     match m.unreachable.as_ref().map(|u| u.kind.as_str()) {
         Some("offline") => "Offline",
         Some("powered-off") => "Powered off",
@@ -197,4 +224,6 @@ pub fn unreachable_reason(m: &Machine) -> &'static str {
         Some("tailscale-off") => "Tailscale is off here",
         _ => "Can't connect",
     }
+    .into()
 }
+

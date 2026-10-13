@@ -336,7 +336,7 @@ impl Root {
         };
         let (url, mid, port) = (f.url(), m.id.clone(), f.port);
         let tip = format!("{}'s port {} at localhost:{}: click to open it in your browser", m.name, f.port, f.local_port);
-        let w = (self.sidebar_width - 20. - 30. - 16. - 16. - 110. - 16.).max(30.);
+        let w = (self.row_width() - 20. - 30. - 16. - 16. - 110. - 16.).max(30.);
         div()
             .id(SharedString::from(format!("side-fwd-{}-{}", m.id, f.port)))
             .group(group.clone())

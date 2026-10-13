@@ -102,6 +102,14 @@ impl Engine {
                 out.peer = l.peer().map(|a| a.ip().to_string());
             }
         }
+        // Through another machine (ProxyJump to its own loopback): ssh's last
+        // hop is "this computer" to that one; the network that counts is the
+        // one to it.
+        let parent = self.current().machines.iter().find(|m| m.id == spec.id).and_then(|m| m.parent.clone());
+        if let Some(p) = parent.filter(|_| out.network.as_deref() == Some("This computer") && !spec.is_local()) {
+            out.network = link::current(&p.machine_id).and_then(|l| l.network().map(str::to_string));
+            out.peer = None;
+        }
         if out.direct && out.via == "ssh" {
             // A Mac blocks the agent's network until Local Network access is allowed there.
             let mac = self.current().machines.iter().any(|m| m.id == spec.id && m.platform.starts_with("darwin"));

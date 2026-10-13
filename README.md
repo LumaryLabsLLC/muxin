@@ -114,6 +114,8 @@ name = "StudioNAS"   # no runners: shown under "Other machines"
 host = "nas"
 ```
 
+A machine that runs on another one is shown under it: a VM or container reached through that machine (`ProxyJump` to its own address or `127.0.0.1`), or at its address on another port. Muxen works this out from `~/.ssh/config`, what each machine reports about itself (a VM says so), and the Docker containers that publish the port ssh goes to. When it can't be reached, it says whether the machine it's on is off or its container is stopped, and it can start or stop that container (`muxen power win11 on`).
+
 Runners installed in the usual places are discovered automatically: `~/actions-runner*`, `~/actions-runner/*`, `~/runners/*`, `/opt/actions-runner*` and `C:\actions-runner\*`. A runner is found from its `.runner` file and its running `Runner.Listener` / `Runner.Worker` processes.
 
 ## GitHub
@@ -175,6 +177,7 @@ The MCP server has these tools:
 | `machine_processes`, `process_signal` | A machine's busiest processes and its GPUs; stop or kill one. |
 | `run_on_machines` | Runs one shell command on several machines at once, with each one's output and exit status. |
 | `wake_machine` | Wakes a machine that's asleep or off (Wake on LAN). |
+| `machine_power` | Powers a machine on or off: a cloud machine, or a VM in a Docker container on another machine. |
 | `agent_usage` | What Claude Code and Codex used over the last N days: tokens, requests and cost at API prices, by model and machine. |
 | `install_runners` | Downloads, registers and starts runners on a machine. |
 | `runner_action` | Starts, stops, restarts or removes a runner, or reads its logs. |
@@ -233,6 +236,7 @@ muxen run --on beelink,mac-studio -- df -h /   # one command on several machines
 muxen ps beelink [-n 20]                  # its busiest processes and its GPUs
 muxen kill beelink 4242 [--force]         # stop a process (--force: SIGKILL)
 muxen wake beelink                        # Wake on LAN
+muxen power win11 off                     # a VM in Docker on another machine (or a cloud machine): on or off
 muxen usage [--days 30] [--machine beelink]   # what the agents used, and the cost at API prices
 muxen edit beelink:~/code/api [--editor zed] [--print]   # open a folder there in your editor
 muxen disconnect <id>                     # stop connecting to it (its sessions go on there)

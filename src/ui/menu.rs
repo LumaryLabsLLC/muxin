@@ -58,6 +58,8 @@ enum Action {
     RemoveRunner(String),
     FavoriteMachine(String, bool),
     CloudPower(String, bool),
+    /// Start (true) or stop a VM or container that runs on another machine.
+    MachinePower(String, bool),
     ShowRunner(String),
     /// Install a runner with these labels on this machine.
     InstallWith(String, Vec<String>),
@@ -195,6 +197,13 @@ impl Root {
                     items.push(if busy { Item::Off { label: label.into(), glyph: Glyph::Icon("power") } } else { act(label, "power", Action::CloudPower(id.clone(), off)) });
                     items.push(Item::Action { label: "Destroy…".into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
                 } else {
+                    // A VM or container on another machine: started and stopped there.
+                    if let Some(p) = m.parent.as_ref().filter(|p| p.container.is_some() && s.machines.iter().any(|h| h.id == p.machine_id && !h.is_down())) {
+                        let running = p.container_state.as_deref() == Some("running");
+                        let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(id.as_str()) && o.kind != "logs");
+                        let label = if running { "Stop" } else { "Start" };
+                        items.push(if busy { Item::Off { label: label.into(), glyph: Glyph::Icon("power") } } else { act(label, "power", Action::MachinePower(id.clone(), !running)) });
+                    }
                     items.push(Item::Action { label: "Remove from Muxen…".into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
                 }
                 items
@@ -421,6 +430,7 @@ impl Root {
             Action::RenameMachine(id) => self.show_rename(super::dialogs::RenameTarget::Machine(id), window, cx),
             Action::RenameSession(id) => self.show_rename(super::dialogs::RenameTarget::Session(id), window, cx),
             Action::CloudPower(id, on) => self.cloud_power(&id, on, cx),
+            Action::MachinePower(id, on) => self.machine_power(&id, on, cx),
             Action::ShowRunner(id) => self.navigate(Route::Runner(id), window, cx),
             Action::InstallWith(machine, labels) => self.show_install_dialog_with(&machine, &labels, window, cx),
             Action::CancelRun(job) => self.confirm_cancel_run(job, window, cx),

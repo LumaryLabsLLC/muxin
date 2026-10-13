@@ -180,12 +180,18 @@ impl Root {
             body = body.child(self.cloud_card(&theme, &s, &m, c, busy, cx));
         }
 
+        // Where it runs, when that's on another of the user's machines.
+        if let Some(parent) = &m.parent {
+            body = body.child(self.parent_card(&theme, &s, &m, parent, cx));
+        }
+
         if disconnected {
             body = body.child(self.disconnected_card(&theme, &m, cx));
         }
 
-        // A powered-off cloud machine says so on its cloud card.
-        if let Some(u) = m.unreachable.as_ref().filter(|u| offline && u.kind != "powered-off") {
+        // A powered-off cloud machine says so on its cloud card; a stopped VM,
+        // or one whose host is off, on the card above.
+        if let Some(u) = m.unreachable.as_ref().filter(|u| offline && !matches!(u.kind.as_str(), "powered-off" | "stopped" | "host-down")) {
             body = body.child(self.unreachable_card(&theme, &m, u, cx));
         }
 
@@ -239,6 +245,11 @@ impl Root {
                         theme.accent,
                     )),
             );
+        }
+
+        // The VMs and containers that run on it.
+        if let Some(c) = self.hosted_card(&theme, &s, &m, cx) {
+            body = body.child(c);
         }
 
         if !m.host.is_empty() {

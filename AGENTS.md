@@ -143,8 +143,10 @@ The CLI equivalents are `muxen cloud options|create|usage|power|destroy|login|lo
 
 - `run_on_machines(machine_ids, command, timeout_secs?)` runs one shell command on each machine, in its login shell from the home folder, without a terminal (nothing interactive). It waits for all of them and returns each one's `exit_code`, `error` and `operation.log_tail`. It runs as the user on their real machines: only when asked, and show the command first.
 - `status.attention` and `get_machine`'s diagnostics include `reboot-required` (a Linux machine's updates want a restart) and `failed-services` (systemd units that failed, by name). Read their logs (`logs_read(kind: "service")`) before suggesting a fix.
+- A machine can run on another of the user's machines: `get_machine`'s `parent` names that machine, with `relation` `"vm"`, `"container"` or `"inside"` (kind unknown), or `"through"` when ssh only goes through it (a jump host). `container` is the Docker container it runs in there, and `containerState` that container's state. When it can't be reached because of that, `unreachable.kind` is `"host-down"` (the machine it's on is off) or `"stopped"` (its container isn't running): start that machine, or its container.
+- `machine_power(machine_id, "on"|"off")` starts or stops the container a VM runs in (stopping gives it two minutes to shut down cleanly), or powers a cloud machine. It changes the user's machines: only when asked.
 - `wake_machine(machine_id)` sends Wake on LAN to a machine that's asleep or off, from this computer and from online machines on its network. It works once Muxen has seen the machine's network card (while it was on) and when the machine is set up to wake that way. Muxen checks it again after 20 and 40 seconds.
-- The CLI equivalents are `muxen run --on a,b -- <command>` (`--all` for every machine online; it exits 1 when any failed) and `muxen wake <machine>`.
+- The CLI equivalents are `muxen run --on a,b -- <command>` (`--all` for every machine online; it exits 1 when any failed), `muxen wake <machine>` and `muxen power <machine> on|off`.
 
 ## Logs
 

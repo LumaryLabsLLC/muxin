@@ -12,6 +12,7 @@
 pub(crate) mod cloud;
 mod docker;
 pub(crate) mod inventory_edit;
+mod power;
 pub(crate) mod remote;
 
 use std::collections::HashSet;

@@ -159,6 +159,31 @@ if [ "$os" = linux ]; then
   fi
 fi
 
+# --- What it runs in, when it's virtual -----------------------------------------
+# "kvm", "qemu", "vmware", "docker", ...: a VM or a container on another machine.
+case "$os" in
+darwin)
+  [ "$(sysctl -n kern.hv_vmm_present 2>/dev/null)" = 1 ] && kv virt apple ;;
+linux)
+  v=$(systemd-detect-virt 2>/dev/null)
+  [ "$v" = none ] && v=
+  if [ -z "$v" ]; then
+    if [ -f /.dockerenv ]; then v=docker
+    elif [ -f /run/.containerenv ]; then v=podman
+    else
+      case "$(cat /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name 2>/dev/null)" in
+      *QEMU*) v=qemu ;;
+      *VMware*) v=vmware ;;
+      *VirtualBox* | *innotek*) v=oracle ;;
+      *Parallels*) v=parallels ;;
+      *Xen*) v=xen ;;
+      *"Virtual Machine"*) v=microsoft ;;
+      esac
+    fi
+  fi
+  [ -n "$v" ] && kv virt "$v" ;;
+esac
+
 # --- Docker -------------------------------------------------------------------
 # Runner containers: the ones Muxen made (label muxen.runner, or
 # openrunner.runner from before the rename) and any other container running
@@ -191,6 +216,15 @@ if command -v docker >/dev/null 2>&1; then
         j=$((j + 1))
       done
     }
+    # Containers that publish ports here, running or not: a machine Muxen
+    # reaches through one (a VM in Docker, say) runs in it.
+    ids=$(docker ps -aq 2>/dev/null)
+    if [ -n "$ids" ]; then
+      # shellcheck disable=SC2086
+      docker inspect --format '{{.Name}}|{{.State.Status}}|{{.Config.Image}}|{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}:{{.HostPort}}->{{$p}} {{end}}{{end}}' $ids 2>/dev/null | while IFS='|' read -r cname cstate cimage cports; do
+        [ -n "$cports" ] && kv published "${cname#/}|$cstate|$cimage|$cports"
+      done
+    fi
   else
     kv docker_error "$(docker version 2>&1 | grep -i -m1 -E 'permission denied|cannot connect|error' | cut -c1-200)"
   fi

@@ -116,6 +116,8 @@ enum Command {
     Run(FleetRunArgs),
     /// Wake a machine that's asleep or off (Wake on LAN)
     Wake(MachineArgs),
+    /// Power a machine on or off: a cloud machine, or a VM in Docker on another machine
+    Power(CloudPowerArgs),
     /// Open a machine's port on this computer (localhost) until Ctrl-C
     Forward(ForwardArgs),
     /// Cloud machines: create DigitalOcean droplets to work in, power them, destroy them
@@ -1339,6 +1341,10 @@ fn main() -> ExitCode {
             run(&runtime, &a.agent, async move |e| api::process_signal(&e, req).await, |v| format!("{} {}.\n", if v["done"] == "killed" { "Killed" } else { "Stopped" }, v["pid"]))
         }
         Some(Command::Run(a)) => fleet_run(a, &runtime),
+        Some(Command::Power(a)) => {
+            let req = api::CloudMachineRequest { machine_id: a.machine, power: Some(a.state), wait: true };
+            run(&runtime, &a.agent, async move |e| api::machine_power(&e, req, api::Surface::Cli, stream_line).await, cli::action)
+        }
         Some(Command::Wake(a)) => {
             let req = api::WakeRequest { machine_id: a.machine_id };
             run(&runtime, &a.agent, async move |e| api::wake_machine(&e, req).await, |v| format!("Sent the wake signal from {}. Muxen checks it again in 20 and 40 seconds.\n", v["sent_from"].as_str().unwrap_or("here")))

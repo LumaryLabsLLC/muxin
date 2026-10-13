@@ -74,6 +74,47 @@ pub struct ProbeResult {
     /// Linux: systemd services that failed (the first few).
     #[serde(default)]
     pub failed_units: Vec<String>,
+    /// What it runs in when it's virtual ("kvm", "qemu", "vmware", "docker",
+    /// "apple", ...): a VM or a container. None: real hardware, or not said.
+    #[serde(default)]
+    pub virt: Option<String>,
+    /// Its Docker containers that publish ports, running or not.
+    #[serde(default)]
+    pub published: Vec<PublishedContainer>,
+    /// Where ssh really goes for it, from ~/.ssh/config.
+    #[serde(default)]
+    pub route: Option<SshRoute>,
+}
+
+/// A Docker container that publishes ports on its machine.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PublishedContainer {
+    pub name: String,
+    /// Docker's state: "running" | "exited" | "created" | "paused" | ...
+    pub state: String,
+    pub image: String,
+    pub ports: Vec<PublishedPort>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PublishedPort {
+    /// The machine's address it listens on ("" or "0.0.0.0": all of them).
+    pub host_ip: String,
+    pub host_port: u16,
+    /// Inside the container: "22/tcp".
+    pub target: String,
+}
+
+/// Where ssh goes for a machine: through a jump host (`ProxyJump`, its last
+/// hop), and the address and port at the end.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SshRoute {
+    pub jump: Option<String>,
+    pub hostname: String,
+    pub port: u16,
 }
 
 impl ProbeResult {
@@ -96,6 +137,12 @@ impl ProbeResult {
             self.mac = self.mac.take().or_else(|| p.mac.clone());
             self.lan_ip = self.lan_ip.take().or_else(|| p.lan_ip.clone());
             self.lan_broadcast = self.lan_broadcast.take().or_else(|| p.lan_broadcast.clone());
+            self.virt = self.virt.take().or_else(|| p.virt.clone());
+            // Its containers as last seen, to explain the machines in them.
+            if self.published.is_empty() {
+                self.published = p.published.clone();
+            }
+            self.route = self.route.take().or_else(|| p.route.clone());
             if !self.ok {
                 self.desktop = self.desktop.or(p.desktop);
             }
@@ -126,6 +173,21 @@ pub struct ProbedRunner {
     pub restarts: Option<u32>,
 }
 
+/// "name|state|image|127.0.0.1:2222->22/tcp :::8080->80/tcp ..." from the probe.
+fn parse_published(value: &str) -> Option<PublishedContainer> {
+    let mut parts = value.splitn(4, '|');
+    let (name, state, image, ports) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    let ports: Vec<PublishedPort> = ports
+        .split_whitespace()
+        .filter_map(|p| {
+            let (host, target) = p.split_once("->")?;
+            let (ip, port) = host.rsplit_once(':')?;
+            Some(PublishedPort { host_ip: ip.to_string(), host_port: port.parse().ok()?, target: target.to_string() })
+        })
+        .collect();
+    (!name.is_empty() && !ports.is_empty()).then(|| PublishedContainer { name: name.into(), state: state.into(), image: image.into(), ports })
+}
+
 /// The `dir` of a runner that lives in a container.
 pub fn container_dir(container: &str) -> String {
     format!("docker://{container}")
@@ -145,6 +207,38 @@ impl ProbeResult {
 
 /// Checks one machine. Never fails: problems are reported in `ProbeResult::error`.
 pub async fn probe(spec: &MachineSpec, remembered: Option<Shell>) -> ProbeResult {
+    let mut r = check(spec, remembered).await;
+    if spec.is_checkable() && !spec.is_local() {
+        r.route = ssh_route(spec).await;
+    }
+    r
+}
+
+/// Where ssh goes for the machine (its config resolved by `ssh -G`).
+pub async fn ssh_route(spec: &MachineSpec) -> Option<SshRoute> {
+    let out = tokio::time::timeout(Duration::from_secs(3), Command::new("ssh").arg("-G").args(ssh_args(spec)).output()).await.ok()?.ok()?;
+    parse_route(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `ssh -G` output to a route: its HostName, Port and the last ProxyJump hop
+/// (as a bare host: no user, no port).
+pub fn parse_route(text: &str) -> Option<SshRoute> {
+    let get = |key: &str| text.lines().find_map(|l| l.strip_prefix(key).map(|v| v.trim().to_string()));
+    let hostname = get("hostname ").filter(|h| !h.is_empty())?;
+    let port = get("port ").and_then(|p| p.parse().ok()).unwrap_or(22);
+    let jump = get("proxyjump ").filter(|j| !j.is_empty() && j != "none").and_then(|j| {
+        let hop = j.rsplit(',').next()?.trim().trim_start_matches("ssh://");
+        let hop = hop.rsplit_once('@').map(|(_, h)| h).unwrap_or(hop);
+        let host = match hop.strip_prefix('[') {
+            Some(rest) => rest.split(']').next().unwrap_or(rest),
+            None => hop.split(':').next().unwrap_or(hop),
+        };
+        (!host.is_empty()).then(|| host.to_string())
+    });
+    Some(SshRoute { jump, hostname, port })
+}
+
+async fn check(spec: &MachineSpec, remembered: Option<Shell>) -> ProbeResult {
     let started = Instant::now();
     if !spec.is_checkable() {
         return ProbeResult::failed(started, "No host configured");
@@ -412,6 +506,8 @@ pub fn parse(out: &str) -> ProbeResult {
             }
             "reboot_required" => r.reboot_required = value == "yes",
             "failed_units" => r.failed_units = value.split_whitespace().map(str::to_string).collect(),
+            "virt" => r.virt = text().filter(|v| v != "none"),
+            "published" => r.published.extend(parse_published(value)),
             k if k.starts_with('c') && k.contains('.') => {
                 let (idx, field) = k[1..].split_once('.').unwrap();
                 let Ok(idx) = idx.parse::<usize>() else { continue };
@@ -598,6 +694,28 @@ r1.listener=
         assert_eq!(r.runners[0].worker_pid, None);
         assert_eq!(r.runners[0].service_state.as_deref(), Some("active"));
         assert_eq!(r.runners[1].name, "broken");
+    }
+
+    #[test]
+    fn parses_virtual_machines_and_published_ports() {
+        let r = parse("probe=1\nvirt=qemu\npublished=zn-win11|exited|dockurr/windows|127.0.0.1:2222->22/tcp :::8006->8006/tcp 100.1.2.3:47822->47821/udp \npublished=bare|running|alpine|\n");
+        assert_eq!(r.virt.as_deref(), Some("qemu"));
+        assert_eq!(r.published.len(), 1, "a container without ports isn't listed");
+        let c = &r.published[0];
+        assert_eq!((c.name.as_str(), c.state.as_str()), ("zn-win11", "exited"));
+        assert_eq!(c.ports[0], PublishedPort { host_ip: "127.0.0.1".into(), host_port: 2222, target: "22/tcp".into() });
+        assert_eq!((c.ports[1].host_ip.as_str(), c.ports[1].host_port), ("::", 8006));
+        assert_eq!(c.ports.len(), 3);
+    }
+
+    #[test]
+    fn reads_where_ssh_goes() {
+        let r = parse_route("user adib\nhostname 127.0.0.1\nport 2222\nproxyjump beelink\n").unwrap();
+        assert_eq!(r, SshRoute { jump: Some("beelink".into()), hostname: "127.0.0.1".into(), port: 2222 });
+        let r = parse_route("hostname 10.0.0.5\nport 22\nproxyjump a@bastion:2200,ssh://me@[fd00::1]:22\n").unwrap();
+        assert_eq!(r.jump.as_deref(), Some("fd00::1"));
+        let r = parse_route("hostname adib-ser\nport 22\n").unwrap();
+        assert_eq!(r.jump, None);
     }
 
     #[test]

@@ -847,7 +847,7 @@ impl Root {
         // Explicit width: GPUI 0.2 only ellipsizes text whose width it knows up front.
         let trailing = if exited { 40. } else if s.busy || s.attention.is_some() { 20. } else { 0. };
         let trailing = trailing + if exited && s.attention.is_some() { 14. } else { 0. };
-        let text_w = (self.sidebar_width - 20. - 22. - 8. - 16. - 8. - trailing).max(40.);
+        let text_w = (self.row_width() - 20. - 22. - 8. - 16. - 8. - trailing).max(40.);
         div()
             .id(SharedString::from(format!("side-s-{}", s.id)))
             .flex()
@@ -1161,6 +1161,8 @@ impl Root {
         }
         let mid = m.id.clone();
         let changing = self.conn_changing.contains(&m.id);
+        // Reached through another machine (a VM on it, or behind it).
+        let via = m.parent.as_ref().map(|p| p.name.clone());
         let (glyph, value, detail, direct) = match self.machine_conn.get(&m.id) {
             Some(Load::Ready(c)) => {
                 let speed = c.latency_ms.map(|ms| format!(" · {ms} ms")).unwrap_or_default();
@@ -1172,17 +1174,25 @@ impl Root {
                 };
                 let net = c.network.clone().map(|n| format!(" · {n}{path}")).unwrap_or_default();
                 let at = c.peer.clone().map(|p| format!(" ({p})")).unwrap_or_default();
+                // A port its host forwards to it: "adib-ser:47822 (UDP, forwarded)".
+                let forwarded = c.address.as_deref().filter(|a| a.ends_with("forwarded)")).and_then(|a| a.split_whitespace().next()).and_then(|a| a.rsplit_once(':')).map(|(_, port)| port.to_string());
                 match c.via.as_str() {
                     "direct" => (
                         "zap",
                         format!("Direct{net}{speed}"),
-                        c.note.clone().unwrap_or_else(|| format!("QUIC to {}{at}, no ssh in between.", c.address.clone().unwrap_or_default())),
+                        c.note.clone().unwrap_or_else(|| match (&via, forwarded) {
+                            (Some(v), Some(port)) => format!("QUIC through {v}'s forwarded port {port}, no ssh in between."),
+                            _ => format!("QUIC to {}{at}, no ssh in between.", c.address.clone().unwrap_or_default()),
+                        }),
                         true,
                     ),
                     "ssh" => (
                         "network",
                         format!("Over ssh{net}{speed}"),
-                        c.note.clone().unwrap_or_else(|| "One ssh connection, kept open.".into()),
+                        c.note.clone().unwrap_or_else(|| match &via {
+                            Some(v) => format!("One ssh connection through {v}, kept open."),
+                            None => "One ssh connection, kept open.".into(),
+                        }),
                         c.direct,
                     ),
                     _ => ("unplug", "Not connected".into(), c.note.clone().unwrap_or_else(|| "The agent there didn't answer.".into()), c.direct),
@@ -1193,11 +1203,14 @@ impl Root {
         };
         // Not on the tailnet (while this computer is): offer to set it up there.
         let offer_tailscale = m.platform.starts_with("linux")
+            && via.is_none()
             && matches!(self.machine_conn.get(&m.id), Some(Load::Ready(c)) if c.tailnet.is_none() && c.tailscale.as_ref().is_some_and(|t| t.running));
         // Whether it's reachable away from its own network.
         let tailnet_line = match self.machine_conn.get(&m.id) {
             Some(Load::Ready(c)) => match (&c.tailnet, &c.tailscale) {
                 (Some(d), _) => Some(format!("On your tailnet as {}.", d.name)),
+                // Where it can be reached is up to the machine it's reached through.
+                (None, _) if via.is_some() => via.as_ref().map(|v| format!("Through {v}: reachable wherever {v} is.")),
                 (None, Some(t)) if t.running => Some("Not on your tailnet: reachable only on its network.".to_string()),
                 _ => None,
             },

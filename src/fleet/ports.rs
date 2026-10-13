@@ -48,6 +48,12 @@ pub struct ListeningPort {
 impl ListeningPort {
     /// A site to open in a browser: it answers with a page (not an API's 404).
     pub fn is_site(&self) -> bool {
+        // Windows' own web server (HTTP.sys, the "System" process) holds ports
+        // for its services (device discovery on 5357, remote management on
+        // 5985) and answers anything else with an error page: not a site.
+        if self.process.eq_ignore_ascii_case("system") && self.status.is_some_and(|s| s >= 400) {
+            return false;
+        }
         self.web && (self.title.is_some() || self.status.is_some_and(|s| (200..400).contains(&s)))
     }
 
@@ -254,6 +260,8 @@ mod tests {
         let api = ListeningPort { port: 6463, web: true, status: Some(404), process: "Discord Helper".into(), address: "0.0.0.0".into(), ..Default::default() };
         assert!(!api.is_site() && !api.local_only());
         assert_eq!(api.name(), "Discord Helper");
+        let wsd = ListeningPort { port: 5357, web: true, status: Some(503), title: Some("Service Unavailable".into()), process: "System".into(), address: "0.0.0.0".into(), ..Default::default() };
+        assert!(!wsd.is_site(), "Windows' own services aren't sites");
         let db = ListeningPort { port: 5432, container: Some("shop-db-1".into()), ..Default::default() };
         assert_eq!(db.name(), "shop-db-1");
         let f = Forward { machine_id: "beelink".into(), port: 8080, host: "127.0.0.1".into(), local_port: 8081 };

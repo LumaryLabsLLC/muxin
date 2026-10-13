@@ -51,6 +51,9 @@ pub struct Theme {
     pub text_placeholder: Hsla,
     pub text_accent: Hsla,
     pub accent: Hsla,
+    /// The second brand color (Muxen Dusk and Dawn: the icon's orange); the
+    /// accent itself in other themes.
+    pub accent2: Hsla,
     pub accent_text: Hsla,
     pub success: Hsla,
     pub warning: Hsla,
@@ -88,7 +91,7 @@ impl Theme {
     pub fn machine_status(&self, m: &crate::fleet::model::Machine) -> Hsla {
         match (m.status.as_str(), m.unreachable.as_ref().map(|u| u.kind.as_str())) {
             ("online", _) => self.success,
-            ("offline", Some("offline" | "powered-off" | "stopped" | "host-down")) => self.text_placeholder,
+            ("offline", Some("offline" | "powered-off" | "stopped" | "host-down" | "installing")) => self.text_placeholder,
             ("offline", Some("refused" | "tailscale-off")) => self.warning,
             ("offline", _) => self.error,
             _ => self.text_placeholder,

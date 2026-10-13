@@ -91,6 +91,7 @@ pub fn machine_subtitle_in(m: &Machine, nested: bool) -> (String, &'static str) 
             return ("Powered off".into(), "muted");
         }
         return match (m.unreachable.as_ref().map(|u| u.kind.as_str()), is_just_offline(m), seen) {
+            (Some("installing"), _, _) => ("Installing…".into(), "muted"),
             (Some("stopped" | "host-down"), _, _) => (unreachable_reason(m), "muted"),
             (_, true, Some(t)) => (format!("Offline · seen {}", ago(Some(t))), "muted"),
             (_, true, None) => ("Offline".into(), "muted"),
@@ -178,7 +179,7 @@ mod tests {
 /// Offline in the everyday sense (shut down, asleep, off the network), as
 /// opposed to on but refusing us: nothing for the user to fix.
 pub fn is_just_offline(m: &Machine) -> bool {
-    m.status == "offline" && m.unreachable.as_ref().is_some_and(|u| matches!(u.kind.as_str(), "offline" | "powered-off" | "stopped" | "host-down"))
+    m.status == "offline" && m.unreachable.as_ref().is_some_and(|u| matches!(u.kind.as_str(), "offline" | "powered-off" | "stopped" | "host-down" | "installing"))
 }
 
 /// A cloud machine that's powered off (and still billed).
@@ -199,6 +200,8 @@ pub fn unreachable_word(m: &Machine) -> &'static str {
         "Powered off"
     } else if is_stopped(m) {
         "Stopped"
+    } else if m.unreachable.as_ref().is_some_and(|u| u.kind == "installing") {
+        "Installing"
     } else if is_just_offline(m) {
         "Offline"
     } else {
@@ -211,6 +214,7 @@ pub fn unreachable_reason(m: &Machine) -> String {
     let parent = m.parent.as_ref().map(|p| p.name.as_str()).unwrap_or("Its host");
     match m.unreachable.as_ref().map(|u| u.kind.as_str()) {
         Some("stopped") => return "Stopped".into(),
+        Some("installing") => return "Installing…".into(),
         Some("host-down") => return m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("{parent} is offline")),
         _ => {}
     }

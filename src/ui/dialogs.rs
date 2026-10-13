@@ -25,6 +25,10 @@ pub enum DialogEvent {
     OpenSettings,
     /// Open the New cloud machine dialog instead.
     NewCloudMachine,
+    /// Open the New VM dialog instead.
+    NewVm,
+    /// A schedule was saved: show the schedules again.
+    ScheduleSaved,
     OpenCloudSettings,
     /// The root view runs it, so it can open the workspace when it's ready.
     CreateWorkspace(CreateWorkspace, WorkspaceIsolation),
@@ -32,6 +36,8 @@ pub enum DialogEvent {
     StartSession(StartSession),
     /// Set up the workspace first, then start the session in its folder.
     StartInWorkspace(CreateWorkspace, StartSession),
+    /// Make a VM first, then (a workspace in it and) the session there.
+    StartInNewVm(crate::ops::vm::VmCreate, Option<CreateWorkspace>, StartSession),
     /// A virtual monitor was added: (machine, display) to show.
     DisplayAdded(String, String),
 }
@@ -254,6 +260,7 @@ impl Render for AddMachineDialog {
         .children(error_line(&theme, &self.error))
         .child(footer(vec![
             Button::new("am-cloud", "New cloud machine…").style(ButtonStyle::Ghost).icon("cloud").on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::NewCloudMachine))).into_any_element(),
+            Button::new("am-vm", "New VM…").style(ButtonStyle::Ghost).icon("box").on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::NewVm))).into_any_element(),
             div().flex_1().into_any_element(),
             Button::new("am-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
             Button::new("am-add", "Add machine").style(ButtonStyle::Primary).key_hint("↵").on_click(cx.listener(|this, _, _, cx| this.submit(cx))).into_any_element(),
@@ -1319,6 +1326,8 @@ pub struct NewSessionDialog {
     /// for, and the last listing that came back (for which machine and folder).
     folders_asked: Option<(String, String)>,
     folders: Option<((String, String), Load<Listing>)>,
+    /// Start in a new Linux VM instead of a machine: (system, the machine it runs on).
+    new_vm: Option<(String, Option<String>)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1386,6 +1395,7 @@ impl NewSessionDialog {
             branch,
             folders_asked: None,
             folders: None,
+            new_vm: None,
             _subscriptions: subs,
         };
         dialog.agent = dialog.default_agent(&snapshot);
@@ -1471,6 +1481,10 @@ impl NewSessionDialog {
 
     /// The first agent CLI the machine has, else a shell.
     fn default_agent(&self, s: &Snapshot) -> &'static str {
+        // A new VM comes with whichever is picked.
+        if self.new_vm.is_some() {
+            return "claude";
+        }
         let installed = self.machine.as_ref().and_then(|id| s.machines.iter().find(|m| &m.id == id)).map(|m| m.agents.clone()).unwrap_or_default();
         AGENTS.iter().find(|a| installed.iter().any(|i| i == a.id)).map(|a| a.id).unwrap_or("shell")
     }
@@ -1481,8 +1495,25 @@ impl NewSessionDialog {
     }
 
     fn submit(&mut self, cx: &mut Context<Self>) {
-        let Some(machine_id) = self.machine.clone() else { return };
-        let direct = self.without_agent(&self.engine.current());
+        // A new VM: its id is its name's, and it's made first.
+        let vm = self.new_vm.clone().and_then(|(system, host)| {
+            let host = host?;
+            let name = vm_name(&self.engine.current(), &system);
+            Some(crate::ops::vm::VmCreate {
+                name: name.clone(),
+                system,
+                host: Some(host),
+                cpus: Some(4),
+                memory_gb: Some(8),
+                disk_gb: None,
+                install: if self.agent == "shell" { Vec::new() } else { vec![self.agent.to_string()] },
+            })
+        });
+        if self.new_vm.is_some() && vm.is_none() {
+            return;
+        }
+        let Some(machine_id) = vm.as_ref().map(|v| crate::util::slug(&v.name)).or_else(|| self.machine.clone()) else { return };
+        let direct = vm.is_none() && self.without_agent(&self.engine.current());
         let text = |e: &Entity<TextInput>, cx: &Context<Self>| Some(e.read(cx).text().trim().to_string()).filter(|t| !t.is_empty());
         // The prepared message, then whatever the user added.
         let message = match (self.prefill.message.clone(), text(&self.prompt, cx)) {
@@ -1507,7 +1538,7 @@ impl NewSessionDialog {
         };
         match self.prefill.workspace.clone().filter(|_| self.in_workspace) {
             Some(plan) => {
-                if !self.workspaces_allowed(&self.engine.current()) {
+                if vm.is_none() && !self.workspaces_allowed(&self.engine.current()) {
                     return;
                 }
                 let workspace = CreateWorkspace {
@@ -1519,9 +1550,15 @@ impl NewSessionDialog {
                     branch: text(&self.branch, cx),
                     owner: Some("app".into()),
                 };
-                cx.emit(DialogEvent::StartInWorkspace(workspace, session))
+                match vm {
+                    Some(vm) => cx.emit(DialogEvent::StartInNewVm(vm, Some(workspace), session)),
+                    None => cx.emit(DialogEvent::StartInWorkspace(workspace, session)),
+                }
             }
-            None => cx.emit(DialogEvent::StartSession(session)),
+            None => match vm {
+                Some(vm) => cx.emit(DialogEvent::StartInNewVm(vm, None, session)),
+                None => cx.emit(DialogEvent::StartSession(session)),
+            },
         }
     }
 
@@ -1731,6 +1768,13 @@ impl NewSessionDialog {
 /// The window height a dialog's title, intro, buttons and margins take.
 pub(super) const MODAL_CHROME: f32 = 300.;
 
+/// "ubuntu-1", "debian-2": the first name of that kind not taken yet.
+fn vm_name(s: &Snapshot, system: &str) -> String {
+    let base = system.split('-').next().unwrap_or("vm");
+    let taken: Vec<String> = s.machines.iter().map(|m| m.name.to_lowercase()).collect();
+    (1..).map(|n| format!("{base}-{n}")).find(|n| !taken.contains(n)).unwrap_or_else(|| base.to_string())
+}
+
 /// Machines that can run sessions: any with a host (or this computer).
 fn session_machines(s: &Snapshot) -> Vec<&crate::fleet::model::Machine> {
     s.machines.iter().filter(|m| !m.host.is_empty()).collect()
@@ -1748,9 +1792,14 @@ impl Render for NewSessionDialog {
         let checked = machine.as_ref().is_some_and(|m| m.agent_version.is_some() || m.sessions_error.is_some());
         let installed: Vec<String> = machine.as_ref().map(|m| m.agents.clone()).unwrap_or_default();
 
-        let picker = div().flex().flex_wrap().gap(px(6.)).children(session_machines(&snapshot).into_iter().enumerate().map(|(i, m)| {
-            let selected = self.machine.as_deref() == Some(m.id.as_str());
+        // Machines of their own first; the VMs and containers inside one
+        // under it ("In Beelink"); then a new VM, made for this.
+        let all = session_machines(&snapshot);
+        let host_of = |m: &crate::fleet::model::Machine| m.parent.as_ref().filter(|p| p.inside() && all.iter().any(|h| h.id == p.machine_id)).map(|p| p.machine_id.clone());
+        let machine_chip = |i: usize, m: &crate::fleet::model::Machine, cx: &mut Context<Self>| {
+            let selected = self.new_vm.is_none() && self.machine.as_deref() == Some(m.id.as_str());
             let id = m.id.clone();
+            let kind = m.parent.as_ref().filter(|p| p.inside()).map(|p| if p.relation == "vm" { "VM" } else { "Container" });
             div()
                 .id(("ns-machine", i))
                 .flex()
@@ -1764,10 +1813,12 @@ impl Render for NewSessionDialog {
                 .border_color(if selected { theme.accent } else { theme.border_variant })
                 .bg(if selected { theme.accent.opacity(0.12) } else { theme.element })
                 .text_size(px(12.5))
-                .child(div().size(px(7.)).rounded_full().bg(theme.machine_status(&m)))
+                .child(div().size(px(7.)).rounded_full().bg(theme.machine_status(m)))
                 .child(m.name.clone())
+                .children(kind.map(|k| div().text_size(px(11.)).text_color(theme.text_placeholder).child(k)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.machine = Some(id.clone());
+                    this.new_vm = None;
                     this.agent_picked = false;
                     this.list_folders(cx);
                     // Find out what's installed there if we don't know yet.
@@ -1778,15 +1829,151 @@ impl Render for NewSessionDialog {
                     });
                     cx.notify()
                 }))
-        }));
+                .into_any_element()
+        };
+        let mut i = 0;
+        let mut own: Vec<AnyElement> = Vec::new();
+        for m in all.iter().filter(|m| host_of(m).is_none()) {
+            own.push(machine_chip(i, m, cx));
+            i += 1;
+        }
+        // Linux VMs need a machine with Docker.
+        let vm_hosts: Vec<crate::ops::vm::VmHost> = self.engine.vm_options().hosts.into_iter().filter(|h| h.systems.iter().any(|s| s.starts_with("ubuntu"))).collect();
+        if !vm_hosts.is_empty() {
+            let on = self.new_vm.is_some();
+            let best = vm_hosts.iter().max_by_key(|h| h.memory_free.unwrap_or(0)).map(|h| h.machine_id.clone());
+            own.push(
+                div()
+                    .id("ns-new-vm")
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .h(px(26.))
+                    .px(px(10.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_dashed()
+                    .cursor_pointer()
+                    .border_color(if on { theme.accent } else { theme.border })
+                    .bg(if on { theme.accent.opacity(0.12) } else { theme.element })
+                    .text_size(px(12.5))
+                    .text_color(if on { theme.text } else { theme.text_muted })
+                    .child(icon("box", 12., if on { theme.text } else { theme.text_muted }))
+                    .child("New VM")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.new_vm = Some(("ubuntu-24.04".into(), best.clone()));
+                        this.agent_picked = false;
+                        cx.notify()
+                    }))
+                    .into_any_element(),
+            );
+        }
+        let mut groups: Vec<AnyElement> = Vec::new();
+        for h in all.iter().filter(|m| host_of(m).is_none()) {
+            let guests: Vec<&&crate::fleet::model::Machine> = all.iter().filter(|g| host_of(g).as_deref() == Some(h.id.as_str())).collect();
+            if guests.is_empty() {
+                continue;
+            }
+            let mut chips: Vec<AnyElement> = Vec::new();
+            for g in guests {
+                chips.push(machine_chip(i, g, cx));
+                i += 1;
+            }
+            groups.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_none().flex().items_center().gap(px(4.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(icon("corner-down-right", 11., theme.text_placeholder)).child(format!("In {}", h.name)))
+                    .child(div().flex().flex_wrap().gap(px(6.)).children(chips))
+                    .into_any_element(),
+            );
+        }
+        let vm_form = self.new_vm.clone().map(|(system, host)| {
+            let chip = |id: SharedString, text: String, selected: bool| {
+                div()
+                    .id(id)
+                    .h(px(24.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(5.))
+                    .border_1()
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .border_color(if selected { theme.accent } else { theme.border_variant })
+                    .bg(if selected { theme.accent.opacity(0.10) } else { theme.element })
+                    .text_color(if selected { theme.text } else { theme.text_muted })
+                    .child(text)
+            };
+            let systems: Vec<AnyElement> = crate::ops::vm::SYSTEMS
+                .iter()
+                .filter(|s| s.os == "linux" && vm_hosts.iter().any(|h| h.systems.iter().any(|x| x == s.id)))
+                .map(|s| {
+                    let id = s.id.to_string();
+                    chip(SharedString::from(format!("ns-vs-{id}")), s.name.to_string(), system == id)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(v) = this.new_vm.as_mut() {
+                                v.0 = id.clone();
+                            }
+                            cx.notify()
+                        }))
+                        .into_any_element()
+                })
+                .collect();
+            let hosts: Vec<AnyElement> = vm_hosts
+                .iter()
+                .filter(|h| h.systems.iter().any(|x| *x == system))
+                .map(|h| {
+                    let id = h.machine_id.clone();
+                    chip(SharedString::from(format!("ns-vh-{id}")), format!("on {}", h.name), host.as_deref() == Some(id.as_str()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(v) = this.new_vm.as_mut() {
+                                v.1 = Some(id.clone());
+                            }
+                            cx.notify()
+                        }))
+                        .into_any_element()
+                })
+                .collect();
+            let name = vm_name(&snapshot, &system);
+            let with = match crate::fleet::sessions::agent(self.agent) {
+                Some(k) if k.id != "shell" => format!(", with {}", k.name),
+                _ => String::new(),
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .p(px(10.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(theme.border_variant)
+                .bg(theme.element.opacity(0.5))
+                .child(div().flex().flex_wrap().gap(px(6.)).children(systems))
+                .child(div().flex().flex_wrap().gap(px(6.)).children(hosts))
+                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!(
+                    "A Linux container named {name}{with}, ready in a few minutes. It joins your machines; destroy it from its page when you're done."
+                )))
+        });
+        let picker = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(div().flex().flex_wrap().gap(px(6.)).children(own))
+            .children(groups)
+            .children(vm_form);
 
         // Agents, three to a row.
         let card = |i: usize, kind: &'static crate::fleet::sessions::AgentKind, cx: &mut Context<Self>| {
             let selected = self.agent == kind.id;
             let found = kind.id == "shell" || installed.iter().any(|a| a == kind.id);
             let (icon_name, (from, to)) = super::kit::agent_look(kind.id);
+            let new_vm = self.new_vm.is_some();
+            let found = found || new_vm;
             let note = match (kind.id, found, checked) {
                 ("shell", _, _) => "Your login shell",
+                (_, _, _) if new_vm => "Installed with the VM",
                 (_, true, _) => "Installed",
                 (_, false, true) => "Not installed",
                 (_, false, false) => "Checking…",
@@ -1890,7 +2077,16 @@ impl Render for NewSessionDialog {
                 )))
         });
         let into_workspace = self.in_workspace && self.prefill.workspace.is_some();
-        let can_start = self.machine.is_some() && (!into_workspace || self.workspaces_allowed(&snapshot));
+        let can_start = match &self.new_vm {
+            Some((_, host)) => host.is_some(),
+            None => self.machine.is_some() && (!into_workspace || self.workspaces_allowed(&snapshot)),
+        };
+        let start_label = match (self.new_vm.is_some(), into_workspace) {
+            (true, true) => "Create VM, workspace and start",
+            (true, false) => "Create VM and start",
+            (false, true) => "Create workspace and start",
+            (false, false) => "Start session",
+        };
 
         // The buttons stay in view; what's between them and the title scrolls.
         let body_max = (f32::from(window.viewport_size().height) - MODAL_CHROME).max(220.);
@@ -1907,6 +2103,7 @@ impl Render for NewSessionDialog {
         .children(self.prefill.workspace.clone().map(|plan| field(&theme, "Where", self.where_choice(&theme, &plan, cx), None)))
         .map(|d| match self.prefill.workspace.clone().filter(|_| self.in_workspace) {
             Some(plan) => d.child(self.workspace_fields(&theme, &plan, machine.as_ref(), cx)),
+            None if self.new_vm.is_some() => d,
             None => d.child(field(&theme, "Folder", div().flex().flex_col().gap(px(8.)).child(self.cwd.clone()).child(folder_chips).children(self.folder_browser(&theme, cx)), None)),
         })
         .when(self.agent != "shell", |d| {
@@ -1943,7 +2140,7 @@ impl Render for NewSessionDialog {
         .child(body)
         .child(footer(vec![
             Button::new("ns-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
-            Button::new("ns-start", if into_workspace { "Create workspace and start" } else { "Start session" })
+            Button::new("ns-start", start_label)
                 .style(ButtonStyle::Primary)
                 .icon(if into_workspace { "layers" } else { "square-terminal" })
                 .disabled(!can_start)

@@ -60,6 +60,10 @@ enum Action {
     CloudPower(String, bool),
     /// Start (true) or stop a VM or container that runs on another machine.
     MachinePower(String, bool),
+    /// The New VM dialog, for this machine.
+    NewVm(String),
+    /// The New schedule dialog, for this machine.
+    NewSchedule(String),
     ShowRunner(String),
     /// Install a runner with these labels on this machine.
     InstallWith(String, Vec<String>),
@@ -204,7 +208,16 @@ impl Root {
                         let label = if running { "Stop" } else { "Start" };
                         items.push(if busy { Item::Off { label: label.into(), glyph: Glyph::Icon("power") } } else { act(label, "power", Action::MachinePower(id.clone(), !running)) });
                     }
-                    items.push(Item::Action { label: "Remove from Muxen…".into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
+                    if m.status == "online" {
+                        items.push(act("New schedule here…", "clock", Action::NewSchedule(id.clone())));
+                    }
+                    // A machine that can run VMs: make one here.
+                    if self.engine.vm_options().hosts.iter().any(|h| &h.machine_id == id && !h.systems.is_empty()) {
+                        items.push(act("New VM here…", "box", Action::NewVm(id.clone())));
+                    }
+                    // A VM Muxen made goes with its container and disk.
+                    let label = if m.vm.is_some() { "Destroy…" } else { "Remove from Muxen…" };
+                    items.push(Item::Action { label: label.into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
                 }
                 items
             }
@@ -431,6 +444,8 @@ impl Root {
             Action::RenameSession(id) => self.show_rename(super::dialogs::RenameTarget::Session(id), window, cx),
             Action::CloudPower(id, on) => self.cloud_power(&id, on, cx),
             Action::MachinePower(id, on) => self.machine_power(&id, on, cx),
+            Action::NewVm(id) => self.show_vm_dialog(Some(id), window, cx),
+            Action::NewSchedule(id) => self.show_schedule_dialog(Some(id), window, cx),
             Action::ShowRunner(id) => self.navigate(Route::Runner(id), window, cx),
             Action::InstallWith(machine, labels) => self.show_install_dialog_with(&machine, &labels, window, cx),
             Action::CancelRun(job) => self.confirm_cancel_run(job, window, cx),

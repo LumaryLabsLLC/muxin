@@ -238,6 +238,83 @@ pub fn cloud_usage(u: &crate::cloud::usage::CloudUsage) -> String {
     out
 }
 
+pub fn schedules(list: &Vec<crate::fleet::schedules::MachineSchedules>) -> String {
+    let mut out = String::new();
+    for m in list {
+        if m.schedules.is_empty() && m.error.is_none() && m.problem.is_none() {
+            continue;
+        }
+        out.push_str(&format!("{}\n", m.machine));
+        if let Some(e) = &m.error {
+            out.push_str(&format!("  (couldn't ask it: {e})\n"));
+        }
+        if let Some(p) = &m.problem {
+            out.push_str(&format!("  ! {p}\n"));
+        }
+        for s in &m.schedules {
+            let what = match s.what.kind.as_str() {
+                "agent" => format!("{}: {}", s.what.agent.clone().unwrap_or_default(), s.what.prompt.clone().unwrap_or_default()),
+                _ => s.what.command.clone().unwrap_or_default(),
+            };
+            let last = match &s.last_run {
+                _ if s.running => "running now".to_string(),
+                Some(r) if r.ok => format!("last ok {}", ago_secs(r.started)),
+                Some(r) => format!("last failed {}{}", ago_secs(r.started), r.exit_code.map(|c| format!(" (exit {c})")).unwrap_or_default()),
+                None => "not run yet".to_string(),
+            };
+            let off = if s.enabled { "" } else { " (off)" };
+            out.push_str(&format!("  {:<10} {:<22} {:<24} {last}{off}\n    {what}\n", s.id, s.name, s.when_text));
+        }
+    }
+    if out.is_empty() {
+        out.push_str("No schedules. Add one with `muxen schedule add <machine> --name ... --every day --at 09:00 --command ...`.\n");
+    }
+    out
+}
+
+pub fn schedule_log(l: &crate::fleet::schedules::ScheduleLog) -> String {
+    let mut out = String::new();
+    for r in &l.runs {
+        let how = match (&r.session, r.ok) {
+            (Some(s), _) => format!("started session {s}"),
+            (None, true) => "ok".into(),
+            (None, false) => r.error.clone().unwrap_or_else(|| format!("failed{}", r.exit_code.map(|c| format!(" (exit {c})")).unwrap_or_default())),
+        };
+        out.push_str(&format!("{}  {how}{}\n", ago_secs(r.started), r.seconds.map(|s| format!(" in {s}s")).unwrap_or_default()));
+    }
+    if !l.output.is_empty() {
+        out.push_str("\n── newest run ──\n");
+        out.push_str(&l.output);
+        if !l.output.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    if out.is_empty() {
+        out.push_str("Not run yet.\n");
+    }
+    out
+}
+
+/// "5m ago" from Unix seconds.
+fn ago_secs(t: i64) -> String {
+    let secs = (chrono::Utc::now().timestamp() - t).max(0) as u64;
+    format!("{} ago", crate::util::short_duration(secs))
+}
+
+pub fn vm_options(o: &crate::ops::vm::VmOptions) -> String {
+    let mut out = String::from("Machines:\n");
+    for h in &o.hosts {
+        let can = if h.systems.is_empty() { h.reason.clone().unwrap_or_else(|| "can't run VMs".into()) } else if h.systems.iter().any(|s| s.starts_with("windows")) { "Windows and Linux".into() } else { "Linux".into() };
+        out.push_str(&format!("  {:<20} {can}\n", h.machine_id));
+    }
+    out.push_str("Systems:\n");
+    for s in &o.systems {
+        out.push_str(&format!("  {:<22} {}\n", s.id, s.name));
+    }
+    out.push_str(&format!("Defaults: {} CPUs, {} GB memory, {} GB disk (Windows)\n", o.default_cpus, o.default_memory_gb, o.default_disk_gb));
+    out
+}
+
 pub fn cloud_options(o: &crate::cloud::CloudOptions) -> String {
     let mut out = String::new();
     let method = match o.method.as_str() {

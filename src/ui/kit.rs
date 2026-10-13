@@ -528,6 +528,14 @@ impl RenderOnce for Button {
             .when_some(border, |d, b| d.border_1().border_color(b))
             .when(disabled, |d| d.opacity(0.5))
             .when(!disabled, |d| d.cursor_pointer().hover(move |s| s.bg(hover)));
+        // A theme with two brand colors fills primary buttons with both, as the icon does.
+        if self.style == ButtonStyle::Primary && theme.accent2 != theme.accent {
+            let (a, b) = (theme.accent, theme.accent2);
+            el = el.bg(gpui::linear_gradient(90., gpui::linear_color_stop(a, 0.), gpui::linear_color_stop(b, 1.)));
+            if !disabled {
+                el = el.hover(move |s| s.bg(gpui::linear_gradient(90., gpui::linear_color_stop(a.opacity(0.85), 0.), gpui::linear_color_stop(b.opacity(0.85), 1.))));
+            }
+        }
         if self.loading {
             el = el.child(spinner(ElementId::Name(format!("{}-spin", self.id).into()), 13., fg));
         } else if let Some(i) = self.icon {

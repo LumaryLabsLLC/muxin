@@ -9,6 +9,7 @@ pub mod desktop;
 pub mod direct;
 pub mod link;
 pub mod logs;
+pub mod schedules;
 pub mod services;
 pub mod engine;
 pub mod files;

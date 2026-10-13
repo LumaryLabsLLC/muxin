@@ -302,6 +302,14 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "cloud_destroy" => ok(api::cloud_destroy(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "cloud_power" => ok(api::cloud_power(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "machine_power" => ok(api::machine_power(engine, args(a)?, Surface::Mcp, |_| {}).await?),
+        "vm_options" => ok(api::vm_options(engine).await),
+        "schedule_list" => ok(api::schedule_list(engine, args(a)?).await?),
+        "schedule_save" => ok(api::schedule_save(engine, args(a)?).await?),
+        "schedule_delete" => ok(api::schedule_delete(engine, args(a)?).await?),
+        "schedule_run" => ok(api::schedule_run(engine, args(a)?).await?),
+        "schedule_log" => ok(api::schedule_log(engine, args(a)?).await?),
+        "vm_create" => ok(api::vm_create(engine, args(a)?, Surface::Mcp, |_| {}).await?),
+        "vm_destroy" => ok(api::vm_destroy(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "get_operation" => ok(api::operation(engine, args(a)?)?),
         "cancel_operation" => ok(api::cancel_operation(engine, args(a)?)?),
         "list_files" => ok(api::list_files(engine, args(a)?).await?),
@@ -533,6 +541,79 @@ pub fn tools() -> Vec<Value> {
             "description": "Power a machine on or off. A cloud machine: through its provider (as cloud_power). A VM or container that runs in Docker on another of the user's machines (get_machine's `parent` names the machine and its `container`): starts or stops that container there; stopping gives it two minutes to shut down cleanly, and starting waits until it answers ssh. It changes the user's machines: only when asked.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID }, "power": { "type": "string", "enum": ["on", "off"] }, "wait": { "type": "boolean" } }), &["machine_id", "power"]),
             "annotations": annotations("Power a machine on or off", false, false, true, true),
+        }),
+        json!({
+            "name": "schedule_list",
+            "description": "Schedules on the user's machines (or one): commands or agent sessions that run there at set times, kept and run by Muxen's agent through the machine's own scheduler (cron, launchd, Task Scheduler), so they run whether or not Muxen is open. Each with `when` (and `when_text`, in the machine's own time), `what`, `enabled`, `running` and `last_run` (ok, exit_code, or the agent session it started). `problem` says when a machine can't run them (no cron). Read-only.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &[]),
+            "annotations": annotations("List schedules", true, false, true, false),
+        }),
+        json!({
+            "name": "schedule_save",
+            "description": "Create a schedule on a machine, or change one (pass its id). It runs `command` in the user's login shell in `folder`, or starts an agent session (`agent`: claude, codex, ...) with `prompt` in `folder`, which shows up in the app like any session. For an unattended agent run that ends by itself, use a command such as `claude -p \"...\"`. `when`: {every: \"minutes\"|\"hours\", n} (hours at `at`'s minute), or {every: \"day\"|\"weekdays\", at: \"HH:MM\"}, or {every: \"week\", days: [\"mon\", \"thu\"], at}; in the machine's own time. It runs on the user's machine unattended: only when asked.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "id": { "type": "string", "description": "An existing schedule's id, to change it." },
+                "name": { "type": "string" },
+                "when": { "type": "object", "properties": {
+                    "every": { "type": "string", "enum": ["minutes", "hours", "day", "weekdays", "week"] },
+                    "n": { "type": "integer", "minimum": 1 },
+                    "at": { "type": "string", "description": "HH:MM" },
+                    "days": { "type": "array", "items": { "type": "string" } }
+                }, "required": ["every"] },
+                "command": { "type": "string" },
+                "agent": { "type": "string", "description": "claude, codex, opencode, gemini, amp, pi or shell." },
+                "prompt": { "type": "string" },
+                "folder": { "type": "string", "description": "Default ~." },
+                "enabled": { "type": "boolean", "description": "Default true; false keeps it without running it." }
+            }), &["machine_id", "name", "when"]),
+            "annotations": annotations("Save schedule", false, false, true, true),
+        }),
+        json!({
+            "name": "schedule_delete",
+            "description": "Delete a schedule from a machine, with its run history. Confirm with the user first unless they asked.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID }, "schedule_id": { "type": "string" } }), &["machine_id", "schedule_id"]),
+            "annotations": annotations("Delete schedule", false, true, true, true),
+        }),
+        json!({
+            "name": "schedule_run",
+            "description": "Run a schedule now, in the background on its machine (its next times don't change). Read the result with schedule_log.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID }, "schedule_id": { "type": "string" } }), &["machine_id", "schedule_id"]),
+            "annotations": annotations("Run schedule now", false, false, false, true),
+        }),
+        json!({
+            "name": "schedule_log",
+            "description": "A schedule's last runs (newest first: started, ok, exit_code, seconds, or the agent session) and one run's output: the newest, or the one whose `started` you pass. Read-only.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID }, "schedule_id": { "type": "string" }, "started": { "type": "integer" } }), &["machine_id", "schedule_id"]),
+            "annotations": annotations("Schedule runs and output", true, false, true, false),
+        }),
+        json!({
+            "name": "vm_options",
+            "description": "Where VMs can run and what: each of the user's machines with Docker (online, kvm, cores, free memory and disk), the systems it can run (Windows needs a Linux x86-64 machine with KVM; Linux runs anywhere with Docker), why one can't, the system catalog (ids like windows-11, windows-10, windows-server-2025, ubuntu-24.04, debian-13, fedora, alpine, arch) and the defaults. Read-only.",
+            "inputSchema": schema(json!({}), &[]),
+            "annotations": annotations("VM options", true, false, true, false),
+        }),
+        json!({
+            "name": "vm_create",
+            "description": "Create a VM on one of the user's machines and add it to them (shown under that machine). Windows (dockur/windows with KVM) downloads and installs itself, 15-30 minutes the first time: call with wait: false and poll get_operation. Linux is a container with ssh, ready in under a minute (it shares the host's kernel, no systemd). Muxen sets up ssh with this computer's key and its agent, so sessions, files, workspace_exec and the desktop work like on any machine. `host` defaults to the machine with the most free memory that can run it. The result names the new machine_id. It uses the user's machine and disk: only when asked, or when the task needs a fresh machine; destroy it when done unless they want to keep it.",
+            "inputSchema": schema(json!({
+                "name": { "type": "string", "description": "Its name in Muxen, e.g. \"win-test\"." },
+                "system": { "type": "string", "description": "A system id from vm_options, e.g. windows-11 or ubuntu-24.04." },
+                "host": { "type": "string", "description": MACHINE_ID },
+                "cpus": { "type": "integer", "minimum": 1, "description": "Default 4." },
+                "memory_gb": { "type": "integer", "minimum": 1, "description": "Default 8." },
+                "disk_gb": { "type": "integer", "minimum": 32, "description": "Windows' disk, grown as needed. Default 64." },
+                "install": { "type": "array", "items": { "type": "string" }, "description": "Agent CLIs to install on a Linux VM (with Node.js): claude, codex, gemini, opencode, amp, pi. They sign in on first use." },
+                "wait": { "type": "boolean", "description": "Wait for it to be ready. Default true (up to timeout_secs, default 600)." },
+                "timeout_secs": { "type": "integer", "minimum": 1 }
+            }), &["name", "system"]),
+            "annotations": annotations("Create VM", false, false, false, true),
+        }),
+        json!({
+            "name": "vm_destroy",
+            "description": "Destroy a VM Muxen made (vm_create): removes its container and disk on its host (everything in it is lost) and the machine from Muxen. Confirm with the user first unless they asked for it, or you made it for the task; copy out anything worth keeping. machine_power stops one without deleting it.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID }, "wait": { "type": "boolean" } }), &["machine_id"]),
+            "annotations": annotations("Destroy VM", false, true, true, true),
         }),
         json!({
             "name": "cancel_run",
@@ -1122,7 +1203,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 80);
+        assert_eq!(tools.len(), 88);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

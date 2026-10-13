@@ -49,7 +49,7 @@ pub fn default_extras() -> Vec<String> {
 }
 
 /// npm packages of the agent CLIs (they need Node.js).
-fn npm_package(id: &str) -> Option<&'static str> {
+pub(crate) fn npm_package(id: &str) -> Option<&'static str> {
     match id {
         "claude" => Some("@anthropic-ai/claude-code"),
         "codex" => Some("@openai/codex"),

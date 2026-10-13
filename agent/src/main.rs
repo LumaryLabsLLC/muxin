@@ -34,6 +34,7 @@ mod gui;
 mod link;
 mod proto;
 mod repos;
+mod schedules;
 mod screen;
 mod sys;
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -76,6 +77,7 @@ fn main() {
         #[cfg(target_os = "macos")]
         Some("display-mode") => displays::run_mode(&args[1..]),
         Some("clip") => clipboard::run(),
+        Some("schedule-run") => schedules::run(args.get(1).map(String::as_str).unwrap_or("")),
         Some("attach") => match args.get(1) {
             Some(name) => client::attach(name),
             None => usage(),

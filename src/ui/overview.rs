@@ -634,6 +634,7 @@ fn status_word(m: &Machine) -> &'static str {
         "online" => "online",
         "offline" if format::is_powered_off(m) => "powered off",
         "offline" if format::is_stopped(m) => "stopped",
+        "offline" if m.unreachable.as_ref().is_some_and(|u| u.kind == "installing") => "installing",
         "offline" if format::is_just_offline(m) => "offline",
         "offline" => "can't connect",
         "manual" => "no host",

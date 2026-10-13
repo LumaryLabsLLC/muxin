@@ -22,7 +22,9 @@ impl Root {
             "through" => format!("Reached through {}", parent.name),
             _ => format!("Runs on {}", parent.name),
         };
+        let installing = m.unreachable.as_ref().is_some_and(|u| u.kind == "installing");
         let (state, color) = match (powering, &parent.container) {
+            _ if installing => (m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_default(), theme.text_muted),
             (Some(true), _) => ("Starting…".to_string(), theme.text_muted),
             (Some(false), _) => ("Shutting down…".to_string(), theme.text_muted),
             _ if host_down => (format!("{} is {}", parent.name, host.map(format::unreachable_word).unwrap_or("gone").to_lowercase()), theme.warning),
@@ -31,7 +33,39 @@ impl Root {
             (None, None) if parent.inside() => (format!("ssh reaches it through a port {} forwards to it.", parent.name), theme.text_placeholder),
             (None, None) => (format!("ssh goes through {} to reach it.", parent.name), theme.text_placeholder),
         };
-        let power = power_button(s, m, parent, host_down, "m-vm-power", cx);
+        let power = if installing { None } else { power_button(s, m, parent, host_down, "m-vm-power", cx) };
+        // A VM Muxen made: its install's screen, its password, destroying it.
+        let made = m.vm.as_ref();
+        let watch = made.and_then(|v| v.web_port).filter(|_| installing && !host_down).map(|port| {
+            let pid = parent.machine_id.clone();
+            Button::new("m-vm-watch", "Watch the install")
+                .icon("monitor")
+                .tooltip("Its screen in your browser, while Windows installs")
+                .on_click(cx.listener(move |this, _, _, cx| this.open_port(&pid, port, None, true, cx)))
+                .into_any_element()
+        });
+        let password = made.filter(|v| v.os == "windows").map(|_| {
+            let mid = m.id.clone();
+            Button::new("m-vm-password", "Copy password")
+                .style(ButtonStyle::Ghost)
+                .icon("copy")
+                .tooltip("Its Windows account's password (Muxen made it; it's kept in your Keychain)")
+                .on_click(cx.listener(move |this, _, _, cx| match this.engine.vm_password(&mid) {
+                    Some(p) => {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(p));
+                        this.notify_user("Copied its password".to_string(), false, cx);
+                    }
+                    None => this.notify_user("Muxen doesn't have its password.".to_string(), true, cx),
+                }))
+                .into_any_element()
+        });
+        let destroy = made.map(|_| {
+            let machine = m.clone();
+            Button::new("m-vm-destroy", "Destroy…")
+                .style(ButtonStyle::Danger)
+                .on_click(cx.listener(move |this, _, window, cx| this.confirm_remove_machine(&machine, window, cx)))
+                .into_any_element()
+        });
         let pid = parent.machine_id.clone();
         let (from, to) = host.map(format::machine_tile).unwrap_or(kit::tiles::OVERVIEW);
         card(theme)
@@ -53,13 +87,16 @@ impl Root {
                             .child(div().truncate().text_size(px(13.)).child(title))
                             .child(div().text_size(px(11.5)).text_color(color).child(state)),
                     )
+                    .children(watch)
                     .children(power)
+                    .children(password)
                     .child(
                         Button::new("m-vm-host", format!("Open {}", parent.name))
                             .style(ButtonStyle::Ghost)
                             .icon("external-link")
                             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(pid.clone()), window, cx))),
-                    ),
+                    )
+                    .children(destroy),
             )
             .into_any_element()
     }

@@ -22,6 +22,9 @@ pub struct Palette {
     pub text_placeholder: u32,
     /// Brand color; also the "working" state.
     pub accent: u32,
+    /// A second brand color (the icon's orange): links and accent text, and
+    /// the far end of primary buttons' gradient. The accent itself elsewhere.
+    pub accent2: u32,
     /// Also the "idle" state.
     pub success: u32,
     pub warning: u32,
@@ -50,6 +53,7 @@ macro_rules! palette {
             text_muted: $muted,
             text_placeholder: $placeholder,
             accent: $accent,
+            accent2: $accent,
             success: $success,
             warning: $warning,
             error: $error,
@@ -58,8 +62,8 @@ macro_rules! palette {
     };
 }
 
-pub const DEFAULT_DARK: &str = "graphite";
-pub const DEFAULT_LIGHT: &str = "paper";
+pub const DEFAULT_DARK: &str = "dusk";
+pub const DEFAULT_LIGHT: &str = "dawn";
 
 pub static PALETTES: &[Palette] = &[
     // --- Dark ---------------------------------------------------------------
@@ -67,6 +71,16 @@ pub static PALETTES: &[Palette] = &[
         sidebar 0x0f1013, canvas 0x15161a, surface 0x1b1c21, elevated 0x202127, border 0x2b2d35, 0x24262d,
         text 0xececf1, 0xa2a4ae, 0x6c6f7b,
         accent 0x8b7cff, success 0x4ad6a7, warning 0xf2b347, error 0xff6b6b, info 0x6cb8ff),
+    // The app icon's colors: its navy for the window, its violet for
+    // selection and focus, its orange for links and accent text, and the two
+    // as a gradient on primary buttons (as on the icon).
+    Palette {
+        accent2: 0xe8734a,
+        ..palette!("dusk", "Muxen Dusk", true,
+            sidebar 0x151834, canvas 0x1a1e3c, surface 0x20254a, elevated 0x272d56, border 0x363d6e, 0x2b3160,
+            text 0xeeecfb, 0xaeb0d8, 0x7a7fae,
+            accent 0xa66bf2, success 0x52d6ad, warning 0xf2c94c, error 0xff6e86, info 0x7fa4ff)
+    },
     // Apple's dark Aqua: system blue accent, graphite surfaces, SF fonts.
     Palette {
         id: "macos-dark",
@@ -83,6 +97,7 @@ pub static PALETTES: &[Palette] = &[
         text_muted: 0xa1a1a6,
         text_placeholder: 0x6e6e73,
         accent: 0x0a84ff,
+        accent2: 0x0a84ff,
         success: 0x30d158,
         warning: 0xff9f0a,
         error: 0xff453a,
@@ -141,6 +156,15 @@ pub static PALETTES: &[Palette] = &[
         sidebar 0xf0f0f3, canvas 0xfafafb, surface 0xffffff, elevated 0xffffff, border 0xe2e2e8, 0xebebf0,
         text 0x16171c, 0x5c5f6a, 0x8c8f9a,
         accent 0x6d5cf6, success 0x12a27a, warning 0xc8870e, error 0xe5484d, info 0x2f80ed),
+    // The app icon's colors in daylight: lavender white, its navy for text,
+    // deeper violet and orange so they read on white.
+    Palette {
+        accent2: 0xc0501a,
+        ..palette!("dawn", "Muxen Dawn", false,
+            sidebar 0xf2eff9, canvas 0xfaf8fe, surface 0xffffff, elevated 0xffffff, border 0xe1dcf0, 0xebe7f6,
+            text 0x1e2148, 0x585c88, 0x8b8eb2,
+            accent 0x7d45e4, success 0x0c8f6b, warning 0x9a6a00, error 0xd8435a, info 0x3b6fe0)
+    },
     // Apple's light Aqua, like System Settings: white grouped boxes on a light grey window.
     Palette {
         id: "macos-light",
@@ -157,6 +181,7 @@ pub static PALETTES: &[Palette] = &[
         text_muted: 0x6e6e73,
         text_placeholder: 0xa1a1a6,
         accent: 0x007aff,
+        accent2: 0x007aff,
         success: 0x28c840,
         warning: 0xff9500,
         error: 0xff3b30,
@@ -219,6 +244,7 @@ impl Palette {
     pub fn theme(&self) -> Theme {
         let text = color(self.text);
         let accent = color(self.accent);
+        let accent2 = color(self.accent2);
         let dark = self.dark;
         Theme {
             id: self.id,
@@ -237,8 +263,9 @@ impl Palette {
             text,
             text_muted: color(self.text_muted),
             text_placeholder: color(self.text_placeholder),
-            text_accent: accent,
+            text_accent: accent2,
             accent,
+            accent2,
             accent_text: if luminance(accent) > 0.55 { color(self.canvas).blend(black().opacity(0.4)) } else { gpui::white() },
             success: color(self.success),
             warning: color(self.warning),

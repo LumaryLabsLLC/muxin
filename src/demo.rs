@@ -343,6 +343,7 @@ impl World {
             virt: None,
             published: Vec::new(),
             route: None,
+            kvm: false,
         }
     }
 

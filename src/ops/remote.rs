@@ -93,6 +93,20 @@ pub async fn run(
     secrets: &[String],
     timeout: Duration,
 ) -> Result<(), String> {
+    run_lines(engine, op, spec, shell, script, secrets, timeout).await.map(|_| ())
+}
+
+/// The same, and returns what it printed (stdout, line by line): a script's
+/// results, like the ports it picked.
+pub async fn run_lines(
+    engine: &Arc<Engine>,
+    op: u64,
+    spec: &MachineSpec,
+    shell: Shell,
+    script: String,
+    secrets: &[String],
+    timeout: Duration,
+) -> Result<Vec<String>, String> {
     spec.refuse_if_disconnected()?;
     let mut cmd = command(spec, shell);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -113,11 +127,15 @@ pub async fn run(
         let mut out_lines = BufReader::new(stdout).lines();
         let mut err_lines = BufReader::new(stderr).lines();
         let mut tail: Vec<String> = Vec::new();
+        let mut printed: Vec<String> = Vec::new();
         let (mut out_open, mut err_open) = (true, true);
         while out_open || err_open {
             tokio::select! {
                 line = out_lines.next_line(), if out_open => match line {
-                    Ok(Some(l)) => log_line(engine, op, &l, secrets),
+                    Ok(Some(l)) => {
+                        log_line(engine, op, &l, secrets);
+                        printed.push(l);
+                    }
                     _ => out_open = false,
                 },
                 line = err_lines.next_line(), if err_open => match line {
@@ -137,7 +155,7 @@ pub async fn run(
         }
         let status = child.wait().await.map_err(|e| e.to_string())?;
         if status.success() {
-            Ok(())
+            Ok(printed)
         } else {
             let reason = tail
                 .iter()
@@ -156,6 +174,35 @@ pub async fn run(
         Ok(result) => result,
         Err(_) => Err(format!("Gave up after {} minutes.", timeout.as_secs() / 60)),
     }
+}
+
+/// Runs `script` on the machine and returns what it printed, or why it
+/// failed (its last `error: ...` line, else its last stderr line).
+pub async fn output(spec: &MachineSpec, shell: Shell, script: String, timeout: Duration) -> Result<String, String> {
+    spec.refuse_if_disconnected()?;
+    let mut cmd = command(spec, shell);
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    let mut child = cmd.spawn().map_err(|e| format!("Couldn't run ssh: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or("No stdin for the script")?;
+    let script = if shell == Shell::Powershell { ps_sendable(&script) } else { script };
+    let work = async move {
+        let _ = stdin.write_all(script.as_bytes()).await;
+        drop(stdin);
+        child.wait_with_output().await.map_err(|e| e.to_string())
+    };
+    let out = tokio::time::timeout(timeout, work).await.map_err(|_| format!("Gave up after {} seconds.", timeout.as_secs()))??;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).to_string());
+    }
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    let lines: Vec<&str> = err.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    Err(lines
+        .iter()
+        .rev()
+        .find_map(|l| l.strip_prefix("error: "))
+        .or(lines.last().copied())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("It exited with status {}.", out.status.code().unwrap_or(-1))))
 }
 
 fn command(spec: &MachineSpec, shell: Shell) -> Command {

@@ -93,6 +93,8 @@ fn machine(id: &str, platform: &str, cpu: f64, working: usize, disk_free: u64, a
         cloud: None,
         displays: Vec::new(),
         parent: None,
+        vm: None,
+        direct_address: None,
     }
 }
 

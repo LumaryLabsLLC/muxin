@@ -150,7 +150,8 @@ pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(
     let installed = if windows {
         run_ps(spec, "$a = Join-Path $env:USERPROFILE '.muxen\\bin\\muxen-agent.exe'; if (Test-Path $a) { & $a hash } else { 'none' }", CTL_TIMEOUT).await?
     } else {
-        run_sh(spec, &format!("a={REMOTE_PATH}; if [ -x \"$a\" ]; then \"$a\" hash; else echo none; fi"), CTL_TIMEOUT).await?
+        // One that can't run (another system's build) is replaced like a missing one.
+        run_sh(spec, &format!("a={REMOTE_PATH}; if [ -x \"$a\" ]; then \"$a\" hash 2>/dev/null || echo broken; else echo none; fi"), CTL_TIMEOUT).await?
     };
     if installed.trim() != hash {
         tracing::info!("installing muxen-agent ({target}) on {}", spec.name);

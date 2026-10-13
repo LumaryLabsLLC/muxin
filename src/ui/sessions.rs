@@ -1216,16 +1216,20 @@ impl Root {
             },
             _ => None,
         };
-        let button = if direct {
-            Button::new("m-direct-off", "Use ssh only").style(ButtonStyle::Ghost).loading(changing).on_click(cx.listener({
+        // Inside another machine with nothing forwarded to it: there's no way in for direct.
+        let shut_in = m.parent.as_ref().is_some_and(|p| p.inside()) && m.direct_address.is_none();
+        let button = if shut_in && !direct {
+            None
+        } else if direct {
+            Some(Button::new("m-direct-off", "Use ssh only").style(ButtonStyle::Ghost).loading(changing).on_click(cx.listener({
                 let mid = mid.clone();
                 move |this, _, _, cx| this.set_machine_direct(&mid, false, cx)
-            }))
+            })))
         } else {
-            Button::new("m-direct-on", "Connect directly").loading(changing).on_click(cx.listener({
+            Some(Button::new("m-direct-on", "Connect directly").loading(changing).on_click(cx.listener({
                 let mid = mid.clone();
                 move |this, _, _, cx| this.set_machine_direct(&mid, true, cx)
-            }))
+            })))
         };
         div()
             .flex()
@@ -1271,7 +1275,7 @@ impl Root {
                             move |this, _, window, cx| this.setup_tailscale(&mid, window, cx)
                         })))
                     })
-                    .child(button),
+                    .children(button),
             )
             .into_any_element()
     }

@@ -36,6 +36,7 @@ actions!(
         ShowGithub,
         ShowUsage,
         ShowRun,
+        ShowSchedules,
         GoToMachine1,
         GoToMachine2,
         GoToMachine3,
@@ -122,6 +123,7 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("GitHub", ShowGithub),
                 MenuItem::action("Usage", ShowUsage),
                 MenuItem::action("Run on Machines", ShowRun),
+                MenuItem::action("Schedules", ShowSchedules),
                 MenuItem::action("Activity", ToggleActivity),
                 MenuItem::separator(),
                 MenuItem::action("Back", GoBack),
@@ -145,6 +147,8 @@ pub enum Route {
     Usage,
     /// One command on several machines.
     Run,
+    /// Commands and agent sessions that run on machines at set times.
+    Schedules,
     Activity,
     Machine(String),
     Runner(String),
@@ -187,6 +191,8 @@ pub enum Modal {
     Licenses(Entity<super::about::LicensesDialog>),
     Copy(Entity<super::files::CopyDialog>),
     Cloud(Entity<super::cloud_dialog::CloudDialog>),
+    Vm(Entity<super::vm_dialog::VmDialog>),
+    Schedule(Entity<super::schedule_dialog::ScheduleDialog>),
     Rename(Entity<RenameDialog>),
     AddDisplay(Entity<AddDisplayDialog>),
     MonitorPassword(Entity<MonitorPasswordDialog>),
@@ -214,6 +220,11 @@ pub struct Root {
     forward: Vec<Route>,
     pub(super) filter: Entity<TextInput>,
     pub(super) collapsed: HashSet<String>,
+    /// The Schedules page: every machine's schedules, the one open, and its runs.
+    pub(super) schedules: super::github::Load<Vec<crate::fleet::schedules::MachineSchedules>>,
+    pub(super) schedules_loading: bool,
+    pub(super) schedule_open: Option<(String, String)>,
+    pub(super) schedule_logs: HashMap<(String, String), super::github::Load<crate::fleet::schedules::ScheduleLog>>,
     pub(super) activity_filter: ActivityFilter,
     pub(super) activity_selected: Option<ActivityItem>,
     pub(super) activity_scroll: ScrollHandle,
@@ -419,6 +430,10 @@ impl Root {
             forward: Vec::new(),
             filter,
             collapsed: HashSet::new(),
+            schedules: super::github::Load::Loading,
+            schedules_loading: false,
+            schedule_open: None,
+            schedule_logs: HashMap::new(),
             activity_filter: ActivityFilter::default(),
             activity_selected: None,
             activity_scroll: ScrollHandle::new(),
@@ -668,6 +683,11 @@ impl Root {
                 window.focus(&self.service_pages[&id].focus_handle(cx));
             }
             Route::Run => window.focus(&self.run_input.read(cx).focus_handle(cx)),
+            // Fresh each time it's opened.
+            Route::Schedules => {
+                self.load_schedules(cx);
+                window.focus(&self.focus)
+            }
             _ => window.focus(&self.focus),
         }
         self.page_scroll = ScrollHandle::new();
@@ -680,6 +700,9 @@ impl Root {
         match kind {
             "jobs" => self.navigate(Route::Jobs, window, cx),
             "usage" => self.navigate(Route::Usage, window, cx),
+            "schedules" => self.navigate(Route::Schedules, window, cx),
+            // "schedule" or "schedule:<machine>": the New schedule dialog.
+            "schedule" => self.show_schedule_dialog((!arg.is_empty()).then(|| arg.to_string()), window, cx),
             "run-big" => self.run_expanded = Some(arg.to_string()),
             // The menu of editors, for "<machine>@<folder>".
             "editors" => {
@@ -810,6 +833,8 @@ impl Root {
                 self.choose_theme(cx);
             }
             "cloud" => self.show_cloud_dialog(window, cx),
+            // "vm" or "vm:<host>": the New VM dialog.
+            "vm" => self.show_vm_dialog((!arg.is_empty()).then(|| arg.to_string()), window, cx),
             // An icon style ("icons:tiles"), for screenshots.
             "icons" => super::theme::update_appearance(window, cx, |a, _| a.icon_style = arg.into()),
             // The first queued job's menu.
@@ -1169,6 +1194,22 @@ impl Root {
         }
     }
 
+    /// New schedule, on `machine` when given.
+    pub(super) fn show_schedule_dialog(&mut self, machine: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let engine = self.engine.clone();
+        let dialog = cx.new(|cx| super::schedule_dialog::ScheduleDialog::new(engine, machine, window, cx));
+        self.show_modal(Modal::Schedule(dialog.clone()), window, cx);
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+    }
+
+    /// New VM, on `host` when given (else the best machine for it).
+    pub(super) fn show_vm_dialog(&mut self, host: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let engine = self.engine.clone();
+        let dialog = cx.new(|cx| super::vm_dialog::VmDialog::new(engine, host, window, cx));
+        self.show_modal(Modal::Vm(dialog.clone()), window, cx);
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+    }
+
     /// New cloud machine (a DigitalOcean droplet).
     pub(super) fn show_cloud_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let engine = self.engine.clone();
@@ -1303,6 +1344,15 @@ impl Root {
 
     pub(super) fn confirm_remove_machine(&mut self, machine: &Machine, window: &mut Window, cx: &mut Context<Self>) {
         let machine_id = machine.id.clone();
+        // A VM Muxen made goes with its container and disk.
+        if let Some(vm) = &machine.vm {
+            let host = machine.parent.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| vm.host.clone());
+            let detail = format!("Its container {} and its disk on {host} are deleted, and it leaves Muxen. Copy out anything you want to keep first.", vm.container);
+            let dialog = cx.new(|cx| ConfirmDialog::new(format!("Destroy {}?", machine.name), detail, "Destroy", None, move |_, engine| engine.vm_destroy(&machine_id).map(Some), self.engine.clone(), window, cx));
+            self.show_modal(Modal::Confirm(dialog.clone()), window, cx);
+            self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+            return;
+        }
         // A cloud machine goes with its droplet.
         if let Some(c) = &machine.cloud {
             let detail = format!(
@@ -1392,6 +1442,38 @@ impl Root {
         self.track(task);
     }
 
+    /// Makes a VM, then (a workspace in it and) the session there, once it's ready.
+    fn start_in_new_vm(&mut self, vm: crate::ops::vm::VmCreate, workspace: Option<CreateWorkspace>, session: StartSession, window: &mut Window, cx: &mut Context<Self>) {
+        let (name, host) = (vm.name.clone(), vm.host.clone().unwrap_or_default());
+        let op = match self.engine.vm_create(vm) {
+            Ok(op) => op,
+            Err(e) => return self.notify_user(e, true, cx),
+        };
+        self.show_operation(op, cx);
+        let host = self.snapshot.machines.iter().find(|m| m.id == host).map(|m| m.name.clone()).unwrap_or(host);
+        self.notify_user(format!("Making {name} on {host}; the session starts when it's ready."), false, cx);
+        let task = cx.spawn_in(window, async move |this, cx| {
+            // Until the operation is done, one way or the other.
+            let status = loop {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let Ok(s) = this.update(cx, |this, _| this.engine.current().operations.iter().find(|o| o.id == op).map(|o| (o.status.clone(), o.error.clone()))) else { return };
+                match s {
+                    Some((st, _)) if st == "running" => continue,
+                    Some((st, e)) => break (st, e),
+                    None => break ("failed".to_string(), Some("The operation went missing.".into())),
+                }
+            };
+            let _ = this.update_in(cx, |this, window, cx| match status {
+                (st, _) if st == "succeeded" => match workspace {
+                    Some(ws) => this.start_in_workspace(ws, session, window, cx),
+                    None => this.start_session(session, window, cx),
+                },
+                (_, e) => this.notify_user(format!("Couldn't make {name}: {}", e.unwrap_or_default()), true, cx),
+            });
+        });
+        self.track(task);
+    }
+
     pub(super) fn confirm_destroy_workspace(&mut self, id: &str, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let wid = id.to_string();
         // Sessions working in its folder end with it.
@@ -1475,6 +1557,8 @@ impl Root {
             Modal::NewSession(d) => d.read(cx).first_focus(cx),
             Modal::Copy(d) => d.read(cx).first_focus(cx),
             Modal::Cloud(d) => d.read(cx).first_focus(cx),
+            Modal::Vm(d) => d.read(cx).first_focus(cx),
+            Modal::Schedule(d) => d.read(cx).first_focus(cx),
             Modal::Rename(d) => d.read(cx).first_focus(cx),
             Modal::AddDisplay(d) => d.read(cx).first_focus(cx),
             Modal::MonitorPassword(d) => d.read(cx).first_focus(cx),
@@ -1494,8 +1578,14 @@ impl Root {
             DialogEvent::OpenSettings => self.open_settings_tab(super::settings::SettingsTab::GitHub, window, cx),
             DialogEvent::OpenCloudSettings => self.open_settings_tab(super::settings::SettingsTab::Cloud, window, cx),
             DialogEvent::NewCloudMachine => self.show_cloud_dialog(window, cx),
+            DialogEvent::NewVm => self.show_vm_dialog(None, window, cx),
+            DialogEvent::ScheduleSaved => {
+                self.notify_user("Scheduled".to_string(), false, cx);
+                self.navigate(Route::Schedules, window, cx);
+            }
             DialogEvent::CreateWorkspace(req, iso) => self.create_workspace(req.clone(), iso.clone(), window, cx),
             DialogEvent::StartInWorkspace(req, session) => self.start_in_workspace(req.clone(), session.clone(), window, cx),
+            DialogEvent::StartInNewVm(vm, workspace, session) => self.start_in_new_vm(vm.clone(), workspace.clone(), session.clone(), window, cx),
             DialogEvent::DisplayAdded(machine, display) => self.show_display(machine.clone(), Some(display.clone()), window, cx),
             DialogEvent::StartSession(req) => {
                 self.start_session(req.clone(), window, cx);
@@ -1873,6 +1963,7 @@ impl Root {
                     .child(self.nav_item("nav-github", "agent-github", super::github::TILE, "GitHub", self.gh.waiting(), Route::Github, "github", cx))
                     .child(self.nav_item("nav-usage", "gauge", kit::tiles::USAGE, "Usage", None, Route::Usage, "usage", cx))
                     .child(self.nav_item("nav-run", "zap", kit::tiles::RUN, "Run", None, Route::Run, "run", cx))
+                    .child(self.nav_item("nav-schedules", "clock", super::schedules::TILE, "Schedules", None, Route::Schedules, "schedules", cx))
                     .child(self.activity_nav(&theme, running_ops, cx)),
             )
             .child(
@@ -2874,6 +2965,7 @@ impl Root {
             Route::Activity => self.render_activity(cx).into_any_element(),
             Route::Usage => self.render_usage(cx),
             Route::Run => self.render_run(window, cx),
+            Route::Schedules => self.render_schedules(window, cx),
             Route::Machine(id) => self.render_machine(&id, cx),
             Route::Runner(id) => self.render_runner(&id, cx),
             Route::Session(id) => self.render_session(&id, window, cx),
@@ -2942,6 +3034,8 @@ impl Render for Root {
             Modal::NewSession(d) => d.clone().into_any_element(),
             Modal::Copy(d) => d.clone().into_any_element(),
             Modal::Cloud(d) => d.clone().into_any_element(),
+            Modal::Vm(d) => d.clone().into_any_element(),
+            Modal::Schedule(d) => d.clone().into_any_element(),
             Modal::Rename(d) => d.clone().into_any_element(),
             Modal::AddDisplay(d) => d.clone().into_any_element(),
             Modal::MonitorPassword(d) => d.clone().into_any_element(),
@@ -2963,6 +3057,7 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &ShowGithub, window, cx| this.navigate(Route::Github, window, cx)))
             .on_action(cx.listener(|this, _: &ShowUsage, window, cx| this.navigate(Route::Usage, window, cx)))
             .on_action(cx.listener(|this, _: &ShowRun, window, cx| this.navigate(Route::Run, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowSchedules, window, cx| this.navigate(Route::Schedules, window, cx)))
             .on_action(cx.listener(|this, _: &GoToMachine1, window, cx| this.go_to_machine(1, window, cx)))
             .on_action(cx.listener(|this, _: &GoToMachine2, window, cx| this.go_to_machine(2, window, cx)))
             .on_action(cx.listener(|this, _: &GoToMachine3, window, cx| this.go_to_machine(3, window, cx)))
@@ -3083,6 +3178,7 @@ fn route_title(s: &Snapshot, route: &Route) -> (Option<&'static str>, String) {
         Route::Activity => (None, "Activity".into()),
         Route::Usage => (None, "Usage".into()),
         Route::Run => (None, "Run".into()),
+        Route::Schedules => (None, "Schedules".into()),
         Route::Workspace(id) => (Some("Workspaces"), s.workspaces.iter().find(|w| &w.id == id).map(|w| w.name.clone()).unwrap_or_else(|| id.clone())),
         Route::Settings => (None, "Settings".into()),
         Route::About => (None, "About".into()),

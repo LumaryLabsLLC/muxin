@@ -133,6 +133,8 @@ pub fn build(input: &Inputs) -> Snapshot {
         let unreachable = probe.filter(|p| !p.ok && spec.is_connected()).map(|p| {
             if powered_off {
                 powered_off_reason(spec, p)
+            } else if let Some(u) = installing_reason(spec, p, input.now) {
+                u
             } else if let Some(u) = parent.as_ref().and_then(|h| parent_reason(spec, p, h, input)) {
                 u
             } else {
@@ -171,6 +173,8 @@ pub fn build(input: &Inputs) -> Snapshot {
             gh: None,
             unreachable,
             parent,
+            vm: spec.vm.clone(),
+            direct_address: spec.direct_address.clone().filter(|a| !a.trim().is_empty()),
             tailnet: device.cloned(),
             cloud: spec.cloud.as_ref().map(|c| {
                 use crate::cloud::usage;
@@ -431,7 +435,24 @@ fn parents(input: &Inputs) -> HashMap<String, ParentMachine> {
     };
 
     let mut out = HashMap::new();
-    for spec in specs.iter().filter(|s| !s.is_local()) {
+    // A VM Muxen made says where it runs.
+    for spec in specs {
+        let Some(vm) = &spec.vm else { continue };
+        let Some(host) = specs.iter().find(|o| o.id == vm.host && o.id != spec.id) else { continue };
+        let state = probe(&host.id).and_then(|p| p.published.iter().find(|c| c.name == vm.container)).map(|c| c.state.clone());
+        out.insert(
+            spec.id.clone(),
+            ParentMachine {
+                machine_id: host.id.clone(),
+                name: host.name.clone(),
+                relation: if vm.os == "windows" { "vm" } else { "container" }.into(),
+                container: Some(vm.container.clone()),
+                container_state: state,
+            },
+        );
+    }
+    let made: HashSet<String> = out.keys().cloned().collect();
+    for spec in specs.iter().filter(|s| !s.is_local() && !made.contains(&s.id)) {
         let Some(r) = route(&spec.id) else { continue };
         let target = r.hostname.to_ascii_lowercase();
         let others = || specs.iter().filter(|o| o.id != spec.id);
@@ -473,6 +494,29 @@ fn parents(input: &Inputs) -> HashMap<String, ParentMachine> {
     out
 }
 
+/// A VM Muxen made that hasn't answered yet: it's still installing (for a
+/// couple of hours after it was made; after that, something's wrong).
+fn installing_reason(spec: &MachineSpec, p: &ProbeResult, now: DateTime<Utc>) -> Option<Unreachable> {
+    let vm = spec.vm.as_ref()?;
+    let created = DateTime::parse_from_rfc3339(&vm.created_at).ok()?.with_timezone(&Utc);
+    if p.last_seen_at.is_some() || now - created > chrono::Duration::hours(2) {
+        return None;
+    }
+    let system = crate::ops::vm::system(&vm.version).map(|s| s.name).unwrap_or(if vm.os == "windows" { "Windows" } else { "Linux" });
+    Some(Unreachable {
+        kind: "installing".into(),
+        title: format!("Installing {system}…"),
+        detail: if vm.os == "windows" {
+            "It downloads Windows and installs it by itself: 15–30 minutes. Watch its screen from its page.".into()
+        } else {
+            "Setting it up: under a minute.".into()
+        },
+        hint: None,
+        last_seen_at: None,
+        error: p.error.clone().unwrap_or_default(),
+    })
+}
+
 /// Why a machine on (or behind) another one can't be reached, when that
 /// one explains it: it's offline itself, or the container it runs in is stopped.
 fn parent_reason(spec: &MachineSpec, p: &ProbeResult, parent: &ParentMachine, input: &Inputs) -> Option<Unreachable> {
@@ -492,7 +536,8 @@ fn parent_reason(spec: &MachineSpec, p: &ProbeResult, parent: &ParentMachine, in
         });
     }
     let container = parent.container.as_deref()?;
-    (parent.container_state.as_deref() != Some("running")).then(|| Unreachable {
+    // Not known (its host's last check didn't list it): don't guess.
+    parent.container_state.as_deref().is_some_and(|s| s != "running").then(|| Unreachable {
         kind: "stopped".into(),
         title: format!("{name} is stopped"),
         detail: format!("Its container {container} on {pname} isn't running. Start it to use it."),

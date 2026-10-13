@@ -106,11 +106,16 @@ impl Engine {
         // hop is "this computer" to that one; the network that counts is the
         // one to it.
         let parent = self.current().machines.iter().find(|m| m.id == spec.id).and_then(|m| m.parent.clone());
-        if let Some(p) = parent.filter(|_| out.network.as_deref() == Some("This computer") && !spec.is_local()) {
+        if let Some(p) = parent.clone().filter(|_| out.network.as_deref() == Some("This computer") && !spec.is_local()) {
             out.network = link::current(&p.machine_id).and_then(|l| l.network().map(str::to_string));
             out.peer = None;
         }
-        if out.direct && out.via == "ssh" {
+        // Inside another machine with no port forwarded to it: direct can't get in.
+        let shut_in = parent.as_ref().is_some_and(|p| p.inside()) && spec.direct_address.as_deref().is_none_or(|a| a.trim().is_empty());
+        if out.direct && out.via == "ssh" && shut_in {
+            let host = parent.map(|p| p.name).unwrap_or_default();
+            out.note = Some(format!("{host} doesn't forward a UDP port to it, so it's ssh. VMs Muxen makes now get one."));
+        } else if out.direct && out.via == "ssh" {
             // A Mac blocks the agent's network until Local Network access is allowed there.
             let mac = self.current().machines.iter().any(|m| m.id == spec.id && m.platform.starts_with("darwin"));
             out.note = Some(if mac {

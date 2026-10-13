@@ -294,6 +294,10 @@ pub struct MachineSpec {
     /// A cloud machine Muxen created (and can power off or destroy).
     #[serde(default)]
     pub cloud: Option<CloudRef>,
+    /// A VM (or Linux container) Muxen created in Docker on another of the
+    /// user's machines (and can start, stop or destroy).
+    #[serde(default)]
+    pub vm: Option<VmRef>,
     /// Disconnected on purpose: Muxen doesn't connect to it, check it or look
     /// at its sessions until it's connected again (its sessions go on there).
     #[serde(default)]
@@ -318,6 +322,28 @@ pub struct CloudRef {
     /// What it costs per hour while it exists (powered off too), in USD.
     #[serde(default)]
     pub price_hourly: f64,
+    /// RFC 3339.
+    #[serde(default)]
+    pub created_at: String,
+}
+
+/// Where a VM Muxen made runs, as config.toml records it:
+/// `vm = { host = "beelink", os = "windows", version = "11", container = "muxen-win-dev", created_at = "..." }`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct VmRef {
+    /// The machine it runs on (its id).
+    pub host: String,
+    /// "windows" | "linux"
+    pub os: String,
+    /// What it runs: "11", "10", "2025" (Windows), "ubuntu-24.04", "debian-12", ... (Linux).
+    #[serde(default)]
+    pub version: String,
+    /// Its Docker container there.
+    pub container: String,
+    /// Its screen in a browser (Windows: the installer's viewer), on the host's 127.0.0.1.
+    #[serde(default)]
+    pub web_port: Option<u16>,
     /// RFC 3339.
     #[serde(default)]
     pub created_at: String,
@@ -353,7 +379,14 @@ fn yes() -> bool {
 
 impl MachineSpec {
     pub fn is_local(&self) -> bool {
-        matches!(self.host.trim().to_ascii_lowercase().as_str(), "local" | "localhost" | "127.0.0.1" | "::1")
+        match self.host.trim().to_ascii_lowercase().as_str() {
+            "local" => true,
+            // A loopback address with a port, user or ssh options of its own
+            // is something else reached through a forwarded port (a VM's), not
+            // this computer.
+            "localhost" | "127.0.0.1" | "::1" => self.port.is_none() && self.user.is_none() && self.ssh_options.is_empty(),
+            _ => false,
+        }
     }
 
     pub fn is_checkable(&self) -> bool {
@@ -773,6 +806,13 @@ mod tests {
         assert!(inv.machines[1].is_local());
         assert!(inv.machines[0].discover);
         assert_eq!(inv.warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_forwarded_loopback_port_is_another_machine() {
+        let inv = Inventory::parse("[[machine]]\nname = \"Here\"\nhost = \"127.0.0.1\"\n\n[[machine]]\nname = \"VM\"\nhost = \"127.0.0.1\"\nport = 2201\nssh_options = [\"-J\", \"beelink\"]\n").unwrap();
+        assert!(inv.machines[0].is_local());
+        assert!(!inv.machines[1].is_local());
     }
 
     #[test]

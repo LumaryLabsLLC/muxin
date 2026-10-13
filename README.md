@@ -178,6 +178,8 @@ The MCP server has these tools:
 | `run_on_machines` | Runs one shell command on several machines at once, with each one's output and exit status. |
 | `wake_machine` | Wakes a machine that's asleep or off (Wake on LAN). |
 | `machine_power` | Powers a machine on or off: a cloud machine, or a VM in a Docker container on another machine. |
+| `vm_options`, `vm_create`, `vm_destroy` | VMs on your machines: Windows (Docker with KVM) or Linux containers, added to your machines. |
+| `schedule_list`, `schedule_save`, `schedule_delete`, `schedule_run`, `schedule_log` | Commands and agent sessions that run on a machine at set times, run there by its own scheduler. |
 | `agent_usage` | What Claude Code and Codex used over the last N days: tokens, requests and cost at API prices, by model and machine. |
 | `install_runners` | Downloads, registers and starts runners on a machine. |
 | `runner_action` | Starts, stops, restarts or removes a runner, or reads its logs. |
@@ -237,6 +239,8 @@ muxen ps beelink [-n 20]                  # its busiest processes and its GPUs
 muxen kill beelink 4242 [--force]         # stop a process (--force: SIGKILL)
 muxen wake beelink                        # Wake on LAN
 muxen power win11 off                     # a VM in Docker on another machine (or a cloud machine): on or off
+muxen vm create win-test --system windows-11 --on beelink   # a VM on one of your machines
+muxen schedule add beelink --name Tests --every day --at 09:00 --command "make test"
 muxen usage [--days 30] [--machine beelink]   # what the agents used, and the cost at API prices
 muxen edit beelink:~/code/api [--editor zed] [--print]   # open a folder there in your editor
 muxen disconnect <id>                     # stop connecting to it (its sessions go on there)
@@ -479,6 +483,34 @@ muxen cloud options
 muxen cloud create dev-1 --size s-2vcpu-4gb
 muxen cloud usage                     # what they cost
 muxen cloud destroy dev-1
+```
+
+## VMs on your machines
+
+Need a clean Windows to try an installer, or a throwaway Linux? **New VM…** (in the Add machine dialog, the command palette, or a machine's right-click menu) makes one on a machine you already have:
+
+- **Windows** 11, 10, Server 2025 or 2022, in Docker with KVM ([dockur/windows](https://github.com/dockur/windows)) on a Linux machine (x86-64). It downloads Windows and installs it by itself, 15 to 30 minutes the first time, then turns on OpenSSH with your key. Watch the install from its page. It runs unactivated until you enter a key.
+- **Linux** (Ubuntu, Debian, Fedora, Alpine or Arch) as a container with ssh, on any machine with Docker, this Mac included. Ready in under a minute. It shares its host's kernel (no systemd).
+
+It joins your machines under the one it runs on, with Muxen's agent: sessions, files, the desktop and workspaces work like anywhere, and a UDP port on its host is forwarded to it, so **Connect directly** works too. **Stop** and **Start** it from its page; **Destroy** deletes its container and disk. Your AI agents can do the same through MCP: make a Windows VM for a test, use it, destroy it.
+
+```sh
+muxen vm options                                   # where VMs can run, and what
+muxen vm create win-test --system windows-11 --on beelink
+muxen vm create scratch --system ubuntu-24.04       # on the machine with the most free memory
+muxen power win-test off
+muxen vm destroy win-test
+```
+
+## Schedules
+
+A schedule runs a command, or starts an agent session, on one of your machines at set times: every few minutes, every hour, every day, weekdays, or some days of the week, in that machine's own time. It's kept on the machine and run by its own scheduler (cron, launchd or Task Scheduler), so it runs even when Muxen isn't open. The **Schedules** page lists them with their last run, runs one now, pauses one, and shows each run's output. An agent schedule ("every morning, go through new issues") starts a session you find under the machine, waiting for you.
+
+```sh
+muxen schedule add beelink --name "Disk report" --every weekdays --at 09:00 --command "df -h /"
+muxen schedule add beelink --name Triage --every day --at 08:30 --agent claude --prompt "Label new issues in acme/api"
+muxen schedule ls
+muxen schedule log beelink s-ab12cd
 ```
 
 ## How checks and installs work

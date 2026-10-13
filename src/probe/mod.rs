@@ -84,6 +84,9 @@ pub struct ProbeResult {
     /// Where ssh really goes for it, from ~/.ssh/config.
     #[serde(default)]
     pub route: Option<SshRoute>,
+    /// Linux: it has /dev/kvm, so it can run VMs (Windows in Docker, say).
+    #[serde(default)]
+    pub kvm: bool,
 }
 
 /// A Docker container that publishes ports on its machine.
@@ -507,6 +510,7 @@ pub fn parse(out: &str) -> ProbeResult {
             "reboot_required" => r.reboot_required = value == "yes",
             "failed_units" => r.failed_units = value.split_whitespace().map(str::to_string).collect(),
             "virt" => r.virt = text().filter(|v| v != "none"),
+            "kvm" => r.kvm = value == "yes",
             "published" => r.published.extend(parse_published(value)),
             k if k.starts_with('c') && k.contains('.') => {
                 let (idx, field) = k[1..].split_once('.').unwrap();

@@ -51,6 +51,8 @@ pub struct Palette {
 enum Command {
     AddMachine,
     NewCloudMachine,
+    NewVm,
+    NewSchedule,
     NewSession,
     NewWorkspace,
     CopyFiles,
@@ -285,6 +287,8 @@ impl Root {
             Run::Do(c) => match c {
                 Command::AddMachine => self.show_add_machine(window, cx),
                 Command::NewCloudMachine => self.show_cloud_dialog(window, cx),
+                Command::NewVm => self.show_vm_dialog(None, window, cx),
+                Command::NewSchedule => self.show_schedule_dialog(None, window, cx),
                 Command::NewSession => self.show_new_session(None, window, cx),
                 Command::NewWorkspace => self.show_new_workspace(None, window, cx),
                 Command::CopyFiles => self.show_copy_files(None, None, window, cx),
@@ -466,6 +470,9 @@ impl Root {
         let all = [
             item("Add machine…", "plus", Some("add-machine"), Run::Do(Command::AddMachine)),
             item("New cloud machine…", "cloud", None, Run::Do(Command::NewCloudMachine)),
+            item("New VM…", "box", None, Run::Do(Command::NewVm)),
+            item("New schedule…", "clock", None, Run::Do(Command::NewSchedule)),
+            item("Go to Schedules", "clock", Some("schedules"), Run::Go(Route::Schedules)),
             item("New session…", "square-terminal", Some("new-session"), Run::Do(Command::NewSession)),
             item("New workspace…", "layers", None, Run::Do(Command::NewWorkspace)),
             item("Copy files between machines…", "folder", None, Run::Do(Command::CopyFiles)),

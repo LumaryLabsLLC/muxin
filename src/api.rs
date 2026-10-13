@@ -426,6 +426,14 @@ pub struct MachineSummary {
     /// USD an hour, what it has cost so far and since when it's been idle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cloud: Option<CloudOut>,
+    /// The machine it runs on (a VM or container there) or is reached
+    /// through (relation "through"), with the container it runs in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<crate::fleet::model::ParentMachine>,
+    /// A VM Muxen made with vm_create (vm_destroy deletes it): host, os,
+    /// version (the system id), container, created_at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vm: Option<crate::config::VmRef>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -692,6 +700,8 @@ pub fn machine_summary(m: &Machine) -> MachineSummary {
             idle_since: c.idle_since,
             power: c.power.clone(),
         }),
+        parent: m.parent.clone(),
+        vm: m.vm.clone(),
     }
 }
 
@@ -1360,6 +1370,129 @@ pub async fn cloud_power(engine: &Arc<Engine>, req: CloudMachineRequest, surface
     };
     let op = engine.cloud_power(&m.id, on).map_err(op_error)?;
     finish_action(engine, op, req.wait, 300, DEFAULT_TAIL, Some(m.id), Vec::new(), surface, on_line).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleListRequest {
+    #[serde(default)]
+    pub machine_id: Option<String>,
+}
+
+/// The schedules on each online machine (or one), with each one's last run.
+pub async fn schedule_list(engine: &Arc<Engine>, req: ScheduleListRequest) -> ApiResult<Vec<crate::fleet::schedules::MachineSchedules>> {
+    let s = freshen(engine).await;
+    let id = match &req.machine_id {
+        Some(m) => Some(find_machine(&s, m)?.id.clone()),
+        None => None,
+    };
+    Ok(engine.schedules(id.as_deref()).await)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleSaveRequest {
+    pub machine_id: String,
+    /// Given: change that schedule.
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub when: crate::fleet::schedules::When,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub folder: Option<String>,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+/// Saves a schedule on a machine: new, or changed when `id` is given.
+pub async fn schedule_save(engine: &Arc<Engine>, req: ScheduleSaveRequest) -> ApiResult<crate::fleet::schedules::Schedule> {
+    let s = freshen(engine).await;
+    let m = find_machine(&s, &req.machine_id)?.clone();
+    let input = crate::fleet::schedules::ScheduleInput { id: req.id, name: req.name, when: req.when, command: req.command, agent: req.agent, prompt: req.prompt, folder: req.folder, enabled: req.enabled };
+    engine.schedule_save(&m.id, input).await.map_err(|e| ApiError::new("operation_failed", e))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleRequest {
+    pub machine_id: String,
+    pub schedule_id: String,
+    /// schedule_log: the run that started then (Unix seconds); default the newest.
+    #[serde(default)]
+    pub started: Option<i64>,
+}
+
+pub async fn schedule_delete(engine: &Arc<Engine>, req: ScheduleRequest) -> ApiResult<serde_json::Value> {
+    let s = freshen(engine).await;
+    let m = find_machine(&s, &req.machine_id)?.clone();
+    engine.schedule_delete(&m.id, &req.schedule_id).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    Ok(serde_json::json!({ "deleted": req.schedule_id }))
+}
+
+pub async fn schedule_run(engine: &Arc<Engine>, req: ScheduleRequest) -> ApiResult<serde_json::Value> {
+    let s = freshen(engine).await;
+    let m = find_machine(&s, &req.machine_id)?.clone();
+    engine.schedule_run(&m.id, &req.schedule_id).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    Ok(serde_json::json!({ "started": req.schedule_id, "next": "It runs in the background there. Read its output with schedule_log." }))
+}
+
+pub async fn schedule_log(engine: &Arc<Engine>, req: ScheduleRequest) -> ApiResult<crate::fleet::schedules::ScheduleLog> {
+    let s = freshen(engine).await;
+    let m = find_machine(&s, &req.machine_id)?.clone();
+    engine.schedule_log(&m.id, &req.schedule_id, req.started).await.map_err(|e| ApiError::new("operation_failed", e))
+}
+
+/// The machines VMs can run on (Docker; Windows also needs Linux with KVM),
+/// what each can run, and the defaults.
+pub async fn vm_options(engine: &Arc<Engine>) -> crate::ops::vm::VmOptions {
+    freshen(engine).await;
+    engine.vm_options()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VmCreateRequest {
+    pub name: String,
+    /// A system id from vm_options: "windows-11", "ubuntu-24.04", ...
+    pub system: String,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub cpus: Option<u32>,
+    #[serde(default)]
+    pub memory_gb: Option<u32>,
+    #[serde(default)]
+    pub disk_gb: Option<u32>,
+    /// Agent CLIs to install on a Linux VM: claude, codex, gemini, opencode, amp, pi.
+    #[serde(default)]
+    pub install: Vec<String>,
+    #[serde(default = "yes")]
+    pub wait: bool,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Creates a VM on one of the user's machines and adds it to them.
+pub async fn vm_create(engine: &Arc<Engine>, req: VmCreateRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<ActionResponse> {
+    freshen(engine).await;
+    let id = crate::util::slug(req.name.trim());
+    let create = crate::ops::vm::VmCreate { name: req.name, system: req.system, host: req.host, cpus: req.cpus, memory_gb: req.memory_gb, disk_gb: req.disk_gb, install: req.install };
+    let op = engine.vm_create(create).map_err(op_error)?;
+    finish_action(engine, op, req.wait, req.timeout_secs.unwrap_or(600), DEFAULT_TAIL, Some(id), Vec::new(), surface, on_line).await
+}
+
+/// Destroys a VM Muxen made: its container and disk, and the machine in Muxen.
+pub async fn vm_destroy(engine: &Arc<Engine>, req: CloudMachineRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<ActionResponse> {
+    let s = freshen(engine).await;
+    let m = find_machine(&s, &req.machine_id)?.clone();
+    let op = engine.vm_destroy(&m.id).map_err(op_error)?;
+    finish_action(engine, op, req.wait, 300, DEFAULT_TAIL, None, Vec::new(), surface, on_line).await
 }
 
 /// Powers a machine on or off: a cloud machine through its provider, or a VM

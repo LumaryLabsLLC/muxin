@@ -65,6 +65,12 @@ linux)
   kv uptime_s "$(cut -d. -f1 /proc/uptime 2>/dev/null)"
   awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 }
        END { if (t) printf "mem_total=%.0f\nmem_used=%.0f\n", t * 1024, (t - a) * 1024 }' /proc/meminfo 2>/dev/null
+  # A container sees its host's /proc: its own share comes from its cgroup.
+  incontainer=
+  if [ -f /.dockerenv ] || [ -f /run/.containerenv ] || systemd-detect-virt -cq 2>/dev/null; then incontainer=1; fi
+  cg=/sys/fs/cgroup
+  u1=
+  [ -n "$incontainer" ] && u1=$(awk '/^usage_usec / { print $2 }' "$cg/cpu.stat" 2>/dev/null)
   s1=$(head -n1 /proc/stat 2>/dev/null)
   sleep 1
   s2=$(head -n1 /proc/stat 2>/dev/null)
@@ -72,6 +78,32 @@ linux)
     { t = 0; for (i = 2; i <= NF; i++) t += $i; idle = $5 + $6 }
     NR == 1 { t1 = t; i1 = idle }
     NR == 2 { dt = t - t1; if (dt > 0) printf "cpu_pct=%.1f\n", (1 - (idle - i1) / dt) * 100 }'
+  if [ -n "$incontainer" ]; then
+    # Its CPUs ("400000 100000": 4) and memory limits, when it has them
+    # (these lines take the place of the host's), and its own uptime.
+    c=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null)
+    if read -r quota period < "$cg/cpu.max" 2>/dev/null && [ "$quota" != max ] && [ "${period:-0}" -gt 0 ]; then
+      c=$(( (quota + period - 1) / period ))
+      kv cores "$c"
+    fi
+    u2=$(awk '/^usage_usec / { print $2 }' "$cg/cpu.stat" 2>/dev/null)
+    if [ -n "$u1" ] && [ -n "$u2" ] && [ "${c:-0}" -gt 0 ]; then
+      awk -v a="$u1" -v b="$u2" -v c="$c" 'BEGIN { p = (b - a) / 10000 / c; if (p > 100) p = 100; printf "cpu_pct=%.1f\n", p }'
+    fi
+    m=$(cat "$cg/memory.max" 2>/dev/null)
+    if [ -n "$m" ] && [ "$m" != max ]; then
+      cur=$(cat "$cg/memory.current" 2>/dev/null)
+      cache=$(awk '/^inactive_file / { print $2 }' "$cg/memory.stat" 2>/dev/null)
+      kv mem_total "$m"
+      [ -n "$cur" ] && kv mem_used "$(( cur - ${cache:-0} ))"
+    fi
+    st=$(cut -d' ' -f22 /proc/1/stat 2>/dev/null)
+    hz=$(getconf CLK_TCK 2>/dev/null)
+    up=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+    [ -n "$st" ] && [ -n "$hz" ] && [ -n "$up" ] && kv uptime_s "$(( up - st / hz ))"
+    # The host's load says nothing about this container.
+    kv load ""
+  fi
   disk=/
   ;;
 *)
@@ -181,7 +213,9 @@ linux)
       esac
     fi
   fi
-  [ -n "$v" ] && kv virt "$v" ;;
+  [ -n "$v" ] && kv virt "$v"
+  # It can run VMs itself (Windows in Docker needs this).
+  [ -e /dev/kvm ] && kv kvm yes ;;
 esac
 
 # --- Docker -------------------------------------------------------------------

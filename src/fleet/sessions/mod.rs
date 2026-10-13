@@ -55,6 +55,17 @@ pub fn agent(id: &str) -> Option<&'static AgentKind> {
     AGENTS.iter().find(|a| a.id.eq_ignore_ascii_case(id))
 }
 
+/// An agent's command line with its first prompt, when its CLI takes one as
+/// an argument; else the plain command and the prompt to type in once it's up.
+pub fn launch_line(kind: &AgentKind, prompt: Option<&str>, windows: bool) -> (String, Option<String>) {
+    let prompt = prompt.map(str::trim).filter(|p| !p.is_empty());
+    match (kind.command, prompt) {
+        ("", p) => (String::new(), p.map(str::to_string)),
+        (c, Some(p)) if kind.prompt_arg => (format!("{c} {}", if windows { ps_quote(p) } else { sh_quote(p) }), None),
+        (c, p) => (c.to_string(), p.map(str::to_string)),
+    }
+}
+
 /// One session, as listed in the snapshot.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -280,11 +291,9 @@ impl Engine {
 
         // The agent's command line; the prompt rides along when the CLI takes one.
         let prompt = req.prompt.as_deref().map(str::trim).filter(|p| !p.is_empty());
-        let run_line = match (&req.command, kind.command, prompt) {
-            (Some(c), _, _) => c.clone(),
-            (None, "", _) => String::new(),
-            (None, c, Some(p)) if kind.prompt_arg => format!("{c} {}", if windows { ps_quote(p) } else { sh_quote(p) }),
-            (None, c, _) => c.to_string(),
+        let run_line = match &req.command {
+            Some(c) => c.clone(),
+            None => launch_line(kind, prompt, windows).0,
         };
         let request = json!({
             "op": "start",

@@ -20,7 +20,9 @@ impl Root {
         let p = m.probe.as_ref().filter(|p| p.ok);
         let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(&m.id) && o.kind != "logs");
 
-        let mut meta = vec![if m.host.is_empty() { "no host".to_string() } else { m.host.clone() }];
+        // A VM Muxen made is its container on its host, not the 127.0.0.1 ssh goes to.
+        let place = m.vm.as_ref().map(|v| format!("{} on {}", v.container, m.parent.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| v.host.clone())));
+        let mut meta = vec![place.unwrap_or_else(|| if m.host.is_empty() { "no host".to_string() } else { m.host.clone() })];
         if !m.platform.is_empty() {
             meta.push(m.platform.clone());
         }
@@ -191,7 +193,7 @@ impl Root {
 
         // A powered-off cloud machine says so on its cloud card; a stopped VM,
         // or one whose host is off, on the card above.
-        if let Some(u) = m.unreachable.as_ref().filter(|u| offline && !matches!(u.kind.as_str(), "powered-off" | "stopped" | "host-down")) {
+        if let Some(u) = m.unreachable.as_ref().filter(|u| offline && !matches!(u.kind.as_str(), "powered-off" | "stopped" | "host-down" | "installing")) {
             body = body.child(self.unreachable_card(&theme, &m, u, cx));
         }
 

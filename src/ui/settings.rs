@@ -895,19 +895,24 @@ impl SettingsPage {
         let detail = if installed.is_empty() {
             "No editor found: Muxen opens folders in Zed, Cursor or VS Code (with Remote - SSH).".to_string()
         } else {
-            format!("Open in editor (on a session, workspace, checkout or Compose project) lists the editors found here ({}) and opens the machine’s folder over ssh. The one picked here comes first, and `muxen edit` uses it.", installed.iter().map(|e| e.name).collect::<Vec<_>>().join(", "))
+            "Open in editor opens a machine’s folder over ssh in the editor you pick from its list. The one chosen here comes first, and `muxen edit` uses it.".to_string()
         };
+        // Full width, so its wrapped text is measured at that width (else the
+        // section below starts a line too early).
         div()
+            .w_full()
             .flex()
             .flex_col()
             .gap(px(10.))
             .child(section_title(theme, "Editor", None))
             .child(
                 card(theme)
+                    .w_full()
                     .px(px(14.))
                     .py(px(12.))
                     .gap(px(8.))
-                    .child(div().flex().flex_wrap().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).w_full().max_w(px(520.)).children(options.into_iter().map(|(id, name)| {
+                    // As wide as its choices (a row keeps it from stretching).
+                    .child(div().flex().child(div().flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(options.into_iter().map(|(id, name)| {
                         let on = chosen == id;
                         let engine = self.engine.clone();
                         div()
@@ -931,8 +936,8 @@ impl SettingsPage {
                                 let _ = engine.update_settings(s);
                                 cx.refresh_windows();
                             })
-                    })))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(detail)),
+                    }))))
+                    .child(div().w_full().min_w(px(0.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(detail)),
             )
     }
 

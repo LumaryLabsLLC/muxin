@@ -139,6 +139,38 @@ Muxen can create DigitalOcean droplets in the user's account and add them to the
 
 The CLI equivalents are `muxen cloud options|create|usage|power|destroy|login|logout`.
 
+## VMs on the user's machines
+
+Muxen can make a VM on one of the user's machines and add it to them, shown under that machine: Windows (11, 10, Server 2025 or 2022) in Docker with KVM on a Linux x86-64 machine, or Linux (Ubuntu, Debian, Fedora, Alpine, Arch) as a container with ssh on any machine with Docker, this computer included. Muxen sets up ssh with this computer's key and its agent there, so sessions, files, `workspace_exec` and the desktop work like on any machine.
+
+- `vm_options` lists the machines that can run VMs (and which systems, or why not), the system ids and the defaults.
+- `vm_create(name, system, host?, cpus?, memory_gb?, disk_gb?)` makes one; the result names the new `machine_id`. Linux is ready in under a minute. Windows downloads and installs itself, 15-30 minutes the first time: pass `wait: false` and poll `get_operation`. Until it answers, its `unreachable.kind` is `"installing"`.
+- `machine_power(machine_id, "on"|"off")` starts or stops it (Windows gets two minutes to shut down cleanly); `vm_destroy(machine_id)` deletes its container and disk and removes it from Muxen. A machine's `vm` field says Muxen made it (and so can destroy it).
+- It uses the user's machine, memory and disk: make one when asked, or when a task needs a fresh machine (a clean Windows to test an installer on, say), and destroy it when the task is done unless the user wants it kept. Copy out anything worth keeping first.
+- Each VM gets a UDP port on its host forwarded to it (its `direct_address`), so `direct_connection(machine_id, true)` works for it like for any machine. A Linux VM's CPU, memory and uptime are its container's own limits.
+- A Windows VM's account password is in the user's Keychain (the app's Copy password button); you don't need it: ssh uses the key.
+
+**"Test this on a clean Windows machine."**
+
+1. `vm_options`: a host that lists `windows-11`. None: say Windows VMs need a Linux machine (x86-64) with Docker and KVM.
+2. `vm_create(name: "win-test", system: "windows-11", wait: false)`, then poll `get_operation` until it's done (15-30 minutes).
+3. Work there: `workspace_create(machine_id: "win-test")` and `workspace_exec`, or `copy_files` and `session_start`.
+4. `vm_destroy("win-test")` when you're done, unless the user wants it kept.
+
+The CLI equivalents are `muxen vm options|create|destroy` and `muxen power <machine> on|off`.
+
+## Schedules
+
+A schedule runs a command, or starts an agent session, on one machine at set times. It's kept on that machine and run by Muxen's agent through the machine's own scheduler (cron on Linux, launchd on a Mac, Task Scheduler on Windows), so it runs whether or not Muxen is open anywhere. Times are the machine's own.
+
+- `schedule_list(machine_id?)` lists them with `when_text`, `what`, `enabled`, `running` and `last_run`; `problem` says when a machine can't run them (no cron, as in a container).
+- `schedule_save(machine_id, name, when, command | agent + prompt, folder?)` creates one (or changes it, with `id`). `when` is `{every: "minutes"|"hours", n}`, `{every: "day"|"weekdays", at: "09:00"}` or `{every: "week", days: ["mon", "thu"], at}`. An agent schedule starts a session the user sees like any other, waiting for them when it's done; for an agent run that finishes by itself, schedule a command such as `claude -p "..."`.
+- `schedule_run(machine_id, schedule_id)` runs one now; `schedule_log(machine_id, schedule_id, started?)` gives its last runs and one run's output.
+- `schedule_delete(machine_id, schedule_id)` removes one with its history.
+- They run unattended on the user's machines: create one only when asked, and say what it runs and when.
+
+The CLI equivalents are `muxen schedule ls|add|rm|run|log`.
+
 ## Several machines at once
 
 - `run_on_machines(machine_ids, command, timeout_secs?)` runs one shell command on each machine, in its login shell from the home folder, without a terminal (nothing interactive). It waits for all of them and returns each one's `exit_code`, `error` and `operation.log_tail`. It runs as the user on their real machines: only when asked, and show the command first.

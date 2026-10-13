@@ -102,6 +102,11 @@ pub fn handle(req: &Value) -> Value {
         "gpus" => json!({ "ok": true, "gpus": crate::procs::gpus() }),
         "process_signal" => crate::procs::signal(&req),
         "wake" => crate::wake::wake(&req),
+        "schedules" => crate::schedules::list(),
+        "schedule_save" => crate::schedules::save(&req),
+        "schedule_delete" => crate::schedules::delete(&req),
+        "schedule_run" => crate::schedules::run_now(&req),
+        "schedule_log" => crate::schedules::log(&req),
         _ => request(&req, false),
     }
 }

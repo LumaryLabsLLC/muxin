@@ -218,6 +218,10 @@ pub struct Machine {
     /// Another of the user's machines it runs on (a VM or container there),
     /// or is reached through (a jump host).
     pub parent: Option<ParentMachine>,
+    /// A VM Muxen made (and can destroy): its host, system and container.
+    pub vm: Option<crate::config::VmRef>,
+    /// Where a direct connection reaches it (a forwarded port), from config.toml.
+    pub direct_address: Option<String>,
 }
 
 /// The machine another one runs on or is reached through, as Muxen worked it
@@ -375,7 +379,7 @@ pub struct Unreachable {
     /// Tailscale is off or signed out, and the machine is on the tailnet) |
     /// "powered-off" (a cloud machine) | "host-down" (the machine it runs on or
     /// is reached through is off) | "stopped" (its container there isn't
-    /// running) | "error"
+    /// running) | "installing" (a VM Muxen just made) | "error"
     pub kind: String,
     /// e.g. "Beelink is offline".
     pub title: String,

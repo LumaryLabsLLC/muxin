@@ -143,6 +143,38 @@ pub fn set_machine_cloud(text: &str, machine_id: &str, cloud: Option<&crate::con
     finish(doc)
 }
 
+/// Makes a machine one Muxen created as a VM: how ssh reaches it (through its
+/// host, to the port its container publishes) and what it is.
+pub fn set_machine_vm(text: &str, machine_id: &str, port: u16, user: &str, ssh_options: &[String], direct_address: Option<&str>, vm: &crate::config::VmRef) -> Result<String, String> {
+    let mut doc = parse(text)?;
+    let machines = machines_mut(&mut doc)?;
+    let index = find_machine(machines, machine_id)?;
+    let table = machines.get_mut(index).ok_or("That machine isn't in config.toml.")?;
+    table["user"] = value(user);
+    table["port"] = value(port as i64);
+    if !ssh_options.is_empty() {
+        let mut list = toml_edit::Array::new();
+        for o in ssh_options {
+            list.push(o.as_str());
+        }
+        table["ssh_options"] = value(list);
+    }
+    if let Some(a) = direct_address {
+        table["direct_address"] = value(a);
+    }
+    let mut t = toml_edit::InlineTable::new();
+    t.insert("host", vm.host.as_str().into());
+    t.insert("os", vm.os.as_str().into());
+    t.insert("version", vm.version.as_str().into());
+    t.insert("container", vm.container.as_str().into());
+    if let Some(p) = vm.web_port {
+        t.insert("web_port", (p as i64).into());
+    }
+    t.insert("created_at", vm.created_at.as_str().into());
+    table["vm"] = value(t);
+    finish(doc)
+}
+
 /// Splits document trailing text into the comment lines glued to the last table and the rest.
 fn split_attached(trailing: &str) -> (&str, &str) {
     if trailing.is_empty() || trailing.starts_with('\n') {

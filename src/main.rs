@@ -118,6 +118,12 @@ enum Command {
     Wake(MachineArgs),
     /// Power a machine on or off: a cloud machine, or a VM in Docker on another machine
     Power(CloudPowerArgs),
+    /// VMs on your machines: Windows (Docker with KVM) and Linux containers
+    #[command(subcommand)]
+    Vm(VmCommand),
+    /// Schedules: a command or an agent session that runs on a machine at set times
+    #[command(alias = "schedules", subcommand)]
+    Schedule(ScheduleCommand),
     /// Open a machine's port on this computer (localhost) until Ctrl-C
     Forward(ForwardArgs),
     /// Cloud machines: create DigitalOcean droplets to work in, power them, destroy them
@@ -416,6 +422,133 @@ struct GhRepoArgs {
     agent: AgentArgs,
     /// owner/name or a GitHub URL
     repo: String,
+}
+
+#[derive(Subcommand)]
+enum ScheduleCommand {
+    /// The schedules on your machines (--on one), with their last runs
+    Ls(ScheduleLsArgs),
+    /// Add one, e.g. `muxen schedule add beelink --name Tests --every day --at 09:00 --command "make test"`
+    Add(ScheduleAddArgs),
+    /// Delete one
+    Rm(ScheduleRefArgs),
+    /// Run one now
+    Run(ScheduleRefArgs),
+    /// Its last runs, and the newest one's output
+    Log(ScheduleRefArgs),
+}
+
+#[derive(Args)]
+struct ScheduleLsArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// One machine
+    #[arg(long)]
+    on: Option<String>,
+}
+
+#[derive(Args)]
+struct ScheduleAddArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// The machine it runs on
+    machine: String,
+    #[arg(long)]
+    name: String,
+    /// 15m (every 15 minutes), 2h, day, weekdays, or days like mon,thu
+    #[arg(long)]
+    every: String,
+    /// HH:MM in the machine's time (for hours: the minute)
+    #[arg(long)]
+    at: Option<String>,
+    /// A shell command to run
+    #[arg(long)]
+    command: Option<String>,
+    /// Or an agent session: claude, codex, opencode, gemini, amp, pi
+    #[arg(long = "agent")]
+    cli: Option<String>,
+    /// What the agent is asked
+    #[arg(long)]
+    prompt: Option<String>,
+    /// The folder it runs in (default ~)
+    #[arg(long)]
+    folder: Option<String>,
+}
+
+#[derive(Args)]
+struct ScheduleRefArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    machine: String,
+    /// The schedule's id (s-...)
+    id: String,
+}
+
+/// `--every` and `--at` as a schedule's `when`.
+fn parse_every(every: &str, at: Option<String>) -> Result<muxen_when::When, String> {
+    let e = every.trim().to_ascii_lowercase();
+    let num = |s: &str| s.parse::<u32>().map_err(|_| format!("\"{every}\" isn't a schedule Muxen knows."));
+    let (kind, n, days): (&str, Option<u32>, Vec<String>) = if let Some(m) = e.strip_suffix('m').filter(|m| m.chars().all(|c| c.is_ascii_digit())) {
+        ("minutes", Some(num(m)?), Vec::new())
+    } else if let Some(h) = e.strip_suffix('h').filter(|h| h.chars().all(|c| c.is_ascii_digit())) {
+        ("hours", Some(num(h)?), Vec::new())
+    } else if matches!(e.as_str(), "day" | "daily") {
+        ("day", None, Vec::new())
+    } else if e == "weekdays" {
+        ("weekdays", None, Vec::new())
+    } else {
+        ("week", None, e.split(',').map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect())
+    };
+    let at = match (kind, at) {
+        ("minutes", _) => None,
+        ("hours", a) => Some(a.unwrap_or_else(|| "00:00".into())),
+        (_, Some(a)) => Some(a),
+        (_, None) => return Err("Say when with --at HH:MM.".into()),
+    };
+    Ok(muxen_when::When { every: kind.into(), n, at, days })
+}
+
+mod muxen_when {
+    pub use crate::fleet::schedules::When;
+}
+
+#[derive(Subcommand)]
+enum VmCommand {
+    /// Where VMs can run, what each machine can run, and the systems
+    Options(AgentArgs),
+    /// Create a VM and add it to your machines (Windows installs itself: 15-30 minutes)
+    Create(VmCreateArgs),
+    /// Delete a VM Muxen made: its container, its disk, and the machine in Muxen
+    Destroy(CloudMachineArgs),
+}
+
+#[derive(Args)]
+struct VmCreateArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Its name in Muxen
+    name: String,
+    /// windows-11, windows-10, windows-server-2025, windows-server-2022, ubuntu-26.04,
+    /// ubuntu-24.04, debian-13, fedora, alpine or arch
+    #[arg(long)]
+    system: String,
+    /// The machine to run it on (default: the one with the most free memory that can)
+    #[arg(long)]
+    on: Option<String>,
+    #[arg(long)]
+    cpus: Option<u32>,
+    /// Memory, in GB
+    #[arg(long)]
+    memory: Option<u32>,
+    /// Windows' disk, in GB
+    #[arg(long)]
+    disk: Option<u32>,
+    /// Agent CLIs to install on a Linux VM, comma-separated: claude, codex, gemini, opencode, amp, pi
+    #[arg(long)]
+    install: Option<String>,
+    /// Return right away with the operation id
+    #[arg(long)]
+    no_wait: bool,
 }
 
 #[derive(Subcommand)]
@@ -1386,6 +1519,47 @@ fn main() -> ExitCode {
             )
         }
         Some(Command::Cloud(cmd)) => cloud(cmd, &runtime),
+        Some(Command::Schedule(cmd)) => match cmd {
+            ScheduleCommand::Ls(a) => {
+                let req = api::ScheduleListRequest { machine_id: a.on };
+                run(&runtime, &a.agent, async move |e| api::schedule_list(&e, req).await, cli::schedules)
+            }
+            ScheduleCommand::Add(a) => {
+                let when = match parse_every(&a.every, a.at) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return std::process::ExitCode::from(2);
+                    }
+                };
+                let req = api::ScheduleSaveRequest { machine_id: a.machine, id: None, name: a.name, when, command: a.command, agent: a.cli, prompt: a.prompt, folder: a.folder, enabled: true };
+                run(&runtime, &a.agent, async move |e| api::schedule_save(&e, req).await, |s| format!("✓ {} ({}): {}\n", s.name, s.id, s.when_text))
+            }
+            ScheduleCommand::Rm(a) => {
+                let req = api::ScheduleRequest { machine_id: a.machine, schedule_id: a.id, started: None };
+                run(&runtime, &a.agent, async move |e| api::schedule_delete(&e, req).await, |_| "✓ Deleted\n".to_string())
+            }
+            ScheduleCommand::Run(a) => {
+                let req = api::ScheduleRequest { machine_id: a.machine, schedule_id: a.id, started: None };
+                run(&runtime, &a.agent, async move |e| api::schedule_run(&e, req).await, |_| "✓ Started. See it with `muxen schedule log`.\n".to_string())
+            }
+            ScheduleCommand::Log(a) => {
+                let req = api::ScheduleRequest { machine_id: a.machine, schedule_id: a.id, started: None };
+                run(&runtime, &a.agent, async move |e| api::schedule_log(&e, req).await, cli::schedule_log)
+            }
+        },
+        Some(Command::Vm(cmd)) => match cmd {
+            VmCommand::Options(a) => run(&runtime, &a, async move |e| Ok::<_, api::ApiError>(api::vm_options(&e).await), cli::vm_options),
+            VmCommand::Create(a) => {
+                let install = a.install.map(|l| l.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
+                let req = api::VmCreateRequest { name: a.name, system: a.system, host: a.on, cpus: a.cpus, memory_gb: a.memory, disk_gb: a.disk, install, wait: !a.no_wait, timeout_secs: Some(100 * 60) };
+                run(&runtime, &a.agent, async move |e| api::vm_create(&e, req, api::Surface::Cli, stream_line).await, cli::action)
+            }
+            VmCommand::Destroy(a) => {
+                let req = api::CloudMachineRequest { machine_id: a.machine, power: None, wait: true };
+                run(&runtime, &a.agent, async move |e| api::vm_destroy(&e, req, api::Surface::Cli, stream_line).await, cli::action)
+            }
+        },
         Some(Command::Files(a)) => {
             let (machine, path) = a.target.split_once(':').map(|(m, p)| (m.to_string(), p.to_string())).unwrap_or((a.target.clone(), String::new()));
             let req = api::ListFilesRequest { machine_id: machine, path };

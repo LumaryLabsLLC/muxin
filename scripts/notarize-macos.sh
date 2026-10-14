@@ -47,6 +47,19 @@ notarize() { # <file> <credentials...>
     fi
 }
 
+# Attaches the notary ticket. Apple's ticket server can drop the connection, or
+# not have the ticket yet right after notarizing, so it tries a few times.
+staple() { # <file>
+    for try in 1 2 3 4 5; do
+        xcrun stapler staple "$1" && return
+        [ "$try" = 5 ] && break
+        echo "▸ stapling failed; trying again in 20 seconds" >&2
+        sleep 20
+    done
+    echo "error: couldn't staple $1" >&2
+    exit 1
+}
+
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -55,7 +68,7 @@ if [ -n "$notarize" ]; then
     codesign --verify --strict "$app"
     ditto -c -k --keepParent "$app" "$work/Muxen.zip"
     notarize "$work/Muxen.zip" "$@"
-    xcrun stapler staple "$app"
+    staple "$app"
 fi
 
 # Then the DMG: the app and a link to Applications to drag it to.
@@ -68,7 +81,7 @@ if [ -n "$notarize" ]; then
     identity=${MUXEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -n1)}
     codesign --force --timestamp -s "$identity" "$dmg"
     notarize "$dmg" "$@"
-    xcrun stapler staple "$dmg"
+    staple "$dmg"
     spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
 fi
 echo "Built $dmg ($(du -h "$dmg" | cut -f1))"

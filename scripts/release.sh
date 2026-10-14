@@ -6,6 +6,9 @@
 #   scripts/release.sh 0.2.0           # commit and tag here; push yourself
 #   scripts/release.sh 0.2.0 --push    # and push the branch and the tag
 #
+# Run on another branch that main follows (like muxen), --push moves main up to
+# it too, here and on GitHub, when main can fast-forward.
+#
 # See RELEASING.md.
 set -eu
 
@@ -42,7 +45,23 @@ git tag -a "v$version" -m "Muxen $version"
 echo "▸ tagged v$version on $(git rev-parse --short HEAD)"
 
 if [ -n "$push" ]; then
-    git push --quiet origin HEAD "v$version"
+    branch=$(git branch --show-current)
+    main=
+    if [ -n "$branch" ] && [ "$branch" != main ]; then
+        git fetch --quiet origin main
+        if git merge-base --is-ancestor origin/main HEAD && git merge-base --is-ancestor main HEAD 2>/dev/null; then
+            main=1
+        else
+            echo "note: main can't fast-forward to $branch, so it stays where it is" >&2
+        fi
+    fi
+    if [ -n "$main" ]; then
+        git push --quiet origin HEAD HEAD:main "v$version"
+        git branch --force main HEAD
+        echo "▸ main moved up to $branch"
+    else
+        git push --quiet origin HEAD "v$version"
+    fi
     echo "▸ pushed: the release workflow is building it (gh run watch, or Actions on GitHub)"
 else
     echo "Push it to build the release: git push origin HEAD v$version"

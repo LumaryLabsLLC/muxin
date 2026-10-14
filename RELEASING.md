@@ -26,6 +26,10 @@ The script sets the version in `Cargo.toml` and `Cargo.lock`, commits it, tags
 the commit `v0.2.0` and pushes both. Leave out `--push` to look first; then
 `git push origin HEAD v0.2.0`.
 
+You can also run it on a branch that `main` follows, like `muxen`. Then `--push`
+moves `main` up to it too, here and on GitHub. If `main` has commits the branch
+doesn't, it stays where it is and the script says so.
+
 Then:
 
 ```sh

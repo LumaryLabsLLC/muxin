@@ -34,6 +34,10 @@ gh release view v0.2.0                        # the draft and its files
 gh release edit v0.2.0 --draft=false          # publish it
 ```
 
+If a job fails for a reason outside the code, like a dropped connection to
+Apple's servers, run just the failed jobs again: `gh run rerun <run id> --failed`.
+The draft is made once every platform has built.
+
 The repository is private, so its releases are only for people with access to
 it. Public downloads come later.
 

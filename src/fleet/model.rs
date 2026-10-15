@@ -607,6 +607,12 @@ pub struct WorkspaceInfo {
     /// Docker workspaces: the container's name, e.g. "muxen-ws-7f3a2c".
     #[serde(default)]
     pub container: Option<String>,
+    /// Worktree workspaces: the checkout on the same machine it's a git worktree of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_of: Option<String>,
+    /// What the work in it changed, as last looked at (see sessions::git); never stored.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub git: Option<super::sessions::git::GitStatus>,
 }
 
 fn host_isolation() -> String {

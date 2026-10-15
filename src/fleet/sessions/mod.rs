@@ -8,7 +8,9 @@
 //! agent is the source of truth; the engine keeps the last discovery per
 //! machine and refreshes it after changes and on a timer.
 
+pub mod actions;
 pub(crate) mod agent;
+pub mod git;
 pub mod question;
 
 use std::sync::Arc;
@@ -97,6 +99,9 @@ pub struct SessionInfo {
     /// sessions on machines without an agent (Windows, for now), which run in
     /// the app's terminal and end with it.
     pub persistent: bool,
+    /// What its work changed in its folder's git checkout (see git.rs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git: Option<git::GitStatus>,
 }
 
 /// What the last discovery found on one machine.
@@ -193,7 +198,9 @@ impl Engine {
     /// now and then, which agent CLIs are installed).
     pub async fn refresh_sessions(self: &Arc<Self>, machine_id: &str) -> Result<MachineSessions, String> {
         if let Some(world) = self.demo_world() {
-            return Ok(self.sessions_of(machine_id).unwrap_or_else(|| world.sessions(machine_id)));
+            let found = self.sessions_of(machine_id).unwrap_or_else(|| world.sessions(machine_id));
+            self.maybe_look_at_git(machine_id, Some(&found), &found);
+            return Ok(found);
         }
         let (spec, probe) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
         if !spec.is_checkable() {
@@ -231,10 +238,13 @@ impl Engine {
                 checked_at: Some(Utc::now()),
                 error: Some(e),
                 // Keep what we knew; the machine may just be briefly unreachable.
-                ..previous.unwrap_or_default()
+                ..previous.clone().unwrap_or_default()
             },
         };
         self.set_sessions(&spec.id, found.clone());
+        if found.error.is_none() {
+            self.maybe_look_at_git(&spec.id, previous.as_ref(), &found);
+        }
         // Working now: look again once it should have gone quiet, rather than
         // only trusting the agent to say so.
         if found.sessions.iter().any(|s| s.busy) {
@@ -360,9 +370,10 @@ impl Engine {
     }
 
     /// Picks one of a waiting session's choices (`key`, as the question gave
-    /// it; `selected`, the one its cursor was on), and marks it read.
-    pub async fn answer_session(self: &Arc<Self>, id: &str, key: &str, selected: Option<&str>) -> Result<(), String> {
-        let (keys, enter) = question::keys_for(key, selected);
+    /// it; `selected`, the one its cursor was on; `confirm`, the menu wants
+    /// Enter after a number), and marks it read.
+    pub async fn answer_session(self: &Arc<Self>, id: &str, key: &str, selected: Option<&str>, confirm: bool) -> Result<(), String> {
+        let (keys, enter) = question::keys_for(key, selected, confirm);
         self.control_session(id, Control::Send { text: &keys, enter }).await?;
         self.ack_session(id);
         Ok(())
@@ -481,6 +492,7 @@ impl Engine {
             last_output_at: None,
             attach_command: String::new(),
             persistent: false,
+            git: None,
             name,
         };
         self.add_direct(DirectSession { info: info.clone(), run, windows });
@@ -678,6 +690,7 @@ pub(crate) fn parse_discovery(spec: &MachineSpec, reply: &Value) -> MachineSessi
             last_output_at: last_output.and_then(|t| Utc.timestamp_opt(t, 0).single()),
             attach_command: user_attach_command(spec, &name),
             persistent: true,
+            git: None,
             name,
         });
     }

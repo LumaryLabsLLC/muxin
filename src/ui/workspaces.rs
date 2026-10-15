@@ -130,6 +130,26 @@ impl Root {
                             .on_click(cx.listener(move |this, _, window, cx| this.confirm_destroy_workspace(&wid, &name, window, cx)))
                     }),
             )
+            // What its work changed: branch, lines, pull request.
+            .children(w.git.as_ref().map(|g| super::sessions::git_line(theme, &format!("ws-{}", w.id), g, true)))
+            .children(merged_pull(w).map(|n| {
+                let (wid, name) = (w.id.clone(), w.name.clone());
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(10.))
+                    .py(px(7.))
+                    .rounded(px(8.))
+                    .bg(theme.accent2.opacity(0.10))
+                    .text_size(px(12.5))
+                    .child(icon("git-merge", 14., theme.accent2))
+                    .child(div().flex_1().min_w(px(0.)).child(format!("Pull request #{n} is merged, so this worktree's work is done. Its branch stays in the checkout.")))
+                    .child(Button::new(SharedString::from(format!("ws-clean-{}", w.id)), "Clean up").on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.confirm_destroy_workspace(&wid, &name, window, cx)
+                    })))
+            }))
             .child(
                 div()
                     .flex()
@@ -520,7 +540,16 @@ fn workspace_subtitle(w: &WorkspaceInfo) -> String {
         let at = w.branch.as_ref().or(w.git_ref.as_ref()).map(|r| format!(" @ {r}")).unwrap_or_default();
         parts.push(format!("{repo}{at}"));
     }
+    if let Some(src) = &w.worktree_of {
+        parts.push(format!("worktree of {src}"));
+    }
     parts.join("  ·  ")
+}
+
+/// A worktree whose pull request is merged: its work is done, so it can go.
+fn merged_pull(w: &WorkspaceInfo) -> Option<u64> {
+    w.worktree_of.as_ref()?;
+    w.git.as_ref()?.pull.as_ref().filter(|p| p.state == "merged").map(|p| p.number)
 }
 
 fn status_pill(theme: &Theme, w: &WorkspaceInfo) -> AnyElement {

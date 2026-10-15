@@ -69,6 +69,12 @@ struct State {
     direct: Vec<DirectSession>,
     /// Git checkouts per machine, from the last look (see fleet::code).
     checkouts: HashMap<String, Vec<super::model::Checkout>>,
+    /// What the work in sessions' and workspaces' folders changed, per machine
+    /// and folder, and when each machine was last looked at (see sessions::git).
+    git: HashMap<String, Vec<(String, sessions::git::GitStatus)>>,
+    git_looked: HashMap<String, Instant>,
+    /// Branches' pull requests, by (repository, branch), and when GitHub was asked.
+    pulls: HashMap<(String, String), (Instant, Option<crate::github::hub::BranchPull>)>,
     /// Machines on the user's tailnet, as Tailscale last saw them (see roaming.rs).
     tailnet: HashMap<String, super::model::TailnetDevice>,
     /// Tailscale on this computer; None until read, or when it isn't installed.
@@ -147,7 +153,14 @@ impl Engine {
             next_notice: 1,
             attention: HashMap::new(),
             direct: Vec::new(),
-            checkouts: HashMap::new(),
+            // The demo's are there from the start (a real machine's are looked for).
+            checkouts: match &world {
+                Some(w) => w.inventory().machines.iter().map(|m| (m.id.clone(), w.checkouts(&m.id))).filter(|(_, c)| !c.is_empty()).collect(),
+                None => HashMap::new(),
+            },
+            git: HashMap::new(),
+            git_looked: HashMap::new(),
+            pulls: HashMap::new(),
             tailnet: persisted.tailnet,
             tailscale: None,
             droplets: persisted.droplets,
@@ -586,6 +599,35 @@ impl Engine {
         self.publish(&mut st);
     }
 
+    pub(crate) fn git_looked_at(&self, machine_id: &str) -> Option<Instant> {
+        self.state.lock().unwrap().git_looked.get(machine_id).copied()
+    }
+
+    pub(crate) fn set_git_looked(&self, machine_id: &str) {
+        self.state.lock().unwrap().git_looked.insert(machine_id.to_string(), Instant::now());
+    }
+
+    /// What the work in a machine's folders changed (see sessions::git).
+    pub(crate) fn set_git(&self, machine_id: &str, found: Vec<(String, sessions::git::GitStatus)>) {
+        let mut st = self.state.lock().unwrap();
+        if st.git.get(machine_id) == Some(&found) {
+            return;
+        }
+        st.git.insert(machine_id.to_string(), found);
+        self.publish(&mut st);
+    }
+
+    /// A branch's pull request as GitHub said it within `fresh`.
+    pub(crate) fn cached_pull(&self, key: &(String, String), fresh: std::time::Duration) -> Option<Option<crate::github::hub::BranchPull>> {
+        self.state.lock().unwrap().pulls.get(key).filter(|(at, _)| at.elapsed() < fresh).map(|(_, p)| p.clone())
+    }
+
+    pub(crate) fn cache_pull(&self, key: (String, String), pull: Option<crate::github::hub::BranchPull>) {
+        let mut st = self.state.lock().unwrap();
+        st.pulls.retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_secs(3600));
+        st.pulls.insert(key, (Instant::now(), pull));
+    }
+
     pub(crate) fn checkouts_of(&self, machine_id: &str) -> Vec<super::model::Checkout> {
         self.state.lock().unwrap().checkouts.get(machine_id).cloned().unwrap_or_default()
     }
@@ -818,6 +860,10 @@ impl Engine {
 
     async fn sessions_loop(self: Arc<Self>) {
         if self.demo.is_some() {
+            // What the demo's sessions changed, once.
+            for id in self.machines_with_sessions() {
+                let _ = self.look_at_git(&id).await;
+            }
             return;
         }
         // At startup, look everywhere the last check reached.
@@ -1129,6 +1175,9 @@ impl Engine {
         snapshot.version = st.version;
         snapshot.operations = st.operations.iter().cloned().collect();
         snapshot.workspaces = workspaces::snapshot_infos(&st.workspaces, &snapshot.machines, &st.inventory.machines);
+        for w in &mut snapshot.workspaces {
+            w.git = st.git.get(&w.machine_id).and_then(|g| g.iter().find(|(path, _)| *path == w.path)).map(|(_, status)| status.clone());
+        }
         for m in &mut snapshot.machines {
             if let Some(d) = st.displays.get(&m.id) {
                 m.displays = d.clone();
@@ -1141,9 +1190,11 @@ impl Engine {
                 // What we last saw there; nothing is working while it's offline
                 // (or disconnected: nothing we can see).
                 let offline = m.is_down();
+                let git = st.git.get(&m.id);
                 snapshot.sessions.extend(found.sessions.iter().cloned().map(|mut s| {
                     s.attention = st.attention.get(&s.id).cloned().or(s.attention);
                     s.busy &= !offline;
+                    s.git = git.and_then(|g| g.iter().find(|(path, _)| *path == s.cwd)).map(|(_, status)| status.clone());
                     s
                 }));
             }

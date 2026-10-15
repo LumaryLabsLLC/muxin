@@ -16,6 +16,7 @@ use super::terminal::{TerminalEvent, TerminalView};
 use super::theme::{ActiveTheme, Theme, mono_font};
 use crate::fleet::model::{Machine, Snapshot};
 use crate::fleet::model::Machine as FleetMachine;
+use crate::fleet::sessions::git::GitStatus;
 use crate::fleet::sessions::{AGENTS, Control, SessionInfo, StartSession};
 
 /// Toolbar plus the session header, subtracted when sizing a new session.
@@ -526,10 +527,20 @@ impl Root {
                             .child(machine)
                             .child("·")
                             .child(div().font_family(mono_font()).text_size(px(11.5)).child(info.cwd.clone())),
-                    ),
+                    )
+                    .children(info.git.as_ref().map(|g| git_line(&theme, &info.id, g, true).mt(px(2.)))),
             )
             .when(!info.persistent, |d| d.child(kit::pill("Ends when you close Muxen", theme.warning)))
             .child(status)
+            .when(info.agent != "shell" && !info.agent.is_empty() && !exited && offline.is_none(), |d| {
+                let sid = info.id.clone();
+                d.child(
+                    Button::new("session-actions", "Actions")
+                        .icon("zap")
+                        .tooltip("Ask the agent to commit, open a pull request, review its work…")
+                        .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.open_menu(super::menu::MenuTarget::SessionActions(sid.clone()), e.position(), cx))),
+                )
+            })
             .when(info.persistent, |d| {
                 d.child(
                     Button::icon_only("session-copy-attach", "copy")
@@ -992,7 +1003,8 @@ impl Root {
                             .child(div().font_family(mono_font()).child(x.cwd.clone()))
                             .child("·")
                             .child(format!("started {}", format::ago(x.created_at))),
-                    ),
+                    )
+                    .children(x.git.as_ref().map(|g| git_line(theme, &format!("row-{}", x.id), g, false).mt(px(3.)))),
             )
             .child(state)
             .child(icon("chevron-right", 14., theme.text_placeholder))
@@ -1623,4 +1635,101 @@ fn demo_screen(agent: &str) -> Vec<u8> {
         ],
     };
     lines.join("\r\n").into_bytes()
+}
+
+impl Root {
+    /// Asks a session's agent to do one of the session actions (commit, open
+    /// a pull request, ...): its prompt is typed in.
+    pub(super) fn run_session_action(&mut self, id: &str, action: &'static str, cx: &mut Context<Self>) {
+        let (engine, id) = (self.engine.clone(), id.to_string());
+        let label = crate::fleet::sessions::actions::action(action).map(|a| a.label).unwrap_or(action);
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.session_action(&id, action).await }
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(_) => this.notify_user(format!("Asked the agent: {}.", label.to_lowercase()), false, cx),
+                Err(e) => this.notify_user(e, true, cx),
+            });
+        });
+        self.track(task);
+    }
+}
+
+/// What a session's (or a workspace's) work changed, in a line: its branch,
+/// lines added and removed, and its pull request with its checks (a click
+/// opens it on GitHub). `full` adds files, commits and uncommitted files.
+pub(super) fn git_line(theme: &Theme, key: &str, g: &GitStatus, full: bool) -> gpui::Stateful<gpui::Div> {
+    let muted = theme.text_placeholder;
+    let small = |text: String, color| div().flex_none().text_size(px(11.5)).text_color(color).child(text);
+    let mut row = div().id(SharedString::from(format!("git-{key}"))).flex().items_center().gap(px(8.)).min_w(px(0.)).overflow_hidden();
+    // The branch (a worktree's, marked so).
+    row = row.child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .min_w(px(0.))
+            .child(icon("git-branch", 12., muted).flex_none())
+            .child(div().min_w(px(0.)).truncate().font_family(mono_font()).text_size(px(11.5)).text_color(theme.text_muted).child(if g.branch.is_empty() { "no branch".to_string() } else { g.branch.clone() })),
+    );
+    if g.worktree {
+        row = row.child(kit::pill("worktree", theme.info));
+    }
+    let changed = g.added > 0 || g.removed > 0;
+    if changed {
+        row = row.child(div().flex().flex_none().gap(px(4.)).font_family(mono_font()).text_size(px(11.5)).child(div().text_color(theme.success).child(format!("+{}", g.added))).child(div().text_color(theme.error).child(format!("−{}", g.removed))));
+    } else if g.files > 0 {
+        row = row.child(small(format!("{} new file{}", g.files, if g.files == 1 { "" } else { "s" }), muted));
+    } else if !g.on_base() {
+        row = row.child(small("no changes yet".into(), muted));
+    }
+    if full {
+        if changed && g.files > 0 {
+            row = row.child(small(format!("in {} file{}", g.files, if g.files == 1 { "" } else { "s" }), muted));
+        }
+        if g.commits > 0 {
+            row = row.child(small(format!("{} commit{}", g.commits, if g.commits == 1 { "" } else { "s" }), muted));
+        }
+        if g.uncommitted > 0 {
+            row = row.child(small(format!("{} uncommitted", g.uncommitted), theme.warning));
+        }
+    }
+    if let Some(p) = &g.pull {
+        let (color, state) = match p.state.as_str() {
+            "merged" => (theme.accent2, " merged"),
+            "closed" => (theme.error, " closed"),
+            "draft" => (muted, " draft"),
+            _ => (theme.success, ""),
+        };
+        let c = &p.checks;
+        let checks = match (c.failed, c.pending, c.total) {
+            (0, 0, 0) => None,
+            (f, _, _) if f > 0 => Some(("circle-x", theme.error, if full { format!("{f} failing") } else { f.to_string() })),
+            (_, p, _) if p > 0 => Some(("clock", theme.warning, if full { "checks running".to_string() } else { String::new() })),
+            _ => Some(("circle-check", theme.success, if full { "checks pass".to_string() } else { String::new() })),
+        };
+        let url = p.url.clone();
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("git-pr-{key}")))
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(4.))
+                .px(px(6.))
+                .h(px(18.))
+                .rounded(px(4.))
+                .bg(color.opacity(0.12))
+                .cursor_pointer()
+                .hover(|st| st.bg(color.opacity(0.22)))
+                .child(icon(if p.state == "merged" { "git-merge" } else if p.state == "draft" { "git-pull-request-draft" } else { "git-pull-request" }, 11., color))
+                .child(div().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(color).child(format!("#{}{state}", p.number)))
+                .children(checks.map(|(glyph, color, text)| div().flex().items_center().gap(px(3.)).child(icon(glyph, 11., color)).when(!text.is_empty(), |d| d.child(div().text_size(px(11.)).text_color(color).child(text)))))
+                .on_click(move |_, _, cx| cx.open_url(&url)),
+        );
+    }
+    row
 }

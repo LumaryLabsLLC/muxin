@@ -785,6 +785,13 @@ impl Root {
                 self.show(Route::Activity, cx);
             }
             // "settings:<tab>", and "settings:icons" (Appearance, scrolled to the icon styles).
+            // A session action's prompt being changed: "edit-prompt:review" (for screenshots).
+            "edit-prompt" => {
+                self.open_settings_tab(super::settings::SettingsTab::Prompts, window, cx);
+                if let Some(p) = self.settings.clone() {
+                    p.update(cx, |p, cx| p.edit_prompt_id(arg, window, cx));
+                }
+            }
             "settings" => {
                 use super::settings::SettingsTab;
                 let tab = match arg {
@@ -792,6 +799,7 @@ impl Root {
                     "terminal" => SettingsTab::Terminal,
                     "github" => SettingsTab::GitHub,
                     "cloud" => SettingsTab::Cloud,
+                    "prompts" => SettingsTab::Prompts,
                     "keyboard" => SettingsTab::Keyboard,
                     _ => SettingsTab::General,
                 };
@@ -831,6 +839,8 @@ impl Root {
                 }
             }
             "menu" => self.open_menu(super::menu::MenuTarget::Machine(arg.into()), gpui::point(px(260.), px(160.)), cx),
+            // A session's Actions menu, under its header's button (for screenshots).
+            "session-actions" => self.open_menu(super::menu::MenuTarget::SessionActions(arg.into()), gpui::point(px(1080.), px(120.)), cx),
             "runner-menu" => self.open_menu(super::menu::MenuTarget::Runner(arg.into()), gpui::point(px(200.), px(560.)), cx),
             "favorite" => self.set_favorite_machine(arg, true, cx),
             // The palette with this text typed: "palette:" (places), "palette:>set" (commands).
@@ -1494,11 +1504,16 @@ impl Root {
                 .collect(),
             None => Vec::new(),
         };
-        let text = match sessions.len() {
+        let mut text = match sessions.len() {
             0 => "Background commands it started are stopped and its folder is deleted from the machine.".to_string(),
             1 => "The session working in it ends, background commands it started are stopped, and its folder is deleted from the machine.".to_string(),
             n => format!("The {n} sessions working in it end, background commands it started are stopped, and its folder is deleted from the machine."),
         };
+        // A worktree: its branch, and the commits on it, stay in the checkout.
+        if let Some(w) = self.snapshot.workspaces.iter().find(|w| w.id == id && w.worktree_of.is_some()) {
+            let branch = w.branch.clone().or_else(|| w.git.as_ref().map(|g| g.branch.clone())).unwrap_or_else(|| "its branch".into());
+            text.push_str(&format!(" It's a worktree: its branch ({branch}) stays in {}, with any commits on it.", w.worktree_of.clone().unwrap_or_default()));
+        }
         let dialog = cx.new(|cx| {
             ConfirmDialog::new(
                 format!("Delete {name}?"),

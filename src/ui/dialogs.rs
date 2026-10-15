@@ -1245,6 +1245,7 @@ impl NewWorkspaceDialog {
                 git_ref: text(&self.git_ref, cx),
                 branch: text(&self.branch, cx),
                 owner: Some("app".into()),
+                worktree_of: None,
             },
             iso,
         ));
@@ -1324,8 +1325,9 @@ pub struct NewSessionDialog {
     prompt: Entity<TextInput>,
     /// Set by whatever opened the dialog (an issue to fix, a workspace).
     prefill: Prefill,
-    /// Start in a new workspace (`prefill.workspace`) rather than a folder.
-    in_workspace: bool,
+    /// Where it works: a folder, a new worktree of a checkout there, or a
+    /// fresh clone (`prefill.workspace`). See `place`.
+    place: Place,
     branch: Entity<TextInput>,
     /// The folders where the Folder field points: (machine, folder) asked
     /// for, and the last listing that came back (for which machine and folder).
@@ -1334,6 +1336,17 @@ pub struct NewSessionDialog {
     /// Start in a new Linux VM instead of a machine: (system, the machine it runs on).
     new_vm: Option<(String, Option<String>)>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Where a new session works.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Place {
+    /// A folder that's there (the Folder field).
+    Folder,
+    /// A new git worktree of a checkout on the machine: its own folder and branch.
+    Worktree,
+    /// A new workspace with a fresh clone of the repository (`prefill.workspace`).
+    Clone,
 }
 
 /// What a caller already knows about the session to start.
@@ -1396,7 +1409,7 @@ impl NewSessionDialog {
             cwd,
             prompt,
             prefill: Prefill::default(),
-            in_workspace: false,
+            place: Place::Folder,
             branch,
             folders_asked: None,
             folders: None,
@@ -1405,7 +1418,21 @@ impl NewSessionDialog {
         };
         dialog.agent = dialog.default_agent(&snapshot);
         dialog.list_folders(cx);
+        dialog.load_checkouts(&snapshot);
         dialog
+    }
+
+    /// The chosen machine's git checkouts, when they haven't been looked at:
+    /// a worktree of one is offered once they're known.
+    fn load_checkouts(&self, s: &Snapshot) {
+        let Some(machine) = self.machine.clone() else { return };
+        if s.checkouts.iter().any(|c| c.machine_id == machine) || s.machines.iter().any(|m| m.id == machine && m.is_down()) {
+            return;
+        }
+        let engine = self.engine.clone();
+        engine.runtime().clone().spawn(async move {
+            let _ = engine.refresh_checkouts(&machine).await;
+        });
     }
 
     /// Lists the folder the Folder field points at, on the chosen machine,
@@ -1470,7 +1497,8 @@ impl NewSessionDialog {
             self.agent_picked = true;
         }
         if let Some(plan) = &prefill.workspace {
-            self.in_workspace = plan.preferred;
+            // A checkout of it there: a worktree of that (see `place`); else a clone, when that's preferred.
+            self.place = if plan.preferred { Place::Clone } else { Place::Worktree };
             let (text, hint) = match &plan.branch {
                 Some(b) => (b.clone(), "new branch (optional)".to_string()),
                 None => (String::new(), format!("stay on {}", plan.git_ref.clone().unwrap_or_else(|| "the default branch".into()))),
@@ -1541,9 +1569,11 @@ impl NewSessionDialog {
             command: self.prefill.command.as_ref().map(|(c, _)| c.clone()),
             typed: None,
         };
-        match self.prefill.workspace.clone().filter(|_| self.in_workspace) {
-            Some(plan) => {
-                if vm.is_none() && !self.workspaces_allowed(&self.engine.current()) {
+        let snapshot = self.engine.current();
+        let plan = self.prefill.workspace.clone();
+        match (self.place(&snapshot, cx), plan) {
+            (Place::Clone, Some(plan)) => {
+                if vm.is_none() && !self.workspaces_allowed(&snapshot) {
                     return;
                 }
                 let workspace = CreateWorkspace {
@@ -1554,16 +1584,68 @@ impl NewSessionDialog {
                     git_ref: plan.git_ref,
                     branch: text(&self.branch, cx),
                     owner: Some("app".into()),
+                    worktree_of: None,
                 };
                 match vm {
                     Some(vm) => cx.emit(DialogEvent::StartInNewVm(vm, Some(workspace), session)),
                     None => cx.emit(DialogEvent::StartInWorkspace(workspace, session)),
                 }
             }
-            None => match vm {
+            (Place::Worktree, plan) => {
+                let Some(source) = self.worktree_source(&snapshot, cx) else { return };
+                if !self.workspaces_allowed(&snapshot) {
+                    return;
+                }
+                let branch = text(&self.branch, cx);
+                let folder = source.path.trim_end_matches('/').rsplit('/').next().unwrap_or("worktree").to_string();
+                let name = plan.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| match &branch {
+                    Some(b) => format!("{folder} · {b}"),
+                    None => folder,
+                });
+                let workspace = CreateWorkspace {
+                    machine: Some(machine_id),
+                    platform: None,
+                    name: Some(name),
+                    repo: source.repo.clone(),
+                    git_ref: plan.and_then(|p| p.git_ref),
+                    branch,
+                    owner: Some("app".into()),
+                    worktree_of: Some(source.path),
+                };
+                cx.emit(DialogEvent::StartInWorkspace(workspace, session));
+            }
+            _ => match vm {
                 Some(vm) => cx.emit(DialogEvent::StartInNewVm(vm, None, session)),
                 None => cx.emit(DialogEvent::StartSession(session)),
             },
+        }
+    }
+
+    /// The checkout a worktree would come from, on the chosen machine: one of
+    /// the repository it's about (a clean one first, not a workspace itself),
+    /// else the one the Folder field points at.
+    fn worktree_source(&self, s: &Snapshot, cx: &App) -> Option<crate::fleet::model::Checkout> {
+        let machine = self.machine.as_ref().filter(|_| self.new_vm.is_none())?;
+        let here = s.checkouts.iter().filter(|c| &c.machine_id == machine);
+        match &self.prefill.workspace {
+            Some(plan) => here
+                .filter(|c| c.repo.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(&plan.repo)) && !c.path.contains("/muxen/workspaces/"))
+                .min_by_key(|c| c.dirty)
+                .cloned(),
+            None => {
+                let typed = self.cwd.read(cx).text().trim().to_string();
+                here.into_iter().find(|c| !typed.is_empty() && crate::fleet::workspaces::same_folder(&c.path, &typed)).cloned()
+            }
+        }
+    }
+
+    /// Where it works, as chosen: a worktree needs a checkout there and a
+    /// clone needs a repository, else it's the folder.
+    fn place(&self, s: &Snapshot, cx: &App) -> Place {
+        match self.place {
+            Place::Worktree if self.worktree_source(s, cx).is_some() => Place::Worktree,
+            Place::Worktree | Place::Clone if self.prefill.workspace.as_ref().is_some_and(|p| p.preferred || self.place == Place::Clone) => Place::Clone,
+            _ => Place::Folder,
         }
     }
 
@@ -1691,11 +1773,12 @@ impl NewSessionDialog {
         )
     }
 
-    /// New workspace, or a folder that's already there.
-    fn where_choice(&self, theme: &Theme, plan: &WorkspacePlan, cx: &mut Context<Self>) -> AnyElement {
-        let fresh = if plan.branch.is_some() { "A fresh clone, on its own branch" } else { "A fresh clone of the pull request" };
-        let option = |id: &'static str, glyph: &'static str, title: &'static str, note: &'static str, value: bool, cx: &mut Context<Self>| {
-            let selected = self.in_workspace == value;
+    /// Where it works: a new worktree of a checkout there, a new workspace
+    /// with a fresh clone, or a folder that's already there.
+    fn where_choice(&self, theme: &Theme, place: Place, source: Option<&crate::fleet::model::Checkout>, cx: &mut Context<Self>) -> AnyElement {
+        let plan = self.prefill.workspace.as_ref();
+        let option = |id: &'static str, glyph: &'static str, title: &'static str, note: SharedString, value: Place, cx: &mut Context<Self>| {
+            let selected = place == value;
             div()
                 .id(id)
                 .flex_1()
@@ -1716,29 +1799,45 @@ impl NewSessionDialog {
                         .flex_col()
                         .min_w(px(0.))
                         .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).child(title))
-                        .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(note)),
+                        .child(div().text_size(px(11.)).text_color(theme.text_placeholder).truncate().child(note)),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.in_workspace = value;
+                    this.place = value;
                     cx.notify()
                 }))
                 .into_any_element()
         };
-        div()
-            .flex()
-            .gap(px(8.))
-            .child(option("ns-where-ws", "layers", "New workspace", fresh, true, cx))
-            .child(option("ns-where-folder", "folder-open", "A folder", "A checkout already on the machine", false, cx))
-            .into_any_element()
+        let mut options = Vec::new();
+        if source.is_some() {
+            options.push(option("ns-where-wt", "git-branch", "New worktree", "Its own branch".into(), Place::Worktree, cx));
+        }
+        if plan.is_some() {
+            options.push(option("ns-where-ws", "layers", "Fresh clone", "A new copy".into(), Place::Clone, cx));
+        }
+        let folder_note = if plan.is_some() { "One that's there" } else { "Right here" };
+        options.push(option("ns-where-folder", "folder-open", "A folder", folder_note.into(), Place::Folder, cx));
+        div().flex().gap(px(8.)).children(options).into_any_element()
     }
 
     /// The branch to work on, and whether the machine takes workspaces.
-    fn workspace_fields(&self, theme: &Theme, plan: &WorkspacePlan, machine: Option<&crate::fleet::model::Machine>, cx: &mut Context<Self>) -> AnyElement {
+    fn workspace_fields(&self, theme: &Theme, place: Place, source: Option<&crate::fleet::model::Checkout>, machine: Option<&crate::fleet::model::Machine>, cx: &mut Context<Self>) -> AnyElement {
         let name = machine.map(|m| m.name.clone()).unwrap_or_else(|| "the machine".into());
-        let what = match &plan.git_ref {
-            Some(r) if r.starts_with("pull/") => format!("Clones {} on {name} and checks out the pull request.", plan.repo),
-            Some(r) => format!("Clones {} on {name} at {r}.", plan.repo),
-            None => format!("Clones {} on {name}.", plan.repo),
+        let plan = self.prefill.workspace.as_ref();
+        let what = match (place, source, plan) {
+            (Place::Worktree, Some(c), plan) => {
+                let from = match plan.and_then(|p| p.git_ref.as_deref()) {
+                    Some(r) if r.starts_with("pull/") => "the pull request".to_string(),
+                    Some(r) => r.to_string(),
+                    None => "the default branch".to_string(),
+                };
+                format!("Makes a git worktree of {} on {name}: a folder of its own, on its own branch from {from}. The checkout stays as it is, so other agents can work there too.", c.path)
+            }
+            (_, _, Some(plan)) => match &plan.git_ref {
+                Some(r) if r.starts_with("pull/") => format!("Clones {} on {name} and checks out the pull request.", plan.repo),
+                Some(r) => format!("Clones {} on {name} at {r}.", plan.repo),
+                None => format!("Clones {} on {name}.", plan.repo),
+            },
+            _ => String::new(),
         };
         let off = machine.filter(|m| !m.workspaces_allowed).map(|m| {
             let id = m.id.clone();
@@ -1826,6 +1925,7 @@ impl Render for NewSessionDialog {
                     this.new_vm = None;
                     this.agent_picked = false;
                     this.list_folders(cx);
+                    this.load_checkouts(&this.engine.current());
                     // Find out what's installed there if we don't know yet.
                     let engine = this.engine.clone();
                     let id = id.clone();
@@ -2081,7 +2181,9 @@ impl Render for NewSessionDialog {
                     "Sessions on {machine_name} run while Muxen is open; they can't keep running in the background there yet."
                 )))
         });
-        let into_workspace = self.in_workspace && self.prefill.workspace.is_some();
+        let place = self.place(&snapshot, cx);
+        let source = self.worktree_source(&snapshot, cx);
+        let into_workspace = place != Place::Folder;
         let can_start = match &self.new_vm {
             Some((_, host)) => host.is_some(),
             None => self.machine.is_some() && (!into_workspace || self.workspaces_allowed(&snapshot)),
@@ -2089,6 +2191,7 @@ impl Render for NewSessionDialog {
         let start_label = match (self.new_vm.is_some(), into_workspace) {
             (true, true) => "Create VM, workspace and start",
             (true, false) => "Create VM and start",
+            (false, true) if place == Place::Worktree => "Create worktree and start",
             (false, true) => "Create workspace and start",
             (false, false) => "Start session",
         };
@@ -2105,11 +2208,11 @@ impl Render for NewSessionDialog {
             Some((_, what)) => d.child(field(&theme, "Runs", div().text_size(px(12.5)).text_color(theme.text_muted).child(what.clone()), None)),
             None => d.child(field(&theme, "Agent", div().flex().flex_col().gap(px(8.)).children(rows), None)),
         })
-        .children(self.prefill.workspace.clone().map(|plan| field(&theme, "Where", self.where_choice(&theme, &plan, cx), None)))
-        .map(|d| match self.prefill.workspace.clone().filter(|_| self.in_workspace) {
-            Some(plan) => d.child(self.workspace_fields(&theme, &plan, machine.as_ref(), cx)),
-            None if self.new_vm.is_some() => d,
-            None => d.child(field(&theme, "Folder", div().flex().flex_col().gap(px(8.)).child(self.cwd.clone()).child(folder_chips).children(self.folder_browser(&theme, cx)), None)),
+        .when(self.prefill.workspace.is_some() || source.is_some(), |d| d.child(field(&theme, "Where", self.where_choice(&theme, place, source.as_ref(), cx), None)))
+        .map(|d| match place {
+            Place::Worktree | Place::Clone => d.child(self.workspace_fields(&theme, place, source.as_ref(), machine.as_ref(), cx)),
+            Place::Folder if self.new_vm.is_some() => d,
+            Place::Folder => d.child(field(&theme, "Folder", div().flex().flex_col().gap(px(8.)).child(self.cwd.clone()).child(folder_chips).children(self.folder_browser(&theme, cx)), None)),
         })
         .when(self.agent != "shell", |d| {
             let prepared = self.prefill.message.clone().map(|m| {

@@ -150,6 +150,8 @@ mod tests {
                 isolation: "host".into(),
                 image: None,
                 container: None,
+                worktree_of: None,
+                git: None,
             },
             background_pids: vec![42],
             windows: false,

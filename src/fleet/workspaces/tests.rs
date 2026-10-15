@@ -171,8 +171,9 @@ async fn demo_flow() {
     let dir = std::env::temp_dir().join(format!("muxen-ws-demo-{}", std::process::id()));
     let engine = Engine::new(Paths::resolve(Some(dir.clone()), None), true);
     engine.run_check(None).await;
-    assert_eq!(engine.workspaces().len(), 3, "demo seeds three workspaces");
+    assert_eq!(engine.workspaces().len(), 4, "demo seeds four workspaces");
     assert!(engine.workspaces().iter().any(|w| w.isolation == "docker" && w.image.as_deref() == Some("node:22")), "one is a container");
+    assert!(engine.workspaces().iter().any(|w| w.worktree_of.as_deref() == Some("/Users/ci/code/ios-app")), "one is a worktree");
     assert!(!dir.join("workspaces.json").exists(), "demo never writes to disk");
 
     let info = engine

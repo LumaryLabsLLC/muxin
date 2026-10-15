@@ -290,6 +290,8 @@ Think of [Amp's Orbs](https://ampcode.com/news/agents-in-orbs), but on your own 
 
 **Host or Docker.** By default commands run directly on the machine. With `isolation: "docker"` (CLI `--docker`), each workspace gets its own fresh container instead, from an image the agent picks (`node:22`, `python:3.13`, `rust:1`, …; default `buildpack-deps:bookworm`). The workspace folder is mounted at `/workspace`, the container runs as the ssh user so files aren't root-owned, and a container that disappears (reboot, `docker system prune`) is recreated on the next command with the files intact. `docker_socket` shares the machine's Docker for docker-in-docker; that's root-equivalent, so only use it when the task needs it. Docker workspaces need Docker on the machine and the ssh user in the `docker` group. They aren't available on Windows machines yet.
 
+**A worktree of a checkout.** When the repository is already checked out on the machine, a workspace can be a git worktree of that checkout instead of a clone (`worktree_of`, CLI `--worktree-of`): its own folder and branch, sharing the checkout's history, so it's ready in a moment and several agents can work on one repository side by side. New sessions offer it too (**Where › New worktree**), and so does handing an issue to an agent when there's a checkout of its repository. Deleting the workspace removes the worktree and keeps its branch; once the branch's pull request is merged, the Workspaces page offers to clean it up. (A worktree's git history lives in the checkout's `.git` folder, so an agent with a sandbox, such as Codex, asks before it commits there.)
+
 The machine can be named, or picked for you: the least-loaded online machine that allows workspaces, optionally matching a platform such as `linux` or `darwin-arm64`. Private GitHub repos are cloned with your `gh` login; the token is passed through the environment for that one command and never written to disk or logs.
 
 Every command an agent runs is recorded with its exit code, duration and the end of its output. You can see that history in the app's Workspaces page, or open a terminal in any workspace with `muxen workspace shell <id>`.
@@ -297,6 +299,7 @@ Every command an agent runs is recorded with its exit code, duration and the end
 ```sh
 muxen ws create --platform linux --repo acme/api --ref main
 muxen ws create --docker --image node:22 --repo acme/web   # an isolated container
+muxen ws create --machine beelink --worktree-of ~/code/api --branch fix-login   # a worktree of a checkout there
 muxen ws exec ws-7f3a2c -- cargo test          # exits with the command's exit code
 muxen ws exec ws-7f3a2c --background -- npm run dev
 muxen ws cat ws-7f3a2c .muxen/logs/1.log
@@ -358,13 +361,16 @@ Start an AI agent on one of your machines and come back to it whenever you like,
 - **A real terminal in the app.** Everything goes to the agent: Esc, Ctrl-C, Tab, arrows, Option/Shift+Enter for newlines. ⌘C copies a selection, ⌘V pastes, the wheel scrolls back. Nerd Font icons (Neovim's file icons, prompt glyphs) show with any terminal font: Muxen brings the symbols. Right-click a machine for a new terminal or agent session.
 - **Names you choose.** Right-click a machine or a session and pick **Rename…** (or ⇧⌘P › Rename on its page). A machine keeps its id, so its runners, sessions and favorites stay with it; `config.toml` gets `id = "<old id>"` when the new name would give a different one. A session's title is kept by the agent on its machine (`~/.muxen/titles.json`), so every Muxen sees it; an empty title goes back to the one it started with.
 - **Your environment.** The agent starts in your login shell, in the folder you pick, so nvm/fnm/asdf and the CLI's own login work as they do in your terminal. Muxen finds which agent CLIs each machine has: `claude`, `codex`, `opencode`, `gemini`, `amp`.
-- **Agents can drive agents.** `session_start`, `session_read` (the screen as text), `session_question` and `session_answer` (what it asks, and an answer), `session_send` (type into it) and `session_stop` are MCP tools and CLI commands too.
+- **What it changed.** Each session shows its branch, the lines and files it changed since the default branch, its commits and uncommitted files, and the branch's pull request with its checks (click it to open it on GitHub). Muxen looks when a session stops working, and at least every minute while sessions run.
+- **Actions.** A session's **Actions** button (or its right-click menu) asks its agent to commit, commit and push, open or update the pull request, review the changes, fix the review comments, resolve conflicts or write a recap. Each one types a prompt into the agent; change any of them in **Settings › Prompts** (`[settings.prompts]` in `config.toml`), where `{branch}`, `{base}` and `{pull}` are filled in.
+- **Agents can drive agents.** `session_start`, `session_read` (the screen as text), `session_question` and `session_answer` (what it asks, and an answer), `session_send` (type into it), `session_action` and `session_stop` are MCP tools and CLI commands too.
 
 ```sh
 muxen session ls                                   # every session, and which agents each machine has
 muxen session start beelink claude --cwd ~/code/api --prompt "fix the failing test"
 muxen session read beelink/claude-3f9a             # what's on its screen
 muxen session send beelink/claude-3f9a "yes"       # type, then Enter (--no-enter to skip it)
+muxen session do beelink/claude-3f9a pull_request  # an action: commit, commit_push, pull_request, review, fix_comments, conflicts, recap
 muxen session question beelink/claude-3f9a         # what it's asking, and the options' keys
 muxen session answer beelink/claude-3f9a 1         # pick one
 muxen session attach beelink/claude-3f9a           # open it in this terminal; detach with Ctrl-] then d

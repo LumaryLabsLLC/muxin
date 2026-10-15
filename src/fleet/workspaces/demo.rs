@@ -91,6 +91,7 @@ pub(super) fn seed(world: &World) -> Vec<WorkspaceRecord> {
     let api_id = "ws-k3p9xa";
     let desk_id = "ws-7d2m4q";
     let web_id = "ws-q8v2rn";
+    let ios_id = "ws-9c4e71";
     let mut api_tree = tree_for(Some("acme/api"), "fix/flaky-e2e");
     api_tree.files.insert(
         "e2e/checkout.spec.ts".into(),
@@ -103,6 +104,7 @@ pub(super) fn seed(world: &World) -> Vec<WorkspaceRecord> {
         files.insert(api_id.into(), api_tree);
         files.insert(desk_id.into(), desk_tree);
         files.insert(web_id.into(), tree_for(Some("acme/web"), "chore/node-22"));
+        files.insert(ios_id.into(), tree_for(Some("acme/ios-app"), "share-sheet"));
     }
 
     let api = WorkspaceInfo {
@@ -151,6 +153,8 @@ pub(super) fn seed(world: &World) -> Vec<WorkspaceRecord> {
         isolation: "host".into(),
         image: None,
         container: None,
+        worktree_of: None,
+        git: None,
     };
     let desk = WorkspaceInfo {
         id: desk_id.into(),
@@ -184,6 +188,8 @@ pub(super) fn seed(world: &World) -> Vec<WorkspaceRecord> {
         isolation: "host".into(),
         image: None,
         container: None,
+        worktree_of: None,
+        git: None,
     };
     let web = WorkspaceInfo {
         id: web_id.into(),
@@ -211,8 +217,40 @@ pub(super) fn seed(world: &World) -> Vec<WorkspaceRecord> {
         isolation: "docker".into(),
         image: Some("node:22".into()),
         container: Some(super::container_name(web_id)),
+        worktree_of: None,
+        git: None,
+    };
+    // A worktree of a checkout on Orbit, its pull request merged (see World::git).
+    let ios = WorkspaceInfo {
+        id: ios_id.into(),
+        name: "ios-app · share-sheet".into(),
+        machine_id: "orbit".into(),
+        machine_name: "Orbit".into(),
+        host: "orbit".into(),
+        platform: "darwin-arm64".into(),
+        path: demo_path("darwin-arm64", ios_id),
+        repo: Some("acme/ios-app".into()),
+        git_ref: None,
+        branch: Some("share-sheet".into()),
+        owner: Some("app".into()),
+        status: "ready".into(),
+        error: None,
+        created_at: now - chrono::Duration::hours(26),
+        last_used_at: now - chrono::Duration::hours(3),
+        commands: 2,
+        history: vec![
+            command("xcodebuild test -scheme App -destination 'platform=iOS Simulator,name=iPhone 17'", 0, 260, 96400, &["** TEST SUCCEEDED **"], "codex"),
+            command("gh pr create --fill", 0, 200, 2100, &["https://github.com/acme/ios-app/pull/77"], "codex"),
+        ],
+        shell: String::new(),
+        isolation: "host".into(),
+        image: None,
+        container: None,
+        worktree_of: Some("/Users/ci/code/ios-app".into()),
+        git: None,
     };
     vec![
+        WorkspaceRecord { info: ios, background_pids: Vec::new(), windows: false, next_log: 1, docker_socket: false },
         WorkspaceRecord { info: api, background_pids: Vec::new(), windows: false, next_log: 1, docker_socket: false },
         WorkspaceRecord { info: desk, background_pids: Vec::new(), windows: false, next_log: 1, docker_socket: false },
         WorkspaceRecord { info: web, background_pids: Vec::new(), windows: false, next_log: 1, docker_socket: false },

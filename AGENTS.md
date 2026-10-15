@@ -63,6 +63,7 @@ Use the MCP tools when they're connected: start the server with `muxen mcp`, and
 A workspace is a persistent folder on one of the user's machines, optionally a git checkout, that you use as your own work environment. It's like a remote dev box: `workspace_exec` runs shell commands there with the machine user's login environment. Ids look like `ws-7f3a2c`.
 
 - **Reuse before you create.** Call `workspace_list` first. Use one workspace per task and keep using it across steps.
+- **A worktree when the repository is already there.** When `local_checkouts` shows a checkout of the repository on the machine, `workspace_create(machine_id, worktree_of: <its folder>, branch)` makes the workspace a git worktree of it: quicker than a clone, on its own branch, so several agents can work on one repository at once. `workspace_destroy` removes the worktree and keeps the branch; `workspace_list` shows each one's `git`, and a `pull` that's `merged` means its work is done.
 - **Destroy when you're done.** Nothing is deleted automatically. Pull or push anything worth keeping first.
 - **A non-zero `exit_code` is a normal result,** not a tool error. Read `stderr`.
 - **Long-running things go in the background.** Use `background: true` for servers and watchers, then read the returned `log_path` with `workspace_read_file`.
@@ -92,13 +93,14 @@ The CLI equivalents are `muxen workspace create|ls|show|exec|cat|write|files|cha
 
 The user runs AI agent CLIs (Claude Code, Codex, OpenCode, Gemini CLI, Amp) or shells in persistent sessions on their machines (held by Muxen's agent there) and watches them in the app. Ids look like `beelink/claude-3f9a`.
 
-- `session_list` shows every session (agent, folder, `status`, `busy` = printed output in the last few seconds) and which agent CLIs each machine has.
+- `session_list` shows every session (agent, folder, `status`, `busy` = printed output in the last few seconds) and which agent CLIs each machine has. Its `git` says what the work in a session's folder changed: `branch`, the files, lines and `commits` since the default branch (`base`), `uncommitted` files, whether it's a `worktree`, and the branch's `pull` request with its `checks`.
+- `session_action(id, action)` asks a session's agent to `commit`, `commit_push`, open or update the `pull_request`, `review` its branch, `fix_comments` (the pull request's review comments), resolve `conflicts`, or write a `recap`, by typing that action's prompt (the user can change them in Settings). Only when the user asked for it.
 - `session_read` returns the screen and recent scrollback as text: use it to see what an agent is doing or asking.
 - `session_question` says what a waiting session asks: the question and its `options`, each with a `key` (and the `selected` one), or, when it's simply done, the end of what it said (`options` empty). `session_answer(id, key)` picks an option: it approves or refuses what that agent asked, so only when the user told you to, and say which option.
 - `session_send` types text and presses Enter. `session_start` starts one (optionally with a `prompt`); `session_stop` ends it. `session_rename` changes its title (the agent on the machine keeps it; an empty title goes back to the original).
 - These are the user's sessions. Start, type into or stop one only when they asked; reading is fine.
 
-The CLI equivalents are `muxen session ls|start|read|question|answer|send|attach|restart|rename|stop`.
+The CLI equivalents are `muxen session ls|start|read|question|answer|send|do|attach|restart|rename|stop`.
 
 ## Usage and cost
 
@@ -112,7 +114,7 @@ The CLI equivalents are `muxen session ls|start|read|question|answer|send|attach
 - `github_repo` gives a repository's open issues, PRs, recent Actions runs, and its checkouts on the user's machines. `github_item` gives an issue or PR in full (description, comments; for PRs also checks and reviews), from its URL or `owner/name#123`.
 - `muxen edit <machine>:<folder>` opens a folder of a machine's in the user's editor here (Zed, Cursor or VS Code, over ssh). It opens a window on the user's screen: only when asked.
 - `local_checkouts` lists git checkouts on the machines (branch, ahead/behind, uncommitted files). `git_sync` runs fetch, pull (fast-forward only) or push in one; only when asked.
-- To work on an issue: find a checkout with `local_checkouts`, or create a workspace with the repo (`workspace_create(repo, branch: "issue-123-short-name")`; for a pull request `ref: "pull/123/head"` checks out its code, forks included). Then `session_start` an agent in that folder with the issue's URL and text as the prompt, or work there yourself with `workspace_exec`.
+- To work on an issue: find a checkout with `local_checkouts` and make a worktree of it (`workspace_create(machine_id, worktree_of: <its folder>, branch: "issue-123-short-name")`), or create a workspace with a clone of the repo (`workspace_create(repo, branch: ...)`; for a pull request `ref: "pull/123/head"` checks out its code, forks included). Then `session_start` an agent in that folder with the issue's URL and text as the prompt, or work there yourself with `workspace_exec`.
 - Before an agent commits or pushes on a machine, `git_status(machine_id)` says whether that works (`can_commit`, `push`). `git_setup` fixes it (identity from the user's GitHub account, credentials through the machine's GitHub CLI); only when asked, since it changes the machine's global git config.
 - `github_accounts` also says which permissions the login has (`scopes`), the user's organizations (`orgs`), and `grant_command` when watching organizations needs more: pass that to the user verbatim.
 

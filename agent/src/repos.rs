@@ -72,39 +72,115 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// One checkout's state.
-fn describe(dir: &Path) -> Value {
-    let status = git(dir, &["status", "--porcelain=v2", "--branch"]).unwrap_or_default();
-    let mut branch = String::new();
-    let mut upstream = None;
-    let (mut ahead, mut behind, mut dirty) = (0i64, 0i64, 0u32);
-    for line in status.lines() {
+/// A checkout's branch and where it stands, from `git status`.
+#[derive(Default)]
+struct Status {
+    branch: String,
+    upstream: Option<String>,
+    ahead: i64,
+    behind: i64,
+    /// Files with uncommitted changes, untracked ones included.
+    dirty: u32,
+    untracked: u32,
+}
+
+fn status(dir: &Path) -> Status {
+    let text = git(dir, &["status", "--porcelain=v2", "--branch"]).unwrap_or_default();
+    let mut s = Status::default();
+    for line in text.lines() {
         if let Some(v) = line.strip_prefix("# branch.head ") {
-            branch = v.to_string();
+            s.branch = v.to_string();
         } else if let Some(v) = line.strip_prefix("# branch.upstream ") {
-            upstream = Some(v.to_string());
+            s.upstream = Some(v.to_string());
         } else if let Some(v) = line.strip_prefix("# branch.ab ") {
             let mut parts = v.split(' ');
-            ahead = parts.next().and_then(|a| a.trim_start_matches('+').parse().ok()).unwrap_or(0);
-            behind = parts.next().and_then(|b| b.trim_start_matches('-').parse().ok()).unwrap_or(0);
+            s.ahead = parts.next().and_then(|a| a.trim_start_matches('+').parse().ok()).unwrap_or(0);
+            s.behind = parts.next().and_then(|b| b.trim_start_matches('-').parse().ok()).unwrap_or(0);
         } else if !line.starts_with('#') && !line.is_empty() {
-            dirty += 1;
+            s.dirty += 1;
+            if line.starts_with("? ") {
+                s.untracked += 1;
+            }
         }
     }
-    let remote = git(dir, &["config", "--get", "remote.origin.url"]).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    s
+}
+
+fn origin(dir: &Path) -> Option<String> {
+    git(dir, &["config", "--get", "remote.origin.url"]).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// One checkout's state.
+fn describe(dir: &Path) -> Value {
+    let s = status(dir);
     let last = git(dir, &["log", "-1", "--format=%ct%x09%s"]).unwrap_or_default();
     let (when, subject) = last.trim().split_once('\t').unwrap_or(("", ""));
     json!({
         "path": dir.display().to_string(),
-        "remote": remote,
-        "branch": branch,
-        "upstream": upstream,
-        "ahead": ahead,
-        "behind": behind,
-        "dirty": dirty,
+        "remote": origin(dir),
+        "branch": s.branch,
+        "upstream": s.upstream,
+        "ahead": s.ahead,
+        "behind": s.behind,
+        "dirty": s.dirty,
         "last_commit": when.parse::<i64>().ok(),
         "subject": subject,
     })
+}
+
+/// What the work in a folder changed, for a session there: its checkout's
+/// branch, and the files, lines and commits since it left the default branch
+/// (`origin/HEAD`), uncommitted changes included. `{"git": false}` outside one.
+pub fn info(path: &str) -> Value {
+    let dir = expand(path);
+    let Some(root) = git(&dir, &["rev-parse", "--show-toplevel"]).map(|r| r.trim().to_string()) else {
+        return json!({ "path": path, "git": false });
+    };
+    let s = status(&dir);
+    let base = git(&dir, &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+        .map(|b| b.trim().to_string())
+        .or_else(|| ["origin/main", "origin/master"].iter().find(|b| git(&dir, &["rev-parse", "--verify", "--quiet", b]).is_some()).map(|b| b.to_string()));
+    let fork = base.as_deref().and_then(|b| git(&dir, &["merge-base", "HEAD", b])).map(|m| m.trim().to_string());
+    let (mut files, mut added, mut removed, mut commits) = (0u64, 0u64, 0u64, 0u64);
+    if let Some(m) = &fork {
+        (files, added, removed) = shortstat(&git(&dir, &["diff", "--shortstat", m]).unwrap_or_default());
+        commits = git(&dir, &["rev-list", "--count", &format!("{m}..HEAD")]).and_then(|c| c.trim().parse().ok()).unwrap_or(0);
+    }
+    json!({
+        "path": path,
+        "git": true,
+        "root": root,
+        "remote": origin(&dir),
+        "branch": s.branch,
+        "upstream": s.upstream,
+        "ahead": s.ahead,
+        "behind": s.behind,
+        "dirty": s.dirty,
+        "untracked": s.untracked,
+        "base": base,
+        "files": files + s.untracked as u64,
+        "added": added,
+        "removed": removed,
+        "commits": commits,
+        // A worktree's .git is a file pointing back to the checkout it came from.
+        "worktree": Path::new(&root).join(".git").is_file(),
+    })
+}
+
+/// " 3 files changed, 120 insertions(+), 40 deletions(-)" -> (3, 120, 40).
+fn shortstat(text: &str) -> (u64, u64, u64) {
+    let mut out = (0, 0, 0);
+    for part in text.split(',') {
+        let mut words = part.split_whitespace();
+        let (Some(n), Some(what)) = (words.next().and_then(|n| n.parse().ok()), words.next()) else { continue };
+        match what {
+            w if w.starts_with("file") => out.0 = n,
+            w if w.starts_with("insertion") => out.1 = n,
+            w if w.starts_with("deletion") => out.2 = n,
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Every checkout under `roots` (each "dir" or "dir:depth"), described.
@@ -184,4 +260,55 @@ pub fn gh_status(path_dirs: &[String]) -> Value {
         rest.split_whitespace().next().map(str::to_string)
     });
     json!({ "installed": true, "path": gh.display().to_string(), "logged_in": ok && account.is_some(), "account": account })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_shortstat() {
+        assert_eq!(shortstat(" 3 files changed, 120 insertions(+), 40 deletions(-)\n"), (3, 120, 40));
+        assert_eq!(shortstat(" 1 file changed, 1 insertion(+)\n"), (1, 1, 0));
+        assert_eq!(shortstat(" 2 files changed, 7 deletions(-)\n"), (2, 0, 7));
+        assert_eq!(shortstat(""), (0, 0, 0));
+    }
+
+    /// A clone of a repository with two commits, then a branch with work on it.
+    #[test]
+    fn info_counts_what_a_branch_changed_since_the_default_branch() {
+        let tmp = std::env::temp_dir().join(format!("muxen-repos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (origin, work) = (tmp.join("origin"), tmp.join("work"));
+        std::fs::create_dir_all(&origin).unwrap();
+        let run = |dir: &Path, args: &[&str]| {
+            let ok = Command::new("git").arg("-C").arg(dir).args(args).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t").output().unwrap();
+            assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
+        };
+        run(&origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("a.txt"), "one\ntwo\n").unwrap();
+        run(&origin, &["add", "."]);
+        run(&origin, &["commit", "-q", "-m", "first"]);
+        run(&tmp, &["clone", "-q", origin.to_str().unwrap(), "work"]);
+        run(&work, &["checkout", "-q", "-b", "fix"]);
+        std::fs::write(work.join("a.txt"), "one\n2\nthree\n").unwrap();
+        run(&work, &["commit", "-q", "-am", "change"]);
+        std::fs::write(work.join("new.txt"), "x\n").unwrap();
+
+        let v = info(work.to_str().unwrap());
+        assert_eq!(v["git"], true);
+        assert_eq!(v["branch"], "fix");
+        assert_eq!(v["base"], "origin/main");
+        assert_eq!((v["commits"].as_u64(), v["added"].as_u64(), v["removed"].as_u64()), (Some(1), Some(2), Some(1)));
+        // a.txt changed, new.txt is new.
+        assert_eq!((v["files"].as_u64(), v["untracked"].as_u64(), v["dirty"].as_u64()), (Some(2), Some(1), Some(1)));
+        assert_eq!(v["worktree"], false);
+
+        run(&work, &["worktree", "add", "-q", "-b", "other", tmp.join("wt").to_str().unwrap(), "origin/main"]);
+        let wt = info(tmp.join("wt").to_str().unwrap());
+        assert_eq!((wt["branch"].as_str(), wt["worktree"].as_bool(), wt["files"].as_u64()), (Some("other"), Some(true), Some(0)));
+
+        assert_eq!(info(tmp.to_str().unwrap())["git"], false);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

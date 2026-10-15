@@ -320,7 +320,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "update_settings" => ok(api::update_settings(engine, args(a)?)?),
         "list_ssh_hosts" => ok(api::ssh_hosts(engine).await),
         "workspace_create" => ok(api::workspace_create(engine, args(a)?, &session.owner(), Surface::Mcp).await?),
-        "workspace_list" => ok(api::workspaces_list(engine)),
+        "workspace_list" => ok(api::workspaces_list(engine).await),
         "workspace_get" => ok(api::workspace_get(engine, args(a)?, Surface::Mcp)?),
         "workspace_exec" => ok(api::workspace_exec(engine, args(a)?, &session.owner(), Surface::Mcp).await?),
         "workspace_read_file" => ok(api::workspace_read_file(engine, args(a)?, Surface::Mcp).await?),
@@ -333,6 +333,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "session_list" => ok(api::sessions_list(engine, args(a)?).await?),
         "session_start" => ok(api::session_start(engine, args(a)?).await?),
         "session_send" => ok(api::session_send(engine, args(a)?).await?),
+        "session_action" => ok(api::session_action(engine, args(a)?).await?),
         "session_question" => ok(api::session_question(engine, args(a)?).await?),
         "session_answer" => ok(api::session_answer(engine, args(a)?).await?),
         "session_read" => ok(api::session_read(engine, args(a)?).await?),
@@ -702,7 +703,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "workspace_create",
-            "description": "Check out one of the user's own machines as your work environment, like a remote dev box: creates a persistent folder there (optionally cloning a git repo at a ref, or creating a new branch) and returns a workspace_id for the other workspace_* tools. Omit machine_id to get the least-loaded online machine that allows workspaces, filtered by `platform` (e.g. \"linux\" to run tests on Linux). Use one workspace per task and reuse it across steps. Nothing is deleted automatically: call workspace_destroy when done. Private GitHub repos are cloned with the user's gh login.",
+            "description": "Check out one of the user's own machines as your work environment, like a remote dev box: creates a persistent folder there (optionally cloning a git repo at a ref, or creating a new branch) and returns a workspace_id for the other workspace_* tools. Omit machine_id to get the least-loaded online machine that allows workspaces, filtered by `platform` (e.g. \"linux\" to run tests on Linux). Use one workspace per task and reuse it across steps. Nothing is deleted automatically: call workspace_destroy when done. Private GitHub repos are cloned with the user's gh login. To work on a repository that's already checked out on a machine (local_checkouts), pass its folder as `worktree_of`: the workspace is then a git worktree of it on its own branch, quicker than a clone, and several agents can work on that repository side by side; workspace_destroy removes the worktree and keeps the branch.",
             "inputSchema": schema(json!({
                 "machine_id": { "type": "string", "description": "Machine to use; omit to let Muxen pick." },
                 "platform": { "type": "string", "description": "When picking: platform prefix such as \"linux\", \"linux-x64\", \"darwin-arm64\", \"windows\"." },
@@ -712,13 +713,14 @@ pub fn tools() -> Vec<Value> {
                 "branch": { "type": "string", "description": "New branch to create and switch to after checkout." },
                 "isolation": { "type": "string", "enum": ["host", "docker"], "description": "\"host\" (default): commands run directly on the machine with its tools and login environment. \"docker\": a fresh, isolated container per workspace (folder mounted at /workspace); pick the toolchain with `image`. Prefer docker for untrusted code or when you need a clean environment." },
                 "image": { "type": "string", "description": "Docker image for isolation \"docker\", e.g. \"node:22\", \"python:3.13\", \"rust:1\", \"golang:1.25\". Defaults to buildpack-deps:bookworm. Choose an image that already has your tools: the container runs as the ssh user, so apt-get install won't work." },
-                "docker_socket": { "type": "boolean", "description": "Share the machine's Docker socket with the container (docker-in-docker). Root-equivalent on that machine; only when the task needs Docker." }
+                "docker_socket": { "type": "boolean", "description": "Share the machine's Docker socket with the container (docker-in-docker). Root-equivalent on that machine; only when the task needs Docker." },
+                "worktree_of": { "type": "string", "description": "A git checkout's folder on machine_id (from local_checkouts): make the workspace a git worktree of it instead of cloning `repo`. It starts from `ref` (else the default branch) on `branch` (a new one; else named after the workspace). Not with isolation \"docker\"." }
             }), &[]),
             "annotations": annotations("Create workspace", false, false, false, true),
         }),
         json!({
             "name": "workspace_list",
-            "description": "All workspaces (yours and other agents'): machine, folder, repo/ref, owner, status, last command, and which machines can take new workspaces. Check here before creating a new one; reuse a ready workspace for the same task.",
+            "description": "All workspaces (yours and other agents'): machine, folder, repo/ref, owner, status, last command, git (branch, changes, pull request: a merged one means a worktree's work is done), and which machines can take new workspaces. Check here before creating a new one; reuse a ready workspace for the same task.",
             "inputSchema": schema(json!({}), &[]),
             "annotations": annotations("List workspaces", true, false, true, false),
         }),
@@ -843,6 +845,15 @@ pub fn tools() -> Vec<Value> {
                 "enter": { "type": "boolean", "description": "Press Enter afterwards. Default true." }
             }), &["session_id", "text"]),
             "annotations": annotations("Type into session", false, false, false, false),
+        }),
+        json!({
+            "name": "session_action",
+            "description": "Ask a session's agent to do one of Muxen's session actions, by typing that action's prompt (the user may have changed it in Settings) into it: commit (commit its changes, don't push), commit_push, pull_request (push and open or update the branch's pull request), review (review the branch against the default branch, no code changes), fix_comments (address the pull request's review comments), conflicts (bring the branch up to date and resolve conflicts) or recap (summarize the session). session_list's `git` says which fit: a branch, a pull request. Only when the user asked for it.",
+            "inputSchema": schema(json!({
+                "session_id": { "type": "string", "description": SESSION_ID },
+                "action": { "type": "string", "enum": ["commit", "commit_push", "pull_request", "review", "fix_comments", "conflicts", "recap"], "description": "Which action." }
+            }), &["session_id", "action"]),
+            "annotations": annotations("Ask a session's agent", false, false, false, false),
         }),
         json!({
             "name": "session_question",
@@ -1203,7 +1214,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 88);
+        assert_eq!(tools.len(), 89);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

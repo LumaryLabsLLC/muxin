@@ -15,6 +15,8 @@ pub enum MenuTarget {
     /// A queued or running job, by GitHub id.
     Job(u64),
     Session(String),
+    /// The things to ask a session's agent (commit, open a pull request, ...).
+    SessionActions(String),
     /// A GitHub repository, "owner/name".
     Repo(String),
     /// An issue or pull request.
@@ -81,6 +83,10 @@ enum Action {
     AddAccount,
     RenameMachine(String),
     RenameSession(String),
+    /// One of the session actions (sessions::actions), for a session.
+    SessionAction(String, &'static str),
+    /// Settings, where the actions' prompts are.
+    EditPrompts,
     AddDisplay(String),
     ShowDisplay(String, String),
     RenameDisplay(String, String),
@@ -106,6 +112,22 @@ enum Glyph {
     /// The one picked (a plain check).
     Selected,
     None,
+}
+
+/// The things to ask a session's agent: the ones that fit its branch, the
+/// others dimmed, then where to change their prompts.
+fn session_actions(x: &crate::fleet::sessions::SessionInfo) -> Vec<Item> {
+    use crate::fleet::sessions::actions::ACTIONS;
+    let mut items: Vec<Item> = ACTIONS
+        .iter()
+        .map(|a| match a.fits(x.git.as_ref()) {
+            true => Item::Action { label: a.label_for(x.git.as_ref()), glyph: Glyph::Icon(a.icon), action: Action::SessionAction(x.id.clone(), a.id), danger: false },
+            false => Item::Off { label: a.label.to_string(), glyph: Glyph::Icon(a.icon) },
+        })
+        .collect();
+    items.push(Item::Separator);
+    items.push(Item::Action { label: "Edit the prompts…".into(), glyph: Glyph::Icon("pencil"), action: Action::EditPrompts, danger: false });
+    items
 }
 
 /// One item per editor here ("Zed", or "Open in Zed" when `long`), each with its app's icon.
@@ -282,9 +304,19 @@ impl Root {
                 items.push(Item::Action { label: "Cancel run…".into(), glyph: Glyph::Icon("circle-x"), action: Action::CancelRun(*id), danger: true });
                 items
             }
+            MenuTarget::SessionActions(id) => {
+                let Some(x) = s.sessions.iter().find(|x| &x.id == id) else { return Vec::new() };
+                session_actions(x)
+            }
             MenuTarget::Session(id) => {
                 let Some(x) = s.sessions.iter().find(|x| &x.id == id) else { return Vec::new() };
-                let mut items = vec![act("Rename…", "pencil", Action::RenameSession(id.clone()))];
+                let mut items = Vec::new();
+                if x.agent != "shell" && !x.agent.is_empty() && x.status == "running" {
+                    items.push(Item::Note("Ask the agent".into()));
+                    items.extend(session_actions(x));
+                    items.push(Item::Separator);
+                }
+                items.push(act("Rename…", "pencil", Action::RenameSession(id.clone())));
                 if x.persistent {
                     items.push(act("Copy attach command", "copy", Action::CopyAttach(id.clone())));
                 }
@@ -442,6 +474,8 @@ impl Root {
             Action::SetDisplay(machine, display, size, scale) => self.set_display(machine, display, size, scale, window, cx),
             Action::RenameMachine(id) => self.show_rename(super::dialogs::RenameTarget::Machine(id), window, cx),
             Action::RenameSession(id) => self.show_rename(super::dialogs::RenameTarget::Session(id), window, cx),
+            Action::SessionAction(id, action) => self.run_session_action(&id, action, cx),
+            Action::EditPrompts => self.open_settings_tab(super::settings::SettingsTab::Prompts, window, cx),
             Action::CloudPower(id, on) => self.cloud_power(&id, on, cx),
             Action::MachinePower(id, on) => self.machine_power(&id, on, cx),
             Action::NewVm(id) => self.show_vm_dialog(Some(id), window, cx),

@@ -43,6 +43,7 @@ const FILES_PS1: &str = include_str!("scripts/files.ps1");
 const CHANGES_SH: &str = include_str!("scripts/changes.sh");
 const CREATE_SH: &str = include_str!("scripts/create.sh");
 const DESTROY_SH: &str = include_str!("scripts/destroy.sh");
+const WORKTREE_SH: &str = include_str!("scripts/worktree.sh");
 const OTHER_PS1: &str = include_str!("scripts/other.ps1");
 const DOCKER_SH: &str = include_str!("scripts/docker.sh");
 const EXEC_DOCKER_SH: &str = include_str!("scripts/exec_docker.sh");
@@ -93,6 +94,11 @@ pub struct CreateWorkspace {
     pub branch: Option<String>,
     /// Who is creating it ("claude-code", "cli", "app", ...).
     pub owner: Option<String>,
+    /// A git checkout on the machine (its folder): the workspace is a git
+    /// worktree of it, on `branch` (from `git_ref`, else the default branch),
+    /// instead of a fresh clone. Several agents can then work on one
+    /// repository there at once. Needs `machine`; not with docker.
+    pub worktree_of: Option<String>,
 }
 
 /// How a workspace's commands run. Separate from `CreateWorkspace` so existing
@@ -202,8 +208,24 @@ impl Engine {
         }
         let settings = self.settings();
         let gh_host = github_web_host(&settings.github.api_url);
-        let repo = clean_opt(req.repo).map(|r| normalize_repo(&r, &gh_host)).transpose()?;
-        if repo.is_none() && (git_ref.is_some() || branch.is_some()) {
+        let worktree_of = clean_opt(req.worktree_of);
+        if let Some(src) = &worktree_of {
+            if docker {
+                return Err("A worktree runs on the machine itself, not in a container: leave out isolation \"docker\".".into());
+            }
+            if clean_opt(req.machine.clone()).is_none() {
+                return Err(format!("Say which machine {src} is on (machine)."));
+            }
+            if src.chars().any(char::is_control) {
+                return Err("That checkout's folder has odd characters.".into());
+            }
+        }
+        // A worktree's repository is the checkout's; nothing is cloned.
+        let repo = match &worktree_of {
+            Some(_) => None,
+            None => clean_opt(req.repo.clone()).map(|r| normalize_repo(&r, &gh_host)).transpose()?,
+        };
+        if repo.is_none() && worktree_of.is_none() && (git_ref.is_some() || branch.is_some()) {
             return Err("gitRef and branch need a repo to clone.".into());
         }
 
@@ -244,6 +266,10 @@ impl Engine {
             return Err(format!("Docker workspaces aren't supported on Windows machines yet ({}). Use isolation \"host\" there.", spec.name));
         }
         let machine = self.current().machines.iter().find(|m| m.id == spec.id).cloned();
+        // A worktree's repository is its checkout's: look at the machine's checkouts if that's not been done.
+        if worktree_of.is_some() && self.checkouts_of(&spec.id).is_empty() {
+            let _ = self.refresh_checkouts(&spec.id).await;
+        }
 
         let id = self.unused_workspace_id();
         let root = spec.workspace_root.clone().filter(|r| !r.trim().is_empty()).unwrap_or_else(|| {
@@ -259,9 +285,16 @@ impl Engine {
             host: spec.host.trim().to_string(),
             platform: machine.as_ref().map(|m| m.platform.clone()).unwrap_or_default(),
             path: format!("{}{sep}{id}", root.trim_end_matches(['/', '\\'])),
-            repo: repo.as_ref().map(|r| r.shown.clone()),
+            repo: match &worktree_of {
+                Some(src) => self.checkouts_of(&spec.id).into_iter().find(|c| same_folder(&c.path, src)).and_then(|c| c.repo).or_else(|| clean_opt(req.repo.clone())),
+                None => repo.as_ref().map(|r| r.shown.clone()),
+            },
             git_ref: git_ref.clone(),
-            branch: branch.clone(),
+            // A worktree works on a branch of its own: the one asked for, else one named after it.
+            branch: match (&worktree_of, &branch, &git_ref) {
+                (Some(_), None, None) => Some(id.clone()),
+                _ => branch.clone(),
+            },
             owner: clean_opt(req.owner),
             status: "creating".into(),
             error: None,
@@ -273,6 +306,8 @@ impl Engine {
             isolation: if docker { "docker" } else { "host" }.into(),
             image: image.clone(),
             container: docker.then(|| container_name(&id)),
+            worktree_of: worktree_of.clone(),
+            git: None,
         };
         let record = WorkspaceRecord { info, background_pids: Vec::new(), windows, next_log: 1, docker_socket: docker && iso.docker_socket };
         self.update_workspaces(|list| list.push(record.clone()))?;
@@ -725,7 +760,23 @@ impl Engine {
                 ("OR_BRANCH", Param::Str(&branch)),
                 ("OR_AUTH", Param::Str(&auth_s)),
             ];
-            let script = if rec.windows {
+            let worktree_of = rec.info.worktree_of.clone().unwrap_or_default();
+            let script = if !worktree_of.is_empty() {
+                // A worktree of a checkout there: nothing to clone.
+                let mut params = vec![
+                    ("OR_ROOT", Param::Str(root)),
+                    ("OR_ID", Param::Str(&rec.info.id)),
+                    ("OR_SRC", Param::Str(&worktree_of)),
+                    ("OR_REF", Param::Str(&git_ref)),
+                    ("OR_BRANCH", Param::Str(&branch)),
+                ];
+                if rec.windows {
+                    params.insert(0, ("OR_ACTION", Param::Str("worktree")));
+                    with_params(Shell::Powershell, &params, OTHER_PS1)
+                } else {
+                    with_params(Shell::Sh, &params, WORKTREE_SH)
+                }
+            } else if rec.windows {
                 params.insert(0, ("OR_ACTION", Param::Str("create")));
                 with_params(Shell::Powershell, &params, OTHER_PS1)
             } else {
@@ -877,6 +928,7 @@ impl Engine {
                     ("OR_ID", Param::Str(&rec.info.id)),
                     ("OR_PIDS", Param::Str(&pids)),
                     ("OR_KEEP", Param::Bool(keep)),
+                    ("OR_SRC", Param::Str(rec.info.worktree_of.as_deref().unwrap_or_default())),
                 ],
                 OTHER_PS1,
             )
@@ -892,6 +944,7 @@ impl Engine {
                     ("OR_KEEP", Param::Bool(keep)),
                     ("OR_CONTAINER", Param::Str(&container)),
                     ("OR_IMAGE", Param::Str(&image)),
+                    ("OR_SRC", Param::Str(rec.info.worktree_of.as_deref().unwrap_or_default())),
                 ],
                 &format!("{LIB_SH}\n{DESTROY_SH}"),
             )
@@ -1316,6 +1369,17 @@ fn validate_image(image: &str) -> Result<String, String> {
 
 /// The create script: make the folder (and clone) on the host, then, for docker
 /// workspaces, check docker first and start the container last.
+/// The same folder, however it's written: "~/code/api" is "/home/me/code/api/".
+pub(crate) fn same_folder(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim_end_matches(['/', '\\']), b.trim_end_matches(['/', '\\']));
+    let home_relative = |short: &str, full: &str| {
+        let Some(rest) = short.strip_prefix('~').filter(|r| r.starts_with(['/', '\\'])) else { return false };
+        // What's before the rest is a home folder: /home/me, /Users/me, /root, C:\Users\me.
+        full.strip_suffix(rest).is_some_and(|home| !home.is_empty() && home.matches(['/', '\\']).count() <= 2)
+    };
+    a == b || home_relative(a, b) || home_relative(b, a)
+}
+
 fn create_script(docker: bool) -> String {
     if docker {
         format!(

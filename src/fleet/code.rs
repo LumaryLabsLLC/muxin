@@ -19,8 +19,13 @@ impl Engine {
     /// Finds the git checkouts on a machine (through its agent) and publishes them.
     pub async fn refresh_checkouts(self: &Arc<Self>, machine_id: &str) -> Result<Vec<Checkout>, String> {
         let (spec, probe) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
-        if self.demo_world().is_some() {
-            return Ok(self.checkouts_of(&spec.id));
+        if let Some(world) = self.demo_world() {
+            let mut found = self.checkouts_of(&spec.id);
+            if found.is_empty() {
+                found = world.checkouts(&spec.id);
+                self.set_checkouts(&spec.id, found.clone());
+            }
+            return Ok(found);
         }
         if !spec.is_checkable() {
             return Ok(Vec::new());

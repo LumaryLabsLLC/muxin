@@ -540,6 +540,10 @@ pub struct Settings {
     pub editor: String,
     /// Cloud machines: how Muxen signs in, what new ones come with, what happens when they sit idle.
     pub cloud: CloudSettings,
+    /// Session actions' prompts the user changed, by action ("commit", "review", ...;
+    /// see fleet::sessions::actions). The others use Muxen's own.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub prompts: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -605,6 +609,7 @@ impl Default for Settings {
             share_clipboard: true,
             editor: String::new(),
             cloud: CloudSettings::default(),
+            prompts: Default::default(),
         }
     }
 }

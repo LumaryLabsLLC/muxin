@@ -772,6 +772,7 @@ impl World {
             last_output_at: Some(now - chrono::Duration::seconds(if busy { 1 } else { 140 })),
             attach_command: format!("ssh -t {machine_id} ~/.muxen/bin/muxen-agent attach {name}"),
             persistent: true,
+            git: None,
         };
         let (agents, sessions): (Vec<&str>, Vec<SessionInfo>) = match machine_id {
             "forge" => (
@@ -802,6 +803,89 @@ impl World {
         }
     }
 
+    /// Git checkouts on the machines, where the sessions work and next to them.
+    pub fn checkouts(&self, machine_id: &str) -> Vec<crate::fleet::model::Checkout> {
+        let checkout = |path: &str, repo: &str, branch: &str, dirty: u32, subject: &str, mins: i64| crate::fleet::model::Checkout {
+            machine_id: machine_id.into(),
+            path: path.into(),
+            repo: Some(repo.into()),
+            remote: Some(format!("git@github.com:{repo}.git")),
+            branch: branch.into(),
+            upstream: Some(format!("origin/{branch}")),
+            ahead: 0,
+            behind: 0,
+            dirty,
+            last_commit_at: Some(Utc::now() - chrono::Duration::minutes(mins)),
+            last_commit: subject.into(),
+        };
+        match machine_id {
+            "forge" => vec![
+                checkout("/Users/ci/code/checkout", "acme/shop", "fix-coupon-total", 1, "Apply coupons before tax", 40),
+                checkout("/Users/ci/code/web", "acme/web", "main", 0, "Faster product pages", 300),
+            ],
+            "orbit" => vec![checkout("/Users/ci/code/ios-app", "acme/ios-app", "main", 0, "Offline mode, first cut", 120)],
+            "beacon" => vec![checkout("/home/ci/api", "acme/api", "rate-limits", 0, "Rate limits per API key", 25)],
+            _ => Vec::new(),
+        }
+    }
+
+    /// What the seeded sessions' work changed: a pull request with checks
+    /// still running, a worktree with no pull request yet, one failing a check.
+    pub fn git(&self, machine_id: &str, folders: &[String]) -> Vec<(String, crate::fleet::sessions::git::GitStatus)> {
+        use crate::fleet::sessions::git::GitStatus;
+        use crate::github::hub::{BranchPull, Checks};
+        let pull = |number: u64, title: &str, repo: &str, checks: Checks| BranchPull {
+            number,
+            title: title.into(),
+            state: "open".into(),
+            url: format!("https://github.com/{repo}/pull/{number}"),
+            checks,
+        };
+        let status = |branch: &str, repo: &str, (files, added, removed, commits, uncommitted): (u32, u32, u32, u32, u32), worktree: bool, pull: Option<BranchPull>| GitStatus {
+            root: String::new(),
+            branch: branch.into(),
+            base: Some("origin/main".into()),
+            ahead: commits as i64,
+            behind: 0,
+            uncommitted,
+            files,
+            added,
+            removed,
+            commits,
+            worktree,
+            repo: Some(repo.into()),
+            pull,
+        };
+        folders
+            .iter()
+            .filter_map(|f| {
+                let s = match (machine_id, f.as_str()) {
+                    ("forge", "/Users/ci/code/checkout") => status(
+                        "fix-coupon-total",
+                        "acme/shop",
+                        (4, 86, 23, 2, 1),
+                        false,
+                        Some(pull(142, "Fix the checkout total when a coupon is applied", "acme/shop", Checks { total: 6, passed: 5, pending: 1, ..Default::default() })),
+                    ),
+                    ("orbit", "/Users/ci/code/ios-app") => status("offline-mode", "acme/ios-app", (7, 312, 45, 3, 0), true, None),
+                    ("orbit", "/Users/ci/muxen/workspaces/ws-9c4e71") => GitStatus {
+                        pull: Some(BranchPull { state: "merged".into(), ..pull(77, "Share a list from the share sheet", "acme/ios-app", Checks { total: 3, passed: 3, ..Default::default() }) }),
+                        ..status("share-sheet", "acme/ios-app", (6, 204, 31, 3, 0), true, None)
+                    },
+                    ("beacon", "/home/ci/api") => status(
+                        "rate-limits",
+                        "acme/api",
+                        (5, 140, 12, 4, 0),
+                        false,
+                        Some(pull(318, "Rate limits for the public API", "acme/api", Checks { total: 4, passed: 3, failed: 1, failing: vec!["lint".into()], ..Default::default() })),
+                    ),
+                    _ => return None,
+                };
+                Some((f.clone(), s))
+            })
+            .collect()
+    }
+
     pub fn start_session(&self, spec: &MachineSpec, kind: &AgentKind, name: &str, cwd: &str, title: &str) -> SessionInfo {
         SessionInfo {
             id: format!("{}/{name}", spec.id),
@@ -820,6 +904,7 @@ impl World {
             last_output_at: Some(Utc::now()),
             attach_command: format!("ssh -t {} ~/.muxen/bin/muxen-agent attach {name}", spec.host),
             persistent: true,
+            git: None,
         }
     }
 

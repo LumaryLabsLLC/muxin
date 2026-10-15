@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use gpui::{AnyElement, App, Context, Entity, Focusable, SharedString, Subscription, Task, Window, div, prelude::*, px};
 
 mod cloud;
+mod prompts;
 mod shell;
 
 pub(super) use cloud::regular_size;
@@ -27,11 +28,12 @@ pub enum SettingsTab {
     Terminal,
     GitHub,
     Cloud,
+    Prompts,
     Keyboard,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 6] = [SettingsTab::General, SettingsTab::Appearance, SettingsTab::Terminal, SettingsTab::GitHub, SettingsTab::Cloud, SettingsTab::Keyboard];
+    const ALL: [SettingsTab; 7] = [SettingsTab::General, SettingsTab::Appearance, SettingsTab::Terminal, SettingsTab::GitHub, SettingsTab::Cloud, SettingsTab::Prompts, SettingsTab::Keyboard];
 
     fn label(self) -> &'static str {
         match self {
@@ -40,6 +42,7 @@ impl SettingsTab {
             SettingsTab::Terminal => "Terminal",
             SettingsTab::GitHub => "GitHub",
             SettingsTab::Cloud => "Cloud",
+            SettingsTab::Prompts => "Prompts",
             SettingsTab::Keyboard => "Keyboard",
         }
     }
@@ -51,6 +54,7 @@ impl SettingsTab {
             SettingsTab::Terminal => "terminal",
             SettingsTab::GitHub => "agent-github",
             SettingsTab::Cloud => "cloud",
+            SettingsTab::Prompts => "message-square",
             SettingsTab::Keyboard => "keyboard",
         }
     }
@@ -80,6 +84,8 @@ pub struct SettingsPage {
     catch_keys: Option<Subscription>,
     /// What the last change did ("Removed from Jobs"), or why it didn't happen.
     shortcut_note: Option<String>,
+    /// The session action prompt being changed (see prompts.rs).
+    prompt_edit: Option<prompts::PromptEdit>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -146,6 +152,7 @@ impl SettingsPage {
             recording: None,
             catch_keys: None,
             shortcut_note: None,
+            prompt_edit: None,
             _tasks: vec![updates],
             _subscriptions: subs,
         };
@@ -1014,6 +1021,7 @@ impl Render for SettingsPage {
             SettingsTab::Terminal => body.child(self.terminal_section(&theme, super::terminal::font_family(window), super::terminal::monospace_families(window), cx)),
             SettingsTab::GitHub => body.child(self.github_section(&theme, cx)).child(self.checks_section(&theme, true, cx)),
             SettingsTab::Cloud => body.child(self.cloud_usage_section(&theme, cx)).child(self.cloud_section(&theme, cx)),
+            SettingsTab::Prompts => body.child(self.prompts_section(&theme, cx)),
             SettingsTab::Keyboard => body.child(self.keyboard_section(&theme, cx)),
         };
         div()

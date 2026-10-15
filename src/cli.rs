@@ -434,13 +434,14 @@ pub fn workspaces(r: &WorkspacesResponse) -> String {
                     Some(at) => format!("{r}@{at}"),
                     None => r,
                 }).unwrap_or_else(|| "—".into()),
+                w.git.as_ref().map(|g| g.short()).unwrap_or_else(|| "—".into()),
                 w.owner.clone().unwrap_or_else(|| "—".into()),
                 format!("{}", w.commands),
                 ago(w.last_used_at),
             ]
         })
         .collect();
-    out.push_str(&table(&["WORKSPACE", "NAME", "STATUS", "MACHINE", "REPO", "OWNER", "CMDS", "USED"], &rows));
+    out.push_str(&table(&["WORKSPACE", "NAME", "STATUS", "MACHINE", "REPO", "GIT", "OWNER", "CMDS", "USED"], &rows));
     out
 }
 
@@ -566,10 +567,10 @@ pub fn sessions(r: &crate::api::SessionsOut) -> String {
                     (_, true) => "working".into(),
                     _ => "idle".into(),
                 };
-                vec![s.id.clone(), s.agent_name.clone(), state, s.cwd.clone(), s.created_at.map(ago).unwrap_or_else(|| "—".into())]
+                vec![s.id.clone(), s.agent_name.clone(), state, s.cwd.clone(), s.git.as_ref().map(|g| g.short()).unwrap_or_else(|| "—".into()), s.created_at.map(ago).unwrap_or_else(|| "—".into())]
             })
             .collect();
-        out.push_str(&table(&["SESSION", "AGENT", "STATE", "FOLDER", "STARTED"], &rows));
+        out.push_str(&table(&["SESSION", "AGENT", "STATE", "FOLDER", "GIT", "STARTED"], &rows));
     }
     out.push('\n');
     for m in &r.machines {

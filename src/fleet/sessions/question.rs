@@ -18,15 +18,23 @@ pub struct Choice {
 
 /// The keys that pick `key` in a prompt whose cursor is on `selected`:
 /// its number, or arrows to it and Enter.
-pub fn keys_for(key: &str, selected: Option<&str>) -> (String, bool) {
+pub fn keys_for(key: &str, selected: Option<&str>, confirm: bool) -> (String, bool) {
     match (key.strip_prefix('#').and_then(|k| k.parse::<i64>().ok()), selected.and_then(|s| s.strip_prefix('#')).and_then(|s| s.parse::<i64>().ok())) {
         (Some(to), from) => {
             let from = from.unwrap_or(0);
             let arrow = if to >= from { "\x1b[B" } else { "\x1b[A" };
             (arrow.repeat((to - from).unsigned_abs() as usize), true)
         }
-        (None, _) => (key.to_string(), false),
+        (None, _) => (key.to_string(), confirm),
     }
+}
+
+/// The menu says a number needs Enter after it ("Press enter to continue").
+fn asks_for_enter(lines: &[&str]) -> bool {
+    lines.iter().rev().take(6).any(|l| {
+        let l = l.to_lowercase();
+        l.contains("press enter to") || l.contains("enter to confirm")
+    })
 }
 
 /// A line's indent and text, past a box's side.
@@ -120,6 +128,10 @@ pub struct Question {
     pub options: Vec<Choice>,
     /// The choice the cursor is on (Enter picks it).
     pub selected: Option<String>,
+    /// A number only moves to its choice; Enter takes it ("Press enter to
+    /// continue", as Codex says). Claude Code takes a number at once.
+    #[serde(skip)]
+    pub confirm: bool,
     pub read_at: DateTime<Utc>,
 }
 
@@ -240,7 +252,7 @@ pub fn read(screen: &str) -> Question {
         });
         if options.len() >= 2 && numbered && !input_below {
             let text = question_above(&lines[..first]);
-            return Question { text, options, selected, read_at };
+            return Question { text, options, selected, confirm: asks_for_enter(lines), read_at };
         }
     }
 
@@ -251,7 +263,7 @@ pub fn read(screen: &str) -> Question {
             (t.starts_with('>') || t.starts_with('❯') || t.starts_with('›')) && option(l).is_none()
         });
         if !input_below {
-            return Question { text: question_above(&lines[..first]), options, selected: Some(selected), read_at };
+            return Question { text: question_above(&lines[..first]), options, selected: Some(selected), confirm: false, read_at };
         }
     }
 
@@ -287,7 +299,7 @@ pub fn read(screen: &str) -> Question {
     while text.first().is_some_and(String::is_empty) {
         text.remove(0);
     }
-    Question { text, options: Vec::new(), selected: None, read_at }
+    Question { text, options: Vec::new(), selected: None, confirm: false, read_at }
 }
 
 #[cfg(test)]
@@ -350,9 +362,11 @@ mod tests {
         assert_eq!(keys(&q), ["#0", "#1"]);
         assert_eq!(q.selected.as_deref(), Some("#0"));
         assert_eq!(q.text.last().map(String::as_str), Some("Security guide"));
-        assert_eq!(keys_for("#1", q.selected.as_deref()), ("\x1b[B".to_string(), true));
-        assert_eq!(keys_for("#0", Some("#2")), ("\x1b[A\x1b[A".to_string(), true));
-        assert_eq!(keys_for("2", Some("1")), ("2".to_string(), false));
+        assert_eq!(keys_for("#1", q.selected.as_deref(), false), ("\x1b[B".to_string(), true));
+        assert_eq!(keys_for("#0", Some("#2"), false), ("\x1b[A\x1b[A".to_string(), true));
+        assert_eq!(keys_for("2", Some("1"), false), ("2".to_string(), false));
+        // A menu that waits for Enter after the number (Codex).
+        assert_eq!(keys_for("1", Some("1"), true), ("1".to_string(), true));
     }
 
     #[test]
@@ -383,5 +397,15 @@ mod tests {
         let q = read(steps);
         assert!(!q.is_choice());
         assert_eq!(q.text.last().map(String::as_str), Some("2. Deploy to staging"));
+    }
+
+    #[test]
+    fn codex_menus_wait_for_enter() {
+        let screen = "> You are in /home/adib/muxen/workspaces/ws-cqp5kr\n\n  Do you trust the contents of this directory?\n\n› 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue\n";
+        let q = read(screen);
+        assert_eq!(q.options.iter().map(|o| o.key.as_str()).collect::<Vec<_>>(), ["1", "2"]);
+        assert!(q.confirm);
+        let claude = "Do you want to proceed?\n❯ 1. Yes\n  2. No\n";
+        assert!(!read(claude).confirm);
     }
 }

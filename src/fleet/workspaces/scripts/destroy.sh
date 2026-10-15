@@ -1,6 +1,6 @@
 # Stops a workspace's background commands and deletes its folder.
-# Prepended: OR_DIR OR_ID OR_PIDS (space separated) OR_KEEP, and for docker
-# workspaces OR_CONTAINER and OR_IMAGE.
+# Prepended: OR_DIR OR_ID OR_PIDS (space separated) OR_KEEP, for docker
+# workspaces OR_CONTAINER and OR_IMAGE, and for worktrees OR_SRC (the checkout).
 if [ -n "$OR_CONTAINER" ]; then
   if command -v docker >/dev/null 2>&1; then
     if docker rm -f "$OR_CONTAINER" >/dev/null 2>&1; then echo "Removed container $OR_CONTAINER"; else echo "Container $OR_CONTAINER was already gone"; fi
@@ -15,6 +15,12 @@ for or_pid in $OR_PIDS; do
   fi
 done
 if [ "$OR_KEEP" = 1 ]; then echo "Kept the files in $OR_DIR"; exit 0; fi
+# A worktree: git takes it out of its checkout (its branch stays there).
+if [ -n "$OR_SRC" ]; then
+  case "$OR_SRC" in "~") or_src=$HOME ;; "~/"*) or_src="$HOME/${OR_SRC#\~/}" ;; *) or_src=$OR_SRC ;; esac
+  if git -C "$or_src" worktree remove --force "$OR_DIR" 2>/dev/null; then echo "Removed the worktree from $OR_SRC (its branch stays)"; fi
+  git -C "$or_src" worktree prune 2>/dev/null
+fi
 # Only ever delete a workspace folder.
 case "$OR_DIR" in */"$OR_ID") ;; *) echo "error: refusing to delete $OR_DIR" >&2; exit 3 ;; esac
 if [ -d "$OR_DIR" ]; then

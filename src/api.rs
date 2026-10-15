@@ -1704,6 +1704,11 @@ pub struct WorkspaceCreateRequest {
     /// Share the machine's Docker socket with the container (docker-in-docker; root-equivalent).
     #[serde(default)]
     pub docker_socket: bool,
+    /// A git checkout's folder on the machine (from local_checkouts): the workspace is a new git
+    /// worktree of it, on `branch` (from `ref`, else the default branch), instead of a fresh clone,
+    /// so several agents can work on one repository at once. Needs machine_id; not with docker.
+    #[serde(default)]
+    pub worktree_of: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1822,6 +1827,13 @@ pub struct WorkspaceOut {
     /// Container name, for docker workspaces.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
+    /// Worktree workspaces: the checkout (a folder on the same machine) it's a git worktree of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_of: Option<String>,
+    /// What the work in it changed, as last looked at: branch, files and lines since the
+    /// default branch, uncommitted files, and the branch's pull request with its checks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git: Option<crate::fleet::sessions::git::GitStatus>,
     /// "creating" | "ready" | "failed" | "destroying"
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1973,6 +1985,8 @@ pub fn workspace_out(w: &WorkspaceInfo, history: usize) -> WorkspaceOut {
         isolation: w.isolation.clone(),
         image: w.image.clone(),
         container: w.container.clone(),
+        worktree_of: w.worktree_of.clone(),
+        git: w.git.clone(),
         owner: w.owner.clone(),
         status: w.status.clone(),
         error: w.error.clone(),
@@ -2070,8 +2084,14 @@ fn workspace_path(raw: &str) -> ApiResult<String> {
     Ok(p.to_string())
 }
 
-pub fn workspaces_list(engine: &Arc<Engine>) -> WorkspacesResponse {
-    let all = current_workspaces(engine);
+pub async fn workspaces_list(engine: &Arc<Engine>) -> WorkspacesResponse {
+    // Each one's branch and pull request (a merged one means its work is done).
+    let s = engine.current();
+    let mut machines: Vec<String> = current_workspaces(engine).iter().filter(|w| w.status == "ready" && s.machines.iter().any(|m| m.id == w.machine_id && !m.is_down())).map(|w| w.machine_id.clone()).collect();
+    machines.sort();
+    machines.dedup();
+    look_at_stale_git(engine, machines.iter().map(String::as_str)).await;
+    let all = engine.workspaces();
     let s = engine.current();
     // Unchecked machines count: creating a workspace checks the machine first.
     let available: Vec<String> = s.machines.iter().filter(|m| m.workspaces_allowed && !m.is_down()).map(|m| m.id.clone()).collect();
@@ -2128,6 +2148,7 @@ pub async fn workspace_create(engine: &Arc<Engine>, req: WorkspaceCreateRequest,
                 git_ref: clean(req.git_ref),
                 branch: clean(req.branch),
                 owner: Some(owner.to_string()),
+                worktree_of: clean(req.worktree_of),
             },
             iso,
         )
@@ -2507,7 +2528,7 @@ mod tests {
 
         let got = workspace_get(&engine, WorkspaceRequest { workspace_id: id.clone() }, Surface::Mcp).unwrap();
         assert!(got.commands >= 1 && !got.history.is_empty());
-        assert!(workspaces_list(&engine).workspaces.iter().any(|w| w.id == id));
+        assert!(workspaces_list(&engine).await.workspaces.iter().any(|w| w.id == id));
 
         workspace_destroy(&engine, WorkspaceDestroyRequest { workspace_id: id.clone(), keep_files: false }, Surface::Mcp).await.unwrap();
         assert_eq!(workspace_get(&engine, WorkspaceRequest { workspace_id: id }, Surface::Mcp).unwrap_err().code, "not_found");
@@ -2583,6 +2604,22 @@ pub struct SessionReadRequest {
     pub lines: Option<u32>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionActionRequest {
+    pub session_id: String,
+    /// commit, commit_push, pull_request, review, fix_comments, conflicts or recap.
+    pub action: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionActionOut {
+    pub session_id: String,
+    pub action: String,
+    /// What was typed into the agent.
+    pub prompt: String,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -2626,7 +2663,7 @@ fn session_error(message: String) -> ApiError {
         "not_found"
     } else if m.contains("unreachable") || m.contains("timed out") || m.contains("connection refused") || m.contains("no route to host") {
         "unreachable"
-    } else if m.contains("isn't a session id") || m.contains("unknown agent") || m.contains("isn't a folder") {
+    } else if m.contains("isn't a session id") || m.contains("unknown agent") || m.contains("isn't a folder") || m.contains("isn't a session action") || m.contains("is a shell") {
         "invalid"
     } else {
         "operation_failed"
@@ -2647,15 +2684,26 @@ fn session_machines(engine: &Arc<Engine>, only: Option<&str>) -> ApiResult<Vec<M
     }
 }
 
+/// Reads git on these machines (their sessions' and workspaces' folders)
+/// unless that was just now.
+async fn look_at_stale_git<'a>(engine: &Arc<Engine>, machine_ids: impl Iterator<Item = &'a str>) {
+    let stale = machine_ids.filter(|id| engine.git_looked_at(id).is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(20)));
+    futures::future::join_all(stale.map(|id| engine.look_at_git(id))).await;
+}
+
 /// Lists agent sessions, re-reading the machines first.
 pub async fn sessions_list(engine: &Arc<Engine>, req: SessionListRequest) -> ApiResult<SessionsOut> {
     let machines = session_machines(engine, req.machine_id.as_deref())?;
     let found = futures::future::join_all(machines.iter().map(|m| engine.refresh_sessions(&m.id))).await;
+    // What each session's work changed (git), looked at now unless it was just now.
+    look_at_stale_git(engine, machines.iter().zip(&found).filter(|(_, f)| f.as_ref().is_ok_and(|f| !f.sessions.is_empty())).map(|(m, _)| m.id.as_str())).await;
+    let snapshot = engine.current();
     let mut out = SessionsOut { sessions: Vec::new(), machines: Vec::new() };
     for (m, f) in machines.iter().zip(found) {
         match f {
             Ok(f) => {
-                out.sessions.extend(f.sessions);
+                // As published: with what each one changed.
+                out.sessions.extend(f.sessions.into_iter().map(|s| snapshot.sessions.iter().find(|x| x.id == s.id).cloned().unwrap_or(s)));
                 out.machines.push(SessionHostOut { machine_id: m.id.clone(), machine: m.name.clone(), agent: f.agent_version, agents: f.agents, error: f.error });
             }
             Err(e) => out.machines.push(SessionHostOut { machine_id: m.id.clone(), machine: m.name.clone(), agent: None, agents: Vec::new(), error: Some(e) }),
@@ -2707,6 +2755,15 @@ pub async fn session_start(engine: &Arc<Engine>, req: SessionStartRequest) -> Ap
         .map_err(session_error)
 }
 
+/// Asks a session's agent to commit, open a pull request, review, ...: types
+/// that action's prompt (the user's, else Muxen's) into it.
+pub async fn session_action(engine: &Arc<Engine>, req: SessionActionRequest) -> ApiResult<SessionActionOut> {
+    let s = resolve_session(engine, &req.session_id).await?;
+    let action = req.action.trim().to_string();
+    let prompt = engine.session_action(&s.id, &action).await.map_err(session_error)?;
+    Ok(SessionActionOut { session_id: s.id, action, prompt })
+}
+
 pub async fn session_send(engine: &Arc<Engine>, req: SessionSendRequest) -> ApiResult<SessionDoneOut> {
     if req.text.is_empty() && !req.enter {
         return Err(ApiError::invalid("Nothing to send: text is empty and enter is false."));
@@ -2752,7 +2809,7 @@ pub async fn session_answer(engine: &Arc<Engine>, req: SessionAnswerRequest) -> 
         let keys: Vec<String> = q.options.iter().map(|o| format!("{} ({})", o.key, o.label)).collect();
         return Err(ApiError::invalid(if keys.is_empty() { format!("{} isn't asking to choose anything right now.", s.id) } else { format!("No choice \"{}\": it offers {}.", req.choice, keys.join(", ")) }));
     }
-    engine.answer_session(&s.id, &req.choice, q.selected.as_deref()).await.map_err(session_error)?;
+    engine.answer_session(&s.id, &req.choice, q.selected.as_deref(), q.confirm).await.map_err(session_error)?;
     Ok(SessionDoneOut { session_id: s.id, done: "answered".into() })
 }
 

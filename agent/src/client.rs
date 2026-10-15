@@ -69,6 +69,11 @@ pub fn handle(req: &Value) -> Value {
             let roots: Vec<String> = req["roots"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
             json!({ "ok": true, "repos": crate::repos::scan(&roots), "now": now() })
         }
+        // What the work in each folder changed (sessions' folders).
+        "git_info" => {
+            let paths: Vec<&str> = req["paths"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            json!({ "ok": true, "folders": paths.iter().map(|p| crate::repos::info(p)).collect::<Vec<_>>() })
+        }
         "git" => match crate::repos::act(req["path"].as_str().unwrap_or(""), req["action"].as_str().unwrap_or("")) {
             Ok(output) => json!({ "ok": true, "output": output }),
             Err(e) => json!({ "ok": false, "error": e }),

@@ -71,7 +71,7 @@ pub struct Comment {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct Checks {
     pub total: u32,
     pub passed: u32,
@@ -249,6 +249,63 @@ struct RawPull {
     deletions: u32,
     #[serde(default)]
     changed_files: u32,
+}
+
+/// A pull request in a list, as `branch_pull` finds it.
+#[derive(Deserialize)]
+struct RawPullItem {
+    number: u64,
+    title: String,
+    state: String,
+    #[serde(default)]
+    draft: bool,
+    merged_at: Option<String>,
+    html_url: String,
+    head: RawRef,
+}
+
+/// A branch's pull request: "open", "draft", "merged" or "closed", and its checks.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct BranchPull {
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub url: String,
+    pub checks: Checks,
+}
+
+/// Check runs, counted: passed, failed (by name) and still going.
+fn checks_of(runs: Vec<RawCheckRun>) -> Checks {
+    let mut checks = Checks::default();
+    for run in runs {
+        checks.total += 1;
+        match (run.status.as_str(), run.conclusion.as_deref()) {
+            ("completed", Some("success" | "neutral" | "skipped")) => checks.passed += 1,
+            ("completed", _) => {
+                checks.failed += 1;
+                checks.failing.push(run.name);
+            }
+            _ => checks.pending += 1,
+        }
+    }
+    checks
+}
+
+/// A value for a URL's query: the characters that would end or change it, escaped.
+fn query_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' => out.push(c),
+            c => {
+                let mut buf = [0u8; 4];
+                for b in c.encode_utf8(&mut buf).bytes() {
+                    out.push_str(&format!("%{b:02X}"));
+                }
+            }
+        }
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -465,18 +522,7 @@ impl Client {
             latest.retain(|x| x.author != author);
             latest.push(Review { author, state: r.state });
         }
-        let mut checks = Checks::default();
-        for run in runs.map(|r| r.check_runs).unwrap_or_default() {
-            checks.total += 1;
-            match (run.status.as_str(), run.conclusion.as_deref()) {
-                ("completed", Some("success" | "neutral" | "skipped")) => checks.passed += 1,
-                ("completed", _) => {
-                    checks.failed += 1;
-                    checks.failing.push(run.name);
-                }
-                _ => checks.pending += 1,
-            }
-        }
+        let checks = checks_of(runs.map(|r| r.check_runs).unwrap_or_default());
         Ok(PullInfo {
             head_repo: p.head.repo.map(|r| r.full_name),
             head: p.head.name,
@@ -488,6 +534,24 @@ impl Client {
             checks,
             reviews: latest,
         })
+    }
+
+    /// The pull request for a branch of a repository (the newest, open or not),
+    /// with its checks; None when the branch has none.
+    pub async fn branch_pull(&self, settings: &GitHubSettings, full_name: &str, branch: &str) -> Result<Option<BranchPull>, String> {
+        self.configure(settings);
+        let owner = full_name.split('/').next().unwrap_or_default();
+        let path = format!("/repos/{full_name}/pulls?state=all&per_page=1&head={owner}:{}", query_value(branch));
+        let found: Vec<RawPullItem> = self.get(&path).await.map_err(|e| e.message)?;
+        let Some(p) = found.into_iter().next() else { return Ok(None) };
+        let runs: Option<RawCheckRuns> = self.get(&format!("/repos/{full_name}/commits/{}/check-runs?per_page=100", p.head.sha)).await.ok();
+        let state = match (&p.merged_at, p.state.as_str(), p.draft) {
+            (Some(_), _, _) => "merged",
+            (None, "closed", _) => "closed",
+            (None, _, true) => "draft",
+            _ => "open",
+        };
+        Ok(Some(BranchPull { number: p.number, title: p.title, state: state.into(), url: p.html_url, checks: checks_of(runs.map(|r| r.check_runs).unwrap_or_default()) }))
     }
 
     /// Recent GitHub Actions runs.

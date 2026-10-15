@@ -963,6 +963,8 @@ enum SessionCommand {
     Read(SessionReadArgs),
     /// Type text into a session (and press Enter)
     Send(SessionSendArgs),
+    /// Ask a session's agent to commit, commit_push, pull_request, review, fix_comments, conflicts or recap
+    Do(SessionDoArgs),
     /// What a session's agent is waiting for: a choice and its options, or what it said last
     Question(SessionIdArgs),
     /// Pick one of a waiting session's options (its key from `question`)
@@ -1056,6 +1058,15 @@ struct SessionSendArgs {
     no_enter: bool,
 }
 
+#[derive(Args)]
+struct SessionDoArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    session_id: String,
+    /// commit, commit_push, pull_request, review, fix_comments, conflicts or recap
+    action: String,
+}
+
 #[derive(Subcommand)]
 enum WorkspaceCommand {
     /// Create a workspace on a machine (optionally cloning a repo)
@@ -1130,6 +1141,11 @@ struct WsCreateArgs {
     /// Share the machine's Docker socket with the container (docker-in-docker)
     #[arg(long)]
     docker_socket: bool,
+
+    /// A git worktree of this checkout on the machine (its folder) instead of
+    /// a clone, on --branch, so several agents can work on one repository
+    #[arg(long, value_name = "FOLDER", requires = "machine", conflicts_with_all = ["repo", "docker"])]
+    worktree_of: Option<String>,
 }
 
 #[derive(Args)]
@@ -1781,10 +1797,11 @@ fn workspace(cmd: WorkspaceCommand, runtime: &tokio::runtime::Runtime) -> u8 {
                 isolation: if a.docker { Some("docker".into()) } else { a.isolation },
                 image: a.image,
                 docker_socket: a.docker_socket,
+                worktree_of: a.worktree_of,
             };
             run(runtime, &a.agent, async move |e| api::workspace_create(&e, req, CLI_OWNER, CLI).await, cli::workspace_created)
         }
-        WorkspaceCommand::Ls(a) => run(runtime, &a, async move |e| Ok(api::workspaces_list(&e)), cli::workspaces),
+        WorkspaceCommand::Ls(a) => run(runtime, &a, async move |e| Ok(api::workspaces_list(&e).await), cli::workspaces),
         WorkspaceCommand::Show(a) => {
             let req = api::WorkspaceRequest { workspace_id: a.workspace_id };
             run(runtime, &a.agent, async move |e| api::workspace_get(&e, req, CLI), cli::workspace)
@@ -2257,6 +2274,10 @@ fn session(cmd: SessionCommand, runtime: &tokio::runtime::Runtime) -> u8 {
         SessionCommand::Answer(a) => {
             let req = api::SessionAnswerRequest { session_id: a.session_id, choice: a.choice };
             run(runtime, &a.agent, async move |e| api::session_answer(&e, req).await, |d| format!("Answered {}.\n", d.session_id))
+        }
+        SessionCommand::Do(a) => {
+            let req = api::SessionActionRequest { session_id: a.session_id, action: a.action };
+            run(runtime, &a.agent, async move |e| api::session_action(&e, req).await, |r| format!("Asked {}: {}\n", r.session_id, r.prompt))
         }
         SessionCommand::Send(a) => {
             let req = api::SessionSendRequest { session_id: a.session_id, text: a.text, enter: !a.no_enter };

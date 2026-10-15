@@ -34,7 +34,7 @@ jobs:
           [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says $version"; exit 1; }
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-pc-windows-gnu
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-pc-windows-gnu,aarch64-pc-windows-gnullvm
       - uses: Swatinem/rust-cache@v2
       - uses: mlugg/setup-zig@v2
       - uses: taiki-e/install-action@v2
@@ -93,10 +93,19 @@ jobs:
           path: dist/Muxen-*-macos.dmg
           if-no-files-found: error
 
+  # Intel and Arm, each built on its own kind of machine. The oldest Ubuntu
+  # GitHub runs: the app needs this glibc (2.35) or newer.
   linux:
     needs: agents
-    # The oldest Ubuntu GitHub runs: the app needs this glibc (2.35) or newer.
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
       - name: GPUI's libraries
@@ -111,15 +120,31 @@ jobs:
           path: dist/agents
       - run: chmod +x dist/agents/*
       - run: scripts/package-linux.sh --skip-agents
+      - name: It runs here
+        run: |
+          tar -xzf dist/Muxen-*-linux-${{ matrix.arch }}.tar.gz -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/Muxen/muxen" --version
+          "$RUNNER_TEMP/Muxen/agents/muxen-agent-linux-${{ matrix.arch }}" hash
       - uses: actions/upload-artifact@v7
         with:
-          name: linux
-          path: dist/Muxen-*-linux-*.tar.gz
+          name: linux-${{ matrix.arch }}
+          path: dist/Muxen-*-linux-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
 
+  # x64 and Arm, each built on its own kind of machine.
   windows:
     needs: agents
-    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            agent: x86_64
+            runner: windows-2022
+          - arch: arm64
+            agent: aarch64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -131,15 +156,29 @@ jobs:
       - name: Inno Setup, for the installer
         shell: pwsh
         run: |
-          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup --no-progress -y }
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            if (Get-Command choco -ErrorAction SilentlyContinue) {
+              choco install innosetup --no-progress -y
+            } else {
+              # From its maker, where there's no Chocolatey.
+              Invoke-WebRequest https://jrsoftware.org/download.php/is.exe -OutFile "$env:RUNNER_TEMP\innosetup.exe"
+              Start-Process "$env:RUNNER_TEMP\innosetup.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-' -Wait
+            }
+          }
       - run: scripts/package-windows.ps1
         shell: pwsh
+      - name: It runs here
+        shell: pwsh
+        run: |
+          dist\windows\Muxen\muxen.exe --version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dist\windows\Muxen\agents\muxen-agent-windows-${{ matrix.agent }}.exe hash
       - uses: actions/upload-artifact@v7
         with:
-          name: windows
+          name: windows-${{ matrix.arch }}
           path: |
-            dist/Muxen-*-windows-x64.zip
-            dist/Muxen-*-windows-x64-setup.exe
+            dist/Muxen-*-windows-${{ matrix.arch }}.zip
+            dist/Muxen-*-windows-${{ matrix.arch }}-setup.exe
           if-no-files-found: error
 
   # A draft release with every file and their checksums, for a tag.
@@ -151,7 +190,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v8
         with:
-          pattern: '{macos,linux,windows}'
+          pattern: '{macos,linux-*,windows-*}'
           path: dist
           merge-multiple: true
       - name: Checksums

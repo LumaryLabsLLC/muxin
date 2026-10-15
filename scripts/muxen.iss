@@ -6,6 +6,10 @@
 #ifndef AppVersion
   #define AppVersion "0.1.0"
 #endif
+; x64, or arm64 for Windows on Arm (which also runs the x64 one).
+#ifndef Arch
+  #define Arch "x64"
+#endif
 
 [Setup]
 AppId={{6F0B8E52-3C8E-4C8C-9E5B-6C4D2A9B7E31}
@@ -19,13 +23,18 @@ DefaultGroupName=Muxen
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=..\dist
-OutputBaseFilename=Muxen-Setup-x64
+OutputBaseFilename=Muxen-Setup-{#Arch}
 SetupIconFile=..\assets\brand\muxen.ico
 UninstallDisplayIcon={app}\muxen.exe
 Compression=lzma2/max
 SolidCompression=yes
+#if Arch == "arm64"
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
+#else
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+#endif
 WizardStyle=modern
 ChangesEnvironment=yes
 CloseApplications=yes

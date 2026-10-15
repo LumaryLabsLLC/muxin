@@ -53,7 +53,7 @@ To get a real app with the Muxen icon:
 - **Linux:** `./scripts/package-linux.sh` makes a tarball; its `install.sh` puts Muxen in `~/.local` with an entry in your app menu.
 - **Windows:** `scripts\package-windows.ps1` makes the installer.
 
-Releases (a notarized DMG, the Linux tarball and the Windows installer) are built by GitHub Actions from a version tag: see [RELEASING.md](RELEASING.md).
+Releases (a notarized DMG, and for Linux and Windows a tarball and an installer each for Intel/AMD and Arm) are built by GitHub Actions from a version tag: see [RELEASING.md](RELEASING.md).
 
 ## Quick start
 
@@ -343,7 +343,7 @@ muxen checkouts --machine beelink --path ~/code/api --git pull
 Start an AI agent on one of your machines and come back to it whenever you like, from the app, from your own terminal, or through another agent.
 
 - **Keeps running.** Sessions live in Muxen's agent on the machine (`~/.muxen/bin/muxen-agent`), a small background program that holds each session's terminal, the way tmux would. Closing the app, sleeping your laptop or losing the network only detaches; the agent keeps working until you end the session, and reopening it shows the screen as it is with its recent scrollback. A restart of the machine ends its sessions, as with tmux.
-- **Nothing to install.** When Muxen connects to a machine it uploads the agent build for that OS and CPU (macOS and Linux, x86_64 and arm64, and Windows x64; a few MB) and keeps it up to date.
+- **Nothing to install.** When Muxen connects to a machine it uploads the agent build for that OS and CPU (macOS, Linux and Windows, x86_64 and arm64; a few MB) and keeps it up to date.
 - **Split panes.** ⌘D splits a terminal to the right, ⇧⌘D below it (or the buttons in its header): a new shell on the same machine, in the same folder. ⌥⌘← and ⌥⌘→ move between panes, or click one. Each pane is a session of its own, so it keeps running like any other; type `exit` to close it, or × on its bar to take it out of the split. Splits come back when you reopen Muxen.
 - **A real terminal in the app.** Everything goes to the agent: Esc, Ctrl-C, Tab, arrows, Option/Shift+Enter for newlines. ⌘C copies a selection, ⌘V pastes, the wheel scrolls back. Nerd Font icons (Neovim's file icons, prompt glyphs) show with any terminal font: Muxen brings the symbols. Right-click a machine for a new terminal or agent session.
 - **Names you choose.** Right-click a machine or a session and pick **Rename…** (or ⇧⌘P › Rename on its page). A machine keeps its id, so its runners, sessions and favorites stay with it; `config.toml` gets `id = "<old id>"` when the new name would give a different one. A session's title is kept by the agent on its machine (`~/.muxen/titles.json`), so every Muxen sees it; an empty title goes back to the one it started with.
@@ -540,7 +540,7 @@ muxen schedule log beelink s-ab12cd
 
 Not yet on Windows: Docker runners and Docker workspaces, adding virtual monitors.
 
-**The app on Windows** is built on Windows (GPUI compiles its shaders with the Windows SDK's `fxc.exe`): install Rust and Visual Studio's C++ build tools with the Windows SDK, run `scripts/build-agents.sh` on a Mac or Linux (it makes the Windows agent too, with `cargo-zigbuild`), then `scripts\package-windows.ps1` on Windows. That makes `dist\Muxen-Setup-x64.exe` (an installer, with [Inno Setup](https://jrsoftware.org/isinfo.php): for this user, no administrator needed, a Start menu entry, optionally `muxen` on the PATH, an uninstaller) and `dist\Muxen-windows-x64.zip` (`muxen.exe` and its `agents\`). Started from Explorer it shows no console window; from a terminal it's the same CLI as elsewhere. Secrets go in Windows' Credential Manager.
+**The app on Windows** is built on Windows (GPUI compiles its shaders with the Windows SDK's `fxc.exe`): install Rust and Visual Studio's C++ build tools with the Windows SDK, run `scripts/build-agents.sh` on a Mac or Linux (it makes the Windows agent too, with `cargo-zigbuild`), then `scripts\package-windows.ps1` on Windows. That makes `dist\Muxen-<version>-windows-x64-setup.exe` (`arm64` on Windows on Arm: an installer, with [Inno Setup](https://jrsoftware.org/isinfo.php): for this user, no administrator needed, a Start menu entry, optionally `muxen` on the PATH, an uninstaller) and `dist\Muxen-<version>-windows-x64.zip` (`muxen.exe` and its `agents\`). Started from Explorer it shows no console window; from a terminal it's the same CLI as elsewhere. Secrets go in Windows' Credential Manager.
 
 ## Develop
 

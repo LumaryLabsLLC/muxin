@@ -4,9 +4,9 @@
 # to each machine (~/.muxen/bin) when it connects.
 #
 # Needs: rustup targets (x86_64-apple-darwin, aarch64-apple-darwin,
-# x86_64-unknown-linux-musl, aarch64-unknown-linux-musl, x86_64-pc-windows-gnu),
-# cargo-zigbuild and zig for the Linux builds (static musl binaries that run on
-# any distro) and the Windows one.
+# x86_64-unknown-linux-musl, aarch64-unknown-linux-musl, x86_64-pc-windows-gnu,
+# aarch64-pc-windows-gnullvm), cargo-zigbuild and zig for the Linux builds
+# (static musl binaries that run on any distro) and the Windows ones.
 #
 # MUXEN_RELEASE=1 signs the macOS ones for notarization (hardened runtime and a
 # secure timestamp), as scripts/bundle-macos.sh --release needs.
@@ -51,4 +51,5 @@ esac
 build x86_64-unknown-linux-musl linux-x86_64 zigbuild
 build aarch64-unknown-linux-musl linux-aarch64 zigbuild
 build x86_64-pc-windows-gnu windows-x86_64 zigbuild .exe
+build aarch64-pc-windows-gnullvm windows-aarch64 zigbuild .exe
 ls -lh "$out"

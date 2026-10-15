@@ -7,13 +7,18 @@ files in a **draft** GitHub release on this repository to look over and publish.
 | File | What it is |
 |---|---|
 | `Muxen-<version>-macos.dmg` | The app for Apple silicon and Intel Macs (macOS 12 or later), signed with the Developer ID and notarized |
-| `Muxen-<version>-linux-x86_64.tar.gz` | The app for Linux (glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 and later), with `install.sh` |
+| `Muxen-<version>-linux-x86_64.tar.gz` | The app for Linux on Intel and AMD (glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 and later), with `install.sh` |
+| `Muxen-<version>-linux-aarch64.tar.gz` | The same for Linux on Arm |
 | `Muxen-<version>-windows-x64-setup.exe` | The Windows installer (for the user, no administrator needed) |
 | `Muxen-<version>-windows-x64.zip` | The same, unpacked |
+| `Muxen-<version>-windows-arm64-setup.exe` | The installer for Windows on Arm (which runs the x64 one too, emulated) |
+| `Muxen-<version>-windows-arm64.zip` | The same, unpacked |
 | `SHA256SUMS.txt` | Their checksums |
 
 Each one carries the agent for every platform (`agents/`), which the app
-installs on the machines it connects to.
+installs on the machines it connects to. The Arm builds are made on GitHub's
+Arm machines (`ubuntu-22.04-arm`, `windows-11-arm`), and each Linux and Windows
+build runs its `muxen --version` and agent there before it's kept.
 
 ## Making a release
 
@@ -103,7 +108,6 @@ again.
   ("Windows protected your PC" › More info › Run anyway) until it is.
 - **Public downloads** and the links on muxin.dev.
 - **Updates from inside the app.**
-- **The Linux app for ARM** (the agent already runs there).
 
 ## CI
 

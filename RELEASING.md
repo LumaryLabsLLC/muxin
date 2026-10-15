@@ -47,8 +47,8 @@ If a job fails for a reason outside the code, like a dropped connection to
 Apple's servers, run just the failed jobs again: `gh run rerun <run id> --failed`.
 The draft is made once every platform has built.
 
-The repository is private, so its releases are only for people with access to
-it. Public downloads come later.
+Published releases are public: anyone can download them from the repository's
+Releases page.
 
 To try the pipeline without a release, run the workflow by hand (Actions ›
 release › Run workflow, or `gh workflow run release`). It builds the same files
@@ -106,7 +106,6 @@ again.
 
 - **Windows code signing**: the installer isn't signed, so SmartScreen warns
   ("Windows protected your PC" › More info › Run anyway) until it is.
-- **Public downloads** and the links on muxin.dev.
 - **Updates from inside the app.**
 
 ## CI

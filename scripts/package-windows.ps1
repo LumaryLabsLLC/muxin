@@ -33,7 +33,7 @@ Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force (Join-Path $out 'agents') | Out-Null
 Copy-Item target\release\muxen.exe $out
 $agents | Copy-Item -Destination (Join-Path $out 'agents')
-Copy-Item README.md, LICENSE, THIRD_PARTY_NOTICES.md $out
+Copy-Item README.md, LICENSE, NOTICE, THIRD_PARTY_NOTICES.md $out
 $zip = "dist\Muxen-$version-windows-$arch.zip"
 Compress-Archive -Path $out -DestinationPath $zip -Force
 "Built $zip ($([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB)"

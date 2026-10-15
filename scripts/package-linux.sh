@@ -30,7 +30,7 @@ cp target/release/muxen "$out/"
 cp dist/agents/muxen-agent-* "$out/agents/"
 cp assets/brand/icon-512.png "$out/muxen.png"
 cp assets/linux/muxen.desktop assets/linux/install.sh "$out/"
-cp README.md LICENSE THIRD_PARTY_NOTICES.md "$out/"
+cp README.md LICENSE NOTICE THIRD_PARTY_NOTICES.md "$out/"
 
 tarball=dist/Muxen-$version-linux-$arch.tar.gz
 tar -czf "$tarball" -C "$root" Muxen

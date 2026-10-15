@@ -5,7 +5,7 @@
 <h1 align="center">Muxen</h1>
 
 <p align="center">One app for all your machines, run by you <b>or by your AI agents</b>.<br>
-<a href="https://muxin.dev">muxin.dev</a></p>
+<a href="https://muxin.dev">muxin.dev</a> · free and open source (Apache-2.0)</p>
 
 Point it at the machines you own (a Mac Studio under the desk, a NUC, a Linux box, a few MacBooks, a Windows laptop) and Muxen becomes the hub for all of them:
 
@@ -23,6 +23,16 @@ Agents can also **borrow a machine as a work environment**: an [agent workspace]
 - **Uses what you already have.** Machines are first reached with your system `ssh`, so your keys, agent and `~/.ssh/config` aliases just work; after that Muxen talks to its own small agent there, directly or through [Tailscale](#tailscale-and-moving-between-networks). GitHub access uses your `gh` login.
 
 ## Install
+
+Download the app from the [latest release](https://github.com/LumaryLabsLLC/muxin/releases/latest):
+
+- **macOS** 12 or later, Apple silicon and Intel: `Muxen-<version>-macos.dmg`. Open it and drag Muxen to Applications. It's signed and notarized.
+- **Linux** with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later): `Muxen-<version>-linux-x86_64.tar.gz`, or `linux-aarch64` on Arm. Unpack it and run `./Muxen/install.sh`, which installs it for you, no root needed.
+- **Windows 11**: `Muxen-<version>-windows-x64-setup.exe`, or `windows-arm64` on Windows on Arm. The installer isn't signed yet, so Windows may say "Windows protected your PC": click **More info**, then **Run anyway**.
+
+`SHA256SUMS.txt` in each release has the files' checksums.
+
+### Build from source
 
 ```sh
 git clone https://github.com/LumaryLabsLLC/muxin && cd muxin
@@ -564,8 +574,12 @@ Source layout:
 
 `Cargo.lock` pins `libc` to 0.2.189: GPUI's HTTP client pulls in `xattr` 0.2, which doesn't build on Linux against newer `libc` releases. Don't run a blanket `cargo update` without rebuilding on Linux.
 
+## Contributing
+
+Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). To report a security problem, see [SECURITY.md](SECURITY.md) instead of opening an issue.
+
 ## License
 
-Copyright © 2026 Adib Hanna. All rights reserved. Muxen is proprietary software; see `LICENSE`.
+Muxen is open source under the [Apache License 2.0](LICENSE), copyright 2026 Lumary Labs LLC (see `NOTICE`). The Muxen name and logo are Lumary Labs' trademarks; the license doesn't cover them.
 
 It includes third-party components under their own licenses, listed in `THIRD_PARTY_NOTICES.md`: the Geist fonts (SIL Open Font License, `assets/fonts/OFL.txt`), the Lucide icons (ISC, `assets/icons/LICENSE.txt`), the Phosphor, Hugeicons and Fluent icons (MIT), the MingCute icons (Apache-2.0) and the Solar icons (CC BY 4.0), with their licenses in `assets/icons/`, GPUI (Apache-2.0) and the Rust crates in `Cargo.lock`.

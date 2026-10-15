@@ -48,6 +48,7 @@ Source: "..\dist\windows\Muxen\muxen.exe"; DestDir: "{app}"; Flags: ignoreversio
 Source: "..\dist\windows\Muxen\agents\*"; DestDir: "{app}\agents"; Flags: ignoreversion
 Source: "..\dist\windows\Muxen\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\windows\Muxen\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\windows\Muxen\NOTICE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\windows\Muxen\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

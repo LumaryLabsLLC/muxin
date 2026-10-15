@@ -185,7 +185,7 @@ impl Render for LicensesDialog {
             .text_color(theme.text)
             .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Licenses"))
             .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(
-                "Muxen is proprietary software by Lumary Labs LLC. It includes these components under their own licenses; the full texts ship with the app.",
+                "Muxen is open source under the Apache License 2.0, by Lumary Labs LLC. It includes these components under their own licenses; the full texts ship with the app.",
             ))
             .child(card(&theme).children(rows))
             .child(

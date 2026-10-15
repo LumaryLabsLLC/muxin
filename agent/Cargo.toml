@@ -3,7 +3,7 @@ name = "muxen-agent"
 version = "0.2.7"
 edition = "2024"
 description = "Runs on each machine Muxen manages: keeps agent sessions alive and lets the app attach to them"
-license = "LicenseRef-Proprietary"
+license = "Apache-2.0"
 publish = false
 
 [dependencies]

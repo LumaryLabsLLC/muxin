@@ -47,6 +47,8 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/agents"
 cp "$binary" "$app/Contents/MacOS/muxen"
 cp assets/brand/Muxen.icns "$app/Contents/Resources/Muxen.icns"
 cp dist/agents/muxen-agent-* "$app/Contents/Resources/agents/"
+# Its license, and the third-party ones that must ship with every copy.
+cp LICENSE NOTICE THIRD_PARTY_NOTICES.md "$app/Contents/Resources/"
 
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

@@ -54,6 +54,8 @@ cask "muxin" do
   on_macos do
     url "$base/Muxin-#{version}-macos.dmg"
 
+    depends_on macos: :monterey
+
     app "Muxin.app"
     binary "#{appdir}/Muxin.app/Contents/MacOS/muxin"
     binary "#{appdir}/Muxin.app/Contents/MacOS/muxin", target: "muxen"

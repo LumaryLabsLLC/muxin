@@ -19,9 +19,9 @@ pub const TOKEN: &str = "digitalocean-token";
 const OAUTH: &str = "digitalocean-oauth";
 
 /// Muxin's OAuth client at DigitalOcean: registered by Lumary Labs on
-/// 2026-10-09 as a public client ("Muxen", https://muxin.dev, loopback
-/// callbacks at /digitalocean), so it's no secret. `MUXEN_DO_CLIENT_ID` at build
-/// time overrides it.
+/// 2026-10-09 as a public client ("Muxen", renamed "Muxin" on 2026-10-15;
+/// https://muxin.dev, loopback callbacks at /digitalocean), so it's no secret.
+/// `MUXEN_DO_CLIENT_ID` at build time overrides it.
 const CLIENT_ID: &str = "df4228c4a87c9e8d950e0a519d5f41796c0131356c188e5dcabe2e152d59f7b7";
 
 /// The callback path; DigitalOcean matches loopback callbacks on any port.

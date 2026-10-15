@@ -3,7 +3,7 @@
 //! background, streams its output into `Snapshot::operations`, and refreshes the
 //! affected machine when it finishes.
 //!
-//! Operation log conventions: lines starting with "▸ " are Muxen's own
+//! Operation log conventions: lines starting with "▸ " are Muxin's own
 //! steps, "✓ " marks a success, "error: " and "warning: " are problems; anything
 //! else is output from the machine.
 //!
@@ -204,7 +204,7 @@ impl Engine {
     /// Starts an action on a runner (id as in `Runner::id`). Returns the operation id.
     pub fn runner_action(self: &Arc<Self>, runner_id: &str, action: RunnerAction) -> Result<u64, String> {
         let snap = self.current();
-        let runner = snap.runners.iter().find(|r| r.id == runner_id).cloned().ok_or("That runner isn't in Muxen anymore.")?;
+        let runner = snap.runners.iter().find(|r| r.id == runner_id).cloned().ok_or("That runner isn't in Muxin anymore.")?;
         let machine = runner.machine_id.as_deref().and_then(|id| self.machine(id));
         let reachable = runner
             .machine_id
@@ -224,7 +224,7 @@ impl Engine {
             RunnerAction::Remove { delete_files } => self.remove_plan(&runner, delete_files)?,
             _ => {
                 let (spec, probe) = machine.clone().ok_or_else(|| {
-                    format!("{} isn't on a machine in config.toml, so Muxen can't control it. It can only be removed from GitHub.", runner.name)
+                    format!("{} isn't on a machine in config.toml, so Muxin can't control it. It can only be removed from GitHub.", runner.name)
                 })?;
                 if !spec.is_checkable() {
                     return Err(format!("{} has no host in config.toml.", spec.name));
@@ -269,7 +269,7 @@ impl Engine {
         let on_machine = machine.filter(|(spec, _)| spec.is_checkable() && reachable && dir.is_some());
         Ok(match on_machine {
             Some((spec, probe)) => {
-                let scope = runner_scope(runner).ok_or_else(|| format!("Muxen doesn't know which GitHub org or repo {} is registered with.", runner.name))?;
+                let scope = runner_scope(runner).ok_or_else(|| format!("Muxin doesn't know which GitHub org or repo {} is registered with.", runner.name))?;
                 Plan::OnMachine {
                     spec,
                     probe,
@@ -392,7 +392,7 @@ impl Engine {
     fn validate_install(&self, mut req: InstallRequest) -> Result<InstallRequest, String> {
         let (spec, _) = self.machine(&req.machine_id).ok_or("That machine isn't in config.toml anymore.")?;
         if !spec.is_checkable() {
-            return Err(format!("{} has no host in config.toml, so Muxen can't reach it.", spec.name));
+            return Err(format!("{} has no host in config.toml, so Muxin can't reach it.", spec.name));
         }
         if self.machine_busy(&spec.id) {
             return Err(format!("Another operation is already changing {}. Wait for it to finish.", spec.name));
@@ -539,7 +539,7 @@ fn validate_machine(name: &str, host: &str) -> Result<(), String> {
     }
     // A leading '-' would be read by ssh as an option.
     if host.starts_with('-') || host.len() > 255 || !host.chars().all(|c| c.is_ascii_alphanumeric() || "@._-:[]%".contains(c)) {
-        return Err(format!("\"{host}\" isn't an ssh destination Muxen can use."));
+        return Err(format!("\"{host}\" isn't an ssh destination Muxin can use."));
     }
     Ok(())
 }
@@ -703,7 +703,7 @@ async fn record_installed(engine: &Arc<Engine>, op: u64, req: &InstallRequest, s
         step(engine, op, format!("Adding {} to config.toml", done.join(", ")));
         let edit = inventory_edit::edit_file(engine.inventory_path(), |t| inventory_edit::add_runners(t, &spec.id, &done));
         if let Err(e) = edit {
-            engine.op_log(op, format!("warning: {e} The runners still show up because Muxen discovers them."));
+            engine.op_log(op, format!("warning: {e} The runners still show up because Muxin discovers them."));
         }
         engine.reload_inventory_now();
     }

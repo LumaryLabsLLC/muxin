@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=Muxen
+Name=Muxin
 GenericName=Machines
 Comment=All your machines, one app
-Exec=muxen
-Icon=muxen
+Exec=muxin
+Icon=muxin
 Terminal=false
-StartupWMClass=muxen
+StartupWMClass=muxin
 Categories=Development;Network;RemoteAccess;
 Keywords=ssh;servers;agents;runners;

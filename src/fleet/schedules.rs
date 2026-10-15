@@ -1,6 +1,6 @@
 //! Schedules: a command or an agent session that runs on one of the user's
 //! machines at set times. Each one lives on its machine, kept and run there
-//! by Muxen's agent through the machine's own scheduler (agent/src/schedules.rs),
+//! by Muxin's agent through the machine's own scheduler (agent/src/schedules.rs),
 //! so it runs whether or not this app is open.
 
 use std::sync::Arc;
@@ -49,7 +49,7 @@ pub struct What {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// The session's command line and the text typed in once it's up
-    /// (worked out by Muxen; the agent runs them as given).
+    /// (worked out by Muxin; the agent runs them as given).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -233,7 +233,7 @@ impl Engine {
     /// A schedule's runs, and one run's output (the newest, or the one that `started` then).
     pub async fn schedule_log(self: &Arc<Self>, machine_id: &str, id: &str, started: Option<i64>) -> Result<ScheduleLog, String> {
         let reply = Box::pin(self.schedule_ctl(machine_id, json!({ "op": "schedule_log", "schedule_id": id, "started": started }))).await?;
-        serde_json::from_value(reply).map_err(|e| format!("The machine answered in a way Muxen can't read: {e}"))
+        serde_json::from_value(reply).map_err(|e| format!("The machine answered in a way Muxin can't read: {e}"))
     }
 
     async fn schedule_ctl(self: &Arc<Self>, machine_id: &str, request: Value) -> Result<Value, String> {

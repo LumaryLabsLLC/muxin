@@ -42,7 +42,7 @@ impl Root {
                                 "A workspace is a folder on one of your machines, optionally a git checkout, that an agent uses as its work environment: it runs commands, edits files and syncs code there. Workspaces persist until destroyed.",
                             ),
                         ).child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!(
-                            "{allowed} of {} machines accept workspaces. Agents create them with the workspace_create MCP tool or `muxen workspace create`.",
+                            "{allowed} of {} machines accept workspaces. Agents create them with the workspace_create MCP tool or `muxin workspace create`.",
                             s.machines.len()
                         ))),
                     )

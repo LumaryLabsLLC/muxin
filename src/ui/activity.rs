@@ -234,7 +234,7 @@ impl Root {
             .child(div().mt(px(18.)).text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("No activity yet"))
             .child(
                 div().mt(px(8.)).w(px(width)).text_center().text_size(px(13.)).text_color(theme.text_muted).child(
-                    "Everything Muxen does on your machines lands here with its full output: runner installs and restarts, log requests, workspace setup, and the commands agents run.",
+                    "Everything Muxin does on your machines lands here with its full output: runner installs and restarts, log requests, workspace setup, and the commands agents run.",
                 ),
             )
             .child(
@@ -270,7 +270,7 @@ impl Root {
                             "zap",
                             kit::tiles::JOBS,
                             "Connect an agent",
-                            "Copy the command that adds Muxen to Claude Code over MCP.".into(),
+                            "Copy the command that adds Muxin to Claude Code over MCP.".into(),
                             "copy",
                             width,
                         )
@@ -541,7 +541,7 @@ fn kind_label(kind: &str) -> &'static str {
     }
 }
 
-/// Colors Muxen's own lines (see the conventions in crate::ops).
+/// Colors Muxin's own lines (see the conventions in crate::ops).
 fn log_line(theme: &Theme, line: &str) -> AnyElement {
     let color = if line.starts_with("▸ ") {
         theme.text_accent
@@ -619,9 +619,9 @@ fn filtered_empty(theme: &Theme, filter: ActivityFilter) -> AnyElement {
 
 /// `claude mcp add` for this binary, quoted when its path has spaces.
 fn mcp_add_command() -> String {
-    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "muxen".into());
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "muxin".into());
     let exe = if exe.contains(' ') { format!("'{exe}'") } else { exe };
-    format!("claude mcp add muxen -- {exe} mcp")
+    format!("claude mcp add muxin -- {exe} mcp")
 }
 
 /// "45 MB of 120 MB · 6.1 MB/s"

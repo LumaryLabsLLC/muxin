@@ -1,4 +1,4 @@
-//! Settings › Cloud: how Muxen signs in to DigitalOcean, what new cloud
+//! Settings › Cloud: how Muxin signs in to DigitalOcean, what new cloud
 //! machines come with, and what happens to ones nobody is using.
 
 use gpui::{AnyElement, App, Context, Entity, SharedString, Window, div, prelude::*, px};
@@ -76,7 +76,7 @@ impl SettingsPage {
     }
 
     /// What the cloud machines cost: now, this month, by its end, each one,
-    /// and the account's bill when Muxen may read it.
+    /// and the account's bill when Muxin may read it.
     pub(super) fn cloud_usage_section(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let body: AnyElement = match &self.cloud.usage {
             None => div().p(px(14.)).flex().items_center().gap(px(6.)).text_size(px(12.5)).text_color(theme.text_muted).child(kit::spinner("cloud-usage", 12., theme.text_muted)).child("Adding it up…").into_any_element(),
@@ -316,7 +316,7 @@ impl SettingsPage {
                         .loading(self.cloud.busy)
                         .on_click(cx.listener(|this, _, _, cx| this.cloud_connect("oauth", cx)))
                         .into_any_element(),
-                    "oauth" => note(theme, "This copy of Muxen can't sign in in the browser yet. Use an API token or doctl.").into_any_element(),
+                    "oauth" => note(theme, "This copy of Muxin can't sign in in the browser yet. Use an API token or doctl.").into_any_element(),
                     "doctl" => div()
                         .flex()
                         .items_center()
@@ -476,7 +476,7 @@ impl SettingsPage {
                                             .child(div().flex_1().child(self.cloud.tailscale_key.clone()))
                                             .child(Button::new("ts-key-save", "Save").on_click(cx.listener(|this, _, _, cx| this.save_tailscale_key(cx)))),
                                     )
-                                    .child(note(theme, if has_key { "A key is saved. New machines join your tailnet with it." } else { "Without one, Muxen opens Tailscale's approval page for each new machine." }))
+                                    .child(note(theme, if has_key { "A key is saved. New machines join your tailnet with it." } else { "Without one, Muxin opens Tailscale's approval page for each new machine." }))
                                     .into_any_element(),
                             ))
                         }),
@@ -518,7 +518,7 @@ impl SettingsPage {
                     .child(row(theme, "Then", idle.into_any_element()))
                     .when(settings.idle_action != "off", |d| d.child(row(theme, "After", stepper.into_any_element())))
                     .children(warning.map(|w| note(theme, w)))
-                    .child(note(theme, "Idle: no busy session, running job or CPU use. Muxen has to be open to notice.")),
+                    .child(note(theme, "Idle: no busy session, running job or CPU use. Muxin has to be open to notice.")),
             );
 
         div().flex().flex_col().gap(px(28.)).child(account).children(defaults).child(when_idle)

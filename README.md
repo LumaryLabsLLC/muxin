@@ -1,13 +1,13 @@
 <p align="center">
-  <img src="assets/brand/icon-512.png" width="128" height="128" alt="Muxen">
+  <img src="assets/brand/icon-512.png" width="128" height="128" alt="Muxin">
 </p>
 
-<h1 align="center">Muxen</h1>
+<h1 align="center">Muxin</h1>
 
 <p align="center">One app for all your machines, run by you <b>or by your AI agents</b>.<br>
 <a href="https://muxin.dev">muxin.dev</a> · free and open source (Apache-2.0)</p>
 
-Point it at the machines you own (a Mac Studio under the desk, a NUC, a Linux box, a few MacBooks, a Windows laptop) and Muxen becomes the hub for all of them:
+Point it at the machines you own (a Mac Studio under the desk, a NUC, a Linux box, a few MacBooks, a Windows laptop) and Muxin becomes the hub for all of them:
 
 - **Agent sessions:** Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell on any machine, in a real terminal, still running after you close the app.
 - **Desktops:** see a Linux machine's screen live and use it, beside an agent's terminal or in its own window.
@@ -19,25 +19,33 @@ Point it at the machines you own (a Mac Studio under the desk, a NUC, a Linux bo
 Agents can also **borrow a machine as a work environment**: an [agent workspace](#agent-workspaces) is a persistent folder (optionally a git checkout) on one of your machines where an agent runs commands, edits files and syncs code.
 
 - **Native and fast.** The window is built with [GPUI](https://www.gpui.rs), the GPU-accelerated UI framework behind the Zed editor. It runs on macOS, Linux and Windows.
-- **Agent-first.** Every capability is available as an MCP server (`muxen mcp`) and as scriptable commands with `--json`. Claude Code, Codex and other agents can check your machines, explain problems and fix them.
-- **Uses what you already have.** Machines are first reached with your system `ssh`, so your keys, agent and `~/.ssh/config` aliases just work; after that Muxen talks to its own small agent there, directly or through [Tailscale](#tailscale-and-moving-between-networks). GitHub access uses your `gh` login.
+- **Agent-first.** Every capability is available as an MCP server (`muxin mcp`) and as scriptable commands with `--json`. Claude Code, Codex and other agents can check your machines, explain problems and fix them.
+- **Uses what you already have.** Machines are first reached with your system `ssh`, so your keys, agent and `~/.ssh/config` aliases just work; after that Muxin talks to its own small agent there, directly or through [Tailscale](#tailscale-and-moving-between-networks). GitHub access uses your `gh` login.
 
 ## Install
 
 Download the app from the [latest release](https://github.com/LumaryLabsLLC/muxin/releases/latest):
 
-- **macOS** 12 or later, Apple silicon and Intel: `Muxen-<version>-macos.dmg`. Open it and drag Muxen to Applications. It's signed and notarized.
-- **Linux** with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later): `Muxen-<version>-linux-x86_64.tar.gz`, or `linux-aarch64` on Arm. Unpack it and run `./Muxen/install.sh`, which installs it for you, no root needed.
-- **Windows 11**: `Muxen-<version>-windows-x64-setup.exe`, or `windows-arm64` on Windows on Arm. The installer isn't signed yet, so Windows may say "Windows protected your PC": click **More info**, then **Run anyway**.
+- **macOS** 12 or later, Apple silicon and Intel: `Muxin-<version>-macos.dmg`. Open it and drag Muxin to Applications. It's signed and notarized.
+- **Linux** with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later): `Muxin-<version>-linux-x86_64.tar.gz`, or `linux-aarch64` on Arm. Unpack it and run `./Muxin/install.sh`, which installs it for you, no root needed.
+- **Windows 11**: `Muxin-<version>-windows-x64-setup.exe`, or `windows-arm64` on Windows on Arm. The installer isn't signed yet, so Windows may say "Windows protected your PC": click **More info**, then **Run anyway**.
+
+Or with [Homebrew](https://brew.sh), on macOS and Linux:
+
+```sh
+brew install --cask lumarylabsllc/tap/muxin
+```
 
 `SHA256SUMS.txt` in each release has the files' checksums.
+
+Muxin was called Muxen before 0.5.1. Updating keeps your settings, machines and sessions, and the `muxen` command still works. On a Mac, the old Muxen app goes to the Trash the first time Muxin opens.
 
 ### Build from source
 
 ```sh
 git clone https://github.com/LumaryLabsLLC/muxin && cd muxin
 cargo build --release
-./target/release/muxen            # opens the window
+./target/release/muxin            # opens the window
 ```
 
 Requirements:
@@ -55,12 +63,12 @@ cargo build --release --no-default-features
 
 There's nothing else to set up. Fonts and icons are compiled into the binary.
 
-To run `muxen` from a terminal, use **Settings › General › Command line › Install**, or `muxen shell-command install`. On macOS it links `/usr/local/bin/muxen` to the app (macOS asks for your password when that folder needs it), on Linux `~/.local/bin/muxen`, and on Windows it adds Muxen's folder to your user PATH. `muxen shell-command remove` takes it out again.
+To run `muxin` from a terminal, use **Settings › General › Command line › Install**, or `muxin shell-command install`. On macOS it links `/usr/local/bin/muxin` to the app (macOS asks for your password when that folder needs it), on Linux `~/.local/bin/muxin`, and on Windows it adds Muxin's folder to your user PATH. `muxen`, its name from before, runs it too. `muxin shell-command remove` takes it out again.
 
-To get a real app with the Muxen icon:
+To get a real app with the Muxin icon:
 
-- **macOS:** `./scripts/bundle-macos.sh` builds `dist/Muxen.app`, signed with the Developer ID when it's in your keychain. Drag it to Applications. Agents can still use the binary inside it: `Muxen.app/Contents/MacOS/muxen mcp`.
-- **Linux:** `./scripts/package-linux.sh` makes a tarball; its `install.sh` puts Muxen in `~/.local` with an entry in your app menu.
+- **macOS:** `./scripts/bundle-macos.sh` builds `dist/Muxin.app`, signed with the Developer ID when it's in your keychain. Drag it to Applications. Agents can still use the binary inside it: `Muxin.app/Contents/MacOS/muxin mcp`.
+- **Linux:** `./scripts/package-linux.sh` makes a tarball; its `install.sh` puts Muxin in `~/.local` with an entry in your app menu.
 - **Windows:** `scripts\package-windows.ps1` makes the installer.
 
 Releases (a notarized DMG, and for Linux and Windows a tarball and an installer each for Intel/AMD and Arm) are built by GitHub Actions from a version tag: see [RELEASING.md](RELEASING.md).
@@ -68,32 +76,32 @@ Releases (a notarized DMG, and for Linux and Windows a tarball and an installer 
 ## Quick start
 
 ```sh
-muxen --demo                       # explore simulated machines first; nothing real is touched
-muxen                              # your machines: starts with this computer in config.toml
-muxen add-machine --name "Mac Studio" --host ci@mac-studio.local
-muxen watch acme                   # live runner status and jobs for the acme org
-muxen install mac-studio --count 2 # two runners, registered with acme, as services
-muxen status
+muxin --demo                       # explore simulated machines first; nothing real is touched
+muxin                              # your machines: starts with this computer in config.toml
+muxin add-machine --name "Mac Studio" --host ci@mac-studio.local
+muxin watch acme                   # live runner status and jobs for the acme org
+muxin install mac-studio --count 2 # two runners, registered with acme, as services
+muxin status
 ```
 
 ## The app
 
 - **Overview:** the day in one line (machines online, agents working, runners busy), a few notices for what needs a look (each with a button that fixes or explains it), a card per machine with what's running on it (its agents, desktop and runners) and live CPU, memory and disk, and every agent session across your machines. The Jobs page shows how busy your runners have been over the last few minutes.
-- **Machines and runners:** install runners on a machine, and start, stop, restart, show logs for or remove each one. A machine that's off or out of reach says so in plain words (offline, Remote Login off, ssh key not accepted, Tailscale off on this Mac, …), with when it was last seen and what to do; Muxen picks it back up by itself when it returns.
+- **Machines and runners:** install runners on a machine, and start, stop, restart, show logs for or remove each one. A machine that's off or out of reach says so in plain words (offline, Remote Login off, ssh key not accepted, Tailscale off on this Mac, …), with when it was last seen and what to do; Muxin picks it back up by itself when it returns.
 - **Adding machines (⌘N):** suggestions from your `~/.ssh/config`, your Tailscale network, and this network (machines advertising ssh over Bonjour, and Macs that would be addable once Remote Login is on).
 - **Agent sessions (⌘T):** a real terminal on any machine running Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell. Sessions are listed under their machine in the sidebar (a spinner while the agent works, a colored dot when it wants you), with its open desktop and one line for its runners, and keep running when you close the app. Terminal font size, line height and a blinking cursor are in Settings.
 - **Usage (⌃5):** what Claude Code and Codex used on all your machines today or over the last 7, 30 or 90 days, read from their own logs there: tokens and requests by day, model, machine and folder, and what it would cost at Anthropic's and OpenAI's API list prices. With a Claude or ChatGPT plan you don't pay per token; it's what the same use would cost through the API.
 - **Run (⌃6):** one command on several machines at once (`df -h /`, `brew upgrade`, `git -C ~/code/api pull`), each one's output side by side as it comes, and its exit status. It runs in your login shell from your home folder; right-click a machine › **Run a command…** to start with just that one.
-- **Open in your editor:** sessions, workspaces, GitHub checkouts and Compose projects have a button that lists the editors on this computer (Zed, Cursor, VS Code) and opens their folder in the one you pick, over the editor's own ssh support. Settings › General › Editor picks which comes first (and which `muxen edit` uses).
+- **Open in your editor:** sessions, workspaces, GitHub checkouts and Compose projects have a button that lists the editors on this computer (Zed, Cursor, VS Code) and opens their folder in the one you pick, over the editor's own ssh support. Settings › General › Editor picks which comes first (and which `muxin edit` uses).
 - **What's running:** a machine's **Services › Processes** lists its busiest processes (CPU, memory, how long they've run, GPU memory on NVIDIA) and stops or kills one; its page shows its GPU (NVIDIA, AMD on Linux, Apple), how busy it is and its memory.
-- **Fleet warnings and Wake:** a machine's page and the Overview say when it wants a reboot (Linux updates) or has failed services. A machine that's asleep or off has a **Wake** button (Wake on LAN, sent from this computer and from your machines on its network) once Muxen has seen its network card.
+- **Fleet warnings and Wake:** a machine's page and the Overview say when it wants a reboot (Linux updates) or has failed services. A machine that's asleep or off has a **Wake** button (Wake on LAN, sent from this computer and from your machines on its network) once Muxin has seen its network card.
 - **Copy files:** a two-pane dialog to copy files and folders from one machine to another (see [Files and the clipboard](#files-and-the-clipboard)); or drop files from the Finder onto a machine in the sidebar.
 - **Activity (⌘J):** one timeline of everything happening on your machines: operations started in the app (with live output) and every command agents ran in workspaces, filterable by kind or failures.
 - **Workspaces:** see what agents are doing on your machines (every command, its exit code and output), review a workspace's git changes, copy a shell command to step in, or destroy it.
 - **Jobs:** queued and running self-hosted jobs, and which queued jobs no online runner can take.
 - **Appearance:** follow the system, or pin light or dark, each with its own theme. Built-in themes:
-  - dark: Muxen Graphite, macOS Dark, Gruvbox Dark, Catppuccin Mocha / Macchiato / Frappé, Tokyo Night, Nord, Rosé Pine, Solarized Dark, Dracula, Everforest Dark, Kanagawa Wave, GitHub Dark;
-  - light: Muxen Paper, macOS Light, Gruvbox Light, Catppuccin Latte, Tokyo Night Day, Nord Light, Rosé Pine Dawn, Solarized Light, Everforest Light, Kanagawa Lotus, GitHub Light.
+  - dark: Muxin Graphite, macOS Dark, Gruvbox Dark, Catppuccin Mocha / Macchiato / Frappé, Tokyo Night, Nord, Rosé Pine, Solarized Dark, Dracula, Everforest Dark, Kanagawa Wave, GitHub Dark;
+  - light: Muxin Paper, macOS Light, Gruvbox Light, Catppuccin Latte, Tokyo Night Day, Nord Light, Rosé Pine Dawn, Solarized Light, Everforest Light, Kanagawa Lotus, GitHub Light.
 
   The macOS themes also switch to the system fonts (SF Pro, and SF Mono when it's installed). The choice is saved in `config.toml` (`[ui]`).
 
@@ -101,9 +109,9 @@ Keyboard: ⌘P goes to any machine, session or desktop by name, and ⇧⌘P (or 
 
 ## Your settings: `config.toml`
 
-Muxen keeps everything you set in one file, `config.toml`, in `~/.config/muxin/` (`%APPDATA%\muxin\` on Windows), or in `$MUXIN_HOME` if that's set. Run `muxen paths` to see where it is. Older versions kept `fleet.toml`, `settings.json` and `ui.json` in `~/.config/muxen/`; the first run brings them into `config.toml` and leaves the old folder as it was.
+Muxin keeps everything you set in one file, `config.toml`, in `~/.config/muxin/` (`%APPDATA%\muxin\` on Windows), or in `$MUXIN_HOME` if that's set. Run `muxin paths` to see where it is. Older versions kept `fleet.toml`, `settings.json` and `ui.json` in `~/.config/muxen/`; the first run brings them into `config.toml` and leaves the old folder as it was.
 
-- `[[machine]]` tables list your machines. Edit them by hand if you like: Muxen also edits them when you add machines or install runners, and keeps your comments.
+- `[[machine]]` tables list your machines. Edit them by hand if you like: Muxin also edits them when you add machines or install runners, and keeps your comments.
 - `[settings]` holds the watched GitHub orgs and repos, the polling intervals, whether the clipboard is shared, and cloud machine options.
 - `[ui]` holds the app's look: theme, icons, terminal font and size, shortcuts, favorite machines.
 - `state.json` holds the last machine check, and what Tailscale last said about each machine.
@@ -126,13 +134,13 @@ name = "StudioNAS"   # no runners: shown under "Other machines"
 host = "nas"
 ```
 
-A machine that runs on another one is shown under it: a VM or container reached through that machine (`ProxyJump` to its own address or `127.0.0.1`), or at its address on another port. Muxen works this out from `~/.ssh/config`, what each machine reports about itself (a VM says so), and the Docker containers that publish the port ssh goes to. When it can't be reached, it says whether the machine it's on is off or its container is stopped, and it can start or stop that container (`muxen power win11 on`).
+A machine that runs on another one is shown under it: a VM or container reached through that machine (`ProxyJump` to its own address or `127.0.0.1`), or at its address on another port. Muxin works this out from `~/.ssh/config`, what each machine reports about itself (a VM says so), and the Docker containers that publish the port ssh goes to. When it can't be reached, it says whether the machine it's on is off or its container is stopped, and it can start or stop that container (`muxin power win11 on`).
 
 Runners installed in the usual places are discovered automatically: `~/actions-runner*`, `~/actions-runner/*`, `~/runners/*`, `/opt/actions-runner*` and `C:\actions-runner\*`. A runner is found from its `.runner` file and its running `Runner.Listener` / `Runner.Worker` processes.
 
 ## GitHub
 
-Watch an org or a repo in Settings, or with `muxen watch acme` (or `acme/api`). Muxen then reads live runner status (online, busy) and the queued and running jobs of the most recently pushed repos.
+Watch an org or a repo in Settings, or with `muxin watch acme` (or `acme/api`). Muxin then reads live runner status (online, busy) and the queued and running jobs of the most recently pushed repos.
 
 The token comes from `MUXEN_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth token`. Polling uses conditional requests, so unchanged responses don't count against your rate limit.
 
@@ -142,34 +150,34 @@ Reading and registering **org** runners needs an org admin token with the `admin
 gh auth refresh -h github.com -s admin:org
 ```
 
-Repo runners need admin access to the repo. For GitHub Enterprise Server, set the API URL in Settings or run `muxen settings --api-url https://HOST/api/v3`.
+Repo runners need admin access to the repo. For GitHub Enterprise Server, set the API URL in Settings or run `muxin settings --api-url https://HOST/api/v3`.
 
 ## Use it from AI agents
 
-Muxen ships an [MCP](https://modelcontextprotocol.io) server. Print setup snippets that point at your binary:
+Muxin ships an [MCP](https://modelcontextprotocol.io) server. Print setup snippets that point at your binary:
 
 ```sh
-muxen mcp --print-config
+muxin mcp --print-config
 ```
 
 **Claude Code**
 
 ```sh
-claude mcp add muxen -- /path/to/muxen mcp
+claude mcp add muxin -- /path/to/muxin mcp
 ```
 
 **Codex** (`~/.codex/config.toml`)
 
 ```toml
-[mcp_servers.muxen]
-command = "/path/to/muxen"
+[mcp_servers.muxin]
+command = "/path/to/muxin"
 args = ["mcp"]
 ```
 
 **Other MCP clients** (Claude Desktop, Cursor, …)
 
 ```json
-{ "mcpServers": { "muxen": { "command": "/path/to/muxen", "args": ["mcp"] } } }
+{ "mcpServers": { "muxin": { "command": "/path/to/muxin", "args": ["mcp"] } } }
 ```
 
 Add `"--demo"` after `"mcp"` to let an agent practice on the simulated machines.
@@ -237,36 +245,36 @@ Every command takes `--json`. In that mode stdout carries JSON only, and errors 
 - `2`: bad input, or the thing wasn't found.
 
 ```sh
-muxen status [--refresh]                 # overview + what needs attention
-muxen machines | machine <id>
-muxen runners [--machine <id>] [--state offline]
-muxen jobs
-muxen add-machine --name <name> --host <ssh-host> [--no-check]
-muxen remove-machine <id>
-muxen rename-machine <id> <new name>      # the id stays the same
-muxen ports beelink                       # what's listening there (web servers first)
-muxen forward beelink 3000                # its port 3000 at localhost:3000 here, until Ctrl-C
-muxen run --on beelink,mac-studio -- df -h /   # one command on several machines (--all: every one online)
-muxen ps beelink [-n 20]                  # its busiest processes and its GPUs
-muxen kill beelink 4242 [--force]         # stop a process (--force: SIGKILL)
-muxen wake beelink                        # Wake on LAN
-muxen power win11 off                     # a VM in Docker on another machine (or a cloud machine): on or off
-muxen vm create win-test --system windows-11 --on beelink   # a VM on one of your machines
-muxen schedule add beelink --name Tests --every day --at 09:00 --command "make test"
-muxen usage [--days 30] [--machine beelink]   # what the agents used, and the cost at API prices
-muxen edit beelink:~/code/api [--editor zed] [--print]   # open a folder there in your editor
-muxen disconnect <id>                     # stop connecting to it (its sessions go on there)
-muxen connect <id>                        # connect again, and check it
-muxen install <machine-id> [--scope acme] [--count N | --name a --name b] [--label gpu] [--mode auto|service|background|docker] [--image IMAGE] [--docker-socket] [--no-wait]
-muxen runner <start|stop|restart|logs|remove> <runner-id> [--delete-files]
-muxen watch <org|owner/repo>... / unwatch ...
-muxen settings [--poll 20] [--scan-repos 10] [--check-interval 15]
-muxen ssh-hosts                          # ~/.ssh/config, your tailnet, and this network
-muxen files <machine>[:<folder>]         # what's in a folder (alias: ls)
-muxen cp <machine>:<path>... <machine>:<folder>   # copy between machines
-muxen connection <machine> [--direct on|off]
-muxen check [--json]                     # one-shot full report
-muxen workspace …                        # agent workspaces, see below (alias: ws)
+muxin status [--refresh]                 # overview + what needs attention
+muxin machines | machine <id>
+muxin runners [--machine <id>] [--state offline]
+muxin jobs
+muxin add-machine --name <name> --host <ssh-host> [--no-check]
+muxin remove-machine <id>
+muxin rename-machine <id> <new name>      # the id stays the same
+muxin ports beelink                       # what's listening there (web servers first)
+muxin forward beelink 3000                # its port 3000 at localhost:3000 here, until Ctrl-C
+muxin run --on beelink,mac-studio -- df -h /   # one command on several machines (--all: every one online)
+muxin ps beelink [-n 20]                  # its busiest processes and its GPUs
+muxin kill beelink 4242 [--force]         # stop a process (--force: SIGKILL)
+muxin wake beelink                        # Wake on LAN
+muxin power win11 off                     # a VM in Docker on another machine (or a cloud machine): on or off
+muxin vm create win-test --system windows-11 --on beelink   # a VM on one of your machines
+muxin schedule add beelink --name Tests --every day --at 09:00 --command "make test"
+muxin usage [--days 30] [--machine beelink]   # what the agents used, and the cost at API prices
+muxin edit beelink:~/code/api [--editor zed] [--print]   # open a folder there in your editor
+muxin disconnect <id>                     # stop connecting to it (its sessions go on there)
+muxin connect <id>                        # connect again, and check it
+muxin install <machine-id> [--scope acme] [--count N | --name a --name b] [--label gpu] [--mode auto|service|background|docker] [--image IMAGE] [--docker-socket] [--no-wait]
+muxin runner <start|stop|restart|logs|remove> <runner-id> [--delete-files]
+muxin watch <org|owner/repo>... / unwatch ...
+muxin settings [--poll 20] [--scan-repos 10] [--check-interval 15]
+muxin ssh-hosts                          # ~/.ssh/config, your tailnet, and this network
+muxin files <machine>[:<folder>]         # what's in a folder (alias: ls)
+muxin cp <machine>:<path>... <machine>:<folder>   # copy between machines
+muxin connection <machine> [--direct on|off]
+muxin check [--json]                     # one-shot full report
+muxin workspace …                        # agent workspaces, see below (alias: ws)
 ```
 
 Ids:
@@ -294,28 +302,28 @@ Think of [Amp's Orbs](https://ampcode.com/news/agents-in-orbs), but on your own 
 
 The machine can be named, or picked for you: the least-loaded online machine that allows workspaces, optionally matching a platform such as `linux` or `darwin-arm64`. Private GitHub repos are cloned with your `gh` login; the token is passed through the environment for that one command and never written to disk or logs.
 
-Every command an agent runs is recorded with its exit code, duration and the end of its output. You can see that history in the app's Workspaces page, or open a terminal in any workspace with `muxen workspace shell <id>`.
+Every command an agent runs is recorded with its exit code, duration and the end of its output. You can see that history in the app's Workspaces page, or open a terminal in any workspace with `muxin workspace shell <id>`.
 
 ```sh
-muxen ws create --platform linux --repo acme/api --ref main
-muxen ws create --docker --image node:22 --repo acme/web   # an isolated container
-muxen ws create --machine beelink --worktree-of ~/code/api --branch fix-login   # a worktree of a checkout there
-muxen ws exec ws-7f3a2c -- cargo test          # exits with the command's exit code
-muxen ws exec ws-7f3a2c --background -- npm run dev
-muxen ws cat ws-7f3a2c .muxen/logs/1.log
-echo 'hello' | muxen ws write ws-7f3a2c notes.txt
-muxen ws files ws-7f3a2c src --depth 1
-muxen ws changes ws-7f3a2c
-muxen ws sync ws-7f3a2c ~/code/api --push      # or --pull, add --delete to mirror deletions
-muxen ws shell ws-7f3a2c                       # an interactive shell in the workspace, for you
-muxen ws ls
-muxen ws rm ws-7f3a2c [--keep-files]
-muxen ws allow studionas --off                 # forbid workspaces on a machine
+muxin ws create --platform linux --repo acme/api --ref main
+muxin ws create --docker --image node:22 --repo acme/web   # an isolated container
+muxin ws create --machine beelink --worktree-of ~/code/api --branch fix-login   # a worktree of a checkout there
+muxin ws exec ws-7f3a2c -- cargo test          # exits with the command's exit code
+muxin ws exec ws-7f3a2c --background -- npm run dev
+muxin ws cat ws-7f3a2c .muxen/logs/1.log
+echo 'hello' | muxin ws write ws-7f3a2c notes.txt
+muxin ws files ws-7f3a2c src --depth 1
+muxin ws changes ws-7f3a2c
+muxin ws sync ws-7f3a2c ~/code/api --push      # or --pull, add --delete to mirror deletions
+muxin ws shell ws-7f3a2c                       # an interactive shell in the workspace, for you
+muxin ws ls
+muxin ws rm ws-7f3a2c [--keep-files]
+muxin ws allow studionas --off                 # forbid workspaces on a machine
 ```
 
 `ws exec` passes the command's stdout and stderr through and exits with its exit code (124 if it timed out), so it composes in scripts. With `--json` it prints the full result instead.
 
-**Safety.** Host workspace commands run as the ssh user on your machine, with that user's permissions; they aren't sandboxed. Use Docker isolation for code you don't trust. Workspaces are on by default for every machine with a host. Turn them off per machine with `workspaces = false` in `config.toml`, the toggle on the machine's page in the app, or `muxen workspace allow <machine> --off`. Nothing is deleted automatically: workspaces stay until you or an agent destroys them. Folders live under `~/muxen/workspaces/<id>` on each machine (`workspace_root` in `config.toml` changes that).
+**Safety.** Host workspace commands run as the ssh user on your machine, with that user's permissions; they aren't sandboxed. Use Docker isolation for code you don't trust. Workspaces are on by default for every machine with a host. Turn them off per machine with `workspaces = false` in `config.toml`, the toggle on the machine's page in the app, or `muxin workspace allow <machine> --off`. Nothing is deleted automatically: workspaces stay until you or an agent destroys them. Folders live under `~/muxen/workspaces/<id>` on each machine (`workspace_root` in `config.toml` changes that).
 
 ## Your GitHub, and handing issues to agents
 
@@ -324,84 +332,84 @@ The GitHub page is built for the loop of picking an issue, handing it to an agen
 - **For you:** pull requests waiting for your review, issues assigned to you, and your open pull requests.
 - **Repositories:** everything you own, collaborate on or reach through your orgs, with each one's open issues, pull requests and GitHub Actions runs. Star the ones you work on to keep them at the top, and show the list as one list or grouped by owner (you, then your organizations, then repositories other people shared with you).
 - **On your machines:** each machine's agent finds git checkouts in your code folders (`~/Developer`, `~/code`, `~/src`, … set in `config.toml` as `code_folders` under `[settings]`) and links them to their GitHub repository, with branch, commits ahead/behind and uncommitted changes. Fetch, Pull and Push from there.
-- **Fix with agent:** on any issue (or **Review with agent** on a pull request), one click opens a new session in that repository's checkout on the machine you pick (this computer first), with the issue's link, title and description as the agent's first message. Right-click an issue or pull request for **Fix in a new workspace…**: pick any machine and agent, and Muxen clones the repository there (an issue gets its own branch, like `issue-910-content-excalidraw`; a pull request checks out its branch, forks included), then starts the agent in it.
+- **Fix with agent:** on any issue (or **Review with agent** on a pull request), one click opens a new session in that repository's checkout on the machine you pick (this computer first), with the issue's link, title and description as the agent's first message. Right-click an issue or pull request for **Fix in a new workspace…**: pick any machine and agent, and Muxin clones the repository there (an issue gets its own branch, like `issue-910-content-excalidraw`; a pull request checks out its branch, forks included), then starts the agent in it.
 
-Muxen uses the GitHub CLI's login (`gh auth login`) or `GITHUB_TOKEN`. Settings has a **Sign in with GitHub** button that runs the CLI's browser sign-in; each machine's page shows whether its own `gh` is signed in (agents there use it for issues and pull requests) and can sign it in too.
+Muxin uses the GitHub CLI's login (`gh auth login`) or `GITHUB_TOKEN`. Settings has a **Sign in with GitHub** button that runs the CLI's browser sign-in; each machine's page shows whether its own `gh` is signed in (agents there use it for issues and pull requests) and can sign it in too.
 
 **Git on each machine.** A machine's page has a Git card: whether its GitHub CLI is signed in, who commits there, and how pushes reach GitHub. When something's missing, one click fixes it: **Use my GitHub identity** sets git's name and email to your GitHub name and private noreply address, and **Use the GitHub CLI** runs `gh auth setup-git` so pushes use the machine's `gh` login. Agents working there can then commit and push.
 
 ```sh
-muxen git status beelink
-muxen git setup beelink --identity --credentials
+muxin git status beelink
+muxin git setup beelink --identity --credentials
 ```
 
 **Permissions.** Watching an organization's runners needs the `admin:org` permission on your GitHub login. Settings shows when it's missing, with a **Grant access** button that runs `gh auth refresh -s admin:org` in a terminal (it finishes in your browser), and lists your organizations so watching one is a click.
 
-**More than one account.** Click your name at the top of the GitHub page to switch. The menu lists every account the GitHub CLI here is signed in to, plus each machine's own `gh` login: with a work laptop signed in to your work account, pick "@you-at-work · Work MacBook" and Muxen sees that account's repositories, inbox and runners (the token is fetched over ssh when needed and kept in memory only). Fix with agent then prefers checkouts on that machine. Switching doesn't change which account `gh` uses in your terminal. "Add another account…" runs `gh auth login`.
+**More than one account.** Click your name at the top of the GitHub page to switch. The menu lists every account the GitHub CLI here is signed in to, plus each machine's own `gh` login: with a work laptop signed in to your work account, pick "@you-at-work · Work MacBook" and Muxin sees that account's repositories, inbox and runners (the token is fetched over ssh when needed and kept in memory only). Fix with agent then prefers checkouts on that machine. Switching doesn't change which account `gh` uses in your terminal. "Add another account…" runs `gh auth login`.
 
 ```sh
-muxen github inbox                         # what needs you
-muxen github repos                         # favorites first (★)
-muxen github favorite ZenNotes/zennotes    # --remove to unstar
-muxen github accounts
-muxen github use work-login                # or: --machine work-macbook
-muxen github repo ZenNotes/zennotes        # issues, PRs, runs, and where it's checked out
-muxen github issue ZenNotes/zennotes#632   # or the issue's URL
-muxen checkouts --repo ZenNotes/zennotes
-muxen checkouts --machine beelink --path ~/code/api --git pull
+muxin github inbox                         # what needs you
+muxin github repos                         # favorites first (★)
+muxin github favorite ZenNotes/zennotes    # --remove to unstar
+muxin github accounts
+muxin github use work-login                # or: --machine work-macbook
+muxin github repo ZenNotes/zennotes        # issues, PRs, runs, and where it's checked out
+muxin github issue ZenNotes/zennotes#632   # or the issue's URL
+muxin checkouts --repo ZenNotes/zennotes
+muxin checkouts --machine beelink --path ~/code/api --git pull
 ```
 
 ## Agent sessions
 
 Start an AI agent on one of your machines and come back to it whenever you like, from the app, from your own terminal, or through another agent.
 
-- **Keeps running.** Sessions live in Muxen's agent on the machine (`~/.muxen/bin/muxen-agent`), a small background program that holds each session's terminal, the way tmux would. Closing the app, sleeping your laptop or losing the network only detaches; the agent keeps working until you end the session, and reopening it shows the screen as it is with its recent scrollback. A restart of the machine ends its sessions, as with tmux.
-- **Nothing to install.** When Muxen connects to a machine it uploads the agent build for that OS and CPU (macOS, Linux and Windows, x86_64 and arm64; a few MB) and keeps it up to date.
-- **Split panes.** ⌘D splits a terminal to the right, ⇧⌘D below it (or the buttons in its header): a new shell on the same machine, in the same folder. ⌥⌘← and ⌥⌘→ move between panes, or click one. Each pane is a session of its own, so it keeps running like any other; type `exit` to close it, or × on its bar to take it out of the split. Splits come back when you reopen Muxen.
-- **A real terminal in the app.** Everything goes to the agent: Esc, Ctrl-C, Tab, arrows, Option/Shift+Enter for newlines. ⌘C copies a selection, ⌘V pastes, the wheel scrolls back. Nerd Font icons (Neovim's file icons, prompt glyphs) show with any terminal font: Muxen brings the symbols. Right-click a machine for a new terminal or agent session.
-- **Names you choose.** Right-click a machine or a session and pick **Rename…** (or ⇧⌘P › Rename on its page). A machine keeps its id, so its runners, sessions and favorites stay with it; `config.toml` gets `id = "<old id>"` when the new name would give a different one. A session's title is kept by the agent on its machine (`~/.muxen/titles.json`), so every Muxen sees it; an empty title goes back to the one it started with.
-- **Your environment.** The agent starts in your login shell, in the folder you pick, so nvm/fnm/asdf and the CLI's own login work as they do in your terminal. Muxen finds which agent CLIs each machine has: `claude`, `codex`, `opencode`, `gemini`, `amp`.
-- **What it changed.** Each session shows its branch, the lines and files it changed since the default branch, its commits and uncommitted files, and the branch's pull request with its checks (click it to open it on GitHub). Muxen looks when a session stops working, and at least every minute while sessions run.
+- **Keeps running.** Sessions live in Muxin's agent on the machine (`~/.muxen/bin/muxen-agent`), a small background program that holds each session's terminal, the way tmux would. Closing the app, sleeping your laptop or losing the network only detaches; the agent keeps working until you end the session, and reopening it shows the screen as it is with its recent scrollback. A restart of the machine ends its sessions, as with tmux.
+- **Nothing to install.** When Muxin connects to a machine it uploads the agent build for that OS and CPU (macOS, Linux and Windows, x86_64 and arm64; a few MB) and keeps it up to date.
+- **Split panes.** ⌘D splits a terminal to the right, ⇧⌘D below it (or the buttons in its header): a new shell on the same machine, in the same folder. ⌥⌘← and ⌥⌘→ move between panes, or click one. Each pane is a session of its own, so it keeps running like any other; type `exit` to close it, or × on its bar to take it out of the split. Splits come back when you reopen Muxin.
+- **A real terminal in the app.** Everything goes to the agent: Esc, Ctrl-C, Tab, arrows, Option/Shift+Enter for newlines. ⌘C copies a selection, ⌘V pastes, the wheel scrolls back. Nerd Font icons (Neovim's file icons, prompt glyphs) show with any terminal font: Muxin brings the symbols. Right-click a machine for a new terminal or agent session.
+- **Names you choose.** Right-click a machine or a session and pick **Rename…** (or ⇧⌘P › Rename on its page). A machine keeps its id, so its runners, sessions and favorites stay with it; `config.toml` gets `id = "<old id>"` when the new name would give a different one. A session's title is kept by the agent on its machine (`~/.muxen/titles.json`), so every Muxin sees it; an empty title goes back to the one it started with.
+- **Your environment.** The agent starts in your login shell, in the folder you pick, so nvm/fnm/asdf and the CLI's own login work as they do in your terminal. Muxin finds which agent CLIs each machine has: `claude`, `codex`, `opencode`, `gemini`, `amp`.
+- **What it changed.** Each session shows its branch, the lines and files it changed since the default branch, its commits and uncommitted files, and the branch's pull request with its checks (click it to open it on GitHub). Muxin looks when a session stops working, and at least every minute while sessions run.
 - **Actions.** A session's **Actions** button (or its right-click menu) asks its agent to commit, commit and push, open or update the pull request, review the changes, fix the review comments, resolve conflicts or write a recap. Each one types a prompt into the agent; change any of them in **Settings › Prompts** (`[settings.prompts]` in `config.toml`), where `{branch}`, `{base}` and `{pull}` are filled in.
 - **Agents can drive agents.** `session_start`, `session_read` (the screen as text), `session_question` and `session_answer` (what it asks, and an answer), `session_send` (type into it), `session_action` and `session_stop` are MCP tools and CLI commands too.
 
 ```sh
-muxen session ls                                   # every session, and which agents each machine has
-muxen session start beelink claude --cwd ~/code/api --prompt "fix the failing test"
-muxen session read beelink/claude-3f9a             # what's on its screen
-muxen session send beelink/claude-3f9a "yes"       # type, then Enter (--no-enter to skip it)
-muxen session do beelink/claude-3f9a pull_request  # an action: commit, commit_push, pull_request, review, fix_comments, conflicts, recap
-muxen session question beelink/claude-3f9a         # what it's asking, and the options' keys
-muxen session answer beelink/claude-3f9a 1         # pick one
-muxen session attach beelink/claude-3f9a           # open it in this terminal; detach with Ctrl-] then d
-muxen session restart beelink/claude-3f9a
-muxen session rename beelink/claude-3f9a "API server"   # "" goes back to the original title
-muxen session stop beelink/claude-3f9a
+muxin session ls                                   # every session, and which agents each machine has
+muxin session start beelink claude --cwd ~/code/api --prompt "fix the failing test"
+muxin session read beelink/claude-3f9a             # what's on its screen
+muxin session send beelink/claude-3f9a "yes"       # type, then Enter (--no-enter to skip it)
+muxin session do beelink/claude-3f9a pull_request  # an action: commit, commit_push, pull_request, review, fix_comments, conflicts, recap
+muxin session question beelink/claude-3f9a         # what it's asking, and the options' keys
+muxin session answer beelink/claude-3f9a 1         # pick one
+muxin session attach beelink/claude-3f9a           # open it in this terminal; detach with Ctrl-] then d
+muxin session restart beelink/claude-3f9a
+muxin session rename beelink/claude-3f9a "API server"   # "" goes back to the original title
+muxin session stop beelink/claude-3f9a
 ```
 
 Build the agent for every platform with `scripts/build-agents.sh` (needs `cargo-zigbuild` and Zig for the Linux builds); `scripts/bundle-macos.sh` runs it and ships the builds inside the app.
 
 ## Connections and desktops
 
-Muxen first reaches a machine with `ssh`, installs its small agent there, and from then on talks to that agent over **one live connection** instead of a new ssh connection per request: requests take milliseconds instead of ~0.4 s, terminals open instantly, and the sidebar updates the moment a session changes.
+Muxin first reaches a machine with `ssh`, installs its small agent there, and from then on talks to that agent over **one live connection** instead of a new ssh connection per request: requests take milliseconds instead of ~0.4 s, terminals open instantly, and the sidebar updates the moment a session changes.
 
 - **Over ssh** (the default): one ssh connection per machine, kept open and reconnected when it drops.
-- **Direct**: on a machine's page, **Connect directly** pairs the app with its agent (each trusts only the other's certificate, swapped over ssh) and runs the agent's listener as a user service there (systemd or launchd) on UDP port 47821. Muxen then connects over QUIC, falling back to ssh whenever the direct connection is down.
+- **Direct**: on a machine's page, **Connect directly** pairs the app with its agent (each trusts only the other's certificate, swapped over ssh) and runs the agent's listener as a user service there (systemd or launchd) on UDP port 47821. Muxin then connects over QUIC, falling back to ssh whenever the direct connection is down.
 - `MUXEN_NO_LINK=1` turns all of this off: one ssh connection per request, as before.
-- **Disconnect** (a machine's right-click menu, or its Connection section) stops all of it for that machine: Muxen closes the connection and stops checking it and reading its sessions, which keep running there. It shows as Disconnected until you **Connect** (its page, its menu, or search). It's kept in `config.toml` as `disconnected = true`.
+- **Disconnect** (a machine's right-click menu, or its Connection section) stops all of it for that machine: Muxin closes the connection and stops checking it and reading its sessions, which keep running there. It shows as Disconnected until you **Connect** (its page, its menu, or search). It's kept in `config.toml` as `disconnected = true`.
 
-**Servers.** A machine's page lists what's listening there: web servers first, with their page's title (a dev server, a Docker container's site), then its other ports. **Open** puts one on this computer at `localhost` (the same port number when it's free) and opens it in your browser; no desktop needed. Each connection goes through the machine's live connection, so it works over ssh or direct alike, even for servers that listen only on the machine itself. Open ports are listed under their machine in the sidebar (click to open, × to close) and come back when Muxen starts. **Open a port** takes any port number. From a terminal: `muxen ports <machine>` and `muxen forward <machine> <port>`.
+**Servers.** A machine's page lists what's listening there: web servers first, with their page's title (a dev server, a Docker container's site), then its other ports. **Open** puts one on this computer at `localhost` (the same port number when it's free) and opens it in your browser; no desktop needed. Each connection goes through the machine's live connection, so it works over ssh or direct alike, even for servers that listen only on the machine itself. Open ports are listed under their machine in the sidebar (click to open, × to close) and come back when Muxin starts. **Open a port** takes any port number. From a terminal: `muxin ports <machine>` and `muxin forward <machine> <port>`.
 
 **Desktop.** On a Linux machine with an X11 desktop, a Mac, or a Windows PC someone is signed in to, **Show desktop** (on its page, or its right-click menu) shows its screen live and sends your mouse and keyboard to it. On Linux ⌘ works as Ctrl; on a Mac it stays ⌘. An open desktop is listed under its machine in the sidebar (and keeps streaming while you look elsewhere); close it there.
 
-**Monitors, real and virtual.** A machine with more than one monitor gets a picker above its desktop: show one monitor at a time (on Linux, or all of them). **Add monitor** (or **Add virtual monitor…** in the machine's right-click menu) plugs in a monitor that isn't there, the way [DeskPad](https://github.com/Stengo/DeskPad) does on a Mac: pick a name and a size (720p to 4K), and it joins the desktop like a real one, to the right of the others. Windows move onto it, the machine's own tools (System Settings, RustDesk) see it, and while the machine's desktop is open, Muxen lists it under the Desktop item in the sidebar to open it directly. It starts at the main monitor's size and offers every common one (720p to 4K). Above a monitor, pick its resolution, and on Linux desktops that offer it, its scale: 200% makes things twice as big and just as sharp, so a 4K monitor reads like 1080p (the stream is always the screen's own size, so it stays crisp). Right-click a monitor (in the picker or the sidebar) to rename or remove it, and in the all-screens view, click a monitor's name to open it. On Cinnamon each virtual monitor gets copies of the main monitor's panels (menu, clock, dock with the same pinned apps), so it's usable on its own. It stays until you remove it (**Remove monitor**) or the machine restarts. Handy on a machine with no screen (a dummy HDMI plug, a server), or to give an agent a monitor of its own. On a Mac it's a CGVirtualDisplay. On Linux (X11) it's a software dummy plug: Muxen plugs a made-up monitor (at the size you picked) into a video output with nothing connected, and the desktop sets it up like a real one. That takes root, so when sudo wants a password Muxen asks for yours, only then, sends it to sudo over its encrypted connection, and keeps it in memory only until you quit. Nothing is installed.
+**Monitors, real and virtual.** A machine with more than one monitor gets a picker above its desktop: show one monitor at a time (on Linux, or all of them). **Add monitor** (or **Add virtual monitor…** in the machine's right-click menu) plugs in a monitor that isn't there, the way [DeskPad](https://github.com/Stengo/DeskPad) does on a Mac: pick a name and a size (720p to 4K), and it joins the desktop like a real one, to the right of the others. Windows move onto it, the machine's own tools (System Settings, RustDesk) see it, and while the machine's desktop is open, Muxin lists it under the Desktop item in the sidebar to open it directly. It starts at the main monitor's size and offers every common one (720p to 4K). Above a monitor, pick its resolution, and on Linux desktops that offer it, its scale: 200% makes things twice as big and just as sharp, so a 4K monitor reads like 1080p (the stream is always the screen's own size, so it stays crisp). Right-click a monitor (in the picker or the sidebar) to rename or remove it, and in the all-screens view, click a monitor's name to open it. On Cinnamon each virtual monitor gets copies of the main monitor's panels (menu, clock, dock with the same pinned apps), so it's usable on its own. It stays until you remove it (**Remove monitor**) or the machine restarts. Handy on a machine with no screen (a dummy HDMI plug, a server), or to give an agent a monitor of its own. On a Mac it's a CGVirtualDisplay. On Linux (X11) it's a software dummy plug: Muxin plugs a made-up monitor (at the size you picked) into a video output with nothing connected, and the desktop sets it up like a real one. That takes root, so when sudo wants a password Muxin asks for yours, only then, sends it to sudo over its encrypted connection, and keeps it in memory only until you quit. Nothing is installed.
 
 ```sh
-muxen desktop displays beelink                     # its monitors (virtual ones marked)
-muxen desktop add beelink --size 2560x1440         # another monitor, "Display 2"
-muxen desktop shot beelink --display DisplayPort-0 # a screenshot of just that one
-muxen desktop set beelink HDMI-A-0 --size 3840x2160 --scale 2  # 4K, things twice as big
-muxen desktop remove beelink DisplayPort-0
+muxin desktop displays beelink                     # its monitors (virtual ones marked)
+muxin desktop add beelink --size 2560x1440         # another monitor, "Display 2"
+muxin desktop shot beelink --display DisplayPort-0 # a screenshot of just that one
+muxin desktop set beelink HDMI-A-0 --size 3840x2160 --scale 2  # 4K, things twice as big
+muxin desktop remove beelink DisplayPort-0
 ```
 
 - **Macs** ask once, on their own screen, to allow `muxen-agent` under Privacy & Security › Screen Recording (to see it) and Accessibility (to control it). The screen goes over ssh to the agent's background service in your session there, so no other network permission is needed. Release builds sign the agent with a Developer ID, so the permissions survive updates.
@@ -413,10 +421,10 @@ muxen desktop remove beelink DisplayPort-0
 - Only changed parts of the screen are sent (captured through shared memory, compressed on all of the machine's cores), so a still screen costs nothing.
 
 ```sh
-muxen connection beelink                  # how it's reached, and how fast
-muxen connection beelink --direct on      # pair and connect directly
-muxen desktop shot beelink -o screen.jpg
-muxen desktop input beelink '[{"type":"click","x":100,"y":200},{"type":"text","text":"hello"}]'
+muxin connection beelink                  # how it's reached, and how fast
+muxin connection beelink --direct on      # pair and connect directly
+muxin desktop shot beelink -o screen.jpg
+muxin desktop input beelink '[{"type":"click","x":100,"y":200},{"type":"text","text":"hello"}]'
 ```
 
 AI agents get the same: `machine_connection`, `direct_connection`, `desktop_screenshot` (an image they can look at) and `desktop_input`.
@@ -425,12 +433,12 @@ AI agents get the same: `machine_connection`, `direct_connection`, `desktop_scre
 
 ## Tailscale and moving between networks
 
-If [Tailscale](https://tailscale.com) is on your Mac, Muxen uses it to keep machines reachable away from home, with nothing to set up: it only reads Tailscale's status and never changes its settings.
+If [Tailscale](https://tailscale.com) is on your Mac, Muxin uses it to keep machines reachable away from home, with nothing to set up: it only reads Tailscale's status and never changes its settings.
 
 - **Home network first.** A paired machine is tried on its local-network address first, and through its Tailscale address a moment later; the first to answer wins. At home that's the local network; at a café it's Tailscale.
 - **Moving.** When your Mac changes networks, connections that no longer work are rebuilt the best way from where you are, and ones that went through Tailscale move back to the local network when you're home again. Open terminals and desktops carry on.
 - **ssh too.** If a machine's host only works at home (a local IP in `config.toml` or your ssh config), ssh goes to its tailnet address instead when the usual one doesn't answer.
-- **Offline answers.** Tailscale's view tells Muxen when a machine is back, whether Tailscale lost it too, or that Tailscale is off on this Mac (with **Open Tailscale**).
+- **Offline answers.** Tailscale's view tells Muxin when a machine is back, whether Tailscale lost it too, or that Tailscale is off on this Mac (with **Open Tailscale**).
 - **The Connection card** says which way it goes (Local network, or Tailscale peer-to-peer or through a relay), whether the machine is on your tailnet, and offers **Set up Tailscale** on Linux machines that aren't (the install command, typed in a shell there for you to run).
 - **Adding machines:** the Add machine dialog lists the computers on your tailnet; one added by its tailnet name is reachable from anywhere.
 
@@ -438,23 +446,23 @@ If [Tailscale](https://tailscale.com) is on your Mac, Muxen uses it to keep mach
 
 A machine's logs, live: **Logs** on its page (or right-click it, or ⌘P › Logs) opens them, and they stay under the machine in the sidebar until you close them.
 
-- **System:** the systemd journal and the kernel's messages on Linux, the unified log on a Mac. Without the `systemd-journal` group Linux shows only your own; Muxen says so.
+- **System:** the systemd journal and the kernel's messages on Linux, the unified log on a Mac. Without the `systemd-journal` group Linux shows only your own; Muxin says so.
 - **Files:** `/var/log`, `~/Library/Logs`, and log files written lately under your home folder (an app's `storage/logs`, a runner's `_diag`), newest first, or any path you type. Root-only ones are marked.
 - **Docker** containers, and running **services** (systemd units, yours and the system's).
 - The last 500 lines, then new ones as they're written; a filter, Pause, Follow (scrolling up stops it) and Copy. Errors are red and warnings amber.
 
 ```sh
-muxen logs beelink --list                          # what there is
-muxen logs beelink --unit nginx -n 100             # a service's last lines
-muxen logs beelink --file '~/app/storage/logs/laravel.log' --grep error
-muxen logs beelink --container postgres --follow   # keep printing (Ctrl-C to stop)
+muxin logs beelink --list                          # what there is
+muxin logs beelink --unit nginx -n 100             # a service's last lines
+muxin logs beelink --file '~/app/storage/logs/laravel.log' --grep error
+muxin logs beelink --container postgres --follow   # keep printing (Ctrl-C to stop)
 ```
 
 ## Services and containers
 
 A machine's services, and its Docker containers: **Services** on its page (or right-click it, or ⌘P › Services). Failed ones come first, then running ones; Find narrows the list.
 
-- **Linux:** systemd services, the system's and your own ("yours"), with whether each starts at boot (click **At boot** to change it). **Start**, **Stop**, **Restart**. The system's take root: when sudo wants your password, Muxen asks for it there, once, and keeps it in memory until you quit.
+- **Linux:** systemd services, the system's and your own ("yours"), with whether each starts at boot (click **At boot** to change it). **Start**, **Stop**, **Restart**. The system's take root: when sudo wants your password, Muxin asks for it there, once, and keeps it in memory until you quit.
 - **A Mac:** Homebrew's services (`brew services`: Postgres, Redis, nginx, ...).
 - **What they use:** CPU and memory for each running service and container; sort by them to find what's busy.
 - **Docker, all of it:**
@@ -462,45 +470,45 @@ A machine's services, and its Docker containers: **Services** on its page (or ri
   - **Compose:** each project Docker knows, with **Up**, **Down**, **Restart**, **Pull**, its log, and **Edit** (its compose file in your editor, in a terminal on the machine). **New project** makes `~/compose/<name>/compose.yaml` to start from. Click a project to see it three ways: a **Picture** (its services as boxes, an arrow to what each waits for, green when it waits until that's healthy; the ports each opens on the machine, its networks as colored tags, the files it mounts, its volumes at the right; each box with the image, state, health, CPU and memory), a **List** (the same as a table, with Start, Stop and Restart for each service, then its volumes, mounted files and networks), and its **Logs** (every service's lines in time order, each in its color, with a chip to show one service's).
   - **Images:** pull one, run it, remove it, or remove every unused one.
   - Pulls, runs and Compose up/down run as operations: their output shows as they go, and in Activity.
-- Stop, Restart, Remove and Down ask first, and say so when stopping one (ssh, Tailscale, the network) could cut Muxen off from the machine. The log button opens its log in **Logs**.
+- Stop, Restart, Remove and Down ask first, and say so when stopping one (ssh, Tailscale, the network) could cut Muxin off from the machine. The log button opens its log in **Logs**.
 
 - **Processes:** the machine's busiest few hundred processes, with CPU (percent of one core), memory, how long each has run and who runs it; **Stop** sends SIGTERM, **Kill** SIGKILL (both ask first). Another user's takes root, as for system services. NVIDIA, AMD (Linux) and Apple GPUs show above the list, with how busy and how much memory.
 
 ```sh
-muxen services beelink                             # services and containers
-muxen services beelink restart nginx
-muxen services beelink stop postgres --container
+muxin services beelink                             # services and containers
+muxin services beelink restart nginx
+muxin services beelink stop postgres --container
 ```
 
 ## Files and the clipboard
 
 **Copying files.** **Copy files** on a machine's page (or its right-click menu) opens two panes: the machine with the files on the left, where they go on the right, each a folder you can browse. Pick files and folders, pick a folder, copy. Dropping files from the Finder onto a machine in the sidebar opens it ready to send them there.
 
-- Files go through Muxen as a tar stream between the two machines' agents, so the machines never need to reach each other or share ssh keys. Folders come along whole, with permissions and links. Your Mac is a machine like the others, so this uploads and downloads too.
+- Files go through Muxin as a tar stream between the two machines' agents, so the machines never need to reach each other or share ssh keys. Folders come along whole, with permissions and links. Your Mac is a machine like the others, so this uploads and downloads too.
 - Files with the same names in the destination folder are replaced; the dialog says so first.
 - Progress, speed and **Stop** are in Activity.
 - Both ends hold back to what the other can take, so a slow machine doesn't pile data up anywhere.
 
 ```sh
-muxen files beelink:~/build
-muxen cp beelink:~/build/app.tar.gz adibs-macbook-pro:~/Downloads
-muxen cp adibs-macbook-pro:~/Projects/site beelink:~/www --no-wait
+muxin files beelink:~/build
+muxin cp beelink:~/build/app.tar.gz adibs-macbook-pro:~/Downloads
+muxin cp adibs-macbook-pro:~/Projects/site beelink:~/www --no-wait
 ```
 
 **Shared clipboard.** Text you copy on your Mac can be pasted on your Linux desktops and other Macs, and what you copy there lands on your Mac (and on the other machines). Passwords copied from password managers (marked private on the clipboard) stay on your Mac. Turn it off in Settings › Clipboard.
 
 ## Cloud machines
 
-Need a machine you don't have? Muxen can make one in your DigitalOcean account. Connect in **Settings › Cloud** with an API token (kept in the macOS Keychain), the browser sign-in, or `doctl`'s login. Then pick **New cloud machine…** in the Add machine dialog: a name, a region (the nearest is preselected) and a size with its price. Muxen creates the droplet with your user and SSH key, installs what you chose (Docker, git and the GitHub CLI; Node with Claude Code and Codex; Tailscale), and adds it to your machines. Then it's like any other machine: terminals, agent sessions, files, workspaces.
+Need a machine you don't have? Muxin can make one in your DigitalOcean account. Connect in **Settings › Cloud** with an API token (kept in the macOS Keychain), the browser sign-in, or `doctl`'s login. Then pick **New cloud machine…** in the Add machine dialog: a name, a region (the nearest is preselected) and a size with its price. Muxin creates the droplet with your user and SSH key, installs what you chose (Docker, git and the GitHub CLI; Node with Claude Code and Codex; Tailscale), and adds it to your machines. Then it's like any other machine: terminals, agent sessions, files, workspaces.
 
-DigitalOcean bills a droplet by the second while it exists, **powered on or off**, up to its monthly price; only destroying it stops the charges. Each cloud machine's page shows its rate, what it has cost this month and since it was created, and what this month comes to if you keep it, with **Power on/off** and **Destroy**. **Settings › Cloud › Usage and cost** adds them up: what you're paying per hour now, this month so far (machines destroyed this month included), the month's total if nothing changes, and your whole DigitalOcean bill this month (when Muxen may read it: sign in again in the browser, or use a token with `billing:read`). Settings › Cloud also says what happens when one sits idle: nothing, a reminder, power off, or destroy, after the hours you choose.
+DigitalOcean bills a droplet by the second while it exists, **powered on or off**, up to its monthly price; only destroying it stops the charges. Each cloud machine's page shows its rate, what it has cost this month and since it was created, and what this month comes to if you keep it, with **Power on/off** and **Destroy**. **Settings › Cloud › Usage and cost** adds them up: what you're paying per hour now, this month so far (machines destroyed this month included), the month's total if nothing changes, and your whole DigitalOcean bill this month (when Muxin may read it: sign in again in the browser, or use a token with `billing:read`). Settings › Cloud also says what happens when one sits idle: nothing, a reminder, power off, or destroy, after the hours you choose.
 
 ```sh
-muxen cloud login --token dop_v1_...
-muxen cloud options
-muxen cloud create dev-1 --size s-2vcpu-4gb
-muxen cloud usage                     # what they cost
-muxen cloud destroy dev-1
+muxin cloud login --token dop_v1_...
+muxin cloud options
+muxin cloud create dev-1 --size s-2vcpu-4gb
+muxin cloud usage                     # what they cost
+muxin cloud destroy dev-1
 ```
 
 ## VMs on your machines
@@ -510,31 +518,31 @@ Need a clean Windows to try an installer, or a throwaway Linux? **New VM…** (i
 - **Windows** 11, 10, Server 2025 or 2022, in Docker with KVM ([dockur/windows](https://github.com/dockur/windows)) on a Linux machine (x86-64). It downloads Windows and installs it by itself, 15 to 30 minutes the first time, then turns on OpenSSH with your key. Watch the install from its page. It runs unactivated until you enter a key.
 - **Linux** (Ubuntu, Debian, Fedora, Alpine or Arch) as a container with ssh, on any machine with Docker, this Mac included. Ready in under a minute. It shares its host's kernel (no systemd).
 
-It joins your machines under the one it runs on, with Muxen's agent: sessions, files, the desktop and workspaces work like anywhere, and a UDP port on its host is forwarded to it, so **Connect directly** works too. **Stop** and **Start** it from its page; **Destroy** deletes its container and disk. Your AI agents can do the same through MCP: make a Windows VM for a test, use it, destroy it.
+It joins your machines under the one it runs on, with Muxin's agent: sessions, files, the desktop and workspaces work like anywhere, and a UDP port on its host is forwarded to it, so **Connect directly** works too. **Stop** and **Start** it from its page; **Destroy** deletes its container and disk. Your AI agents can do the same through MCP: make a Windows VM for a test, use it, destroy it.
 
 ```sh
-muxen vm options                                   # where VMs can run, and what
-muxen vm create win-test --system windows-11 --on beelink
-muxen vm create scratch --system ubuntu-24.04       # on the machine with the most free memory
-muxen power win-test off
-muxen vm destroy win-test
+muxin vm options                                   # where VMs can run, and what
+muxin vm create win-test --system windows-11 --on beelink
+muxin vm create scratch --system ubuntu-24.04       # on the machine with the most free memory
+muxin power win-test off
+muxin vm destroy win-test
 ```
 
 ## Schedules
 
-A schedule runs a command, or starts an agent session, on one of your machines at set times: every few minutes, every hour, every day, weekdays, or some days of the week, in that machine's own time. It's kept on the machine and run by its own scheduler (cron, launchd or Task Scheduler), so it runs even when Muxen isn't open. The **Schedules** page lists them with their last run, runs one now, pauses one, and shows each run's output. An agent schedule ("every morning, go through new issues") starts a session you find under the machine, waiting for you.
+A schedule runs a command, or starts an agent session, on one of your machines at set times: every few minutes, every hour, every day, weekdays, or some days of the week, in that machine's own time. It's kept on the machine and run by its own scheduler (cron, launchd or Task Scheduler), so it runs even when Muxin isn't open. The **Schedules** page lists them with their last run, runs one now, pauses one, and shows each run's output. An agent schedule ("every morning, go through new issues") starts a session you find under the machine, waiting for you.
 
 ```sh
-muxen schedule add beelink --name "Disk report" --every weekdays --at 09:00 --command "df -h /"
-muxen schedule add beelink --name Triage --every day --at 08:30 --agent claude --prompt "Label new issues in acme/api"
-muxen schedule ls
-muxen schedule log beelink s-ab12cd
+muxin schedule add beelink --name "Disk report" --every weekdays --at 09:00 --command "df -h /"
+muxin schedule add beelink --name Triage --every day --at 08:30 --agent claude --prompt "Label new issues in acme/api"
+muxin schedule ls
+muxin schedule log beelink s-ab12cd
 ```
 
 ## How checks and installs work
 
 - **Checks are read-only.** A small script is sent over `ssh` (`sh` on macOS and Linux, PowerShell on Windows), or run directly for `host = "local"`. It reports CPU, memory, disk, uptime and load, and finds the installed runners, their versions, their services and whether they're running. Checks run on a schedule (every 15 minutes by default) or on request.
-- **Installs only happen when you ask.** Muxen checks the machine, gets a short-lived registration token from GitHub, and installs each runner in one of these modes (`--mode` / `mode`, default `auto`):
+- **Installs only happen when you ask.** Muxin checks the machine, gets a short-lived registration token from GitHub, and installs each runner in one of these modes (`--mode` / `mode`, default `auto`):
   - **service:** downloads the latest `actions-runner` for the machine's platform into `~/actions-runner/<name>`, runs `config.sh --unattended`, and installs a service: launchd on macOS (the user must be logged in), systemd on Linux (needs **passwordless sudo** for `svc.sh`), a Windows service on Windows.
   - **docker:** one container per runner, `muxen-<name>`, from GitHub's official image (`ghcr.io/actions/actions-runner:<latest runner version>`, or `--image`). The runner's files live in a named volume of the same name, registration happens in a throwaway container that reads the token from stdin (so it never shows up in `docker inspect` or a process list), and the container runs with `--restart unless-stopped`, so it comes back with the Docker daemon. No sudo needed; the user just has to be in the `docker` group. The runners get the `docker` label, and jobs run in a clean Ubuntu userland. `--docker-socket` shares the host's Docker socket so jobs can use Docker; that's root-equivalent access to the machine, so only use it for trusted workflows.
   - **background:** `run.sh` started with `nohup`; no root needed, but it doesn't come back after a reboot (`--no-service` is the same).
@@ -546,17 +554,17 @@ muxen schedule log beelink s-ab12cd
 
 ## Windows
 
-**Windows machines** are managed like the others, over OpenSSH (Settings › System › Optional features › OpenSSH Server, then key-based login; an administrator account for services and runners). Muxen installs its agent in `%USERPROFILE%\.muxen\bin` and works with PowerShell or cmd as sshd's shell:
+**Windows machines** are managed like the others, over OpenSSH (Settings › System › Optional features › OpenSSH Server, then key-based login; an administrator account for services and runners). Muxin installs its agent in `%USERPROFILE%\.muxen\bin` and works with PowerShell or cmd as sshd's shell:
 
-- **Sessions** keep running after Muxen closes (ConPTY, in the agent's session server).
-- **Desktop and clipboard:** the screen, mouse and keyboard of whoever is signed in; Muxen starts its helper in their session through a one-off scheduled task (no window flashes).
+- **Sessions** keep running after Muxin closes (ConPTY, in the agent's session server).
+- **Desktop and clipboard:** the screen, mouse and keyboard of whoever is signed in; Muxin starts its helper in their session through a one-off scheduled task (no window flashes).
 - **Pages:** Processes and GPUs, Services (Windows services; "at boot" is the startup type), Servers, Logs (the System, Application and Security event logs, a service's events, files), Usage, Copy files, git, Run (PowerShell), workspaces (sync copies through the agent; it doesn't delete).
 - **Checks** report admin rights, Docker, the network card (for Wake on LAN), pending reboots and failed services.
 - **Direct connections** run `listen` as a scheduled task at sign-in, with a Windows Firewall rule for the agent.
 
 Not yet on Windows: Docker runners and Docker workspaces, adding virtual monitors.
 
-**The app on Windows** is built on Windows (GPUI compiles its shaders with the Windows SDK's `fxc.exe`): install Rust and Visual Studio's C++ build tools with the Windows SDK, run `scripts/build-agents.sh` on a Mac or Linux (it makes the Windows agent too, with `cargo-zigbuild`), then `scripts\package-windows.ps1` on Windows. That makes `dist\Muxen-<version>-windows-x64-setup.exe` (`arm64` on Windows on Arm: an installer, with [Inno Setup](https://jrsoftware.org/isinfo.php): for this user, no administrator needed, a Start menu entry, optionally `muxen` on the PATH, an uninstaller) and `dist\Muxen-<version>-windows-x64.zip` (`muxen.exe` and its `agents\`). Started from Explorer it shows no console window; from a terminal it's the same CLI as elsewhere. Secrets go in Windows' Credential Manager.
+**The app on Windows** is built on Windows (GPUI compiles its shaders with the Windows SDK's `fxc.exe`): install Rust and Visual Studio's C++ build tools with the Windows SDK, run `scripts/build-agents.sh` on a Mac or Linux (it makes the Windows agent too, with `cargo-zigbuild`), then `scripts\package-windows.ps1` on Windows. That makes `dist\Muxin-<version>-windows-x64-setup.exe` (`arm64` on Windows on Arm: an installer, with [Inno Setup](https://jrsoftware.org/isinfo.php): for this user, no administrator needed, a Start menu entry, optionally `muxin` on the PATH, an uninstaller) and `dist\Muxin-<version>-windows-x64.zip` (`muxin.exe` and its `agents\`). Started from Explorer it shows no console window; from a terminal it's the same CLI as elsewhere. Secrets go in Windows' Credential Manager.
 
 ## Develop
 
@@ -586,6 +594,6 @@ Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). To
 
 ## License
 
-Muxen is open source under the [Apache License 2.0](LICENSE), copyright 2026 Lumary Labs LLC (see `NOTICE`). The Muxen name and logo are Lumary Labs' trademarks; the license doesn't cover them.
+Muxin is open source under the [Apache License 2.0](LICENSE), copyright 2026 Lumary Labs LLC (see `NOTICE`). The Muxin name and logo are Lumary Labs' trademarks; the license doesn't cover them.
 
 It includes third-party components under their own licenses, listed in `THIRD_PARTY_NOTICES.md`: the Geist fonts (SIL Open Font License, `assets/fonts/OFL.txt`), the Lucide icons (ISC, `assets/icons/LICENSE.txt`), the Phosphor, Hugeicons and Fluent icons (MIT), the MingCute icons (Apache-2.0) and the Solar icons (CC BY 4.0), with their licenses in `assets/icons/`, GPUI (Apache-2.0) and the Rust crates in `Cargo.lock`.

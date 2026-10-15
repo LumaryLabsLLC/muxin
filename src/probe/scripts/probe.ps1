@@ -1,6 +1,6 @@
-# Muxen machine probe (Windows). Read-only.
+# Muxin machine probe (Windows). Read-only.
 # Prints key=value lines; runner N is reported as rN.<key>=<value>.
-# $OR_DIRS (array of glob patterns) is prepended by Muxen.
+# $OR_DIRS (array of glob patterns) is prepended by Muxin.
 
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'

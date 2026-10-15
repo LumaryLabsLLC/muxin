@@ -92,7 +92,7 @@ impl Engine {
         let settings = self.settings().cloud;
         let extras = req.install.unwrap_or(settings.install);
         if let Some(bad) = extras.iter().find(|e| !setup::EXTRAS.iter().any(|(id, _)| id == e)) {
-            return Err(format!("Muxen doesn't know how to install \"{bad}\". It knows: {}.", setup::EXTRAS.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(", ")));
+            return Err(format!("Muxin doesn't know how to install \"{bad}\". It knows: {}.", setup::EXTRAS.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(", ")));
         }
         let op = self.begin_op("cloud-create", format!("Create {name} on DigitalOcean"), None, None);
         let me = self.clone();
@@ -132,7 +132,7 @@ impl Engine {
             Some(k) => k,
             None => {
                 self.op_log(op, format!("▸ Adding {key_path} to your DigitalOcean account"));
-                client.add_ssh_key(&format!("Muxen · {}", crate::config::local_hostname()), public_key.trim()).await?
+                client.add_ssh_key(&format!("Muxin · {}", crate::config::local_hostname()), public_key.trim()).await?
             }
         };
 
@@ -179,13 +179,13 @@ impl Engine {
             self.join_tailnet(op, &spec).await;
         }
 
-        // Muxen's agent, so terminals, sessions and files work right away.
-        self.op_log(op, "▸ Installing Muxen's agent");
+        // Muxin's agent, so terminals, sessions and files work right away.
+        self.op_log(op, "▸ Installing Muxin's agent");
         self.run_check(Some(vec![machine_id.clone()])).await;
         let probe = self.machine(&machine_id).and_then(|(_, p)| p);
         match crate::fleet::sessions::agent::ensure(&spec, probe.as_ref()).await {
             Ok(()) => self.op_log(op, "✓ Agent installed"),
-            Err(e) => self.op_log(op, format!("! The agent didn't install yet ({e}); Muxen tries again when you open a terminal")),
+            Err(e) => self.op_log(op, format!("! The agent didn't install yet ({e}); Muxin tries again when you open a terminal")),
         }
         self.op_log(op, format!("✓ {name} is ready"));
         Ok(())
@@ -255,10 +255,10 @@ impl Engine {
         }
     }
 
-    /// Destroys a cloud machine: deletes the droplet and removes it from Muxen.
+    /// Destroys a cloud machine: deletes the droplet and removes it from Muxin.
     pub fn cloud_destroy(self: &Arc<Self>, machine_id: &str) -> Result<u64, String> {
-        let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in Muxen anymore.")?;
-        let cloud = spec.cloud.clone().ok_or_else(|| format!("{} isn't a cloud machine Muxen created.", spec.name))?;
+        let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in Muxin anymore.")?;
+        let cloud = spec.cloud.clone().ok_or_else(|| format!("{} isn't a cloud machine Muxin created.", spec.name))?;
         if self.machine_busy(&spec.id) {
             return Err("An operation is still running on this machine. Wait for it to finish.".into());
         }
@@ -292,8 +292,8 @@ impl Engine {
 
     /// Powers a cloud machine off (cleanly) or on. DigitalOcean still bills it while it's off.
     pub fn cloud_power(self: &Arc<Self>, machine_id: &str, on: bool) -> Result<u64, String> {
-        let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in Muxen anymore.")?;
-        let cloud = spec.cloud.clone().ok_or_else(|| format!("{} isn't a cloud machine Muxen created.", spec.name))?;
+        let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in Muxin anymore.")?;
+        let cloud = spec.cloud.clone().ok_or_else(|| format!("{} isn't a cloud machine Muxin created.", spec.name))?;
         if self.machine_busy(&spec.id) {
             return Err("An operation is still running on this machine. Wait for it to finish.".into());
         }
@@ -434,7 +434,7 @@ impl Engine {
                         account_error = Some(match method.as_str() {
                             // It says "not authorized" even with billing:read granted, at least for a new account.
                             "oauth" if !account_needs_sign_in => "DigitalOcean isn't sharing the bill yet; a new account may not have one.".to_string(),
-                            "oauth" => format!("Sign in again so Muxen can read your DigitalOcean bill. ({said})"),
+                            "oauth" => format!("Sign in again so Muxin can read your DigitalOcean bill. ({said})"),
                             "doctl" => format!("doctl's token can't read billing; it needs billing:read. ({said})"),
                             _ => format!("This API token can't read billing; it needs billing:read. ({said})"),
                         });

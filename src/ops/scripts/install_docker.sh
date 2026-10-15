@@ -1,6 +1,6 @@
-# Muxen: install GitHub Actions runners as Docker containers (Linux, or any
+# Muxin: install GitHub Actions runners as Docker containers (Linux, or any
 # machine with a Docker daemon that runs Linux containers).
-# Muxen prepends these variables:
+# Muxin prepends these variables:
 #   OR_IMAGE           runner image, e.g. ghcr.io/actions/actions-runner:2.329.0
 #   OR_IMAGE_FALLBACK  image to try when OR_IMAGE can't be pulled (may be empty)
 #   OR_URL             https://github.com/<org> or https://github.com/<owner>/<repo>

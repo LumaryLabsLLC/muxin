@@ -1,9 +1,9 @@
-//! How Muxen signs in to DigitalOcean, as the user chose in Settings › Cloud:
+//! How Muxin signs in to DigitalOcean, as the user chose in Settings › Cloud:
 //!
 //! - "token": a personal access token the user pasted, kept in the Keychain.
 //! - "doctl": the token DigitalOcean's CLI saved when the user ran `doctl auth init`.
 //! - "oauth": the browser sign-in (OAuth), with its tokens kept in the Keychain.
-//!   Muxen is a public OAuth client: no secret ships in the app. Each sign-in
+//!   Muxin is a public OAuth client: no secret ships in the app. Each sign-in
 //!   proves itself with PKCE, and DigitalOcean sends the browser back to a
 //!   local port. Access tokens last an hour and refresh by themselves; each
 //!   refresh token works once.
@@ -18,7 +18,7 @@ use super::secrets;
 pub const TOKEN: &str = "digitalocean-token";
 const OAUTH: &str = "digitalocean-oauth";
 
-/// Muxen's OAuth client at DigitalOcean: registered by Lumary Labs on
+/// Muxin's OAuth client at DigitalOcean: registered by Lumary Labs on
 /// 2026-10-09 as a public client ("Muxen", https://muxin.dev, loopback
 /// callbacks at /digitalocean), so it's no secret. `MUXEN_DO_CLIENT_ID` at build
 /// time overrides it.
@@ -27,7 +27,7 @@ const CLIENT_ID: &str = "df4228c4a87c9e8d950e0a519d5f41796c0131356c188e5dcabe2e1
 /// The callback path; DigitalOcean matches loopback callbacks on any port.
 const CALLBACK_PATH: &str = "/digitalocean";
 
-/// What Muxen asks to do in the account, and nothing more.
+/// What Muxin asks to do in the account, and nothing more.
 const SCOPES: &str = "account:read regions:read sizes:read ssh_key:read ssh_key:create droplet:create droplet:read droplet:update droplet:delete actions:read billing:read";
 
 fn client_id() -> Option<&'static str> {
@@ -45,12 +45,12 @@ struct OAuthTokens {
     refresh_token: String,
     /// Unix seconds.
     expires_at: i64,
-    /// What DigitalOcean granted, space-separated ("" from before Muxen kept it).
+    /// What DigitalOcean granted, space-separated ("" from before Muxin kept it).
     #[serde(default)]
     scope: String,
 }
 
-/// The permissions the browser sign-in was granted, when Muxen knows them.
+/// The permissions the browser sign-in was granted, when Muxin knows them.
 pub fn granted_scopes(dir: &std::path::Path) -> Option<String> {
     let tokens: OAuthTokens = serde_json::from_str(&secrets::get(dir, OAUTH)?).ok()?;
     Some(tokens.scope).filter(|s| !s.is_empty())
@@ -165,7 +165,7 @@ async fn oauth_token(dir: &Path) -> Result<String, String> {
     if fresh_enough(&tokens) {
         return Ok(tokens.access_token);
     }
-    let id = client_id().ok_or("This build of Muxen can't sign in with DigitalOcean.")?;
+    let id = client_id().ok_or("This build of Muxin can't sign in with DigitalOcean.")?;
     let fresh = exchange(&[("grant_type", "refresh_token"), ("refresh_token", &tokens.refresh_token), ("client_id", id)])
         .await
         .map_err(|_| "The DigitalOcean sign-in expired. Sign in again in Settings › Cloud.".to_string())?;
@@ -211,7 +211,7 @@ async fn exchange(params: &[(&str, &str)]) -> Result<OAuthTokens, String> {
 /// to five minutes for it to send the browser back here, and keeps the tokens.
 pub async fn oauth_sign_in(dir: &Path, open: impl FnOnce(&str)) -> Result<(), String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let id = client_id().ok_or("This build of Muxen can't sign in with DigitalOcean yet. Use an API token or doctl.")?;
+    let id = client_id().ok_or("This build of Muxin can't sign in with DigitalOcean yet. Use an API token or doctl.")?;
     // Any free port: DigitalOcean matches loopback callbacks on any port.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| format!("Couldn't wait for DigitalOcean's answer: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -246,10 +246,10 @@ pub async fn oauth_sign_in(dir: &Path, open: impl FnOnce(&str)) -> Result<(), St
                 continue;
             }
             let (ok, body) = match (query("code"), query("state")) {
-                (Some(code), Some(s)) if s == state => (Ok(code), "Signed in. You can close this tab and go back to Muxen."),
-                _ => (Err(query("error_description").unwrap_or_else(|| "The sign-in was cancelled.".into())), "The sign-in didn't finish. Go back to Muxen and try again."),
+                (Some(code), Some(s)) if s == state => (Ok(code), "Signed in. You can close this tab and go back to Muxin."),
+                _ => (Err(query("error_description").unwrap_or_else(|| "The sign-in was cancelled.".into())), "The sign-in didn't finish. Go back to Muxin and try again."),
             };
-            let page = format!("<!doctype html><meta charset=utf-8><title>Muxen</title><body style=\"font:15px -apple-system,system-ui;padding:40px\">{body}</body>");
+            let page = format!("<!doctype html><meta charset=utf-8><title>Muxin</title><body style=\"font:15px -apple-system,system-ui;padding:40px\">{body}</body>");
             let _ = sock.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{page}", page.len()).as_bytes()).await;
             return ok;
         }

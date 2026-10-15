@@ -8,6 +8,8 @@ mod github;
 mod mcp;
 mod ops;
 mod probe;
+#[cfg(feature = "gui")]
+mod renamed;
 mod shell_command;
 #[cfg(feature = "gui")]
 mod ui;
@@ -27,10 +29,10 @@ use crate::config::{Paths, display_path};
 use crate::fleet::Engine;
 
 /// One app for all your machines: agent sessions, desktops, files, GitHub,
-/// workspaces and self-hosted runners. Agents can drive it too (`muxen mcp`,
+/// workspaces and self-hosted runners. Agents can drive it too (`muxin mcp`,
 /// or any command with --json).
 #[derive(Parser)]
-#[command(name = "muxen", version, about, args_conflicts_with_subcommands = true)]
+#[command(name = "muxin", version, about, args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -55,7 +57,7 @@ enum Command {
     RemoveMachine(MachineArgs),
     /// Give a machine a new name (its id stays the same)
     RenameMachine(RenameMachineArgs),
-    /// Stop connecting to a machine (its sessions go on there) until `muxen connect`
+    /// Stop connecting to a machine (its sessions go on there) until `muxin connect`
     Disconnect(MachineArgs),
     /// Connect to a machine again (and check it)
     Connect(MachineArgs),
@@ -77,10 +79,10 @@ enum Command {
     Settings(SettingsArgs),
     /// Host aliases from ~/.ssh/config, for add-machine
     SshHosts(AgentArgs),
-    /// What's in a folder on a machine: `muxen files beelink:~/build`
+    /// What's in a folder on a machine: `muxin files beelink:~/build`
     #[command(alias = "ls")]
     Files(FilesArgs),
-    /// Copy files and folders between machines: `muxen cp beelink:~/build/app.tar.gz mac-studio:~/Downloads`
+    /// Copy files and folders between machines: `muxin cp beelink:~/build/app.tar.gz mac-studio:~/Downloads`
     Cp(CpArgs),
     /// Agent workspaces: persistent work environments on your machines
     #[command(alias = "ws", subcommand)]
@@ -93,7 +95,7 @@ enum Command {
     /// Whether git on a machine can commit and push, and setting that up
     #[command(subcommand)]
     Git(GitCommand),
-    /// How Muxen reaches a machine (direct, ssh link); --direct on|off to change it
+    /// How Muxin reaches a machine (direct, ssh link); --direct on|off to change it
     Connection(ConnectionArgs),
     /// A machine's desktop: a screenshot, or mouse and keyboard input
     #[command(subcommand)]
@@ -138,9 +140,9 @@ enum Command {
     Check(CheckArgs),
     /// Write a starter config.toml
     Init(InitArgs),
-    /// Print where Muxen keeps its files
+    /// Print where Muxin keeps its files
     Paths(CommonArgs),
-    /// Put `muxen` in your PATH (macOS: /usr/local/bin, Linux: ~/.local/bin,
+    /// Put `muxin` in your PATH (macOS: /usr/local/bin, Linux: ~/.local/bin,
     /// Windows: this folder in your user PATH), or take it out
     ShellCommand(ShellCommandArgs),
 }
@@ -331,7 +333,7 @@ struct CancelRunArgs {
     #[command(flatten)]
     agent: AgentArgs,
 
-    /// The job's id (from `muxen jobs --json`)
+    /// The job's id (from `muxin jobs --json`)
     job_id: u64,
 
     /// Return right away with the operation id
@@ -404,9 +406,9 @@ enum GithubCommand {
     Repos(AgentArgs),
     /// A repository's open issues and PRs, recent runs, and local checkouts
     Repo(GhRepoArgs),
-    /// The GitHub CLI accounts you're signed in to, and which one Muxen uses
+    /// The GitHub CLI accounts you're signed in to, and which one Muxin uses
     Accounts(AgentArgs),
-    /// Switch Muxen to another of the GitHub CLI's accounts
+    /// Switch Muxin to another of the GitHub CLI's accounts
     Use(GhUseArgs),
     /// Add a repository to your favorites (listed first), or remove it with --remove
     #[command(alias = "fav")]
@@ -428,7 +430,7 @@ struct GhRepoArgs {
 enum ScheduleCommand {
     /// The schedules on your machines (--on one), with their last runs
     Ls(ScheduleLsArgs),
-    /// Add one, e.g. `muxen schedule add beelink --name Tests --every day --at 09:00 --command "make test"`
+    /// Add one, e.g. `muxin schedule add beelink --name Tests --every day --at 09:00 --command "make test"`
     Add(ScheduleAddArgs),
     /// Delete one
     Rm(ScheduleRefArgs),
@@ -487,7 +489,7 @@ struct ScheduleRefArgs {
 /// `--every` and `--at` as a schedule's `when`.
 fn parse_every(every: &str, at: Option<String>) -> Result<muxen_when::When, String> {
     let e = every.trim().to_ascii_lowercase();
-    let num = |s: &str| s.parse::<u32>().map_err(|_| format!("\"{every}\" isn't a schedule Muxen knows."));
+    let num = |s: &str| s.parse::<u32>().map_err(|_| format!("\"{every}\" isn't a schedule Muxin knows."));
     let (kind, n, days): (&str, Option<u32>, Vec<String>) = if let Some(m) = e.strip_suffix('m').filter(|m| m.chars().all(|c| c.is_ascii_digit())) {
         ("minutes", Some(num(m)?), Vec::new())
     } else if let Some(h) = e.strip_suffix('h').filter(|h| h.chars().all(|c| c.is_ascii_digit())) {
@@ -518,7 +520,7 @@ enum VmCommand {
     Options(AgentArgs),
     /// Create a VM and add it to your machines (Windows installs itself: 15-30 minutes)
     Create(VmCreateArgs),
-    /// Delete a VM Muxen made: its container, its disk, and the machine in Muxen
+    /// Delete a VM Muxin made: its container, its disk, and the machine in Muxin
     Destroy(CloudMachineArgs),
 }
 
@@ -526,7 +528,7 @@ enum VmCommand {
 struct VmCreateArgs {
     #[command(flatten)]
     agent: AgentArgs,
-    /// Its name in Muxen
+    /// Its name in Muxin
     name: String,
     /// windows-11, windows-10, windows-server-2025, windows-server-2022, ubuntu-26.04,
     /// ubuntu-24.04, debian-13, fedora, alpine or arch
@@ -559,7 +561,7 @@ enum CloudCommand {
     Usage(AgentArgs),
     /// Create a droplet, set it up, and add it to your machines (it costs money while it exists)
     Create(CloudCreateArgs),
-    /// Delete a cloud machine's droplet and remove it from Muxen
+    /// Delete a cloud machine's droplet and remove it from Muxin
     Destroy(CloudMachineArgs),
     /// Power a cloud machine on or off (DigitalOcean still bills it while off)
     Power(CloudPowerArgs),
@@ -635,7 +637,7 @@ enum DesktopCommand {
     Displays(MachineArgs),
     /// Add a virtual monitor (like plugging in another screen)
     Add(DesktopAddArgs),
-    /// Remove a virtual monitor Muxen added
+    /// Remove a virtual monitor Muxin added
     Remove(DesktopRemoveArgs),
     /// Change a monitor's resolution or scale
     Set(DesktopSetArgs),
@@ -776,7 +778,7 @@ struct DesktopSetArgs {
     agent: AgentArgs,
     /// Machine id or name
     machine: String,
-    /// The display's id (see `muxen desktop displays`)
+    /// The display's id (see `muxin desktop displays`)
     display: String,
     /// Its resolution, e.g. 3840x2160 (one it offers)
     #[arg(long)]
@@ -806,7 +808,7 @@ struct DesktopRemoveArgs {
     agent: AgentArgs,
     /// Machine id or name
     machine: String,
-    /// The display's id (see `muxen desktop displays`)
+    /// The display's id (see `muxin desktop displays`)
     display: String,
 }
 
@@ -819,7 +821,7 @@ struct DesktopShotArgs {
     /// Where to save it (default: <machine>-desktop.jpg)
     #[arg(short, long)]
     output: Option<std::path::PathBuf>,
-    /// One of its displays (see `muxen desktop displays`)
+    /// One of its displays (see `muxin desktop displays`)
     #[arg(long)]
     display: Option<String>,
 }
@@ -832,7 +834,7 @@ struct DesktopInputArgs {
     machine: String,
     /// The events, as JSON
     events: String,
-    /// One of its displays (see `muxen desktop displays`)
+    /// One of its displays (see `muxin desktop displays`)
     #[arg(long)]
     display: Option<String>,
 }
@@ -907,7 +909,7 @@ struct GitSetupArgs {
 struct GhUseArgs {
     #[command(flatten)]
     agent: AgentArgs,
-    /// A GitHub login (see `muxen github accounts`)
+    /// A GitHub login (see `muxin github accounts`)
     #[arg(required_unless_present = "machine")]
     login: Option<String>,
     /// Use this machine's GitHub CLI login instead
@@ -1022,7 +1024,7 @@ struct SessionAnswerArgs {
     agent: AgentArgs,
     /// Session id (<machine-id>/<name>) or unique name
     session_id: String,
-    /// The option's key, as `muxen session question` shows it (1, 2, … or #0, #1, …)
+    /// The option's key, as `muxin session question` shows it (1, 2, … or #0, #1, …)
     choice: String,
 }
 
@@ -1338,7 +1340,7 @@ fn main() -> ExitCode {
     // Logs always go to stderr: stdout is reserved for --json output and MCP messages.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("MUXEN_LOG").unwrap_or_else(|_| "muxen=info".into()),
+            tracing_subscriber::EnvFilter::try_from_env("MUXEN_LOG").unwrap_or_else(|_| "muxin=info".into()),
         )
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
@@ -1382,7 +1384,7 @@ fn main() -> ExitCode {
         }
         Some(Command::Disconnect(a)) => {
             let req = api::ConnectMachineRequest { machine_id: a.machine_id, connected: false };
-            run(&runtime, &a.agent, async move |e| api::connect_machine(&e, req).await, |m| format!("Disconnected from {}. Its sessions go on there; `muxen connect {}` connects again.\n", m.name, m.id))
+            run(&runtime, &a.agent, async move |e| api::connect_machine(&e, req).await, |m| format!("Disconnected from {}. Its sessions go on there; `muxin connect {}` connects again.\n", m.name, m.id))
         }
         Some(Command::RenameMachine(a)) => {
             let req = api::RenameMachineRequest { machine_id: a.machine_id, name: a.name };
@@ -1496,7 +1498,7 @@ fn main() -> ExitCode {
         }
         Some(Command::Wake(a)) => {
             let req = api::WakeRequest { machine_id: a.machine_id };
-            run(&runtime, &a.agent, async move |e| api::wake_machine(&e, req).await, |v| format!("Sent the wake signal from {}. Muxen checks it again in 20 and 40 seconds.\n", v["sent_from"].as_str().unwrap_or("here")))
+            run(&runtime, &a.agent, async move |e| api::wake_machine(&e, req).await, |v| format!("Sent the wake signal from {}. Muxin checks it again in 20 and 40 seconds.\n", v["sent_from"].as_str().unwrap_or("here")))
         }
         Some(Command::Edit(a)) => {
             let (machine, path) = a.target.split_once(':').map(|(m, p)| (m.to_string(), p.to_string())).unwrap_or((a.target.clone(), "~".into()));
@@ -1557,7 +1559,7 @@ fn main() -> ExitCode {
             }
             ScheduleCommand::Run(a) => {
                 let req = api::ScheduleRequest { machine_id: a.machine, schedule_id: a.id, started: None };
-                run(&runtime, &a.agent, async move |e| api::schedule_run(&e, req).await, |_| "✓ Started. See it with `muxen schedule log`.\n".to_string())
+                run(&runtime, &a.agent, async move |e| api::schedule_run(&e, req).await, |_| "✓ Started. See it with `muxin schedule log`.\n".to_string())
             }
             ScheduleCommand::Log(a) => {
                 let req = api::ScheduleRequest { machine_id: a.machine, schedule_id: a.id, started: None };
@@ -1633,8 +1635,8 @@ fn main() -> ExitCode {
                 }
                 (Ok(s), false) => {
                     let line = match s.state {
-                        "installed" => format!("muxen is installed: {}", s.path),
-                        "missing" => format!("Not installed (it would go in {}). Run `muxen shell-command install`.", s.path),
+                        "installed" => format!("muxin is installed: {}", s.path),
+                        "missing" => format!("Not installed (it would go in {}). Run `muxin shell-command install`.", s.path),
                         "other" => format!("{} is something else{}", s.path, s.target.as_deref().map(|t| format!(" (-> {t})")).unwrap_or_default()),
                         _ => "Not available here.".to_string(),
                     };
@@ -1660,7 +1662,7 @@ fn main() -> ExitCode {
 
 /// Windows: started from Explorer or the Start menu, the window comes with a
 /// console of its own (a terminal window). Start again without one: a
-/// console that has no window, which every ssh and PowerShell Muxen starts
+/// console that has no window, which every ssh and PowerShell Muxin starts
 /// then shares instead of each opening a window. True when it did (this
 /// process should end).
 #[cfg(windows)]
@@ -1706,15 +1708,15 @@ fn open(args: OpenArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     #[cfg(not(feature = "gui"))]
     {
         let _ = (engine, args.view);
-        eprintln!("This build of Muxen has no window (built without the `gui` feature).");
-        eprintln!("Use the commands (`muxen --help`) or the MCP server (`muxen mcp`).");
+        eprintln!("This build of Muxin has no window (built without the `gui` feature).");
+        eprintln!("Use the commands (`muxin --help`) or the MCP server (`muxin mcp`).");
         2
     }
 }
 
 /// Runs one agent-facing command: JSON or human output on stdout, errors with a
 /// code (0 ok, 1 failed, 2 bad input / not found).
-/// `muxen cp <machine>:<path>... <machine>:<folder>`
+/// `muxin cp <machine>:<path>... <machine>:<folder>`
 fn cp(a: CpArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     let place = |s: &str| s.split_once(':').map(|(m, p)| (m.to_string(), p.to_string()));
     let (dest, sources) = a.paths.split_last().expect("clap requires two");
@@ -1868,7 +1870,7 @@ fn workspace(cmd: WorkspaceCommand, runtime: &tokio::runtime::Runtime) -> u8 {
 
 /// `workspace exec`: passes the command's output through and exits with its exit code
 /// (124 when it timed out, like `timeout(1)`), so it composes in scripts.
-/// `muxen run`: each machine's output under its name; exits 1 when any failed.
+/// `muxin run`: each machine's output under its name; exits 1 when any failed.
 fn fleet_run(a: FleetRunArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     let _guard = runtime.enter();
     let engine = Engine::new(a.agent.common.paths(), a.agent.demo);
@@ -1940,9 +1942,9 @@ fn workspace_exec(a: WsExecArgs, runtime: &tokio::runtime::Runtime) -> u8 {
                 if let Some(log) = &out.log_path {
                     eprintln!("started in the background (pid {}), log: {log}", out.background_pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()));
                 } else if out.timed_out {
-                    eprintln!("muxen: timed out after {}s", out.duration_ms / 1000);
+                    eprintln!("muxin: timed out after {}s", out.duration_ms / 1000);
                 } else if out.truncated {
-                    eprintln!("muxen: output was truncated (the middle was dropped)");
+                    eprintln!("muxin: output was truncated (the middle was dropped)");
                 }
             }
             match (out.exit_code, out.timed_out) {
@@ -2138,7 +2140,7 @@ fn services(a: ServicesArgs, runtime: &tokio::runtime::Runtime) -> u8 {
             run(runtime, &a.agent, async move |e| api::service_action(&e, req).await, |v| format!("{} {}.\n", past(v["action"].as_str().unwrap_or("")), v["name"].as_str().unwrap_or("")))
         }
         (Some(_), None) => {
-            eprintln!("error: which service or container? muxen services <machine> <action> <name>");
+            eprintln!("error: which service or container? muxin services <machine> <action> <name>");
             2
         }
     }
@@ -2262,7 +2264,7 @@ fn session(cmd: SessionCommand, runtime: &tokio::runtime::Runtime) -> u8 {
             run(runtime, &a.agent, async move |e| api::session_question(&e, req).await, |q| {
                 let mut out: String = q.text.iter().map(|l| format!("{l}\n")).collect();
                 if q.options.is_empty() {
-                    out.push_str("(waiting for a message: muxen session send)\n");
+                    out.push_str("(waiting for a message: muxin session send)\n");
                 }
                 for o in &q.options {
                     let mark = if q.selected.as_deref() == Some(o.key.as_str()) { "›" } else { " " };
@@ -2359,7 +2361,7 @@ fn init(args: InitArgs) -> u8 {
         return 1;
     }
     println!("Wrote {}", display_path(&paths.inventory));
-    println!("Add your machines, then run `muxen` to open the dashboard.");
+    println!("Add your machines, then run `muxin` to open the dashboard.");
     0
 }
 
@@ -2383,7 +2385,7 @@ mod tests {
 
     #[test]
     fn parses_workspace_commands() {
-        let cli = Cli::try_parse_from(["muxen", "ws", "exec", "ws-abc123", "--env", "A=1", "--", "npm", "test"]).unwrap();
+        let cli = Cli::try_parse_from(["muxin", "ws", "exec", "ws-abc123", "--env", "A=1", "--", "npm", "test"]).unwrap();
         match cli.command {
             Some(Command::Workspace(WorkspaceCommand::Exec(a))) => {
                 assert_eq!(a.workspace_id, "ws-abc123");
@@ -2392,8 +2394,8 @@ mod tests {
             }
             _ => panic!("expected workspace exec"),
         }
-        assert!(Cli::try_parse_from(["muxen", "workspace", "sync", "ws-1", "."]).is_err(), "needs --push or --pull");
-        assert!(Cli::try_parse_from(["muxen", "workspace", "sync", "ws-1", ".", "--push", "--pull"]).is_err());
-        assert!(Cli::try_parse_from(["muxen", "workspace", "create", "--platform", "linux", "--repo", "acme/api", "--ref", "main", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["muxin", "workspace", "sync", "ws-1", "."]).is_err(), "needs --push or --pull");
+        assert!(Cli::try_parse_from(["muxin", "workspace", "sync", "ws-1", ".", "--push", "--pull"]).is_err());
+        assert!(Cli::try_parse_from(["muxin", "workspace", "create", "--platform", "linux", "--repo", "acme/api", "--ref", "main", "--json"]).is_ok());
     }
 }

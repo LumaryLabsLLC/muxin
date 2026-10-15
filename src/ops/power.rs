@@ -19,14 +19,14 @@ const STOP_GRACE_SECS: u32 = 120;
 impl Engine {
     /// Powers a machine on or off, however that's done for it.
     pub fn machine_power(self: &Arc<Self>, machine_id: &str, on: bool) -> Result<u64, String> {
-        let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in Muxen anymore.")?;
+        let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in Muxin anymore.")?;
         if spec.cloud.is_some() {
             return self.cloud_power(&spec.id, on);
         }
         let parent = self.current().machines.iter().find(|m| m.id == spec.id).and_then(|m| m.parent.clone()).filter(|p| p.container.is_some());
         match parent {
             Some(p) => self.vm_power(&spec, p, on),
-            None => Err(format!("Muxen can't power {} on or off: it isn't a cloud machine, or a VM in a Docker container on another of your machines.", spec.name)),
+            None => Err(format!("Muxin can't power {} on or off: it isn't a cloud machine, or a VM in a Docker container on another of your machines.", spec.name)),
         }
     }
 
@@ -35,9 +35,9 @@ impl Engine {
     fn vm_power(self: &Arc<Self>, spec: &MachineSpec, parent: ParentMachine, on: bool) -> Result<u64, String> {
         let container = parent.container.clone().unwrap_or_default();
         if !valid_container(&container) {
-            return Err(format!("\"{container}\" isn't a container name Muxen can use."));
+            return Err(format!("\"{container}\" isn't a container name Muxin can use."));
         }
-        let (host, host_probe) = self.machine(&parent.machine_id).ok_or_else(|| format!("{} isn't in Muxen anymore.", parent.name))?;
+        let (host, host_probe) = self.machine(&parent.machine_id).ok_or_else(|| format!("{} isn't in Muxin anymore.", parent.name))?;
         host.refuse_if_disconnected()?;
         if self.machine_busy(&spec.id) || self.machine_busy(&host.id) {
             return Err("An operation is still running on this machine. Wait for it to finish.".into());

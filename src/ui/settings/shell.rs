@@ -1,5 +1,5 @@
-//! Settings › General › Command line: the `muxen` command in the PATH (see
-//! crate::shell_command), so terminals and other agents can run Muxen.
+//! Settings › General › Command line: the `muxin` command in the PATH (see
+//! crate::shell_command), so terminals and other agents can run Muxin.
 
 use gpui::{AnyElement, Context, div, prelude::*, px};
 
@@ -54,7 +54,7 @@ impl SettingsPage {
             None => ("loader-circle", theme.text_muted, "Looking…".into()),
             Some(s) => match s.state {
                 "installed" => ("circle-check", theme.success, format!("Installed: {}", s.path)),
-                "missing" if cfg!(windows) => ("circle", theme.text_muted, "Not installed. Muxen's folder gets added to your PATH.".into()),
+                "missing" if cfg!(windows) => ("circle", theme.text_muted, "Not installed. Muxin's folder gets added to your PATH.".into()),
                 "missing" => ("circle", theme.text_muted, format!("Not installed. It goes in {}.", s.path)),
                 "other" => ("triangle-alert", theme.warning, format!("{} is already there.", s.path)),
                 _ => ("circle-x", theme.error, "Not available on this computer.".into()),
@@ -64,7 +64,8 @@ impl SettingsPage {
             // Before it asks: macOS shows its own password prompt for /usr/local/bin.
             st.status.as_ref().filter(|s| s.state == "missing" && cfg!(target_os = "macos")).map(|_| "macOS may ask for your password to add it there.".to_string())
         });
-        let state = st.status.as_ref().map(|s| (s.state, s.replaceable));
+        // Homebrew's link goes when Homebrew uninstalls the app.
+        let state = st.status.as_ref().filter(|s| !s.homebrew).map(|s| (s.state, s.replaceable));
         let button = match state {
             Some(("missing", _)) => Some(Button::new("shell-install", "Install").icon("plus").style(ButtonStyle::Primary).loading(st.busy).on_click(cx.listener(|this, _, _, cx| this.run_shell(Some(true), cx)))),
             Some(("other", true)) => Some(Button::new("shell-replace", "Use this copy").icon("refresh-cw").loading(st.busy).on_click(cx.listener(|this, _, _, cx| this.run_shell(Some(true), cx)))),
@@ -81,7 +82,7 @@ impl SettingsPage {
                     .p(px(14.))
                     .gap(px(10.))
                     .child(div().w_full().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(
-                        "Use Muxen from a terminal, and connect other agents to it with muxen mcp.",
+                        "Use Muxin from a terminal, and connect other agents to it with muxin mcp.",
                     ))
                     .child(
                         div()

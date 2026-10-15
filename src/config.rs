@@ -26,7 +26,7 @@ pub struct Paths {
     /// Where settings are kept: config.toml.
     pub settings: PathBuf,
     pub state: PathBuf,
-    /// Agent workspaces, shared by every Muxen process (see fleet::workspaces).
+    /// Agent workspaces, shared by every Muxin process (see fleet::workspaces).
     pub workspaces: PathBuf,
     /// Cloud machines destroyed lately (see DestroyedCloud). Its own file, so
     /// the processes that write state.json don't save over each other's.
@@ -65,7 +65,7 @@ fn config_base() -> Option<PathBuf> {
     }
 }
 
-/// Muxen used to keep `fleet.toml`, `settings.json` and `ui.json` in
+/// Muxin used to keep `fleet.toml`, `settings.json` and `ui.json` in
 /// `~/.config/muxen` (and before that `~/.config/openrunner`). The first time,
 /// they become one config.toml in `dir`, and the rest of the old folder (pairing
 /// keys, workspaces) is copied along. The old folder is left as it was.
@@ -93,7 +93,7 @@ fn migrate(dir: &Path, base: Option<&Path>) {
         }
     }
     match write_atomic(&config, text.as_bytes()) {
-        Ok(()) => tracing::info!("moved Muxen's settings from {} into {}", display_path(&old), display_path(&config)),
+        Ok(()) => tracing::info!("moved Muxin's settings from {} into {}", display_path(&old), display_path(&config)),
         Err(e) => tracing::warn!("couldn't write {}: {e:#}", display_path(&config)),
     }
 }
@@ -148,7 +148,7 @@ fn snake_case(s: &str) -> String {
 // ---------------------------------------------------------------------------
 // config.toml sections
 
-const CONFIG_HEADER: &str = "# Muxen: settings, look and machines. The app writes [settings] and [ui];\n# change them here or in Settings. Comments on machines are kept.\n\n";
+const CONFIG_HEADER: &str = "# Muxin: settings, look and machines. The app writes [settings] and [ui];\n# change them here or in Settings. Comments on machines are kept.\n\n";
 
 /// Reads one section of config.toml (`[settings]`, `[ui]`), defaults if it's
 /// missing or doesn't read.
@@ -291,14 +291,14 @@ pub struct MachineSpec {
     pub ssh_options: Vec<String>,
     #[serde(default)]
     pub notes: Option<String>,
-    /// A cloud machine Muxen created (and can power off or destroy).
+    /// A cloud machine Muxin created (and can power off or destroy).
     #[serde(default)]
     pub cloud: Option<CloudRef>,
-    /// A VM (or Linux container) Muxen created in Docker on another of the
+    /// A VM (or Linux container) Muxin created in Docker on another of the
     /// user's machines (and can start, stop or destroy).
     #[serde(default)]
     pub vm: Option<VmRef>,
-    /// Disconnected on purpose: Muxen doesn't connect to it, check it or look
+    /// Disconnected on purpose: Muxin doesn't connect to it, check it or look
     /// at its sessions until it's connected again (its sessions go on there).
     #[serde(default)]
     pub disconnected: bool,
@@ -327,7 +327,7 @@ pub struct CloudRef {
     pub created_at: String,
 }
 
-/// Where a VM Muxen made runs, as config.toml records it:
+/// Where a VM Muxin made runs, as config.toml records it:
 /// `vm = { host = "beelink", os = "windows", version = "11", container = "muxen-win-dev", created_at = "..." }`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -364,7 +364,7 @@ pub fn add_cloud_history(path: &Path, entry: DestroyedCloud) -> Result<()> {
     write_atomic(path, serde_json::to_string_pretty(&all)?.as_bytes())
 }
 
-/// A cloud machine Muxen destroyed, kept so this month's costs still count it.
+/// A cloud machine Muxin destroyed, kept so this month's costs still count it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DestroyedCloud {
@@ -393,13 +393,13 @@ impl MachineSpec {
         !self.host.trim().is_empty()
     }
 
-    /// Muxen may reach it: it has a host and isn't disconnected.
+    /// Muxin may reach it: it has a host and isn't disconnected.
     pub fn is_connected(&self) -> bool {
         self.is_checkable() && !self.disconnected
     }
 
     /// Err for a machine disconnected on purpose: what the user sees instead
-    /// of Muxen reaching it.
+    /// of Muxin reaching it.
     pub fn refuse_if_disconnected(&self) -> Result<(), String> {
         if self.disconnected {
             return Err(format!("{} is disconnected. Connect to it first.", self.name));
@@ -472,11 +472,11 @@ pub fn assign_machine_id(name: &str, explicit_id: &str, taken: &mut HashSet<Stri
 pub fn default_inventory() -> String {
     let host = local_hostname();
     format!(
-        r#"# Muxen: your settings and machines. Settings and the app's look go in
-# [settings] and [ui], which Muxen adds when you change them.
+        r#"# Muxin: your settings and machines. Settings and the app's look go in
+# [settings] and [ui], which Muxin adds when you change them.
 #
-# Each [[machine]] is a computer Muxen connects to: for agent sessions, its
-# desktop, files, workspaces, or the GitHub Actions runners on it. Muxen
+# Each [[machine]] is a computer Muxin connects to: for agent sessions, its
+# desktop, files, workspaces, or the GitHub Actions runners on it. Muxin
 # checks machines over SSH (or directly when host = "local") and reads CPU,
 # memory, disk, uptime and which runners are installed. Checks are read-only.
 #
@@ -532,16 +532,16 @@ pub struct Settings {
     pub check_interval_minutes: u32,
     /// Where to look for git checkouts on every machine: "dir" or "dir:depth".
     pub code_folders: Vec<String>,
-    /// Repositories the user starred in Muxen ("owner/name"), in the order added.
+    /// Repositories the user starred in Muxin ("owner/name"), in the order added.
     pub favorite_repos: Vec<String>,
     /// Text copied here can be pasted on the machines (Linux desktops, Macs), and back.
     pub share_clipboard: bool,
     /// The editor machines' folders open in: "zed", "cursor", "vscode", or "" for the first one installed.
     pub editor: String,
-    /// Cloud machines: how Muxen signs in, what new ones come with, what happens when they sit idle.
+    /// Cloud machines: how Muxin signs in, what new ones come with, what happens when they sit idle.
     pub cloud: CloudSettings,
     /// Session actions' prompts the user changed, by action ("commit", "review", ...;
-    /// see fleet::sessions::actions). The others use Muxen's own.
+    /// see fleet::sessions::actions). The others use Muxin's own.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub prompts: std::collections::BTreeMap<String, String>,
 }
@@ -549,7 +549,7 @@ pub struct Settings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CloudSettings {
-    /// How Muxen signs in to DigitalOcean: "token" (kept in the Keychain), "oauth" (browser sign-in) or "doctl" (its CLI's login).
+    /// How Muxin signs in to DigitalOcean: "token" (kept in the Keychain), "oauth" (browser sign-in) or "doctl" (its CLI's login).
     pub digitalocean_auth: String,
     /// Defaults for new machines; empty picks for you.
     pub region: String,

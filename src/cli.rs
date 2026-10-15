@@ -50,7 +50,7 @@ pub fn status(s: &StatusResponse) -> String {
 
 pub fn machines(list: &[MachineSummary]) -> String {
     if list.is_empty() {
-        return "No machines. Add one with `muxen add-machine --name <name> --host <ssh-host>`.\n".into();
+        return "No machines. Add one with `muxin add-machine --name <name> --host <ssh-host>`.\n".into();
     }
     let rows: Vec<Vec<String>> = list
         .iter()
@@ -267,7 +267,7 @@ pub fn schedules(list: &Vec<crate::fleet::schedules::MachineSchedules>) -> Strin
         }
     }
     if out.is_empty() {
-        out.push_str("No schedules. Add one with `muxen schedule add <machine> --name ... --every day --at 09:00 --command ...`.\n");
+        out.push_str("No schedules. Add one with `muxin schedule add <machine> --name ... --every day --at 09:00 --command ...`.\n");
     }
     out
 }
@@ -325,7 +325,7 @@ pub fn cloud_options(o: &crate::cloud::CloudOptions) -> String {
     match (&o.account, o.signed_in) {
         (Some(a), _) => out.push_str(&format!("DigitalOcean: {} ({method})\n", a.email)),
         (None, true) => out.push_str(&format!("DigitalOcean: signed in ({method})\n")),
-        (None, false) => out.push_str("DigitalOcean: not signed in. Run `muxen cloud login --token TOKEN` (or --doctl, --browser).\n"),
+        (None, false) => out.push_str("DigitalOcean: not signed in. Run `muxin cloud login --token TOKEN` (or --doctl, --browser).\n"),
     }
     if let Some(e) = &o.error {
         out.push_str(&format!("  {e}\n"));
@@ -417,7 +417,7 @@ pub fn settings(s: &SettingsOut) -> String {
 pub fn workspaces(r: &WorkspacesResponse) -> String {
     let mut out = format!("{}\n", r.summary);
     if r.workspaces.is_empty() {
-        out.push_str("Create one with `muxen workspace create [--machine <id>] [--repo owner/repo]`.\n");
+        out.push_str("Create one with `muxin workspace create [--machine <id>] [--repo owner/repo]`.\n");
         return out;
     }
     out.push('\n');
@@ -448,7 +448,7 @@ pub fn workspaces(r: &WorkspacesResponse) -> String {
 pub fn workspace_created(r: &WorkspaceCreated) -> String {
     let w = &r.workspace;
     format!(
-        "✓ {} ({}) on {} · {}\n  shell: {}\nRun commands with `muxen workspace exec {} -- <command>`; destroy it with `muxen workspace rm {}`.\n",
+        "✓ {} ({}) on {} · {}\n  shell: {}\nRun commands with `muxin workspace exec {} -- <command>`; destroy it with `muxin workspace rm {}`.\n",
         w.id, w.name, w.machine_name, w.path, w.shell, w.id, w.id
     )
 }
@@ -556,7 +556,7 @@ fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
 pub fn sessions(r: &crate::api::SessionsOut) -> String {
     let mut out = String::new();
     if r.sessions.is_empty() {
-        out.push_str("No agent sessions. Start one with `muxen session start <machine> claude [--cwd ~/code/app]`.\n");
+        out.push_str("No agent sessions. Start one with `muxin session start <machine> claude [--cwd ~/code/app]`.\n");
     } else {
         let rows: Vec<Vec<String>> = r
             .sessions
@@ -587,7 +587,7 @@ pub fn sessions(r: &crate::api::SessionsOut) -> String {
 
 pub fn session_started(s: &crate::fleet::sessions::SessionInfo) -> String {
     format!(
-        "Started {} ({}) in {}.\nWatch it in the Muxen app, or attach here: {}\n",
+        "Started {} ({}) in {}.\nWatch it in the Muxin app, or attach here: {}\n",
         s.id, s.agent_name, s.cwd, s.attach_command
     )
 }
@@ -631,10 +631,10 @@ pub fn github_repos(r: &[crate::github::hub::Repo]) -> String {
 pub fn github_accounts(a: &crate::api::AccountsOut) -> String {
     let mut out = match (&a.using, a.token_source.as_str()) {
         (Some(l), "gh") => match a.machines.iter().find(|m| Some(&m.machine_id) == a.machine_id.as_ref()) {
-            Some(m) => format!("Muxen uses {l} (the GitHub CLI login on {}).\n", m.machine),
-            None => format!("Muxen uses {l}.\n"),
+            Some(m) => format!("Muxin uses {l} (the GitHub CLI login on {}).\n", m.machine),
+            None => format!("Muxin uses {l}.\n"),
         },
-        (Some(l), var) => format!("Muxen uses {l} (the token in ${var}).\n"),
+        (Some(l), var) => format!("Muxin uses {l} (the token in ${var}).\n"),
         (None, _) => "Not signed in to GitHub. Run `gh auth login`.\n".into(),
     };
     if !a.accounts.is_empty() {
@@ -666,7 +666,7 @@ pub fn github_accounts(a: &crate::api::AccountsOut) -> String {
         out.push_str(&table(&["ACCOUNT", "MACHINE", "ID"], &rows));
     }
     if !a.accounts.is_empty() || !a.machines.is_empty() {
-        out.push_str("\nSwitch with `muxen github use <login>` or `--machine <id>`; add an account with `gh auth login`.\n");
+        out.push_str("\nSwitch with `muxin github use <login>` or `--machine <id>`; add an account with `gh auth login`.\n");
     }
     out
 }
@@ -730,7 +730,7 @@ pub fn connection(c: &crate::fleet::connection::Connection) -> String {
         out.push_str(&format!("  note            {n}\n"));
     }
     if !c.direct {
-        out.push_str(&format!("\nConnect directly with `muxen connection {} --direct on`.\n", c.machine_id));
+        out.push_str(&format!("\nConnect directly with `muxin connection {} --direct on`.\n", c.machine_id));
     }
     out
 }
@@ -755,12 +755,12 @@ pub fn git_setup(g: &crate::api::GitSetupOut) -> String {
             (Some(n), Some(e)) => format!(" (sets {n} <{e}>)"),
             _ => String::new(),
         };
-        fixes.push(format!("muxen git setup {} --identity{who}", g.machine_id));
+        fixes.push(format!("muxin git setup {} --identity{who}", g.machine_id));
     }
     if g.push != "gh" {
         fixes.push(match &g.gh_account {
-            Some(_) => format!("muxen git setup {} --credentials", g.machine_id),
-            None => format!("sign in to gh on {} (gh auth login), then: muxen git setup {} --credentials", g.machine_id, g.machine_id),
+            Some(_) => format!("muxin git setup {} --credentials", g.machine_id),
+            None => format!("sign in to gh on {} (gh auth login), then: muxin git setup {} --credentials", g.machine_id, g.machine_id),
         });
     }
     if !fixes.is_empty() {

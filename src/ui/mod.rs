@@ -44,6 +44,9 @@ use theme::Appearance;
 use root::{Quit, Root};
 
 pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
+    if !engine.is_demo() {
+        std::thread::spawn(crate::renamed::retire_old_app);
+    }
     Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
         assets::load_fonts(cx);
         assets::set_dock_icon();
@@ -79,9 +82,9 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
         };
         let bounds = Bounds::centered(display, size(px(w), px(h)), cx);
         let titlebar = if cfg!(target_os = "macos") {
-            TitlebarOptions { title: Some("Muxen".into()), appears_transparent: true, traffic_light_position: Some(point(px(16.), px(19.))) }
+            TitlebarOptions { title: Some("Muxin".into()), appears_transparent: true, traffic_light_position: Some(point(px(16.), px(19.))) }
         } else {
-            TitlebarOptions { title: Some("Muxen".into()), appears_transparent: false, traffic_light_position: None }
+            TitlebarOptions { title: Some("Muxin".into()), appears_transparent: false, traffic_light_position: None }
         };
         let window = cx.open_window(
             WindowOptions {
@@ -89,7 +92,7 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
                 display_id: display,
                 titlebar: Some(titlebar),
                 window_min_size: Some(size(px(960.), px(600.))),
-                app_id: Some("muxen".into()),
+                app_id: Some("muxin".into()),
                 // A test window (on the laptop's screen) doesn't take the keyboard
                 // from whatever the user is typing in.
                 focus: !wants_builtin,
@@ -163,7 +166,7 @@ pub(crate) fn pasteboard_state() -> Option<(i64, bool)> {
     None
 }
 
-/// Brings up the Tailscale app (to turn it on or sign in). Muxen itself never
+/// Brings up the Tailscale app (to turn it on or sign in). Muxin itself never
 /// changes Tailscale's settings.
 pub(crate) fn open_tailscale() {
     #[cfg(target_os = "macos")]

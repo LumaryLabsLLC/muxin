@@ -65,7 +65,7 @@ impl Engine {
         };
         let files: Vec<String> = project.files.split(',').map(str::trim).filter(|f| !f.is_empty()).map(|f| format!("-f {}", sh_quote(f))).collect();
         if files.is_empty() {
-            return Err(format!("Muxen doesn't know where {}'s compose file is.", project.name));
+            return Err(format!("Muxin doesn't know where {}'s compose file is.", project.name));
         }
         let script = format!("{PATH}set -e\ndocker compose -p {} {} {verb}\n", sh_quote(&project.name), files.join(" "));
         let title = format!("{} {}", match action {
@@ -91,7 +91,7 @@ impl Engine {
         };
         let files: Vec<String> = project.files.split(',').map(str::trim).filter(|f| !f.is_empty()).map(|f| format!("-f {}", sh_quote(f))).collect();
         if files.is_empty() {
-            return Err(format!("Muxen doesn't know where {}'s compose file is.", project.name));
+            return Err(format!("Muxin doesn't know where {}'s compose file is.", project.name));
         }
         let script = format!("{PATH}set -e\ndocker compose -p {} {} {verb} {}\n", sh_quote(&project.name), files.join(" "), sh_quote(service));
         self.docker_op(machine_id, &format!("{title} {service} ({})", project.name), script)

@@ -14,7 +14,7 @@ pub struct SessionAction {
     pub id: &'static str,
     pub label: &'static str,
     pub icon: &'static str,
-    /// Muxen's own prompt.
+    /// Muxin's own prompt.
     pub prompt: &'static str,
     /// What it needs to make sense.
     pub needs: Needs,
@@ -107,7 +107,7 @@ impl SessionAction {
     }
 }
 
-/// An action's prompt (the user's, else Muxen's) with the session's branch,
+/// An action's prompt (the user's, else Muxin's) with the session's branch,
 /// base and pull request filled in.
 pub fn prompt(action: &SessionAction, custom: Option<&str>, git: Option<&GitStatus>) -> String {
     let text = custom.map(str::trim).filter(|t| !t.is_empty()).unwrap_or(action.prompt);

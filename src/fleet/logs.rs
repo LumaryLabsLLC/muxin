@@ -79,7 +79,7 @@ impl Engine {
         }
         super::sessions::agent::ensure(&spec, probe.as_ref()).await?;
         let reply = super::sessions::agent::ctl(&spec, &json!({ "op": "log_sources" })).await?;
-        serde_json::from_value(reply).map_err(|_| format!("{} listed its logs in a way Muxen can't read.", spec.name))
+        serde_json::from_value(reply).map_err(|_| format!("{} listed its logs in a way Muxin can't read.", spec.name))
     }
 
     /// A log's last `lines` (holding `filter`, ignoring case, when given).

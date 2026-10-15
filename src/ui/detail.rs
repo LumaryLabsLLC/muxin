@@ -20,7 +20,7 @@ impl Root {
         let p = m.probe.as_ref().filter(|p| p.ok);
         let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(&m.id) && o.kind != "logs");
 
-        // A VM Muxen made is its container on its host, not the 127.0.0.1 ssh goes to.
+        // A VM Muxin made is its container on its host, not the 127.0.0.1 ssh goes to.
         let place = m.vm.as_ref().map(|v| format!("{} on {}", v.container, m.parent.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| v.host.clone())));
         let mut meta = vec![place.unwrap_or_else(|| if m.host.is_empty() { "no host".to_string() } else { m.host.clone() })];
         if !m.platform.is_empty() {
@@ -163,7 +163,7 @@ impl Root {
                     let machine = m.clone();
                     Button::icon_only("m-remove", "trash-2")
                         .style(ButtonStyle::Danger)
-                        .tooltip(if machine.cloud.is_some() { "Destroy" } else { "Remove from Muxen" })
+                        .tooltip(if machine.cloud.is_some() { "Destroy" } else { "Remove from Muxin" })
                         .on_click(cx.listener(move |this, _, window, cx| this.confirm_remove_machine(&machine, window, cx)))
                 };
                 // Remove stays beside the button before it, never on a line of its own.
@@ -792,7 +792,7 @@ impl Root {
                     .min_w(px(0.))
                     .gap(px(4.))
                     .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(format!("Disconnected from {}", m.name)))
-                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(format!("Muxen isn't connecting to it, checking it or reading its sessions. Its sessions keep running there. {seen}"))),
+                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(format!("Muxin isn't connecting to it, checking it or reading its sessions. Its sessions keep running there. {seen}"))),
             )
             .child(Button::new("m-connect-card", "Connect").icon("plug").on_click(cx.listener(move |this, _, _, cx| this.set_machine_connected(&mid, true, cx))))
             .into_any_element()

@@ -82,7 +82,7 @@ pub fn script(user: &str, extras: &[String]) -> String {
     let extras = resolve(extras);
     let mut s = String::from(
         r#"#!/bin/bash
-# Set up by Muxen. Progress: /var/log/muxen-setup.log
+# Set up by Muxin. Progress: /var/log/muxen-setup.log
 exec >>/var/log/muxen-setup.log 2>&1
 export DEBIAN_FRONTEND=noninteractive
 step() { echo "muxen-step: $*"; }

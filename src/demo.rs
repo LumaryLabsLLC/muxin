@@ -1,4 +1,4 @@
-//! `muxen --demo`: simulated machines with jobs arriving, running and
+//! `muxin --demo`: simulated machines with jobs arriving, running and
 //! finishing, so the app can be explored without any real machines.
 
 use std::sync::Mutex;

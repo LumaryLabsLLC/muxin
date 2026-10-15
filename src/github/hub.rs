@@ -34,7 +34,7 @@ pub struct Repo {
     pub html_url: String,
     /// Owned by an organization (else by a person: you, or someone who shared it with you).
     pub owner_is_org: bool,
-    /// Starred in Muxen (not GitHub's stars).
+    /// Starred in Muxin (not GitHub's stars).
     pub favorite: bool,
 }
 

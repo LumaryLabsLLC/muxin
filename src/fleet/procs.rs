@@ -33,7 +33,7 @@ pub struct Process {
     /// Its GPU memory (NVIDIA), bytes.
     #[serde(default)]
     pub gpu_memory: Option<u64>,
-    /// The user Muxen's agent runs as owns it (no password to stop it).
+    /// The user Muxin's agent runs as owns it (no password to stop it).
     #[serde(default)]
     pub yours: bool,
 }
@@ -81,7 +81,7 @@ impl Engine {
         }
         super::sessions::agent::ensure(&spec, probe.as_ref()).await?;
         let reply = super::sessions::agent::ctl(&spec, &json!({ "op": "processes" })).await?;
-        serde_json::from_value(reply).map_err(|_| format!("{} listed its processes in a way Muxen can't read.", spec.name))
+        serde_json::from_value(reply).map_err(|_| format!("{} listed its processes in a way Muxin can't read.", spec.name))
     }
 
     /// Just a machine's GPUs (for its page).
@@ -92,7 +92,7 @@ impl Engine {
         }
         super::sessions::agent::ensure(&spec, probe.as_ref()).await?;
         let reply = super::sessions::agent::ctl(&spec, &json!({ "op": "gpus" })).await?;
-        serde_json::from_value(reply["gpus"].clone()).map_err(|_| format!("{} listed its GPUs in a way Muxen can't read.", spec.name))
+        serde_json::from_value(reply["gpus"].clone()).map_err(|_| format!("{} listed its GPUs in a way Muxin can't read.", spec.name))
     }
 }
 

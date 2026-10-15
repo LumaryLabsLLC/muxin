@@ -3,7 +3,7 @@
 //! accept only each other's, by SHA-256 fingerprint; the fingerprints are
 //! swapped over ssh when pairing (see agent/src/direct.rs).
 //!
-//! Files, in Muxen's config folder: `identity/cert.der` and
+//! Files, in Muxin's config folder: `identity/cert.der` and
 //! `identity/key.der` (this app), `direct.json` (paired machines).
 
 use std::collections::HashMap;
@@ -50,7 +50,7 @@ pub struct Paired {
 
 static DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Where Muxen keeps its files (set once, at startup).
+/// Where Muxin keeps its files (set once, at startup).
 pub fn init(config_dir: PathBuf) {
     let _ = DIR.set(config_dir);
 }
@@ -68,7 +68,7 @@ pub fn paired(machine_id: &str) -> Option<Paired> {
 }
 
 pub fn save(machine_id: &str, entry: Option<Paired>) -> Result<(), String> {
-    let path = store().ok_or("Muxen's config folder isn't set")?;
+    let path = store().ok_or("Muxin's config folder isn't set")?;
     let mut all = load();
     match entry {
         Some(e) => all.insert(machine_id.to_string(), e),
@@ -96,7 +96,7 @@ pub fn fingerprint(der: &[u8]) -> String {
 
 /// This app's certificate and key, made on first use.
 fn identity() -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), String> {
-    let dir = DIR.get().ok_or("Muxen's config folder isn't set")?.join("identity");
+    let dir = DIR.get().ok_or("Muxin's config folder isn't set")?.join("identity");
     let (cert_path, key_path) = (dir.join("cert.der"), dir.join("key.der"));
     if let (Ok(cert), Ok(key)) = (std::fs::read(&cert_path), std::fs::read(&key_path)) {
         return Ok((CertificateDer::from(cert), PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key))));

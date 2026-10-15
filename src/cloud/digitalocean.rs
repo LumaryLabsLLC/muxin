@@ -1,4 +1,4 @@
-//! DigitalOcean's API (v2), for the few things Muxen does there: who's signed
+//! DigitalOcean's API (v2), for the few things Muxin does there: who's signed
 //! in, which regions and sizes exist, the account's SSH keys, and creating,
 //! reading, powering and destroying droplets.
 

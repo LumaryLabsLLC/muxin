@@ -287,7 +287,7 @@ impl Service {
         super::logs::LogSource { kind: kind.into(), target: self.target.clone(), name: self.name.clone(), detail: self.detail.clone(), user: self.user, ..Default::default() }
     }
 
-    /// Whether stopping it could cut Muxen off from the machine.
+    /// Whether stopping it could cut Muxin off from the machine.
     pub fn keeps_muxen_connected(&self) -> bool {
         let n = self.name.to_lowercase();
         ["ssh", "sshd", "tailscaled", "networkmanager", "systemd-networkd", "networking", "systemd-resolved", "muxen-agent", "dbus", "wpa_supplicant"].contains(&n.as_str())
@@ -312,7 +312,7 @@ impl Engine {
         }
         super::sessions::agent::ensure(&spec, probe.as_ref()).await?;
         let reply = super::sessions::agent::ctl(&spec, &json!({ "op": "compose_describe", "project": project.name, "files": project.files })).await?;
-        serde_json::from_value(reply).map_err(|_| format!("{} described {} in a way Muxen can't read.", spec.name, project.name))
+        serde_json::from_value(reply).map_err(|_| format!("{} described {} in a way Muxin can't read.", spec.name, project.name))
     }
 
     /// A machine's services and containers; with what they use when `stats`
@@ -324,7 +324,7 @@ impl Engine {
         }
         super::sessions::agent::ensure(&spec, probe.as_ref()).await?;
         let reply = super::sessions::agent::ctl(&spec, &json!({ "op": "services", "stats": stats })).await?;
-        serde_json::from_value(reply).map_err(|_| format!("{} listed its services in a way Muxen can't read.", spec.name))
+        serde_json::from_value(reply).map_err(|_| format!("{} listed its services in a way Muxin can't read.", spec.name))
     }
 
     /// Starts, stops or restarts one (`enable`, `disable`: whether a systemd

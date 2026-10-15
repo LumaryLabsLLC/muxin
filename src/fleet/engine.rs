@@ -50,7 +50,7 @@ struct State {
     last_publish: Option<Instant>,
     publish_scheduled: bool,
     /// Modification times of the files we last read or wrote, so changes made
-    /// by another Muxen process (the window, the CLI, an agent's MCP
+    /// by another Muxin process (the window, the CLI, an agent's MCP
     /// server) are noticed. See `sync_from_disk`.
     settings_mtime: Option<SystemTime>,
     state_mtime: Option<SystemTime>,
@@ -339,7 +339,7 @@ impl Engine {
         (*self.current()).clone()
     }
 
-    /// Picks up what other Muxen processes wrote to the shared config
+    /// Picks up what other Muxin processes wrote to the shared config
     /// directory: config.toml edits (machines and settings), and newer machine
     /// checks in state.json. Cheap when nothing changed (three `stat` calls).
     pub fn refresh_from_disk(&self) {
@@ -385,7 +385,7 @@ impl Engine {
         Some((spec, st.probes.get(id).cloned()))
     }
 
-    /// Re-reads config.toml right away (after Muxen edited it) and publishes.
+    /// Re-reads config.toml right away (after Muxin edited it) and publishes.
     /// Publishes the snapshot again (when something outside the state changed, like idle times).
     #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     pub(crate) fn republish(&self) {
@@ -747,7 +747,7 @@ impl Engine {
                 _ = tokio::time::sleep(poll) => {}
                 _ = self.sync_now.notified() => {}
             }
-            // Pick up config.toml edits (and settings/checks from other Muxen
+            // Pick up config.toml edits (and settings/checks from other Muxin
             // processes) without waiting for the next full check.
             let before = self.state.lock().unwrap().inventory.machines.len();
             self.refresh_from_disk();
@@ -1216,7 +1216,7 @@ fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// Writes a starter config.toml (this computer only) the first time Muxen runs.
+/// Writes a starter config.toml (this computer only) the first time Muxin runs.
 pub fn ensure_inventory(paths: &Paths) {
     if paths.inventory.exists() {
         return;
@@ -1231,7 +1231,7 @@ pub fn ensure_inventory(paths: &Paths) {
 mod tests {
     use super::*;
 
-    /// Two Muxen processes (say, the window and an agent's MCP server) share one config dir.
+    /// Two Muxin processes (say, the window and an agent's MCP server) share one config dir.
     #[tokio::test(flavor = "multi_thread")]
     async fn picks_up_changes_from_other_processes() {
         let dir = std::env::temp_dir().join(format!("muxen-xproc-{}", std::process::id()));

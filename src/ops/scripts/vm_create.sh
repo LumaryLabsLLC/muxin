@@ -1,4 +1,4 @@
-# Creates a VM for Muxen on this machine: Windows in Docker with KVM
+# Creates a VM for Muxin on this machine: Windows in Docker with KVM
 # (dockur/windows), or Linux in a container that runs sshd.
 # Prepended: OR_OS OR_NAME OR_IMAGE OR_VERSION OR_CPUS OR_MEM OR_DISK OR_USER
 # OR_PASS OR_KEY OR_HOSTNAME OR_SETUP OR_NPM. Prints ssh_port=N, udp_port=N
@@ -23,7 +23,7 @@ in_use() {
 }
 free_port() { p=$1; while in_use "$p"; do p=$((p + 1)); done; echo "$p"; }
 ssh_port=$(free_port 2201)
-# Muxen's direct connections (QUIC) to the VM's agent: a UDP port on every
+# Muxin's direct connections (QUIC) to the VM's agent: a UDP port on every
 # address here, forwarded to the agent's 47821 inside (it only talks to
 # apps it's paired with).
 udp_in_use() {
@@ -59,7 +59,7 @@ icacls $keys /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' | Out-
 New-ItemProperty -Path HKLM:\SOFTWARE\OpenSSH -Name DefaultShell -Value "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -PropertyType String -Force | Out-Null
 Set-Service -Name sshd -StartupType Automatic
 Start-Service sshd
-New-NetFirewallRule -Name muxen-sshd -DisplayName 'OpenSSH (Muxen)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -ErrorAction SilentlyContinue | Out-Null
+New-NetFirewallRule -Name muxen-sshd -DisplayName 'OpenSSH (Muxin)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -ErrorAction SilentlyContinue | Out-Null
 'ready' | Out-File C:\OEM\muxen.done
 PS1
   # The account's name and password in a file only this user reads, not on a command line.
@@ -90,5 +90,5 @@ linux)
   echo "ssh_port=$ssh_port"
   echo "udp_port=$udp_port"
   ;;
-*) fail "Muxen can't make a $OR_OS VM." ;;
+*) fail "Muxin can't make a $OR_OS VM." ;;
 esac

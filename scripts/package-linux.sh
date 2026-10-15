@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds Muxen for Linux and packs it: dist/Muxen-<version>-linux-<arch>.tar.gz,
+# Builds Muxin for Linux and packs it: dist/Muxin-<version>-linux-<arch>.tar.gz,
 # with the app, the agent builds it sets up on each machine (agents/, made by
 # scripts/build-agents.sh), a desktop entry and an install.sh that puts it in
 # ~/.local for the user.
@@ -23,15 +23,15 @@ cargo build --release --locked
 ls dist/agents/muxen-agent-* >/dev/null 2>&1 || { echo "error: no agent builds in dist/agents" >&2; exit 1; }
 
 root=dist/linux
-out=$root/Muxen
+out=$root/Muxin
 rm -rf "$root"
 mkdir -p "$out/agents"
-cp target/release/muxen "$out/"
+cp target/release/muxin "$out/"
 cp dist/agents/muxen-agent-* "$out/agents/"
-cp assets/brand/icon-512.png "$out/muxen.png"
-cp assets/linux/muxen.desktop assets/linux/install.sh "$out/"
+cp assets/brand/icon-512.png "$out/muxin.png"
+cp assets/linux/muxin.desktop assets/linux/install.sh "$out/"
 cp README.md LICENSE NOTICE THIRD_PARTY_NOTICES.md "$out/"
 
-tarball=dist/Muxen-$version-linux-$arch.tar.gz
-tar -czf "$tarball" -C "$root" Muxen
+tarball=dist/Muxin-$version-linux-$arch.tar.gz
+tar -czf "$tarball" -C "$root" Muxin
 echo "Built $tarball ($(du -h "$tarball" | cut -f1))"

@@ -1,7 +1,8 @@
-; Muxen's Windows installer (Inno Setup 6), made by scripts\package-windows.ps1
-; from dist\windows\Muxen. Installs for this user (no administrator needed)
-; in %LOCALAPPDATA%\Programs\Muxen, with a Start menu entry, and optionally a
-; desktop shortcut and `muxen` on the PATH.
+; Muxin's Windows installer (Inno Setup 6), made by scripts\package-windows.ps1
+; from dist\windows\Muxin. Installs for this user (no administrator needed)
+; in %LOCALAPPDATA%\Programs\Muxin, with a Start menu entry, and optionally a
+; desktop shortcut and `muxin` on the PATH. The AppId is the one from when it
+; was called Muxen, so it updates that install in its folder.
 
 #ifndef AppVersion
   #define AppVersion "0.1.0"
@@ -13,19 +14,19 @@
 
 [Setup]
 AppId={{6F0B8E52-3C8E-4C8C-9E5B-6C4D2A9B7E31}
-AppName=Muxen
+AppName=Muxin
 AppVersion={#AppVersion}
-AppVerName=Muxen {#AppVersion}
+AppVerName=Muxin {#AppVersion}
 AppPublisher=Lumary Labs
 AppPublisherURL=https://muxin.dev
-DefaultDirName={localappdata}\Programs\Muxen
-DefaultGroupName=Muxen
+DefaultDirName={localappdata}\Programs\Muxin
+DefaultGroupName=Muxin
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=..\dist
-OutputBaseFilename=Muxen-Setup-{#Arch}
-SetupIconFile=..\assets\brand\muxen.ico
-UninstallDisplayIcon={app}\muxen.exe
+OutputBaseFilename=Muxin-Setup-{#Arch}
+SetupIconFile=..\assets\brand\muxin.ico
+UninstallDisplayIcon={app}\muxin.exe
 Compression=lzma2/max
 SolidCompression=yes
 #if Arch == "arm64"
@@ -41,22 +42,29 @@ CloseApplications=yes
 
 [Tasks]
 Name: "desktopicon"; Description: "Add a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
-Name: "addtopath"; Description: "Add the muxen command to the PATH (for terminals and AI agents)"; GroupDescription: "Command line:"
+Name: "addtopath"; Description: "Add the muxin command to the PATH (for terminals and AI agents)"; GroupDescription: "Command line:"
 
 [Files]
-Source: "..\dist\windows\Muxen\muxen.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\windows\Muxen\agents\*"; DestDir: "{app}\agents"; Flags: ignoreversion
-Source: "..\dist\windows\Muxen\README.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\windows\Muxen\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\windows\Muxen\NOTICE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\windows\Muxen\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\windows\Muxin\muxin.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\windows\Muxin\muxen.cmd"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\windows\Muxin\agents\*"; DestDir: "{app}\agents"; Flags: ignoreversion
+Source: "..\dist\windows\Muxin\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\windows\Muxin\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\windows\Muxin\NOTICE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\windows\Muxin\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+
+; From when it was called Muxen: its program and shortcuts.
+[InstallDelete]
+Type: files; Name: "{app}\muxen.exe"
+Type: files; Name: "{autoprograms}\Muxen.lnk"
+Type: files; Name: "{autodesktop}\Muxen.lnk"
 
 [Icons]
-Name: "{autoprograms}\Muxen"; Filename: "{app}\muxen.exe"
-Name: "{autodesktop}\Muxen"; Filename: "{app}\muxen.exe"; Tasks: desktopicon
+Name: "{autoprograms}\Muxin"; Filename: "{app}\muxin.exe"
+Name: "{autodesktop}\Muxin"; Filename: "{app}\muxin.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\muxen.exe"; Description: "Open Muxen"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\muxin.exe"; Description: "Open Muxin"; Flags: nowait postinstall skipifsilent
 
 [Code]
 const

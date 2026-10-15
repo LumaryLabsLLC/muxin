@@ -102,7 +102,7 @@ impl Engine {
         }
         super::sessions::agent::ensure(&spec, probe.as_ref()).await?;
         let reply = super::sessions::agent::ctl(&spec, &json!({ "op": "ports" })).await?;
-        serde_json::from_value(reply["ports"].clone()).map_err(|_| format!("{} listed its ports in a way Muxen can't read.", spec.name))
+        serde_json::from_value(reply["ports"].clone()).map_err(|_| format!("{} listed its ports in a way Muxin can't read.", spec.name))
     }
 
     /// Just the ports something listens on there (a quick look, no asking).
@@ -113,7 +113,7 @@ impl Engine {
         }
         super::sessions::agent::ensure(&spec, probe.as_ref()).await?;
         let reply = super::sessions::agent::ctl(&spec, &json!({ "op": "listening" })).await?;
-        serde_json::from_value(reply["ports"].clone()).map_err(|_| format!("{} listed its ports in a way Muxen can't read.", spec.name))
+        serde_json::from_value(reply["ports"].clone()).map_err(|_| format!("{} listed its ports in a way Muxin can't read.", spec.name))
     }
 
     /// The ports forwarded to this computer.

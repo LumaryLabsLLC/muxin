@@ -1,4 +1,4 @@
-//! Plain-text report for `muxen check`.
+//! Plain-text report for `muxin check`.
 
 use std::fmt::Write;
 

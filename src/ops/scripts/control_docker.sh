@@ -1,5 +1,5 @@
-# Muxen: control one runner that lives in a Docker container.
-# Muxen prepends these variables:
+# Muxin: control one runner that lives in a Docker container.
+# Muxin prepends these variables:
 #   OR_ACTION     start | stop | restart | logs | remove
 #   OR_CONTAINER  the container, e.g. muxen-beelink-01
 #   OR_TOKEN      remove token (remove only; empty skips deregistration)

@@ -1,10 +1,12 @@
-//! Secrets Muxen keeps for the user (cloud tokens): in the macOS Keychain, in
+//! Secrets Muxin keeps for the user (cloud tokens): in the macOS Keychain, in
 //! Windows' Credential Manager, or elsewhere in a file only the user can
 //! read, next to config.toml.
 
 use std::path::{Path, PathBuf};
 
 #[cfg(any(target_os = "macos", windows))]
+// The app was called Muxen when these were first saved; the name stays so
+// sign-ins made then keep working.
 const SERVICE: &str = "Muxen";
 
 /// Stores a secret under a name ("digitalocean-token").

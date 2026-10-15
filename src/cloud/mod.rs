@@ -1,4 +1,4 @@
-//! Cloud machines: droplets Muxen creates in the user's DigitalOcean account,
+//! Cloud machines: droplets Muxin creates in the user's DigitalOcean account,
 //! sets up, and adds to your machines (see ops::cloud for the operations).
 
 pub mod auth;
@@ -21,7 +21,7 @@ pub struct CloudOptions {
     /// "token" | "oauth" | "doctl"
     pub method: String,
     pub signed_in: bool,
-    /// The browser sign-in is built into this copy of Muxen.
+    /// The browser sign-in is built into this copy of Muxin.
     pub oauth_available: bool,
     pub account: Option<Account>,
     pub regions: Vec<Region>,

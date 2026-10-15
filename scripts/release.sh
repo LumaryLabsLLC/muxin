@@ -38,10 +38,10 @@ if [ "$current" != "$version" ]; then
     mv Cargo.toml.new Cargo.toml
     cargo update --workspace --quiet
     git add Cargo.toml Cargo.lock
-    git commit --quiet -m "Muxen $version"
+    git commit --quiet -m "Muxin $version"
     echo "▸ version $current → $version"
 fi
-git tag -a "v$version" -m "Muxen $version"
+git tag -a "v$version" -m "Muxin $version"
 echo "▸ tagged v$version on $(git rev-parse --short HEAD)"
 
 if [ -n "$push" ]; then

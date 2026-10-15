@@ -1,5 +1,5 @@
 //! Setting up and talking to `muxen-agent` (the `agent/` crate) on a
-//! machine. Muxen ships a build per OS and CPU; when it connects to a
+//! machine. Muxin ships a build per OS and CPU; when it connects to a
 //! machine it makes sure `~/.muxen/bin/muxen-agent` is that exact
 //! build (uploading it over ssh when it isn't), then runs `muxen-agent
 //! ctl` for every session request.
@@ -60,7 +60,7 @@ pub fn builds_dir() -> Option<PathBuf> {
 
 /// Where the build for `target` is.
 fn build_path(target: &str) -> Result<PathBuf, String> {
-    let dir = builds_dir().ok_or("Muxen can't find its agent builds (run scripts/build-agents.sh in a source checkout).")?;
+    let dir = builds_dir().ok_or("Muxin can't find its agent builds (run scripts/build-agents.sh in a source checkout).")?;
     let exe = if target.starts_with("windows") { ".exe" } else { "" };
     Ok(dir.join(format!("muxen-agent-{target}{exe}")))
 }
@@ -68,7 +68,7 @@ fn build_path(target: &str) -> Result<PathBuf, String> {
 /// The build for `target` and its hash (what `muxen-agent hash` prints).
 fn build(target: &str) -> Result<(Vec<u8>, String), String> {
     let path = build_path(target)?;
-    let bytes = std::fs::read(&path).map_err(|_| format!("Muxen has no agent build for {target} machines yet."))?;
+    let bytes = std::fs::read(&path).map_err(|_| format!("Muxin has no agent build for {target} machines yet."))?;
     let hash = format!("{:016x}", fnv(&bytes));
     Ok((bytes, hash))
 }
@@ -124,13 +124,13 @@ fn verified() -> &'static Mutex<HashMap<String, String>> {
     VERIFIED.get_or_init(Default::default)
 }
 
-/// Makes sure the machine runs this Muxen's agent build, installing it if
+/// Makes sure the machine runs this Muxin's agent build, installing it if
 /// not. Cheap after the first time per machine.
 pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(), String> {
     spec.refuse_if_disconnected()?;
     let target = target(probe).ok_or_else(|| match probe {
-        Some(p) => format!("Muxen has no agent for {}-{} machines yet.", p.os.as_deref().unwrap_or("?"), p.arch.as_deref().unwrap_or("?")),
-        None => format!("Muxen hasn't reached {} yet, so it doesn't know which agent build it needs. Refresh it first.", spec.name),
+        Some(p) => format!("Muxin has no agent for {}-{} machines yet.", p.os.as_deref().unwrap_or("?"), p.arch.as_deref().unwrap_or("?")),
+        None => format!("Muxin hasn't reached {} yet, so it doesn't know which agent build it needs. Refresh it first.", spec.name),
     })?;
     let (bytes, hash) = build(&target)?;
     if verified().lock().unwrap().get(&spec.id) == Some(&hash) {

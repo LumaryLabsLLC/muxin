@@ -1,7 +1,9 @@
 #!/bin/sh
-# Builds Muxen.app (release build + Info.plist + icon) into dist/.
+# Builds Muxin.app (release build + Info.plist + icon) into dist/.
 # The bundle runs the same binary: with no arguments it opens the window, and
-# `Muxen.app/Contents/MacOS/muxen mcp` still works for agents.
+# `Muxin.app/Contents/MacOS/muxin mcp` still works for agents. Its bundle id
+# stays com.lumarylabs.muxen (from when it was called Muxen), so macOS keeps
+# its Keychain items and permissions across the rename.
 #
 #   --universal    one app for Apple silicon and Intel Macs.
 #   --release      --universal, signed for notarization: hardened runtime and a
@@ -24,18 +26,18 @@ for arg in "$@"; do
     esac
 done
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
-app=dist/Muxen.app
+app=dist/Muxin.app
 
 if [ -n "$universal" ]; then
     cargo build --release --locked --target aarch64-apple-darwin
     cargo build --release --locked --target x86_64-apple-darwin
     mkdir -p target/universal
-    lipo -create -output target/universal/muxen \
-        target/aarch64-apple-darwin/release/muxen target/x86_64-apple-darwin/release/muxen
-    binary=target/universal/muxen
+    lipo -create -output target/universal/muxin \
+        target/aarch64-apple-darwin/release/muxin target/x86_64-apple-darwin/release/muxin
+    binary=target/universal/muxin
 else
     cargo build --release
-    binary=target/release/muxen
+    binary=target/release/muxin
 fi
 # The agent builds the app installs on each machine it connects to.
 if [ -z "$skip_agents" ]; then
@@ -44,8 +46,8 @@ fi
 ls dist/agents/muxen-agent-* >/dev/null 2>&1 || { echo "error: no agent builds in dist/agents" >&2; exit 1; }
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/agents"
-cp "$binary" "$app/Contents/MacOS/muxen"
-cp assets/brand/Muxen.icns "$app/Contents/Resources/Muxen.icns"
+cp "$binary" "$app/Contents/MacOS/muxin"
+cp assets/brand/Muxin.icns "$app/Contents/Resources/Muxin.icns"
 cp dist/agents/muxen-agent-* "$app/Contents/Resources/agents/"
 # Its license, and the third-party ones that must ship with every copy.
 cp LICENSE NOTICE THIRD_PARTY_NOTICES.md "$app/Contents/Resources/"
@@ -55,11 +57,11 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>Muxen</string>
-  <key>CFBundleDisplayName</key><string>Muxen</string>
+  <key>CFBundleName</key><string>Muxin</string>
+  <key>CFBundleDisplayName</key><string>Muxin</string>
   <key>CFBundleIdentifier</key><string>com.lumarylabs.muxen</string>
-  <key>CFBundleExecutable</key><string>muxen</string>
-  <key>CFBundleIconFile</key><string>Muxen</string>
+  <key>CFBundleExecutable</key><string>muxin</string>
+  <key>CFBundleIconFile</key><string>Muxin</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$version</string>
   <key>CFBundleVersion</key><string>$version</string>
@@ -67,7 +69,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSHumanReadableCopyright</key><string>© Lumary Labs LLC</string>
-  <key>NSLocalNetworkUsageDescription</key><string>Muxen connects straight to your machines on your local network: faster than going through ssh or a VPN, and needed to show their desktops smoothly.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Muxin connects straight to your machines on your local network: faster than going through ssh or a VPN, and needed to show their desktops smoothly.</string>
 </dict>
 </plist>
 PLIST

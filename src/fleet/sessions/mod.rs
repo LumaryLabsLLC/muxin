@@ -1,8 +1,8 @@
 //! Agent sessions: terminals on fleet machines running an AI agent (Claude Code,
 //! Codex, OpenCode, Pi, ...) or a plain shell.
 //!
-//! Sessions live in Muxen's own agent on each machine (`muxen-agent`,
-//! the `agent/` crate), which Muxen installs when it connects. The agent
+//! Sessions live in Muxin's own agent on each machine (`muxen-agent`,
+//! the `agent/` crate), which Muxin installs when it connects. The agent
 //! keeps them running when the window closes or the network drops, and anyone
 //! can attach: the app's terminal, the CLI, or the user's own terminal. The
 //! agent is the source of truth; the engine keeps the last discovery per
@@ -33,7 +33,7 @@ pub const REFRESH_EVERY: Duration = Duration::from_secs(8);
 /// interactive shell on the machine, so not on every refresh).
 const AGENTS_EVERY: chrono::Duration = chrono::Duration::minutes(10);
 
-/// An agent CLI Muxen knows how to start.
+/// An agent CLI Muxin knows how to start.
 pub struct AgentKind {
     pub id: &'static str,
     pub name: &'static str,
@@ -390,7 +390,7 @@ impl Engine {
                     self.set_direct_status(id, "running");
                     Ok(String::new())
                 }
-                _ => Err(format!("{id} runs only in the Muxen window, so it can't be read or typed into from here.")),
+                _ => Err(format!("{id} runs only in the Muxin window, so it can't be read or typed into from here.")),
             };
         }
         let (machine_id, name) = split_id(id)?;
@@ -426,7 +426,7 @@ impl Engine {
     }
 
     /// Gives a session a new title (kept by the agent on its machine, so every
-    /// Muxen sees it). An empty title goes back to the one it started with.
+    /// Muxin sees it). An empty title goes back to the one it started with.
     pub async fn rename_session(self: &Arc<Self>, id: &str, title: &str) -> Result<SessionInfo, String> {
         let title = clean_title(title)?;
         if let Some(d) = self.direct_session(id) {

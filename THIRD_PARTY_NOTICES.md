@@ -1,7 +1,7 @@
 # Third-party notices
 
-Muxen includes the following third-party components. Their licenses
-must ship with every copy of Muxen.
+Muxin includes the following third-party components. Their licenses
+must ship with every copy of Muxin.
 
 | Component | License | Notice |
 |---|---|---|
@@ -21,8 +21,8 @@ must ship with every copy of Muxen.
 | Rust crates listed in `Cargo.lock` | MIT and/or Apache-2.0 (mostly), see each crate | Generate the full list before each release, e.g. with `cargo about generate` |
 
 The agent logos are trademarks of their owners (Anthropic, OpenAI, Google,
-SST, Sourcegraph, Earendil), as is DigitalOcean's. Muxen shows them only to identify which CLI a session
+SST, Sourcegraph, Earendil), as is DigitalOcean's. Muxin shows them only to identify which CLI a session
 runs, or that a machine is a DigitalOcean droplet; check each owner's brand guidelines before using them in marketing.
 
 Before shipping a release, regenerate the crate list and include the license
-texts in the app bundle (for example `Muxen.app/Contents/Resources/`).
+texts in the app bundle (for example `Muxin.app/Contents/Resources/`).

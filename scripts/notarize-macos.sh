@@ -1,6 +1,6 @@
 #!/bin/sh
-# Notarizes dist/Muxen.app (built by scripts/bundle-macos.sh --release), staples
-# it, and packs it into dist/Muxen-<version>-macos.dmg, itself signed, notarized
+# Notarizes dist/Muxin.app (built by scripts/bundle-macos.sh --release), staples
+# it, and packs it into dist/Muxin-<version>-macos.dmg, itself signed, notarized
 # and stapled, so it opens without a warning even offline.
 #
 #   --no-notarize  only make the DMG, as it is (for a test build: macOS warns
@@ -21,9 +21,9 @@ case "${1:-}" in
     "") ;;
     *) echo "usage: $0 [--no-notarize]" >&2; exit 2 ;;
 esac
-app=dist/Muxen.app
+app=dist/Muxin.app
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
-dmg=dist/Muxen-$version-macos.dmg
+dmg=dist/Muxin-$version-macos.dmg
 [ -d "$app" ] || { echo "error: no $app: run scripts/bundle-macos.sh --release first" >&2; exit 1; }
 
 if [ -n "${APPLE_API_KEY_PATH:-}" ]; then
@@ -66,17 +66,17 @@ trap 'rm -rf "$work"' EXIT
 # The app first, so it's stapled (and opens offline) once it's out of the DMG.
 if [ -n "$notarize" ]; then
     codesign --verify --strict "$app"
-    ditto -c -k --keepParent "$app" "$work/Muxen.zip"
-    notarize "$work/Muxen.zip" "$@"
+    ditto -c -k --keepParent "$app" "$work/Muxin.zip"
+    notarize "$work/Muxin.zip" "$@"
     staple "$app"
 fi
 
 # Then the DMG: the app and a link to Applications to drag it to.
 mkdir "$work/dmg"
-ditto "$app" "$work/dmg/Muxen.app"
+ditto "$app" "$work/dmg/Muxin.app"
 ln -s /Applications "$work/dmg/Applications"
 rm -f "$dmg"
-hdiutil create -quiet -volname "Muxen $version" -srcfolder "$work/dmg" -fs HFS+ -format UDZO "$dmg"
+hdiutil create -quiet -volname "Muxin $version" -srcfolder "$work/dmg" -fs HFS+ -format UDZO "$dmg"
 if [ -n "$notarize" ]; then
     identity=${MUXEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -n1)}
     codesign --force --timestamp -s "$identity" "$dmg"

@@ -161,7 +161,7 @@ fn register_with_core_text(bytes: &'static [u8]) {
     }
 }
 
-/// Shows the Muxen icon in the Dock. Bundled builds get it from Info.plist;
+/// Shows the Muxin icon in the Dock. Bundled builds get it from Info.plist;
 /// this covers `cargo run` and `cargo install`.
 #[cfg(target_os = "macos")]
 pub fn set_dock_icon() {

@@ -23,7 +23,7 @@ use crate::fleet::link::Link;
 
 const CONTEXT: &str = "Desktop";
 
-/// Keys that would otherwise run Muxen's own shortcuts go to the machine.
+/// Keys that would otherwise run Muxin's own shortcuts go to the machine.
 pub fn bind_keys(cx: &mut App) {
     let mut keys: Vec<String> = ["escape", "/", "tab", "shift-tab"].map(String::from).to_vec();
     if cfg!(target_os = "macos") {
@@ -942,7 +942,7 @@ pub fn open_window(engine: Arc<Engine>, machine_id: String, display: Option<Stri
         window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
         titlebar: Some(gpui::TitlebarOptions { title: Some(format!("{name} · Desktop").into()), appears_transparent: cfg!(target_os = "macos"), traffic_light_position: None }),
         window_min_size: Some(gpui::size(px(480.), px(320.))),
-        app_id: Some("muxen".into()),
+        app_id: Some("muxin".into()),
         ..Default::default()
     };
     let opened = cx.open_window(options, |window, cx| {

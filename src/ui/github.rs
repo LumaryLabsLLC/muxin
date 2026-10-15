@@ -159,7 +159,7 @@ impl Root {
         });
     }
 
-    /// Switches Muxen to another GitHub account (one signed in here, or a
+    /// Switches Muxin to another GitHub account (one signed in here, or a
     /// machine's) and reloads everything GitHub.
     pub(super) fn gh_use_account(&mut self, login: String, machine_id: Option<String>, cx: &mut Context<Self>) {
         let engine = self.engine.clone();

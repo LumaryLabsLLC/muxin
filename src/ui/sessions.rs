@@ -530,7 +530,7 @@ impl Root {
                     )
                     .children(info.git.as_ref().map(|g| git_line(&theme, &info.id, g, true).mt(px(2.)))),
             )
-            .when(!info.persistent, |d| d.child(kit::pill("Ends when you close Muxen", theme.warning)))
+            .when(!info.persistent, |d| d.child(kit::pill("Ends when you close Muxin", theme.warning)))
             .child(status)
             .when(info.agent != "shell" && !info.agent.is_empty() && !exited && offline.is_none(), |d| {
                 let sid = info.id.clone();
@@ -914,8 +914,8 @@ impl Root {
             let text = match runs_in_app(m) {
                 _ if m.is_disconnected() => format!("Connect to {} to start Claude Code, Codex or a shell there.", m.name),
                 _ if m.is_down() => format!("Start Claude Code, Codex or a shell here once {} is back.", m.name),
-                true => format!("Run Claude Code, Codex or a shell here. {} so sessions run while Muxen is open.", m.sessions_error.clone().unwrap_or_default().trim_end_matches('.')),
-                false => "Run Claude Code, Codex, OpenCode or a shell here. Sessions keep working on the machine after you close Muxen.".to_string(),
+                true => format!("Run Claude Code, Codex or a shell here. {} so sessions run while Muxin is open.", m.sessions_error.clone().unwrap_or_default().trim_end_matches('.')),
+                false => "Run Claude Code, Codex, OpenCode or a shell here. Sessions keep working on the machine after you close Muxin.".to_string(),
             };
             card(theme)
                 .p(px(16.))
@@ -1017,7 +1017,7 @@ impl Root {
     }
 }
 
-/// Sessions here can't live in Muxen's agent (a platform it has no build
+/// Sessions here can't live in Muxin's agent (a platform it has no build
 /// for), so they run in this window and end with it.
 pub(super) fn runs_in_app(m: &FleetMachine) -> bool {
     m.agent_version.is_none() && m.sessions_error.as_deref().is_some_and(|e| e.contains("no agent"))

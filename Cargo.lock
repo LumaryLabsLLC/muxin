@@ -3576,8 +3576,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
-name = "muxen"
-version = "0.5.0"
+name = "muxen-agent"
+version = "0.2.8"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "base64 0.22.1",
+ "cc",
+ "jpeg-encoder",
+ "libc",
+ "portable-pty",
+ "quinn",
+ "rcgen",
+ "ring",
+ "rustls",
+ "serde_json",
+ "socket2",
+ "tokio",
+ "windows-sys 0.61.2",
+ "x11rb",
+]
+
+[[package]]
+name = "muxin"
+version = "0.5.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -3610,28 +3632,6 @@ dependencies = [
  "unicode-segmentation",
  "windows-sys 0.61.2",
  "winresource",
-]
-
-[[package]]
-name = "muxen-agent"
-version = "0.2.8"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "base64 0.22.1",
- "cc",
- "jpeg-encoder",
- "libc",
- "portable-pty",
- "quinn",
- "rcgen",
- "ring",
- "rustls",
- "serde_json",
- "socket2",
- "tokio",
- "windows-sys 0.61.2",
- "x11rb",
 ]
 
 [[package]]

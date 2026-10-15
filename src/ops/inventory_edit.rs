@@ -1,5 +1,5 @@
 //! Edits config.toml in place with `toml_edit`, so the user's comments, ordering
-//! and formatting survive when Muxen adds or removes machines and runners.
+//! and formatting survive when Muxin adds or removes machines and runners.
 //! Every function works on text, which lets demo mode reuse them on its
 //! in-memory inventory.
 
@@ -143,7 +143,7 @@ pub fn set_machine_cloud(text: &str, machine_id: &str, cloud: Option<&crate::con
     finish(doc)
 }
 
-/// Makes a machine one Muxen created as a VM: how ssh reaches it (through its
+/// Makes a machine one Muxin created as a VM: how ssh reaches it (through its
 /// host, to the port its container publishes) and what it is.
 pub fn set_machine_vm(text: &str, machine_id: &str, port: u16, user: &str, ssh_options: &[String], direct_address: Option<&str>, vm: &crate::config::VmRef) -> Result<String, String> {
     let mut doc = parse(text)?;
@@ -278,7 +278,7 @@ fn machines_mut(doc: &mut DocumentMut) -> Result<&mut ArrayOfTables, String> {
     }
     doc.get_mut("machine")
         .and_then(Item::as_array_of_tables_mut)
-        .ok_or_else(|| "config.toml defines `machine` in a form Muxen can't edit. Use [[machine]] tables.".to_string())
+        .ok_or_else(|| "config.toml defines `machine` in a form Muxin can't edit. Use [[machine]] tables.".to_string())
 }
 
 fn table_name(t: &Table) -> &str {

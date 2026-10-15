@@ -17,7 +17,7 @@ fn version() -> String {
     format!("Version {v} ({})", option_env!("MUXEN_BUILD").unwrap_or(v))
 }
 
-/// What Muxen includes from others, and under which license.
+/// What Muxin includes from others, and under which license.
 const COMPONENTS: &[(&str, &str, &str)] = &[
     ("GPUI", "Zed Industries", "Apache-2.0"),
     ("alacritty_terminal", "Alacritty", "Apache-2.0"),
@@ -49,7 +49,7 @@ impl Root {
                     .gap(px(4.))
                     .flex_1()
                     .min_w(px(0.))
-                    .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Muxen"))
+                    .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Muxin"))
                     .child(div().text_size(px(14.)).text_color(theme.text_muted).child(version())),
             )
             .child(Button::new("about-updates", "Check for Updates…").on_click(|_, _, cx| cx.open_url(WEBSITE)));
@@ -81,12 +81,12 @@ impl Root {
                 2,
                 "Feedback",
                 EMAIL,
-                Button::new("about-mail", "Send Email").on_click(|_, _, cx| cx.open_url(&format!("mailto:{EMAIL}?subject=Muxen%20feedback"))).into_any_element(),
+                Button::new("about-mail", "Send Email").on_click(|_, _, cx| cx.open_url(&format!("mailto:{EMAIL}?subject=Muxin%20feedback"))).into_any_element(),
             ))
             .child(row(
                 3,
                 "Licenses",
-                "Open-source software Muxen includes",
+                "Open-source software Muxin includes",
                 Button::new("about-licenses", "View")
                     .on_click(cx.listener(|this, _, window, cx| {
                         let dialog = cx.new(|cx| LicensesDialog { focus: cx.focus_handle() });
@@ -185,7 +185,7 @@ impl Render for LicensesDialog {
             .text_color(theme.text)
             .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Licenses"))
             .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(
-                "Muxen is open source under the Apache License 2.0, by Lumary Labs LLC. It includes these components under their own licenses; the full texts ship with the app.",
+                "Muxin is open source under the Apache License 2.0, by Lumary Labs LLC. It includes these components under their own licenses; the full texts ship with the app.",
             ))
             .child(card(&theme).children(rows))
             .child(

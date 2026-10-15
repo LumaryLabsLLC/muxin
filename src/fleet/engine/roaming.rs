@@ -106,7 +106,7 @@ impl Engine {
                 }
             }
         }
-        // While Tailscale is off, what it last said is kept: it's how Muxen
+        // While Tailscale is off, what it last said is kept: it's how Muxin
         // knows a machine is reached through it.
         let known: Vec<String> = st.inventory.machines.iter().map(|m| m.id.clone()).collect();
         let before = st.tailnet.len();

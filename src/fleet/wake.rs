@@ -30,8 +30,8 @@ impl Engine {
     /// Sends the wake signal; says from where. Checks it again in a little while.
     pub async fn wake(self: &Arc<Self>, machine_id: &str) -> Result<String, String> {
         let (spec, probe) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
-        let probe = probe.ok_or_else(|| format!("Muxen hasn't reached {} yet, so it doesn't know its network card.", spec.name))?;
-        let mac = probe.mac.clone().ok_or_else(|| format!("Muxen doesn't know {}'s network card yet: it learns it the next time the machine is on.", spec.name))?;
+        let probe = probe.ok_or_else(|| format!("Muxin hasn't reached {} yet, so it doesn't know its network card.", spec.name))?;
+        let mac = probe.mac.clone().ok_or_else(|| format!("Muxin doesn't know {}'s network card yet: it learns it the next time the machine is on.", spec.name))?;
         if self.demo_world().is_some() {
             return Ok("this computer".into());
         }

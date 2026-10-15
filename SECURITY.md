@@ -1,6 +1,6 @@
 # Security
 
-Muxen runs commands on your machines and holds your connections to them, so we
+Muxin runs commands on your machines and holds your connections to them, so we
 take security problems seriously.
 
 ## Reporting a problem
@@ -16,5 +16,5 @@ you when it's released if you'd like.
 
 ## What's covered
 
-The app, its command line and MCP server (`muxen`), and the agent it installs
+The app, its command line and MCP server (`muxin`), and the agent it installs
 on machines (`muxen-agent`), in the latest release.

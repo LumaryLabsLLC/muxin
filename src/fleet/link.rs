@@ -162,7 +162,7 @@ impl Link {
         let _ = rx.wait_for(|down| *down).await;
     }
 
-    /// Whether Muxen dropped it on purpose, rather than losing the machine.
+    /// Whether Muxin dropped it on purpose, rather than losing the machine.
     pub fn retired(&self) -> bool {
         self.retired.load(Ordering::Relaxed)
     }

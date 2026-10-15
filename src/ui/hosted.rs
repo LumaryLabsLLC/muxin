@@ -34,7 +34,7 @@ impl Root {
             (None, None) => (format!("ssh goes through {} to reach it.", parent.name), theme.text_placeholder),
         };
         let power = if installing { None } else { power_button(s, m, parent, host_down, "m-vm-power", cx) };
-        // A VM Muxen made: its install's screen, its password, destroying it.
+        // A VM Muxin made: its install's screen, its password, destroying it.
         let made = m.vm.as_ref();
         let watch = made.and_then(|v| v.web_port).filter(|_| installing && !host_down).map(|port| {
             let pid = parent.machine_id.clone();
@@ -49,13 +49,13 @@ impl Root {
             Button::new("m-vm-password", "Copy password")
                 .style(ButtonStyle::Ghost)
                 .icon("copy")
-                .tooltip("Its Windows account's password (Muxen made it; it's kept in your Keychain)")
+                .tooltip("Its Windows account's password (Muxin made it; it's kept in your Keychain)")
                 .on_click(cx.listener(move |this, _, _, cx| match this.engine.vm_password(&mid) {
                     Some(p) => {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(p));
                         this.notify_user("Copied its password".to_string(), false, cx);
                     }
-                    None => this.notify_user("Muxen doesn't have its password.".to_string(), true, cx),
+                    None => this.notify_user("Muxin doesn't have its password.".to_string(), true, cx),
                 }))
                 .into_any_element()
         });

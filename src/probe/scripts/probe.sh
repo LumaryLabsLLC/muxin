@@ -1,6 +1,6 @@
-# Muxen machine probe (macOS / Linux). Read-only.
+# Muxin machine probe (macOS / Linux). Read-only.
 # Prints key=value lines; runner N is reported as rN.<key>=<value>.
-# OR_DIRS (newline-separated glob patterns) is prepended by Muxen.
+# OR_DIRS (newline-separated glob patterns) is prepended by Muxin.
 
 LC_ALL=C
 export LC_ALL
@@ -219,7 +219,7 @@ linux)
 esac
 
 # --- Docker -------------------------------------------------------------------
-# Runner containers: the ones Muxen made (label muxen.runner, or
+# Runner containers: the ones Muxin made (label muxen.runner, or
 # openrunner.runner from before the rename) and any other container running
 # GitHub's actions-runner image.
 if command -v docker >/dev/null 2>&1; then
@@ -250,7 +250,7 @@ if command -v docker >/dev/null 2>&1; then
         j=$((j + 1))
       done
     }
-    # Containers that publish ports here, running or not: a machine Muxen
+    # Containers that publish ports here, running or not: a machine Muxin
     # reaches through one (a VM in Docker, say) runs in it.
     ids=$(docker ps -aq 2>/dev/null)
     if [ -n "$ids" ]; then

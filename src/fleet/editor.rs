@@ -1,6 +1,6 @@
 //! Opening a machine's folder in your editor: Zed, VS Code or Cursor on
 //! this computer, over their own remote-ssh support (the machine's ssh
-//! alias, as Muxen reaches it), or directly for this computer's folders.
+//! alias, as Muxin reaches it), or directly for this computer's folders.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use serde::Serialize;
 use super::Engine;
 use crate::config::MachineSpec;
 
-/// An editor Muxen can open folders in.
+/// An editor Muxin can open folders in.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Editor {
     /// "zed", "vscode" or "cursor".
@@ -22,7 +22,7 @@ pub struct Editor {
     pub cli: PathBuf,
 }
 
-/// The editors this computer has, in the order Muxen prefers them.
+/// The editors this computer has, in the order Muxin prefers them.
 pub fn installed() -> Vec<Editor> {
     let home = dirs::home_dir().unwrap_or_default();
     let apps = |name: &str| [PathBuf::from("/Applications").join(name), home.join("Applications").join(name)];
@@ -156,7 +156,7 @@ impl Engine {
     pub async fn editor_command(self: &Arc<Self>, machine_id: &str, path: &str, editor: &str, run: bool) -> Result<(String, Vec<String>), String> {
         let (spec, _) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
         let chosen = if editor.is_empty() { self.settings().editor } else { editor.to_string() };
-        let editor = pick(&chosen).ok_or("No editor found here: Muxen opens folders in Zed, Cursor or VS Code.")?;
+        let editor = pick(&chosen).ok_or("No editor found here: Muxin opens folders in Zed, Cursor or VS Code.")?;
         if self.demo_world().is_some() {
             return Err("The demo doesn't open editors.".into());
         }

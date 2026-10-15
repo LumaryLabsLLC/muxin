@@ -329,7 +329,7 @@ impl std::fmt::Display for RunError {
 async fn run(spec: &MachineSpec, shell: Shell) -> Result<String, RunError> {
     let script = script_for(spec, shell);
     // Over the machine's live link when one is up (no ssh handshake). A check
-    // doesn't make one: it's also how Muxen first reaches a machine.
+    // doesn't make one: it's also how Muxin first reaches a machine.
     if shell == Shell::Sh && !spec.is_local() {
         if let Some(link) = crate::fleet::link::current(&spec.id) {
             let req = serde_json::json!({ "op": "sh", "script": script, "login": false, "timeout": TIMEOUT.as_secs() });
@@ -608,7 +608,7 @@ impl ContainerLines {
         if self.container.is_empty() {
             return None;
         }
-        // The runner's own config wins; then Muxen's label; then the container name.
+        // The runner's own config wins; then Muxin's label; then the container name.
         let (config_name, config_url) = self.config.unwrap_or_default();
         let name = [config_name, self.label_name, self.container.clone()].into_iter().find(|n| !n.is_empty())?;
         let url = config_url.or_else(|| (!self.label_scope.is_empty()).then(|| format!("https://github.com/{}", self.label_scope)));

@@ -298,7 +298,7 @@ impl Render for ScheduleDialog {
             .child(field(&theme, "Runs", div().flex().flex_col().gap(px(8.)).child(kinds).child(what), None))
             .child(field(&theme, "Folder", self.folder.clone(), None))
             .child(field(&theme, "When", when, None));
-        frame(&theme, "New schedule", Some("It's kept and run on the machine itself, so it runs even when Muxen isn't open.".into()))
+        frame(&theme, "New schedule", Some("It's kept and run on the machine itself, so it runs even when Muxin isn't open.".into()))
             .child(div().id("sd-body").max_h(px(body_max)).overflow_y_scroll().child(fields))
             .children(error_line(&theme, &self.error))
             .child(footer(vec![

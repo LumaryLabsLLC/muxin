@@ -20,12 +20,12 @@ pub struct CloudUsage {
     /// This month if the ones that exist are kept until it ends.
     pub month_if_kept: f64,
     pub machines: Vec<UsageLine>,
-    /// The whole DigitalOcean account's bill this month, when Muxen may read it.
+    /// The whole DigitalOcean account's bill this month, when Muxin may read it.
     pub account: Option<Balance>,
     /// Why `account` is missing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_error: Option<String>,
-    /// Signing in again (in the browser) would let Muxen read the bill.
+    /// Signing in again (in the browser) would let Muxin read the bill.
     pub account_needs_sign_in: bool,
     pub billing: &'static str,
 }

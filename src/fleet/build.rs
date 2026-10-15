@@ -435,7 +435,7 @@ fn parents(input: &Inputs) -> HashMap<String, ParentMachine> {
     };
 
     let mut out = HashMap::new();
-    // A VM Muxen made says where it runs.
+    // A VM Muxin made says where it runs.
     for spec in specs {
         let Some(vm) = &spec.vm else { continue };
         let Some(host) = specs.iter().find(|o| o.id == vm.host && o.id != spec.id) else { continue };
@@ -494,7 +494,7 @@ fn parents(input: &Inputs) -> HashMap<String, ParentMachine> {
     out
 }
 
-/// A VM Muxen made that hasn't answered yet: it's still installing (for a
+/// A VM Muxin made that hasn't answered yet: it's still installing (for a
 /// couple of hours after it was made; after that, something's wrong).
 fn installing_reason(spec: &MachineSpec, p: &ProbeResult, now: DateTime<Utc>) -> Option<Unreachable> {
     let vm = spec.vm.as_ref()?;
@@ -792,7 +792,7 @@ fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Opt
         }
     }
     if p.reboot_required {
-        out.push(diag("warning", "reboot-required", "Updates are waiting for a reboot.".into(), Some("sudo reboot  # its sessions end; Muxen reconnects when it's back".into()), None));
+        out.push(diag("warning", "reboot-required", "Updates are waiting for a reboot.".into(), Some("sudo reboot  # its sessions end; Muxin reconnects when it's back".into()), None));
     }
     if !p.failed_units.is_empty() {
         let n = p.failed_units.len();

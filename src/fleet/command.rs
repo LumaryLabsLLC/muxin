@@ -1,4 +1,4 @@
-//! Running one command on several machines at once (the Run page, `muxen
+//! Running one command on several machines at once (the Run page, `muxin
 //! run`): an operation per machine, in the user's login shell from their
 //! home folder, its output streamed into the operation's log.
 

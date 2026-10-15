@@ -51,7 +51,7 @@ pub struct Theme {
     pub text_placeholder: Hsla,
     pub text_accent: Hsla,
     pub accent: Hsla,
-    /// The second brand color (Muxen Dusk and Dawn: the icon's orange); the
+    /// The second brand color (Muxin Dusk and Dawn: the icon's orange); the
     /// accent itself in other themes.
     pub accent2: Hsla,
     pub accent_text: Hsla,

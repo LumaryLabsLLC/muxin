@@ -96,9 +96,9 @@ pub struct AddMachineDialog {
     name: Entity<TextInput>,
     host: Entity<TextInput>,
     hosts: Vec<String>,
-    /// Computers on the user's tailnet that aren't in Muxen yet.
+    /// Computers on the user's tailnet that aren't in Muxin yet.
     tailnet: Vec<crate::api::TailnetHost>,
-    /// Computers on this network that aren't in Muxen yet; still looking while None.
+    /// Computers on this network that aren't in Muxin yet; still looking while None.
     network: Option<Vec<crate::fleet::discover::NetworkHost>>,
     /// What to do before a picked machine can be added (a Mac with Remote Login off).
     note: Option<String>,
@@ -189,7 +189,7 @@ impl Render for AddMachineDialog {
         frame(
             &theme,
             "Add a machine",
-            Some("Muxen reaches machines with your system ssh, keys and ~/.ssh/config. Checks are read-only; nothing is installed until you ask.".into()),
+            Some("Muxin reaches machines with your system ssh, keys and ~/.ssh/config. Checks are read-only; nothing is installed until you ask.".into()),
         )
         .child(field(&theme, "Name", self.name.clone(), None))
         .child(field(&theme, "SSH host", self.host.clone(), Some("Key-based login must work without a password prompt.")))
@@ -723,17 +723,17 @@ impl Render for RenameDialog {
         let (title, intro, field_name) = match &self.target {
             RenameTarget::Machine(id) => (
                 "Rename machine",
-                format!("Only the name Muxen shows changes. Its id ({id}), runners and sessions stay the same, and nothing on the machine changes."),
+                format!("Only the name Muxin shows changes. Its id ({id}), runners and sessions stay the same, and nothing on the machine changes."),
                 "Name",
             ),
             RenameTarget::Display(..) => (
                 "Rename display",
-                format!("What Muxen calls this monitor on {}. Its windows and settings stay as they are.", self.machine),
+                format!("What Muxin calls this monitor on {}. Its windows and settings stay as they are.", self.machine),
                 "Name",
             ),
             RenameTarget::Session(_) => (
                 "Rename session",
-                format!("Muxen's agent on {} keeps the title, so it shows wherever you use Muxen. What runs in the session isn't touched.", self.machine),
+                format!("Muxin's agent on {} keeps the title, so it shows wherever you use Muxin. What runs in the session isn't touched.", self.machine),
                 "Title",
             ),
         };
@@ -808,7 +808,7 @@ impl AddDisplayDialog {
             return;
         }
         if self.asking {
-            // Read once, cleared from the field, kept only in memory while Muxen runs.
+            // Read once, cleared from the field, kept only in memory while Muxin runs.
             let p = self.password.read(cx).text().to_string();
             if p.is_empty() {
                 self.error = Some(format!("Type your password on {}.", self.machine_name));
@@ -911,7 +911,7 @@ impl Render for AddDisplayDialog {
         frame(
             &theme,
             "Add a virtual monitor",
-            Some(format!("Like plugging another screen into {}: windows can move there, and Muxen shows it on its own. It stays until you remove it or the machine restarts.", self.machine_name).into()),
+            Some(format!("Like plugging another screen into {}: windows can move there, and Muxin shows it on its own. It stays until you remove it or the machine restarts.", self.machine_name).into()),
         )
         .child(field(&theme, "Name", self.name.clone(), None))
         .child(div().flex().flex_col().gap(px(6.)).child(label(&theme, "Size").text_size(px(12.)).text_color(theme.text_muted)).child(div().flex().gap(px(8.)).children(sizes)))
@@ -934,7 +934,7 @@ fn password_frame(theme: &Theme, machine: &str, what: &str) -> gpui::Div {
     frame(
         theme,
         format!("Your password on {machine}"),
-        Some(format!("{machine} asks for it to {what}. Muxen sends it to sudo there over its encrypted connection, and keeps it only in memory until you quit.").into()),
+        Some(format!("{machine} asks for it to {what}. Muxin sends it to sudo there over its encrypted connection, and keeps it only in memory until you quit.").into()),
     )
 }
 
@@ -1115,7 +1115,7 @@ impl Render for ConfirmDialog {
 
 pub struct NewWorkspaceDialog {
     engine: Arc<Engine>,
-    /// None = let Muxen pick the least busy machine.
+    /// None = let Muxin pick the least busy machine.
     machine: Option<String>,
     name: Entity<TextInput>,
     repo: Entity<TextInput>,
@@ -1522,7 +1522,7 @@ impl NewSessionDialog {
         AGENTS.iter().find(|a| installed.iter().any(|i| i == a.id)).map(|a| a.id).unwrap_or("shell")
     }
 
-    /// The chosen machine can't keep sessions in Muxen's agent (Windows, for now).
+    /// The chosen machine can't keep sessions in Muxin's agent (Windows, for now).
     fn without_agent(&self, s: &Snapshot) -> bool {
         self.machine.as_ref().and_then(|id| s.machines.iter().find(|m| &m.id == id)).is_some_and(super::sessions::runs_in_app)
     }
@@ -2178,7 +2178,7 @@ impl Render for NewSessionDialog {
                 .text_color(theme.text)
                 .child(div().pt(px(1.)).child(icon("info", 14., theme.warning)))
                 .child(div().flex_1().min_w(px(0.)).child(format!(
-                    "Sessions on {machine_name} run while Muxen is open; they can't keep running in the background there yet."
+                    "Sessions on {machine_name} run while Muxin is open; they can't keep running in the background there yet."
                 )))
         });
         let place = self.place(&snapshot, cx);
@@ -2243,7 +2243,7 @@ impl Render for NewSessionDialog {
         frame(
             &theme,
             "New session",
-            Some("Runs an agent (or a shell) in a terminal on one of your machines. It keeps running when you close Muxen; come back to it from the sidebar.".into()),
+            Some("Runs an agent (or a shell) in a terminal on one of your machines. It keeps running when you close Muxin; come back to it from the sidebar.".into()),
         )
         .child(body)
         .child(footer(vec![

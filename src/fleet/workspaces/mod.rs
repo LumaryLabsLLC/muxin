@@ -57,7 +57,7 @@ const DEFAULT_ROOT_WINDOWS: &str = "~\\muxen\\workspaces";
 
 pub const EXEC_TIMEOUT_DEFAULT: u64 = 600;
 pub const EXEC_TIMEOUT_MAX: u64 = 3600;
-/// Extra time Muxen waits beyond the command's own timeout before hanging up.
+/// Extra time Muxin waits beyond the command's own timeout before hanging up.
 const EXEC_GRACE: u64 = 30;
 const FILE_TIMEOUT: Duration = Duration::from_secs(60);
 const CREATE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -188,7 +188,7 @@ impl Engine {
         let docker = match clean_opt(iso.isolation).map(|s| s.to_ascii_lowercase()).as_deref() {
             None | Some("host") | Some("none") => false,
             Some("docker") | Some("container") => true,
-            Some(other) => return Err(format!("\"{other}\" isn't an isolation Muxen knows. Use \"host\" or \"docker\".")),
+            Some(other) => return Err(format!("\"{other}\" isn't an isolation Muxin knows. Use \"host\" or \"docker\".")),
         };
         let image_req = clean_opt(iso.image);
         if !docker && image_req.is_some() {
@@ -239,11 +239,11 @@ impl Engine {
                     .find(|x| x.id == m || x.name.eq_ignore_ascii_case(&m))
                     .ok_or_else(|| format!("Machine \"{m}\" not found. Known machines: {}.", machine_names(&snap.machines)))?;
                 if found.host.is_empty() {
-                    return Err(format!("{} has no host in config.toml, so Muxen can't reach it.", found.name));
+                    return Err(format!("{} has no host in config.toml, so Muxin can't reach it.", found.name));
                 }
                 if !found.workspaces_allowed {
                     return Err(format!(
-                        "Workspaces are turned off for {}. Turn them on from its page in Muxen, or remove `workspaces = false` from its entry in config.toml.",
+                        "Workspaces are turned off for {}. Turn them on from its page in Muxin, or remove `workspaces = false` from its entry in config.toml.",
                         found.name
                     ));
                 }
@@ -538,7 +538,7 @@ impl Engine {
             .await
             .is_ok_and(|s| s.success());
         if !have_rsync {
-            return Err("rsync isn't installed on this computer, so Muxen can't sync folders.".into());
+            return Err("rsync isn't installed on this computer, so Muxin can't sync folders.".into());
         }
         match direction {
             SyncDirection::Push if !local.is_dir() => return Err(format!("{} isn't a folder on this computer.", local.display())),
@@ -699,7 +699,7 @@ impl Engine {
     fn workspace_machine(&self, rec: &WorkspaceRecord) -> Result<MachineSpec, String> {
         let (spec, _) = self.machine(&rec.info.machine_id).ok_or_else(|| {
             format!(
-                "Machine {} not found in config.toml anymore, so Muxen can't reach workspace {}. Destroy it with keepFiles to forget it.",
+                "Machine {} not found in config.toml anymore, so Muxin can't reach workspace {}. Destroy it with keepFiles to forget it.",
                 rec.info.machine_name, rec.info.id
             )
         })?;
@@ -1196,7 +1196,7 @@ struct Repo {
     /// "api" for acme/api.
     short_name: String,
     host: String,
-    /// https on the GitHub host Muxen has a token for.
+    /// https on the GitHub host Muxin has a token for.
     on_github: bool,
 }
 
@@ -1209,7 +1209,7 @@ pub(crate) fn github_web_host(api_url: &str) -> String {
 fn normalize_repo(raw: &str, gh_host: &str) -> Result<Repo, String> {
     let raw = raw.trim();
     if raw.starts_with('-') || raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(format!("\"{raw}\" isn't a repository Muxen can clone."));
+        return Err(format!("\"{raw}\" isn't a repository Muxin can clone."));
     }
     let short = |s: &str| {
         s.trim_end_matches('/').rsplit(['/', ':']).next().unwrap_or(s).trim_end_matches(".git").to_string()

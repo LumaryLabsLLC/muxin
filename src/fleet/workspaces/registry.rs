@@ -1,4 +1,4 @@
-//! `workspaces.json`: the workspaces every Muxen process shares (the
+//! `workspaces.json`: the workspaces every Muxin process shares (the
 //! window, the CLI, each agent's MCP server). Writers take a lock file, re-read,
 //! change, and write atomically, so two processes never drop each other's edits.
 
@@ -105,7 +105,7 @@ impl Lock {
                         continue;
                     }
                     if started.elapsed() > LOCK_WAIT {
-                        return Err(format!("{} is locked by another Muxen process.", display_path(path)));
+                        return Err(format!("{} is locked by another Muxin process.", display_path(path)));
                     }
                     std::thread::sleep(Duration::from_millis(15));
                 }

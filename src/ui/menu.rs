@@ -237,8 +237,8 @@ impl Root {
                     if self.engine.vm_options().hosts.iter().any(|h| &h.machine_id == id && !h.systems.is_empty()) {
                         items.push(act("New VM here…", "box", Action::NewVm(id.clone())));
                     }
-                    // A VM Muxen made goes with its container and disk.
-                    let label = if m.vm.is_some() { "Destroy…" } else { "Remove from Muxen…" };
+                    // A VM Muxin made goes with its container and disk.
+                    let label = if m.vm.is_some() { "Destroy…" } else { "Remove from Muxin…" };
                     items.push(Item::Action { label: label.into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
                 }
                 items
@@ -334,7 +334,7 @@ impl Root {
                 let mut items = vec![Item::Note("Open it in".into())];
                 items.extend(editor_items(&self.engine.settings().editor, machine, path, false));
                 if items.len() == 1 {
-                    items.push(Item::Note("No editor here: Muxen opens folders in Zed, Cursor or VS Code.".into()));
+                    items.push(Item::Note("No editor here: Muxin opens folders in Zed, Cursor or VS Code.".into()));
                 }
                 items
             }

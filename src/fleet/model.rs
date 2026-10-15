@@ -65,7 +65,7 @@ pub struct TailnetDevice {
     pub path: String,
     /// The relay's region code (e.g. "mia"), when relayed.
     pub relay: Option<String>,
-    /// When Muxen read this from Tailscale.
+    /// When Muxin read this from Tailscale.
     pub read_at: DateTime<Utc>,
 }
 
@@ -189,7 +189,7 @@ pub struct Machine {
     /// "runner" when it hosts runners, otherwise "other".
     pub kind: String,
     /// "online" | "offline" | "unchecked" | "manual" | "disconnected" (on
-    /// purpose: Muxen leaves it alone until it's connected again)
+    /// purpose: Muxin leaves it alone until it's connected again)
     pub status: String,
     pub checking: bool,
     pub notes: Option<String>,
@@ -201,7 +201,7 @@ pub struct Machine {
     pub workspaces_allowed: bool,
     /// Agent CLIs found on the machine ("claude", "codex", ...), from the last session check.
     pub agents: Vec<String>,
-    /// The Muxen agent's version there (it runs agent sessions), once set up.
+    /// The Muxin agent's version there (it runs agent sessions), once set up.
     pub agent_version: Option<String>,
     /// Why sessions aren't available here, when they aren't.
     pub sessions_error: Option<String>,
@@ -211,20 +211,20 @@ pub struct Machine {
     pub unreachable: Option<Unreachable>,
     /// It on the user's tailnet, as Tailscale last saw it.
     pub tailnet: Option<TailnetDevice>,
-    /// A cloud machine Muxen created: where it runs and what it costs.
+    /// A cloud machine Muxin created: where it runs and what it costs.
     pub cloud: Option<CloudInfo>,
     /// Its monitors, virtual ones included, as last listed (empty until then).
     pub displays: Vec<DisplayInfo>,
     /// Another of the user's machines it runs on (a VM or container there),
     /// or is reached through (a jump host).
     pub parent: Option<ParentMachine>,
-    /// A VM Muxen made (and can destroy): its host, system and container.
+    /// A VM Muxin made (and can destroy): its host, system and container.
     pub vm: Option<crate::config::VmRef>,
     /// Where a direct connection reaches it (a forwarded port), from config.toml.
     pub direct_address: Option<String>,
 }
 
-/// The machine another one runs on or is reached through, as Muxen worked it
+/// The machine another one runs on or is reached through, as Muxin worked it
 /// out from ~/.ssh/config, the machines' checks and their Docker containers.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -259,7 +259,7 @@ impl ParentMachine {
 }
 
 impl Machine {
-    /// Muxen can't use it now: it's offline, or disconnected on purpose.
+    /// Muxin can't use it now: it's offline, or disconnected on purpose.
     pub fn is_down(&self) -> bool {
         matches!(self.status.as_str(), "offline" | "disconnected")
     }
@@ -269,7 +269,7 @@ impl Machine {
     }
 }
 
-/// One of a machine's monitors: a real one, or a virtual one Muxen added.
+/// One of a machine's monitors: a real one, or a virtual one Muxin added.
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
 pub struct DisplayInfo {
     /// What to pass as `display`: a RandR monitor's name on Linux ("all": the
@@ -285,7 +285,7 @@ pub struct DisplayInfo {
     /// The main (primary) display.
     #[serde(default)]
     pub main: bool,
-    /// A virtual monitor Muxen added (and can remove).
+    /// A virtual monitor Muxin added (and can remove).
     #[serde(default, rename = "virtual")]
     pub is_virtual: bool,
     /// The sizes it can be set to, biggest first (empty: it can't be, or
@@ -364,7 +364,7 @@ pub struct Probe {
     pub load: Vec<f64>,
     /// Docker server version, when the machine's user can use Docker.
     pub docker: Option<String>,
-    /// Linux: "root" | "passwordless" | "password" — whether Muxen can install systemd services.
+    /// Linux: "root" | "passwordless" | "password" — whether Muxin can install systemd services.
     pub sudo: Option<String>,
     /// The last time a check reached the machine.
     pub last_seen_at: Option<DateTime<Utc>>,
@@ -379,7 +379,7 @@ pub struct Unreachable {
     /// Tailscale is off or signed out, and the machine is on the tailnet) |
     /// "powered-off" (a cloud machine) | "host-down" (the machine it runs on or
     /// is reached through is off) | "stopped" (its container there isn't
-    /// running) | "installing" (a VM Muxen just made) | "error"
+    /// running) | "installing" (a VM Muxin just made) | "error"
     pub kind: String,
     /// e.g. "Beelink is offline".
     pub title: String,

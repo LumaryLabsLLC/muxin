@@ -76,7 +76,7 @@ pub struct SettingsPage {
     pub scroll: gpui::ScrollHandle,
     tab: SettingsTab,
     cloud: cloud::CloudState,
-    /// The `muxen` command in the PATH.
+    /// The `muxin` command in the PATH.
     shell: shell::ShellState,
     /// A shortcut waiting for its new keys, and what catches them before
     /// they run anything.
@@ -806,7 +806,7 @@ impl SettingsPage {
         div().flex().flex_wrap().gap(px(10.)).children(cards)
     }
 
-    /// Tailscale on this computer: whether it's on, and what Muxen uses it for.
+    /// Tailscale on this computer: whether it's on, and what Muxin uses it for.
     fn tailscale_section(&self, theme: &Theme) -> Option<impl IntoElement> {
         let t = self.snapshot.tailscale.clone()?;
         let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
@@ -900,9 +900,9 @@ impl SettingsPage {
         let mut options: Vec<(String, String)> = vec![(String::new(), "First installed".into())];
         options.extend(installed.iter().map(|e| (e.id.to_string(), e.name.to_string())));
         let detail = if installed.is_empty() {
-            "No editor found: Muxen opens folders in Zed, Cursor or VS Code (with Remote - SSH).".to_string()
+            "No editor found: Muxin opens folders in Zed, Cursor or VS Code (with Remote - SSH).".to_string()
         } else {
-            "Open in editor opens a machine’s folder over ssh in the editor you pick from its list. The one chosen here comes first, and `muxen edit` uses it.".to_string()
+            "Open in editor opens a machine’s folder over ssh in the editor you pick from its list. The one chosen here comes first, and `muxin edit` uses it.".to_string()
         };
         // Full width, so its wrapped text is measured at that width (else the
         // section below starts a line too early).
@@ -962,7 +962,7 @@ impl SettingsPage {
                     .p(px(14.))
                     .gap(px(10.))
                     .child(div().w_full().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(
-                        "Machines and the runners they should host live in config.toml. Muxen edits it when you add machines or install runners, and keeps your comments.",
+                        "Machines and the runners they should host live in config.toml. Muxin edits it when you add machines or install runners, and keeps your comments.",
                     ))
                     .child(
                         div()
@@ -1249,7 +1249,7 @@ fn note(_theme: &Theme, icon_name: &'static str, color: gpui::Hsla, text: impl I
     div().flex().items_center().gap(px(8.)).text_size(px(12.5)).child(icon(icon_name, 14., color)).child(text.into())
 }
 
-/// A fix to run: copyable, and a button when it's a GitHub permission Muxen can ask for.
+/// A fix to run: copyable, and a button when it's a GitHub permission Muxin can ask for.
 fn hint_line(theme: &Theme, i: usize, hint: String) -> impl IntoElement {
     let copy = hint.clone();
     let grant = hint.contains("gh auth refresh") && hint.contains("admin:org");

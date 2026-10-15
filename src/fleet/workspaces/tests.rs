@@ -352,7 +352,7 @@ async fn local_end_to_end() {
         let local = tmp.join("local-copy");
         let summary = engine.workspace_sync(&info.id, local.to_str().unwrap(), SyncDirection::Pull, false).await.unwrap();
         assert!(local.join("README.md").exists(), "{summary}");
-        assert!(!local.join(".muxen").exists(), "Muxen's own folder isn't synced");
+        assert!(!local.join(".muxen").exists(), "Muxin's own folder isn't synced");
         std::fs::write(local.join("pushed.txt"), "from local\n").unwrap();
         engine.workspace_sync(&info.id, local.to_str().unwrap(), SyncDirection::Push, false).await.unwrap();
         assert!(root.join(&info.id).join("pushed.txt").exists());

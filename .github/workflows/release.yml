@@ -90,7 +90,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: macos
-          path: dist/Muxen-*-macos.dmg
+          path: dist/Muxin-*-macos.dmg
           if-no-files-found: error
 
   # Intel and Arm, each built on its own kind of machine. The oldest Ubuntu
@@ -122,13 +122,13 @@ jobs:
       - run: scripts/package-linux.sh --skip-agents
       - name: It runs here
         run: |
-          tar -xzf dist/Muxen-*-linux-${{ matrix.arch }}.tar.gz -C "$RUNNER_TEMP"
-          "$RUNNER_TEMP/Muxen/muxen" --version
-          "$RUNNER_TEMP/Muxen/agents/muxen-agent-linux-${{ matrix.arch }}" hash
+          tar -xzf dist/Muxin-*-linux-${{ matrix.arch }}.tar.gz -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/Muxin/muxin" --version
+          "$RUNNER_TEMP/Muxin/agents/muxen-agent-linux-${{ matrix.arch }}" hash
       - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
-          path: dist/Muxen-*-linux-${{ matrix.arch }}.tar.gz
+          path: dist/Muxin-*-linux-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
 
   # x64 and Arm, each built on its own kind of machine.
@@ -170,15 +170,15 @@ jobs:
       - name: It runs here
         shell: pwsh
         run: |
-          dist\windows\Muxen\muxen.exe --version
+          dist\windows\Muxin\muxin.exe --version
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          dist\windows\Muxen\agents\muxen-agent-windows-${{ matrix.agent }}.exe hash
+          dist\windows\Muxin\agents\muxen-agent-windows-${{ matrix.agent }}.exe hash
       - uses: actions/upload-artifact@v7
         with:
           name: windows-${{ matrix.arch }}
           path: |
-            dist/Muxen-*-windows-${{ matrix.arch }}.zip
-            dist/Muxen-*-windows-${{ matrix.arch }}-setup.exe
+            dist/Muxin-*-windows-${{ matrix.arch }}.zip
+            dist/Muxin-*-windows-${{ matrix.arch }}-setup.exe
           if-no-files-found: error
 
   # A draft release with every file and their checksums, for a tag.
@@ -195,11 +195,11 @@ jobs:
           merge-multiple: true
       - name: Checksums
         working-directory: dist
-        run: sha256sum Muxen-* > SHA256SUMS.txt && cat SHA256SUMS.txt
+        run: sha256sum Muxin-* > SHA256SUMS.txt && cat SHA256SUMS.txt
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           signed=$([ "$SIGNED" = true ] && echo "" || echo " (unsigned test build)")
-          gh release create "$GITHUB_REF_NAME" dist/Muxen-* dist/SHA256SUMS.txt \
-            --draft --title "Muxen ${GITHUB_REF_NAME#v}$signed" --generate-notes
+          gh release create "$GITHUB_REF_NAME" dist/Muxin-* dist/SHA256SUMS.txt \
+            --draft --title "Muxin ${GITHUB_REF_NAME#v}$signed" --generate-notes

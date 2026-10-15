@@ -1,5 +1,5 @@
-# Muxen: control one installed runner (Windows).
-# Muxen prepends: $OR_ACTION (start|stop|restart|logs|remove), $OR_DIR,
+# Muxin: control one installed runner (Windows).
+# Muxin prepends: $OR_ACTION (start|stop|restart|logs|remove), $OR_DIR,
 # $OR_TOKEN (remove only), $OR_DELETE (bool).
 
 $ErrorActionPreference = 'Stop'

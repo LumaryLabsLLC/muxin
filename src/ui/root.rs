@@ -92,13 +92,13 @@ pub fn bind_keys(cx: &mut App) {
 pub fn menus() -> Vec<Menu> {
     vec![
         Menu {
-            name: "Muxen".into(),
+            name: "Muxin".into(),
             items: vec![
-                MenuItem::action("About Muxen", ShowAbout),
+                MenuItem::action("About Muxin", ShowAbout),
                 MenuItem::separator(),
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
-                MenuItem::action("Quit Muxen", Quit),
+                MenuItem::action("Quit Muxin", Quit),
             ],
         },
         Menu {
@@ -1098,7 +1098,7 @@ impl Root {
     /// Files dropped from the Finder on a machine: copy them there.
     pub(super) fn copy_dropped(&mut self, machine_id: &str, paths: &[std::path::PathBuf], window: &mut Window, cx: &mut Context<Self>) {
         let Some(local) = self.snapshot.machines.iter().find(|m| m.local).map(|m| m.id.clone()) else {
-            self.notify_user("Add this computer to Muxen (host \"local\") to copy files from it.", true, cx);
+            self.notify_user("Add this computer to Muxin (host \"local\") to copy files from it.", true, cx);
             return;
         };
         let Some(dir) = paths.first().and_then(|p| p.parent()).map(|p| p.display().to_string()) else { return };
@@ -1150,7 +1150,7 @@ impl Root {
         let task = cx.spawn(async move |this, cx| {
             let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update(cx, |this, cx| match result {
-                Ok(from) => this.notify_user(format!("Woke {name} from {from}. Muxen looks again in a moment."), false, cx),
+                Ok(from) => this.notify_user(format!("Woke {name} from {from}. Muxin looks again in a moment."), false, cx),
                 Err(e) => this.notify_user(e, true, cx),
             });
         });
@@ -1361,10 +1361,10 @@ impl Root {
 
     pub(super) fn confirm_remove_machine(&mut self, machine: &Machine, window: &mut Window, cx: &mut Context<Self>) {
         let machine_id = machine.id.clone();
-        // A VM Muxen made goes with its container and disk.
+        // A VM Muxin made goes with its container and disk.
         if let Some(vm) = &machine.vm {
             let host = machine.parent.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| vm.host.clone());
-            let detail = format!("Its container {} and its disk on {host} are deleted, and it leaves Muxen. Copy out anything you want to keep first.", vm.container);
+            let detail = format!("Its container {} and its disk on {host} are deleted, and it leaves Muxin. Copy out anything you want to keep first.", vm.container);
             let dialog = cx.new(|cx| ConfirmDialog::new(format!("Destroy {}?", machine.name), detail, "Destroy", None, move |_, engine| engine.vm_destroy(&machine_id).map(Some), self.engine.clone(), window, cx));
             self.show_modal(Modal::Confirm(dialog.clone()), window, cx);
             self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
@@ -1373,7 +1373,7 @@ impl Root {
         // A cloud machine goes with its droplet.
         if let Some(c) = &machine.cloud {
             let detail = format!(
-                "Its droplet and everything on it are deleted, and it leaves Muxen. Push your work first. It has cost about ${:.2} so far.",
+                "Its droplet and everything on it are deleted, and it leaves Muxin. Push your work first. It has cost about ${:.2} so far.",
                 c.cost_so_far
             );
             let dialog = cx.new(|cx| {
@@ -1394,7 +1394,7 @@ impl Root {
         }
         let dialog = cx.new(|cx| {
             ConfirmDialog::new(
-                format!("Remove {} from Muxen?", machine.name),
+                format!("Remove {} from Muxin?", machine.name),
                 "It's taken out of config.toml. Nothing on the machine changes, and its runners stay registered.".into(),
                 "Remove machine",
                 None,
@@ -1691,7 +1691,7 @@ impl Root {
         out
     }
 
-    /// The machine it sits under in the sidebar: the one it runs on, when that's in Muxen.
+    /// The machine it sits under in the sidebar: the one it runs on, when that's in Muxin.
     pub(super) fn host_in_sidebar(s: &Snapshot, m: &Machine) -> Option<String> {
         m.parent.as_ref().filter(|p| p.inside() && p.machine_id != m.id && s.machines.iter().any(|x| x.id == p.machine_id)).map(|p| p.machine_id.clone())
     }
@@ -2020,7 +2020,7 @@ impl Root {
                     .flex()
                     .flex_col()
                     .min_w(px(0.))
-                    .child(div().w(px(text_w)).truncate().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Muxen")),
+                    .child(div().w(px(text_w)).truncate().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Muxin")),
             )
             .when(s.demo, |d| d.child(div().flex_1()).child(kit::pill("demo", theme.warning)))
     }
@@ -2914,7 +2914,7 @@ impl Root {
             // An explicit width: GPUI 0.2 only ellipsizes text whose width it knows.
             .child(div().w(px((self.row_width() - 20. - 30. - 16. - 16. - 74. - 52.).max(40.))).truncate().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child(d.name.clone()))
             .child(div().flex_1())
-            // Which ones Muxen added (and the × takes away).
+            // Which ones Muxin added (and the × takes away).
             .child(kit::pill("virtual", theme.accent))
             .child(div().flex_none().font_family(mono_font()).text_size(px(10.5)).text_color(theme.text_placeholder).group_hover("monitor-row", |st| st.invisible()).child(format!("{}×{}", d.width as u32, d.height as u32)))
             // On hover, in place of the size: unplug it.

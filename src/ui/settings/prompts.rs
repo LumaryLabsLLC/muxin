@@ -1,5 +1,5 @@
 //! Settings › Prompts: what each session action (commit, open a pull
-//! request, review, ...) types into an agent. Any can be changed; Muxen's
+//! request, review, ...) types into an agent. Any can be changed; Muxin's
 //! own comes back with Reset. Kept in `[settings.prompts]` in config.toml.
 
 use gpui::{AnyElement, Context, Entity, Focusable, FontWeight, SharedString, Subscription, Window, div, prelude::*, px};
@@ -18,7 +18,7 @@ pub(super) struct PromptEdit {
 }
 
 impl SettingsPage {
-    /// The prompt an action types in: the user's, else Muxen's.
+    /// The prompt an action types in: the user's, else Muxin's.
     fn prompt_of(&self, a: &SessionAction) -> (String, bool) {
         match self.engine.settings().prompts.get(a.id).filter(|p| !p.trim().is_empty()) {
             Some(p) => (p.clone(), true),
@@ -49,7 +49,7 @@ impl SettingsPage {
         }
     }
 
-    /// Keeps what's in the field; Muxen's own (or an empty field) is kept as no change.
+    /// Keeps what's in the field; Muxin's own (or an empty field) is kept as no change.
     fn save_prompt(&mut self, cx: &mut Context<Self>) {
         let Some(edit) = self.prompt_edit.take() else { return };
         let text = edit.input.read(cx).text().trim().to_string();
@@ -95,7 +95,7 @@ impl SettingsPage {
             .child(div().flex_1())
             .when(editing.is_none(), |d| {
                 d.when(changed, |d| {
-                    d.child(Button::new(SharedString::from(format!("prompt-reset-{}", a.id)), "Reset").style(ButtonStyle::Ghost).tooltip("Go back to Muxen's prompt").on_click(cx.listener(move |this, _, _, cx| this.set_prompt(a.id, None, cx))))
+                    d.child(Button::new(SharedString::from(format!("prompt-reset-{}", a.id)), "Reset").style(ButtonStyle::Ghost).tooltip("Go back to Muxin's prompt").on_click(cx.listener(move |this, _, _, cx| this.set_prompt(a.id, None, cx))))
                 })
                 .child(Button::new(SharedString::from(format!("prompt-edit-{}", a.id)), "Edit").icon("pencil").on_click(cx.listener(move |this, _, window, cx| this.edit_prompt(a, window, cx))))
             })
@@ -115,7 +115,7 @@ impl SettingsPage {
                     .flex_col()
                     .gap(px(6.))
                     .child(e.input.clone())
-                    .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(if typed.trim().is_empty() { format!("Empty uses Muxen's: {}", a.prompt) } else { typed }))
+                    .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(if typed.trim().is_empty() { format!("Empty uses Muxin's: {}", a.prompt) } else { typed }))
                     .into_any_element()
             }
             None => div().text_size(px(12.5)).line_height(px(18.)).text_color(theme.text_muted).child(text).into_any_element(),
@@ -129,7 +129,7 @@ impl SettingsPage {
             .when(i > 0, |d| d.border_t_1().border_color(theme.border_variant))
             .child(header)
             .child(body)
-            .child(div().font_family(mono_font()).text_size(px(10.5)).text_color(theme.text_placeholder).child(format!("muxen session do <session> {}", a.id)))
+            .child(div().font_family(mono_font()).text_size(px(10.5)).text_color(theme.text_placeholder).child(format!("muxin session do <session> {}", a.id)))
             .into_any_element()
     }
 }

@@ -149,7 +149,7 @@ impl Root {
                     .gap(px(4.))
                     .min_w(px(0.))
                     .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child("Schedules"))
-                    .child(div().text_size(px(13.)).text_color(theme.text_muted).child("Commands and agent sessions that run on your machines at set times, in each machine’s own time. They run there, so they don’t need Muxen open.")),
+                    .child(div().text_size(px(13.)).text_color(theme.text_muted).child("Commands and agent sessions that run on your machines at set times, in each machine’s own time. They run there, so they don’t need Muxin open.")),
             )
             .child(
                 div()

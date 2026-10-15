@@ -183,7 +183,7 @@ impl Engine {
         }
         super::sessions::agent::ensure(&spec, probe.as_ref()).await?;
         let reply = super::sessions::agent::ctl(&spec, &json!({ "op": "usage", "days": days })).await?;
-        let mut u: MachineUsage = serde_json::from_value(reply).map_err(|_| format!("{} told its usage in a way Muxen can't read.", spec.name))?;
+        let mut u: MachineUsage = serde_json::from_value(reply).map_err(|_| format!("{} told its usage in a way Muxin can't read.", spec.name))?;
         u.machine_id = spec.id.clone();
         Ok(u)
     }

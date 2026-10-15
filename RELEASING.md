@@ -1,4 +1,4 @@
-# Releasing Muxen
+# Releasing Muxin
 
 A release is a version tag (`v1.2.3`). Pushing one runs the **release** workflow
 (`.github/workflows/release.yml`), which builds every platform and puts the
@@ -6,19 +6,19 @@ files in a **draft** GitHub release on this repository to look over and publish.
 
 | File | What it is |
 |---|---|
-| `Muxen-<version>-macos.dmg` | The app for Apple silicon and Intel Macs (macOS 12 or later), signed with the Developer ID and notarized |
-| `Muxen-<version>-linux-x86_64.tar.gz` | The app for Linux on Intel and AMD (glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 and later), with `install.sh` |
-| `Muxen-<version>-linux-aarch64.tar.gz` | The same for Linux on Arm |
-| `Muxen-<version>-windows-x64-setup.exe` | The Windows installer (for the user, no administrator needed) |
-| `Muxen-<version>-windows-x64.zip` | The same, unpacked |
-| `Muxen-<version>-windows-arm64-setup.exe` | The installer for Windows on Arm (which runs the x64 one too, emulated) |
-| `Muxen-<version>-windows-arm64.zip` | The same, unpacked |
+| `Muxin-<version>-macos.dmg` | The app for Apple silicon and Intel Macs (macOS 12 or later), signed with the Developer ID and notarized |
+| `Muxin-<version>-linux-x86_64.tar.gz` | The app for Linux on Intel and AMD (glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 and later), with `install.sh` |
+| `Muxin-<version>-linux-aarch64.tar.gz` | The same for Linux on Arm |
+| `Muxin-<version>-windows-x64-setup.exe` | The Windows installer (for the user, no administrator needed) |
+| `Muxin-<version>-windows-x64.zip` | The same, unpacked |
+| `Muxin-<version>-windows-arm64-setup.exe` | The installer for Windows on Arm (which runs the x64 one too, emulated) |
+| `Muxin-<version>-windows-arm64.zip` | The same, unpacked |
 | `SHA256SUMS.txt` | Their checksums |
 
 Each one carries the agent for every platform (`agents/`), which the app
 installs on the machines it connects to. The Arm builds are made on GitHub's
 Arm machines (`ubuntu-22.04-arm`, `windows-11-arm`), and each Linux and Windows
-build runs its `muxen --version` and agent there before it's kept.
+build runs its `muxin --version` and agent there before it's kept.
 
 ## Making a release
 
@@ -31,7 +31,7 @@ The script sets the version in `Cargo.toml` and `Cargo.lock`, commits it, tags
 the commit `v0.2.0` and pushes both. Leave out `--push` to look first; then
 `git push origin HEAD v0.2.0`.
 
-You can also run it on a branch that `main` follows, like `muxen`. Then `--push`
+You can also run it on a branch that `main` follows, like `muxin`. Then `--push`
 moves `main` up to it too, here and on GitHub. If `main` has commits the branch
 doesn't, it stays where it is and the script says so.
 
@@ -41,6 +41,7 @@ Then:
 gh run watch                                  # the build: about 30 minutes
 gh release view v0.2.0                        # the draft and its files
 gh release edit v0.2.0 --draft=false          # publish it
+scripts/homebrew.sh 0.2.0 --push              # then the Homebrew cask
 ```
 
 If a job fails for a reason outside the code, like a dropped connection to
@@ -49,6 +50,15 @@ The draft is made once every platform has built.
 
 Published releases are public: anyone can download them from the repository's
 Releases page.
+
+## Homebrew
+
+`brew install --cask lumarylabsllc/tap/muxin` installs Muxin on macOS and Linux
+from [LumaryLabsLLC/homebrew-tap](https://github.com/LumaryLabsLLC/homebrew-tap).
+Its cask, `Casks/muxin.rb`, points at a release's files by their checksums, so
+it moves up only once the release is published: `scripts/homebrew.sh <version>
+--push` writes it from the release's `SHA256SUMS.txt`, commits and pushes it.
+`brew upgrade --cask muxin` gets it from then on.
 
 To try the pipeline without a release, run the workflow by hand (Actions ›
 release › Run workflow, or `gh workflow run release`). It builds the same files
@@ -96,10 +106,10 @@ again.
 
 | Platform | Command | Output |
 |---|---|---|
-| macOS | `scripts/bundle-macos.sh` | `dist/Muxen.app`, for this Mac (what you use day to day) |
-| macOS release | `scripts/bundle-macos.sh --release && scripts/notarize-macos.sh` | a universal, notarized `dist/Muxen-<version>-macos.dmg` |
+| macOS | `scripts/bundle-macos.sh` | `dist/Muxin.app`, for this Mac (what you use day to day) |
+| macOS release | `scripts/bundle-macos.sh --release && scripts/notarize-macos.sh` | a universal, notarized `dist/Muxin-<version>-macos.dmg` |
 | Agents | `scripts/build-agents.sh` | `dist/agents/`, every platform (needs zig and cargo-zigbuild) |
-| Linux | `scripts/package-linux.sh` | `dist/Muxen-<version>-linux-<arch>.tar.gz` |
+| Linux | `scripts/package-linux.sh` | `dist/Muxin-<version>-linux-<arch>.tar.gz` |
 | Windows | `scripts\package-windows.ps1` | the installer and zip (agents from a Mac or Linux first) |
 
 ## Not done yet

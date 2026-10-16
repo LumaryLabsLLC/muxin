@@ -168,6 +168,13 @@ pub fn set_dock_icon() {
     use cocoa::appkit::{NSApp, NSApplication, NSImage};
     use cocoa::base::nil;
     use cocoa::foundation::NSData;
+    // A bundled app keeps the icon macOS draws from its .icns (on macOS 26 a
+    // set image would stand apart from the Dock's and Spotlight's look); only
+    // a bare binary (cargo run) needs one.
+    let bundled = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok()).is_some_and(|e| e.to_string_lossy().contains(".app/Contents/MacOS/"));
+    if bundled {
+        return;
+    }
     // SAFETY: called on the main thread after GPUI has created NSApplication;
     // the PNG bytes are 'static and copied into NSData.
     unsafe {

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, Focusable, FontWeight, KeyBinding, Menu,
-    MenuItem, MouseButton, ScrollHandle, SharedString, Subscription, Task, Window, actions, div, prelude::*, px,
+    MenuItem, MouseButton, ScrollHandle, SharedString, Subscription, SystemMenuType, Task, Window, actions, div, prelude::*, px,
 };
 
 use super::dialogs::{AddDisplayDialog, MonitorPasswordDialog, AddMachineDialog, ConfirmDialog, DialogEvent, InstallDialog, NewSessionDialog, NewWorkspaceDialog, RenameDialog, RenameTarget};
@@ -64,7 +64,19 @@ actions!(
         SignInGitHub,
         GrantGitHubAccess,
         Dismiss,
-        Quit
+        Quit,
+        CheckForUpdates,
+        HideApp,
+        HideOthers,
+        ShowAll,
+        Minimize,
+        Zoom,
+        OpenDocs,
+        ShowShortcuts,
+        ShowReleaseNotes,
+        ReportProblem,
+        AskQuestion,
+        OpenGitHub
     ]
 );
 
@@ -82,6 +94,14 @@ pub fn bind_keys(cx: &mut App) {
     let custom = super::shortcuts::bindings(cx);
     cx.bind_keys(custom);
     super::palette::bind_keys(cx);
+    // The Mac's own: hide and minimize (macOS adds Enter Full Screen itself).
+    if cfg!(target_os = "macos") {
+        cx.bind_keys([
+            KeyBinding::new("cmd-h", HideApp, None),
+            KeyBinding::new("alt-cmd-h", HideOthers, None),
+            KeyBinding::new("cmd-m", Minimize, None),
+        ]);
+    }
     cx.bind_keys([
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("escape", Dismiss, Some(WORKSPACE)),
@@ -90,15 +110,34 @@ pub fn bind_keys(cx: &mut App) {
 }
 
 pub fn menus() -> Vec<Menu> {
+    use super::input;
     vec![
         Menu {
             name: "Muxin".into(),
             items: vec![
                 MenuItem::action("About Muxin", ShowAbout),
+                MenuItem::action("Check for Updates…", CheckForUpdates),
                 MenuItem::separator(),
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
+                MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("Hide Muxin", HideApp),
+                MenuItem::action("Hide Others", HideOthers),
+                MenuItem::action("Show All", ShowAll),
+                MenuItem::separator(),
                 MenuItem::action("Quit Muxin", Quit),
+            ],
+        },
+        // Text fields' editing; a terminal copies and pastes by itself.
+        Menu {
+            name: "Edit".into(),
+            items: vec![
+                MenuItem::action("Cut", input::Cut),
+                MenuItem::action("Copy", input::Copy),
+                MenuItem::action("Paste", input::Paste),
+                MenuItem::separator(),
+                MenuItem::action("Select All", input::SelectAll),
             ],
         },
         Menu {
@@ -128,9 +167,45 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("Back", GoBack),
                 MenuItem::action("Forward", GoForward),
+                MenuItem::separator(),
+                MenuItem::action("Show or Hide Sidebar", ToggleSidebar),
+            ],
+        },
+        Menu { name: "Window".into(), items: vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom)] },
+        Menu {
+            name: "Help".into(),
+            items: vec![
+                MenuItem::action("Muxin Docs", OpenDocs),
+                MenuItem::action("Keyboard Shortcuts", ShowShortcuts),
+                MenuItem::separator(),
+                MenuItem::action("What’s New", ShowReleaseNotes),
+                MenuItem::action("Report a Problem…", ReportProblem),
+                MenuItem::action("Ask a Question…", AskQuestion),
+                MenuItem::separator(),
+                MenuItem::action("Muxin on GitHub", OpenGitHub),
             ],
         },
     ]
+}
+
+/// The menu's app-wide actions: they work in any of Muxin's windows.
+pub fn bind_app_actions(cx: &mut App) {
+    cx.on_action(|_: &HideApp, cx| cx.hide());
+    cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+    fn on_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
+        if let Some(handle) = cx.active_window() {
+            let _ = handle.update(cx, |_, window, _| f(window));
+        }
+    }
+    cx.on_action(|_: &Minimize, cx| on_window(cx, |w| w.minimize_window()));
+    cx.on_action(|_: &Zoom, cx| on_window(cx, |w| w.zoom_window()));
+    const REPO: &str = "https://github.com/LumaryLabsLLC/muxin";
+    cx.on_action(|_: &OpenDocs, cx| cx.open_url("https://muxin.dev/docs"));
+    cx.on_action(|_: &ShowReleaseNotes, cx| cx.open_url(&format!("{REPO}/releases")));
+    cx.on_action(|_: &ReportProblem, cx| cx.open_url(&format!("{REPO}/issues/new/choose")));
+    cx.on_action(|_: &AskQuestion, cx| cx.open_url(&format!("{REPO}/discussions")));
+    cx.on_action(|_: &OpenGitHub, cx| cx.open_url(REPO));
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1750,6 +1825,16 @@ impl Root {
         self.navigate(Route::Settings, window, cx);
     }
 
+    /// About, where the answer shows, and a look at GitHub now.
+    fn check_for_updates(&mut self, _: &CheckForUpdates, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(Route::About, window, cx);
+        super::updates::check_now(self.engine.clone(), cx);
+    }
+
+    fn show_shortcuts(&mut self, _: &ShowShortcuts, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings_tab(super::settings::SettingsTab::Keyboard, window, cx);
+    }
+
     fn focus_filter(&mut self, _: &FocusFilter, window: &mut Window, cx: &mut Context<Self>) {
         // Not from under an open dialog.
         if self.modal.is_none() {
@@ -3112,6 +3197,8 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &GoToMachine9, window, cx| this.go_to_machine(9, window, cx)))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::check_for_updates))
+            .on_action(cx.listener(Self::show_shortcuts))
             .on_action(cx.listener(Self::focus_filter))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))

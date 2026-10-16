@@ -62,6 +62,7 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
         desktop::bind_keys(cx);
         root::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
+        root::bind_app_actions(cx);
         cx.set_menus(root::menus());
         updates::start(engine.clone(), cx);
 

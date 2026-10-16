@@ -63,12 +63,18 @@ impl Engine {
         match (account, regions, sizes) {
             (Ok(a), Ok(r), Ok(s)) => {
                 out.account = Some(a);
-                let slugs: Vec<String> = r.iter().map(|r| r.slug.clone()).collect();
-                let offset = chrono::Local::now().offset().local_minus_utc() / 3600;
-                out.default_region = Some(settings.region.clone()).filter(|r| slugs.contains(r)).or_else(|| nearest_region(offset, &slugs)).unwrap_or_default();
-                out.regions = r;
                 // The everyday sizes: basic ("s-"), general purpose ("g-") and CPU-optimized ("c-") droplets.
                 out.sizes = s.into_iter().filter(|s| ["s-", "g-", "c-"].iter().any(|p| s.slug.starts_with(p)) && s.memory_mb >= 1024).collect();
+                // Defaults that work: a region with sizes on offer (DigitalOcean
+                // offers none in some datacenters), and a size on offer there.
+                let on_offer: Vec<String> = r.iter().map(|r| r.slug.clone()).filter(|slug| crate::cloud::offered(&out.sizes, slug).next().is_some()).collect();
+                let offset = chrono::Local::now().offset().local_minus_utc() / 3600;
+                out.default_region = Some(settings.region.clone()).filter(|r| on_offer.contains(r)).or_else(|| nearest_region(offset, &on_offer)).unwrap_or_default();
+                let mut there = crate::cloud::offered(&out.sizes, &out.default_region);
+                if !crate::cloud::offered(&out.sizes, &out.default_region).any(|s| s.slug == out.default_size) {
+                    out.default_size = there.next().map(|s| s.slug.clone()).unwrap_or_default();
+                }
+                out.regions = r;
             }
             (a, r, s) => out.error = a.err().or(r.err()).or(s.err()),
         }

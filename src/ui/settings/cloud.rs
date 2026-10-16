@@ -368,9 +368,10 @@ impl SettingsPage {
 
         // New machines: only with a working sign-in.
         let defaults = options.as_ref().filter(|o| o.account.is_some()).map(|o| {
-            let region = if settings.region.is_empty() { o.default_region.clone() } else { settings.region.clone() };
+            // The saved region while it has sizes on offer, else the default (which does).
+            let region = Some(settings.region.clone()).filter(|r| crate::cloud::offered(&o.sizes, r).next().is_some()).unwrap_or_else(|| o.default_region.clone());
             let chosen_city = crate::cloud::city_of_slug(&o.regions, &region);
-            let regions: Vec<AnyElement> = crate::cloud::cities(&o.regions)
+            let regions: Vec<AnyElement> = crate::cloud::cities(&o.regions, &o.sizes)
                 .into_iter()
                 .map(|(city, slug)| {
                     let selected = chosen_city.as_deref() == Some(city.as_str());
@@ -379,10 +380,7 @@ impl SettingsPage {
                         .into_any_element()
                 })
                 .collect();
-            let sizes: Vec<AnyElement> = o
-                .sizes
-                .iter()
-                .filter(|s| regular_size(&s.slug))
+            let sizes: Vec<AnyElement> = crate::cloud::offered(&o.sizes, &region)
                 .take(8)
                 .enumerate()
                 .map(|(i, s)| {
@@ -525,10 +523,6 @@ impl SettingsPage {
     }
 }
 
-/// Basic droplets on regular CPUs: the premium AMD and Intel twins of each size are left out.
-pub(crate) fn regular_size(slug: &str) -> bool {
-    slug.starts_with("s-") && !slug.ends_with("-amd") && !slug.ends_with("-intel")
-}
 
 fn row(theme: &Theme, label: &'static str, control: AnyElement) -> impl IntoElement {
     div()

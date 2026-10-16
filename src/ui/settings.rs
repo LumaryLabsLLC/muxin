@@ -9,7 +9,6 @@ mod cloud;
 mod prompts;
 mod shell;
 
-pub(super) use cloud::regular_size;
 
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, card, icon, mono, section_title};

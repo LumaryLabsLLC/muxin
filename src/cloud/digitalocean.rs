@@ -33,7 +33,7 @@ pub struct Region {
     pub sizes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Size {
     pub slug: String,
     pub vcpus: u32,

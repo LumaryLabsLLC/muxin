@@ -45,10 +45,12 @@ impl CloudDialog {
         cx.spawn(async move |this, cx| {
             if let Ok(options) = job.await {
                 let _ = this.update(cx, |this, cx| {
-                    if this.region.is_empty() {
+                    // The saved region and size, while they're on offer; else the defaults, which are.
+                    if crate::cloud::offered(&options.sizes, &this.region).next().is_none() {
                         this.region = options.default_region.clone();
                     }
                     this.options = Load::Ready(options);
+                    this.fit_size();
                     cx.notify();
                 });
             }
@@ -63,6 +65,16 @@ impl CloudDialog {
             extras: settings.install,
             error: None,
             _subscriptions: subs,
+        }
+    }
+
+    /// Keeps the size one on offer in the chosen region: the cheapest there
+    /// when the chosen one isn't.
+    fn fit_size(&mut self) {
+        let Load::Ready(options) = &self.options else { return };
+        let mut there = crate::cloud::offered(&options.sizes, &self.region);
+        if !crate::cloud::offered(&options.sizes, &self.region).any(|s| s.slug == self.size) {
+            self.size = there.next().map(|s| s.slug.clone()).unwrap_or_default();
         }
     }
 
@@ -142,20 +154,21 @@ impl Render for CloudDialog {
                 .child(text)
         };
         let chosen_city = crate::cloud::city_of_slug(&options.regions, &self.region);
-        let regions: Vec<AnyElement> = crate::cloud::cities(&options.regions)
+        let regions: Vec<AnyElement> = crate::cloud::cities(&options.regions, &options.sizes)
             .into_iter()
             .map(|(city, slug)| {
                 let selected = chosen_city.as_deref() == Some(city.as_str());
                 chip(SharedString::from(format!("cr-{slug}")), city, selected)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.region = slug.clone();
+                        this.fit_size();
                         cx.notify()
                     }))
                     .into_any_element()
             })
             .collect();
         // Basic sizes available in the region, cheapest first.
-        let sizes: Vec<&crate::cloud::Size> = options.sizes.iter().filter(|s| super::settings::regular_size(&s.slug) && s.regions.contains(&self.region)).take(8).collect();
+        let sizes: Vec<&crate::cloud::Size> = crate::cloud::offered(&options.sizes, &self.region).take(8).collect();
         let picked = options.sizes.iter().find(|s| s.slug == self.size && s.regions.contains(&self.region)).cloned();
         let size_rows: Vec<AnyElement> = sizes
             .iter()

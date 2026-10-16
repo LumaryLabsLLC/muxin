@@ -510,6 +510,8 @@ impl RenderOnce for Button {
             ButtonStyle::Danger => (gpui::transparent_black(), theme.error.opacity(0.14), theme.error, None),
         };
         let disabled = self.disabled || self.loading;
+        // A theme with two brand colors fills primary buttons with both, as the icon does.
+        let gradient = (self.style == ButtonStyle::Primary && theme.accent2 != theme.accent).then_some((theme.accent, theme.accent2));
         let mut el = div()
             .id(self.id.clone())
             .flex()
@@ -527,10 +529,10 @@ impl RenderOnce for Button {
             .font_weight(FontWeight::MEDIUM)
             .when_some(border, |d, b| d.border_1().border_color(b))
             .when(disabled, |d| d.opacity(0.5))
-            .when(!disabled, |d| d.cursor_pointer().hover(move |s| s.bg(hover)));
-        // A theme with two brand colors fills primary buttons with both, as the icon does.
-        if self.style == ButtonStyle::Primary && theme.accent2 != theme.accent {
-            let (a, b) = (theme.accent, theme.accent2);
+            .when(!disabled, |d| d.cursor_pointer())
+            // One hover style per element (GPUI checks in debug builds).
+            .when(!disabled && gradient.is_none(), |d| d.hover(move |s| s.bg(hover)));
+        if let Some((a, b)) = gradient {
             el = el.bg(gpui::linear_gradient(90., gpui::linear_color_stop(a, 0.), gpui::linear_color_stop(b, 1.)));
             if !disabled {
                 el = el.hover(move |s| s.bg(gpui::linear_gradient(90., gpui::linear_color_stop(a.opacity(0.85), 0.), gpui::linear_color_stop(b.opacity(0.85), 1.))));

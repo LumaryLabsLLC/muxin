@@ -7,6 +7,11 @@
 <p align="center">One app for all your machines, run by you <b>or by your AI agents</b>.<br>
 <a href="https://muxin.dev">muxin.dev</a> · free and open source (Apache-2.0)</p>
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/overview-dark.webp">
+  <img src="assets/readme/overview-light.webp" alt="Muxin's overview: each machine, what's running on it, its CPU, memory and disk, and what needs a look.">
+</picture>
+
 Point it at the machines you own (a Mac Studio under the desk, a NUC, a Linux box, a few MacBooks, a Windows laptop) and Muxin becomes the hub for all of them:
 
 - **Agent sessions:** Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell on any machine, in a real terminal, still running after you close the app.
@@ -42,6 +47,8 @@ brew install --cask lumarylabsllc/tap/muxin
 ```
 
 `SHA256SUMS.txt` in each release has the files' checksums.
+
+Muxin tells you when a new version is out: the sidebar says so, and About shows how to update the copy you have (with Homebrew or the AUR, or the new file to download). It asks GitHub for the latest release when it opens and twice a day; turn that off in **Settings › General › Updates**. `muxin updates` checks from a terminal.
 
 Muxin was called Muxen before 0.5.1. Updating keeps your settings, machines and sessions, and the `muxen` command still works. On a Mac, the old Muxen app goes to the Trash the first time Muxin opens.
 

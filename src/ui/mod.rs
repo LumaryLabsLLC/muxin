@@ -8,6 +8,7 @@ mod detail;
 mod dialogs;
 mod files;
 mod format;
+mod frame;
 mod github;
 mod hosted;
 mod input;
@@ -29,6 +30,7 @@ mod theme;
 mod run;
 mod schedule_dialog;
 mod schedules;
+mod updates;
 mod usage;
 mod vm_dialog;
 mod themes;
@@ -61,6 +63,7 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
         root::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(root::menus());
+        updates::start(engine.clone(), cx);
 
         // `--view size:960x640` (screenshots and layout checks) overrides the default size.
         let (w, h) = initial_view
@@ -93,6 +96,7 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
                 titlebar: Some(titlebar),
                 window_min_size: Some(size(px(960.), px(600.))),
                 app_id: Some("muxin".into()),
+                window_decorations: frame::requested(),
                 // A test window (on the laptop's screen) doesn't take the keyboard
                 // from whatever the user is typing in.
                 focus: !wants_builtin,
@@ -195,13 +199,17 @@ fn builtin_display(_: &App) -> Option<gpui::DisplayId> {
     None
 }
 
-/// A press on our own title bar: a double click zooms (or whatever the system
-/// setting says); otherwise the window follows the mouse. On macOS GPUI only
-/// does this in the top 28 points, so we ask AppKit to drag from the event.
+/// A press on our own title bar: a double click zooms (on macOS, whatever the
+/// system setting says); otherwise the window follows the mouse. On macOS GPUI
+/// only does this in the top 28 points, so we ask AppKit to drag from the event.
 #[allow(unexpected_cfgs)] // objc's msg_send! checks a cfg this crate doesn't declare
 pub(crate) fn title_bar_press(e: &gpui::MouseDownEvent, window: &mut gpui::Window) {
     if e.click_count == 2 {
-        window.titlebar_double_click();
+        if cfg!(target_os = "macos") {
+            window.titlebar_double_click();
+        } else {
+            window.zoom_window();
+        }
         return;
     }
     #[cfg(target_os = "macos")]

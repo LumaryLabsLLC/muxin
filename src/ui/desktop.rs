@@ -923,15 +923,30 @@ impl Render for DesktopWindow {
             .icon(if full { "minimize" } else { "maximize" })
             .on_click(|_, window, _| window.toggle_fullscreen())
             .into_any_element();
+        let mut extra = vec![button];
+        extra.extend(super::frame::window_buttons(window, cx));
+        // When the app draws the frame (Linux on Wayland), the toolbar is the
+        // title bar: it moves the window and opens the window menu.
+        let title_bar = super::frame::ours(window);
         div()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
             .bg(cx.theme().canvas)
+            .when(super::frame::bordered(window), |d| d.border_1().border_color(cx.theme().border))
             // Room for the traffic lights on macOS.
             .when(cfg!(target_os = "macos") && !full, |d| d.pt(px(28.)))
-            .child(toolbar(&self.view, vec![button], cx))
+            .child(
+                div()
+                    .when(title_bar, |d| {
+                        d.on_mouse_down(MouseButton::Left, |e: &MouseDownEvent, window, _| super::title_bar_press(e, window))
+                            .on_mouse_down(MouseButton::Right, |e: &MouseDownEvent, window, _| super::frame::title_bar_menu(e, window))
+                    })
+                    .child(toolbar(&self.view, extra, cx)),
+            )
             .child(div().flex_1().min_h(px(0.)).child(self.view.clone()))
+            .children(super::frame::resize_edges(window))
     }
 }
 
@@ -943,6 +958,7 @@ pub fn open_window(engine: Arc<Engine>, machine_id: String, display: Option<Stri
         titlebar: Some(gpui::TitlebarOptions { title: Some(format!("{name} · Desktop").into()), appears_transparent: cfg!(target_os = "macos"), traffic_light_position: None }),
         window_min_size: Some(gpui::size(px(480.), px(320.))),
         app_id: Some("muxin".into()),
+        window_decorations: super::frame::requested(),
         ..Default::default()
     };
     let opened = cx.open_window(options, |window, cx| {

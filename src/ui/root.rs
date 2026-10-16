@@ -2563,7 +2563,27 @@ impl Root {
             .child(footer_button("footer-settings", "settings", "Settings", Route::Settings, cx))
             .child(footer_button("footer-about", "info", "About", Route::About, cx))
             .child(div().flex_1())
-            .child(div().pr(px(6.)).font_family(mono_font()).text_size(px(11.)).text_color(theme.text_placeholder).child(format!("v{}", env!("CARGO_PKG_VERSION"))));
+            .child(match super::updates::get(cx).latest {
+                // A newer version: says so, and About says how to get it.
+                Some(update) => div()
+                    .id("footer-update")
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .px(px(6.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .text_size(px(11.5))
+                    .text_color(theme.text_accent)
+                    .hover(|st| st.bg(theme.ghost_hover))
+                    .child(kit::dot(theme.accent, 6.))
+                    .child(format!("{} is out", update.version))
+                    .tooltip(move |window, cx| kit::Tooltip::view(format!("Muxin {} is out. See how to update.", update.version).into(), window, cx))
+                    .on_click(cx.listener(|this, _, window, cx| this.navigate(Route::About, window, cx)))
+                    .into_any_element(),
+                None => div().pr(px(6.)).font_family(mono_font()).text_size(px(11.)).text_color(theme.text_placeholder).child(format!("v{}", env!("CARGO_PKG_VERSION"))).into_any_element(),
+            });
         div().flex_none().px(px(10.)).pb(px(10.)).border_t_1().border_color(theme.border_variant).child(footer)
     }
 
@@ -2597,6 +2617,7 @@ impl Root {
             .border_color(theme.border_variant)
             // The whole bar moves the window (except its buttons), like a title bar.
             .on_mouse_down(gpui::MouseButton::Left, |e: &gpui::MouseDownEvent, window, _| super::title_bar_press(e, window))
+            .on_mouse_down(gpui::MouseButton::Right, |e: &gpui::MouseDownEvent, window, _| super::frame::title_bar_menu(e, window))
             .child(
                 Button::icon_only("toggle-sidebar", "panel-left")
                     .tooltip(tip(if self.sidebar_hidden { "Show sidebar" } else { "Hide sidebar" }, &super::shortcuts::label_for(cx, "sidebar")))
@@ -2643,7 +2664,7 @@ impl Root {
                     })
                     .on_click(cx.listener(|this, _, window, cx| this.show_add_machine(window, cx))),
             )
-
+            .children(super::frame::window_buttons(window, cx))
     }
 
     fn render_notice(&self, theme: &Theme) -> Option<AnyElement> {
@@ -3122,6 +3143,7 @@ impl Render for Root {
             .flex()
             .size_full()
             .bg(theme.canvas)
+            .when(super::frame::bordered(window), |d| d.border_1().border_color(theme.border))
             .text_color(theme.text)
             .font_family(ui_font())
             .text_size(px(13.))
@@ -3167,6 +3189,8 @@ impl Render for Root {
                         ),
                 )
             })
+            // Over everything, dialogs too: the edges to resize the window from.
+            .children(super::frame::resize_edges(window))
     }
 }
 

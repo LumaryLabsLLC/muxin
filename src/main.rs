@@ -11,6 +11,7 @@ mod probe;
 #[cfg(feature = "gui")]
 mod renamed;
 mod shell_command;
+mod update;
 #[cfg(feature = "gui")]
 mod ui;
 mod util;
@@ -145,6 +146,15 @@ enum Command {
     /// Put `muxin` in your PATH (macOS: /usr/local/bin, Linux: ~/.local/bin,
     /// Windows: this folder in your user PATH), or take it out
     ShellCommand(ShellCommandArgs),
+    /// Whether a newer Muxin is out, and how to update this copy
+    Updates(UpdatesArgs),
+}
+
+#[derive(Args)]
+struct UpdatesArgs {
+    /// Print machine-readable JSON
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -1621,6 +1631,37 @@ fn main() -> ExitCode {
             }
             println!("state       {}", display_path(&p.state));
             0
+        }
+        Some(Command::Updates(args)) => {
+            let current = env!("CARGO_PKG_VERSION");
+            match (runtime.block_on(update::check()), args.json) {
+                (Ok(latest), true) => {
+                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "current": current, "update": latest })).unwrap_or_default());
+                    0
+                }
+                (Ok(None), false) => {
+                    println!("Muxin {current} is the latest version.");
+                    0
+                }
+                (Ok(Some(u)), false) => {
+                    println!("Muxin {} is out (you have {current}).", u.version);
+                    match (&u.command, &u.download) {
+                        (Some(command), _) => println!("Update it with: {command}"),
+                        (None, Some(url)) => println!("Download: {url}"),
+                        (None, None) => {}
+                    }
+                    println!("What's new: {}", u.page);
+                    0
+                }
+                (Err(e), true) => {
+                    println!("{}", serde_json::json!({ "error": { "code": "unreachable", "message": e } }));
+                    1
+                }
+                (Err(e), false) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            }
         }
         Some(Command::ShellCommand(args)) => {
             let result = match args.action {

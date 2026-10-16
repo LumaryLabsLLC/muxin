@@ -17,6 +17,49 @@ fn version() -> String {
     format!("Version {v} ({})", option_env!("MUXEN_BUILD").unwrap_or(v))
 }
 
+/// What the last look at GitHub found: a newer version and how to get it, or
+/// that this is the latest. Nothing before the first look.
+fn update_card(theme: &Theme, updates: &super::updates::Updates) -> Option<AnyElement> {
+    let line = |text: String, color| div().text_size(px(13.)).text_color(color).child(text);
+    let body = match (&updates.latest, &updates.error) {
+        (Some(u), _) => {
+            let (page, download) = (u.page.clone(), u.download.clone());
+            let how = match (&u.command, &u.download) {
+                (Some(_), _) => "Update it the way you installed it:",
+                (None, Some(_)) => "Download it, then install it over this one. Your settings stay.",
+                (None, None) => "Get it from its release page.",
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(format!("Muxin {} is out", u.version)))
+                .child(line(how.into(), theme.text_muted))
+                .children(u.command.clone().map(|command| {
+                    let copy = command.clone();
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(div().px(px(10.)).py(px(6.)).rounded(px(6.)).bg(theme.element).font_family(super::theme::mono_font()).text_size(px(12.5)).text_color(theme.text).child(command))
+                        .child(Button::new("update-copy", "Copy").icon("copy").on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))))
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .children(download.map(|url| Button::new("update-download", "Download").style(ButtonStyle::Primary).icon("arrow-down").on_click(move |_, _, cx| cx.open_url(&url))))
+                        .child(Button::new("update-notes", "What's new").on_click(move |_, _, cx| cx.open_url(&page))),
+                )
+                .into_any_element()
+        }
+        (None, Some(e)) => line(e.clone(), theme.text_muted).into_any_element(),
+        (None, None) if updates.checked => line(format!("You have the latest version, {}.", env!("CARGO_PKG_VERSION")), theme.text_muted).into_any_element(),
+        (None, None) => return None,
+    };
+    Some(card(theme).px(px(24.)).py(px(18.)).child(body).into_any_element())
+}
+
 /// What Muxin includes from others, and under which license.
 const COMPONENTS: &[(&str, &str, &str)] = &[
     ("GPUI", "Zed Industries", "Apache-2.0"),
@@ -52,7 +95,13 @@ impl Root {
                     .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Muxin"))
                     .child(div().text_size(px(14.)).text_color(theme.text_muted).child(version())),
             )
-            .child(Button::new("about-updates", "Check for Updates…").on_click(|_, _, cx| cx.open_url(WEBSITE)));
+            .child({
+                let engine = self.engine.clone();
+                Button::new("about-updates", "Check for Updates…")
+                    .loading(super::updates::get(cx).checking)
+                    .on_click(move |_, _, cx| super::updates::check_now(engine.clone(), cx))
+            });
+        let update = update_card(&theme, &super::updates::get(cx));
 
         let row = |i: usize, title: &'static str, detail: &'static str, action: AnyElement| {
             div()
@@ -113,7 +162,7 @@ impl Root {
             .items_center()
             .px(px(28.))
             .py(px(32.))
-            .child(div().w_full().max_w(px(620.)).flex().flex_col().gap(px(16.)).child(header).child(links).child(built_by))
+            .child(div().w_full().max_w(px(620.)).flex().flex_col().gap(px(16.)).child(header).children(update).child(links).child(built_by))
             .into_any_element()
     }
 }

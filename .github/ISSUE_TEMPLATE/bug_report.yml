@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in Muxin doesn't work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting it. The more we know, the sooner it's fixed.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Muxin version
+      description: On the About page, or from `muxin --version`.
+      placeholder: "0.5.3"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Muxin runs on
+      options:
+        - macOS, Apple silicon
+        - macOS, Intel
+        - Linux, x86_64
+        - Linux, arm64
+        - Windows, x64
+        - Windows, Arm
+    validations:
+      required: true
+  - type: input
+    id: installed
+    attributes:
+      label: Installed with
+      placeholder: The DMG, Homebrew, the .deb, the .rpm, the AUR, the AppImage, the Windows installer…
+  - type: textarea
+    id: machines
+    attributes:
+      label: The machines it's about
+      description: Their systems (macOS 26, Ubuntu 24.04, Windows 11…) and how Muxin reaches them (local network, Tailscale, a jump host), if it's about a machine.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Anything that helps. Leave out hostnames, addresses or tokens you'd rather not share.

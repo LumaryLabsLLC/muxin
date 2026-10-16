@@ -893,6 +893,30 @@ impl SettingsPage {
             )
     }
 
+    /// Whether Muxin asks GitHub for its latest release (crate::update).
+    fn updates_section(&self, theme: &Theme) -> impl IntoElement {
+        let on = self.engine.settings().check_updates;
+        let engine = self.engine.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(section_title(theme, "Updates", None))
+            .child(
+                card(theme)
+                    .px(px(14.))
+                    .py(px(12.))
+                    .gap(px(6.))
+                    .child(kit::checkbox(theme, "check-updates", on, "Tell me when a new version is out", move |on, _, cx| {
+                        let mut s = engine.settings();
+                        s.check_updates = *on;
+                        let _ = engine.update_settings(s);
+                        cx.refresh_windows();
+                    }))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Muxin asks GitHub for its latest release when it opens and twice a day. Nothing about you is sent.")),
+            )
+    }
+
     /// The editor machines' folders open in.
     fn editor_section(&self, theme: &Theme) -> impl IntoElement {
         let chosen = self.engine.settings().editor;
@@ -1014,6 +1038,7 @@ impl Render for SettingsPage {
                 .child(self.shell_section(&theme, cx))
                 .child(self.clipboard_section(&theme))
                 .child(self.editor_section(&theme))
+                .child(self.updates_section(&theme))
                 .children(self.tailscale_section(&theme))
                 .child(self.checks_section(&theme, false, cx))
                 .child(self.inventory_section(&theme)),

@@ -206,6 +206,10 @@ The CLI equivalents are `muxin schedule ls|add|rm|run|log`.
 - The CLI equivalents are `muxin files <machine>:<folder>` and `muxin cp <machine>:<path>... <machine>:<folder>`.
 - Text copied on the user's Mac is shared with machines that have a desktop, and back, when the user has that on (Settings › Clipboard). Don't rely on it to move data; use `copy_files`.
 
+## Muxin itself
+
+- `muxin updates` (`--json`) says whether a newer Muxin is out and how to update this copy: a command (Homebrew, the AUR) or the file to download. Read-only; installing is the user's call.
+
 ## Don'ts
 
 - Don't edit `config.toml` or `state.json` by hand while the tools can do it.

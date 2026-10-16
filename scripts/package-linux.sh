@@ -2,7 +2,8 @@
 # Builds Muxin for Linux and packs it: dist/Muxin-<version>-linux-<arch>.tar.gz,
 # with the app, the agent builds it sets up on each machine (agents/, made by
 # scripts/build-agents.sh), a desktop entry and an install.sh that puts it in
-# ~/.local for the user.
+# ~/.local for the user. scripts/linux-packages.sh then makes the .deb, .rpm,
+# Arch package and AppImage from the same folder.
 #
 # Needs: Rust, and GPUI's libraries (Debian/Ubuntu: libxkbcommon-dev
 # libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig-dev

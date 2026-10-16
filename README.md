@@ -27,7 +27,12 @@ Agents can also **borrow a machine as a work environment**: an [agent workspace]
 Download the app from the [latest release](https://github.com/LumaryLabsLLC/muxin/releases/latest):
 
 - **macOS** 12 or later, Apple silicon and Intel: `Muxin-<version>-macos.dmg`. Open it and drag Muxin to Applications. It's signed and notarized.
-- **Linux** with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later): `Muxin-<version>-linux-x86_64.tar.gz`, or `linux-aarch64` on Arm. Unpack it and run `./Muxin/install.sh`, which installs it for you, no root needed.
+- **Linux** with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36, openSUSE Tumbleweed, RHEL 10 and later), for Intel and AMD (`x86_64`) or Arm (`aarch64`):
+  - Debian and Ubuntu: `Muxin-<version>-linux-x86_64.deb`, then `sudo apt install ./Muxin-<version>-linux-x86_64.deb`.
+  - Fedora, openSUSE and RHEL: `Muxin-<version>-linux-x86_64.rpm`, then `sudo dnf install ./Muxin-<version>-linux-x86_64.rpm` (or `zypper install`).
+  - Arch: `yay -S muxin-bin` from the [AUR](https://aur.archlinux.org/packages/muxin-bin), or `Muxin-<version>-linux-x86_64.pkg.tar.zst` with `sudo pacman -U`.
+  - Any distribution: `Muxin-<version>-linux-x86_64.AppImage`. Make it executable and run it; it needs no FUSE 2.
+  - Or `Muxin-<version>-linux-x86_64.tar.gz`: unpack it and run `./Muxin/install.sh`, which installs it for you, no root needed.
 - **Windows 11**: `Muxin-<version>-windows-x64-setup.exe`, or `windows-arm64` on Windows on Arm. The installer isn't signed yet, so Windows may say "Windows protected your PC": click **More info**, then **Run anyway**.
 
 Or with [Homebrew](https://brew.sh), on macOS and Linux:

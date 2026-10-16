@@ -120,15 +120,33 @@ jobs:
           path: dist/agents
       - run: chmod +x dist/agents/*
       - run: scripts/package-linux.sh --skip-agents
+      - run: scripts/linux-packages.sh
       - name: It runs here
         run: |
           tar -xzf dist/Muxin-*-linux-${{ matrix.arch }}.tar.gz -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/Muxin/muxin" --version
           "$RUNNER_TEMP/Muxin/agents/muxen-agent-linux-${{ matrix.arch }}" hash
+          dist/Muxin-*-linux-${{ matrix.arch }}.AppImage --appimage-extract-and-run --version
+      # Each package installs with its dependencies on a fresh system, and runs.
+      - name: The .deb on Ubuntu
+        run: |
+          sudo apt-get install -y -qq ./dist/Muxin-*-linux-${{ matrix.arch }}.deb
+          muxin --version && muxen --version
+          sudo apt-get remove -y -qq muxin
+      - name: The .rpm on Fedora
+        run: docker run --rm -v "$PWD/dist:/d" fedora:latest sh -c 'dnf install -y -q /d/Muxin-*-linux-${{ matrix.arch }}.rpm && muxin --version'
+      - name: The Arch package
+        if: matrix.arch == 'x86_64'
+        run: docker run --rm -v "$PWD/dist:/d" archlinux:latest sh -c 'sed -i "/^\[options\]/a DisableSandbox" /etc/pacman.conf && pacman -Sy --noconfirm >/dev/null && pacman -U --noconfirm /d/Muxin-*-linux-x86_64.pkg.tar.zst && muxin --version'
       - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
-          path: dist/Muxin-*-linux-${{ matrix.arch }}.tar.gz
+          path: |
+            dist/Muxin-*-linux-${{ matrix.arch }}.tar.gz
+            dist/Muxin-*-linux-${{ matrix.arch }}.deb
+            dist/Muxin-*-linux-${{ matrix.arch }}.rpm
+            dist/Muxin-*-linux-${{ matrix.arch }}.pkg.tar.zst
+            dist/Muxin-*-linux-${{ matrix.arch }}.AppImage
           if-no-files-found: error
 
   # x64 and Arm, each built on its own kind of machine.

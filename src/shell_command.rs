@@ -4,7 +4,8 @@
 //! folder isn't writable) and ~/.local/bin on Linux; on Windows, this
 //! executable's folder added to the user's PATH. `muxen`, its name from
 //! before, goes beside it (on Windows, muxen.cmd ships next to muxin.exe).
-//! When Homebrew installed the app, its link is the one in the PATH.
+//! When Homebrew or a Linux package installed the app, its link is the one in
+//! the PATH; an AppImage links the AppImage file, not its temporary mount.
 
 use std::path::{Path, PathBuf};
 
@@ -22,8 +23,8 @@ pub struct Status {
     pub note: Option<String>,
     /// "other" that install may replace: a link to another copy of Muxin.
     pub replaceable: bool,
-    /// Homebrew put it there (`brew install --cask muxin`), and takes it away.
-    pub homebrew: bool,
+    /// Homebrew or the app's Linux package put it there, and takes it away.
+    pub managed: bool,
 }
 
 /// Whether `muxin` is in the PATH and runs this copy of Muxin.
@@ -51,6 +52,13 @@ pub fn remove() -> Result<Status, String> {
 }
 
 fn this_exe() -> Result<PathBuf, String> {
+    // An AppImage runs from a mount that's gone once it quits: the command
+    // runs the AppImage file instead.
+    if cfg!(target_os = "linux")
+        && let Some(file) = std::env::var_os("APPIMAGE").map(PathBuf::from).filter(|f| f.is_file())
+    {
+        return Ok(std::fs::canonicalize(&file).unwrap_or(file));
+    }
     let exe = std::env::current_exe().map_err(|e| format!("Couldn't tell where Muxin is: {e}"))?;
     Ok(std::fs::canonicalize(&exe).unwrap_or(exe))
 }
@@ -61,7 +69,8 @@ fn this_exe() -> Result<PathBuf, String> {
 #[cfg(unix)]
 fn is_ours(target: &Path) -> bool {
     let s = target.to_string_lossy();
-    target.file_name().is_some_and(|n| n == "muxin" || n == "muxen") || s.contains("Muxin.app/") || s.contains("Muxen.app/")
+    let name = target.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    name == "muxin" || name == "muxen" || (name.starts_with("muxin") && name.ends_with(".appimage")) || s.contains("Muxin.app/") || s.contains("Muxen.app/")
 }
 
 #[cfg(unix)]
@@ -85,16 +94,31 @@ mod imp {
         link.with_file_name("muxen")
     }
 
-    /// Homebrew's link, when Homebrew installed this copy (`brew install --cask muxin`).
-    fn homebrew_link(exe: &Path) -> Option<PathBuf> {
+    /// Who installed this copy and its link, when that wasn't Muxin: Homebrew
+    /// (`brew install --cask muxin`), or the .deb, .rpm or Arch package (the
+    /// app in /usr/lib/muxin, the link in /usr/bin).
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub(super) enum Manager {
+        Homebrew,
+        Package,
+    }
+
+    fn managed_link(exe: &Path) -> Option<(PathBuf, Manager)> {
+        let runs_this = |link: &Path| std::fs::canonicalize(link).is_ok_and(|r| r == exe);
+        if cfg!(target_os = "linux") && exe.starts_with("/usr/lib/muxin") && runs_this(Path::new("/usr/bin/muxin")) {
+            return Some((PathBuf::from("/usr/bin/muxin"), Manager::Package));
+        }
         let prefixes = std::env::var_os("HOMEBREW_PREFIX").map(PathBuf::from).into_iter().chain(["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"].map(PathBuf::from));
-        prefixes.filter(|p| p.join("Caskroom/muxin").is_dir()).map(|p| p.join("bin/muxin")).find(|link| std::fs::canonicalize(link).is_ok_and(|r| r == exe))
+        prefixes.filter(|p| p.join("Caskroom/muxin").is_dir()).map(|p| p.join("bin/muxin")).find(|link| runs_this(link)).map(|link| (link, Manager::Homebrew))
     }
 
     pub fn status(exe: &Path) -> Status {
-        if let Some(link) = homebrew_link(exe) {
-            let note = Some("Homebrew put it there with the app.".into());
-            return Status { state: "installed", path: link.display().to_string(), target: Some(exe.display().to_string()), note, replaceable: false, homebrew: true };
+        if let Some((link, by)) = managed_link(exe) {
+            let note = Some(match by {
+                Manager::Homebrew => "Homebrew put it there with the app.",
+                Manager::Package => "Muxin's package put it there with the app.",
+            });
+            return Status { state: "installed", path: link.display().to_string(), target: Some(exe.display().to_string()), note: note.map(Into::into), replaceable: false, managed: true };
         }
         match link_path() {
             Ok(link) => status_at(&link, exe),
@@ -115,7 +139,7 @@ mod imp {
         let resolved = std::fs::canonicalize(&link).ok();
         let shown = target.as_ref().map(|t| t.display().to_string());
         let ours = target.as_deref().is_some_and(is_ours);
-        let other = |note: &str, replaceable| Status { state: "other", path: path.clone(), target: shown.clone(), note: Some(note.into()), replaceable, homebrew: false };
+        let other = |note: &str, replaceable| Status { state: "other", path: path.clone(), target: shown.clone(), note: Some(note.into()), replaceable, managed: false };
         match resolved {
             Some(r) if r == exe => {
                 // The old name still runs another copy: offer to point it here too.
@@ -123,7 +147,7 @@ mod imp {
                 let alias_elsewhere = std::fs::read_link(&alias).is_ok_and(|t| is_ours(&t)) && std::fs::canonicalize(&alias).ok().as_deref() != Some(exe);
                 if alias_elsewhere {
                     let target = std::fs::read_link(&alias).ok().map(|t| t.display().to_string());
-                    return Status { state: "other", path: alias.display().to_string(), target, note: Some("It runs another copy of Muxin.".into()), replaceable: true, homebrew: false };
+                    return Status { state: "other", path: alias.display().to_string(), target, note: Some("It runs another copy of Muxin.".into()), replaceable: true, managed: false };
                 }
                 Status { state: "installed", path: path.clone(), target: shown.clone(), note: in_path_note(&link), ..Default::default() }
             }
@@ -145,7 +169,7 @@ mod imp {
     }
 
     pub fn install(exe: &Path) -> Result<(), String> {
-        if homebrew_link(exe).is_some() {
+        if managed_link(exe).is_some() {
             return Ok(());
         }
         install_at(&link_path()?, exe)
@@ -168,8 +192,10 @@ mod imp {
     }
 
     pub fn remove(exe: &Path) -> Result<(), String> {
-        if homebrew_link(exe).is_some() {
-            return Err("Homebrew put it there. It goes when you uninstall Muxin with brew uninstall --cask muxin.".into());
+        match managed_link(exe) {
+            Some((_, Manager::Homebrew)) => return Err("Homebrew put it there. It goes when you uninstall Muxin with brew uninstall --cask muxin.".into()),
+            Some((_, Manager::Package)) => return Err("Muxin's package put it there. It goes when you uninstall the package.".into()),
+            None => {}
         }
         remove_at(&link_path()?)
     }
@@ -316,6 +342,7 @@ mod tests {
         assert!(is_ours(Path::new("/Applications/Muxin.app/Contents/MacOS/muxin")));
         assert!(is_ours(Path::new("/Applications/Muxen.app/Contents/MacOS/muxen")));
         assert!(is_ours(Path::new("/home/me/.cargo/bin/muxin")));
+        assert!(is_ours(Path::new("/home/me/Applications/Muxin-0.5.2-linux-x86_64.AppImage")));
         assert!(!is_ours(Path::new("/usr/bin/python3")));
     }
 

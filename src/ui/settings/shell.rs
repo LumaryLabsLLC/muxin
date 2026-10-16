@@ -64,8 +64,8 @@ impl SettingsPage {
             // Before it asks: macOS shows its own password prompt for /usr/local/bin.
             st.status.as_ref().filter(|s| s.state == "missing" && cfg!(target_os = "macos")).map(|_| "macOS may ask for your password to add it there.".to_string())
         });
-        // Homebrew's link goes when Homebrew uninstalls the app.
-        let state = st.status.as_ref().filter(|s| !s.homebrew).map(|s| (s.state, s.replaceable));
+        // Homebrew's or the package's link goes when they uninstall the app.
+        let state = st.status.as_ref().filter(|s| !s.managed).map(|s| (s.state, s.replaceable));
         let button = match state {
             Some(("missing", _)) => Some(Button::new("shell-install", "Install").icon("plus").style(ButtonStyle::Primary).loading(st.busy).on_click(cx.listener(|this, _, _, cx| this.run_shell(Some(true), cx)))),
             Some(("other", true)) => Some(Button::new("shell-replace", "Use this copy").icon("refresh-cw").loading(st.busy).on_click(cx.listener(|this, _, _, cx| this.run_shell(Some(true), cx)))),

@@ -5,6 +5,13 @@
 #
 # Signed and notarized when the signing secrets are set (see RELEASING.md);
 # without them the macOS app is an unsigned test build.
+#
+# The signing secrets belong in the release environment, which only the jobs
+# that sign use (agents and macos). Those two skip rust-cache and Zig's build
+# cache: a poisoned cache could run code next to the unlocked keychain.
+#
+# Actions are pinned to commits, with the version in a comment. rust-toolchain
+# is pinned to a master commit, as its README asks, and told to use stable.
 name: release
 
 on:
@@ -12,12 +19,14 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Read only. The release job, which makes the draft, gets write.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   # Set when the Developer ID certificate is a secret: then sign and notarize.
+  # Only the release environment's jobs see the secrets: elsewhere it's false.
   SIGNED: ${{ secrets.MACOS_CERT_P12 != '' }}
 
 jobs:
@@ -25,19 +34,25 @@ jobs:
   # one on each machine. Built on a Mac, which signs the macOS ones.
   agents:
     runs-on: macos-15
+    # The signing secrets belong in this environment. No rust-cache: see the top.
+    environment: release
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: The tag matches the version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
           [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says $version"; exit 1; }
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
         with:
+          toolchain: stable
           targets: aarch64-apple-darwin,x86_64-apple-darwin,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-pc-windows-gnu,aarch64-pc-windows-gnullvm
-      - uses: Swatinem/rust-cache@v2
-      - uses: mlugg/setup-zig@v2
-      - uses: taiki-e/install-action@v2
+      # Without Zig's build cache. setup-zig still restores the Zig download
+      # itself from the Actions cache, and doesn't check its signature then.
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          use-cache: false
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-zigbuild
       - name: Signing identity
@@ -47,7 +62,7 @@ jobs:
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
         run: scripts/ci/macos-keychain.sh
       - run: MUXEN_RELEASE=$([ "$SIGNED" = true ] && echo 1) scripts/build-agents.sh
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agents
           path: dist/agents
@@ -56,13 +71,18 @@ jobs:
   macos:
     needs: agents
     runs-on: macos-15
+    # The signing secrets belong in this environment. No rust-cache: see the top.
+    environment: release
+    # Whether it signed, for the release job: that job can't see the secrets.
+    outputs:
+      signed: ${{ env.SIGNED }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
         with:
+          toolchain: stable
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: agents
           path: dist/agents
@@ -87,7 +107,7 @@ jobs:
         run: |
           scripts/bundle-macos.sh --universal --skip-agents
           scripts/notarize-macos.sh --no-notarize
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos
           path: dist/Muxin-*-macos.dmg
@@ -107,14 +127,16 @@ jobs:
             runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: GPUI's libraries
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig-dev libx11-xcb-dev libxcb1-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: agents
           path: dist/agents
@@ -138,7 +160,7 @@ jobs:
       - name: The Arch package
         if: matrix.arch == 'x86_64'
         run: docker run --rm -v "$PWD/dist:/d" archlinux:latest sh -c 'sed -i "/^\[options\]/a DisableSandbox" /etc/pacman.conf && pacman -Sy --noconfirm >/dev/null && pacman -U --noconfirm /d/Muxin-*-linux-x86_64.pkg.tar.zst && muxin --version'
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-${{ matrix.arch }}
           path: |
@@ -164,10 +186,12 @@ jobs:
             runner: windows-11-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: agents
           path: dist/agents
@@ -191,7 +215,7 @@ jobs:
           dist\windows\Muxin\muxin.exe --version
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           dist\windows\Muxin\agents\muxen-agent-windows-${{ matrix.agent }}.exe hash
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-${{ matrix.arch }}
           path: |
@@ -204,9 +228,12 @@ jobs:
     needs: [macos, linux, windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # The one job that writes: gh release create.
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: '{macos,linux-*,windows-*}'
           path: dist
@@ -217,6 +244,8 @@ jobs:
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
+          # The secrets aren't visible here: the macos job says whether it signed.
+          SIGNED: ${{ needs.macos.outputs.signed }}
         run: |
           signed=$([ "$SIGNED" = true ] && echo "" || echo " (unsigned test build)")
           gh release create "$GITHUB_REF_NAME" dist/Muxin-* dist/SHA256SUMS.txt \

@@ -18,6 +18,7 @@ pub mod ports;
 pub mod procs;
 pub mod report;
 pub mod sessions;
+pub mod tar_filter;
 pub mod tailscale;
 pub mod usage;
 pub mod wake;

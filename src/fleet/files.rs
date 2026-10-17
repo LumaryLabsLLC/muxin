@@ -119,7 +119,7 @@ impl Engine {
         let me = self.clone();
         self.runtime().spawn(async move {
             let started = Instant::now();
-            let result = me.run_copy(id, &from, &req.dir, &names, &to, &req.to_dir, &cancel).await;
+            let result = me.run_copy(id, &from, &req.dir, &names, &to, &req.to_dir, &cancel, false).await;
             match &result {
                 Ok(bytes) => {
                     let secs = started.elapsed().as_secs_f64().max(0.001);
@@ -133,8 +133,9 @@ impl Engine {
     }
 
     /// Copies and waits; returns the bytes moved (the tar stream's size).
+    /// `no_git`: leave out every .git (a workspace pull).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn run_copy(self: &Arc<Self>, id: u64, from: &MachineSpec, dir: &str, names: &[String], to: &MachineSpec, to_dir: &str, cancel: &AtomicBool) -> Result<u64, String> {
+    pub(crate) async fn run_copy(self: &Arc<Self>, id: u64, from: &MachineSpec, dir: &str, names: &[String], to: &MachineSpec, to_dir: &str, cancel: &AtomicBool, no_git: bool) -> Result<u64, String> {
         let src_place = format!("{}:{}", from.id, dir);
         let dst_place = format!("{}:{}", to.id, to_dir);
         self.op_log(id, format!("{} → {}", names.iter().map(|n| format!("{src_place}/{n}")).collect::<Vec<_>>().join(", "), dst_place));
@@ -143,6 +144,11 @@ impl Engine {
             self.op_log(id, format!("{} to copy.", util::bytes(t)));
         }
         let mut dst = Sink::open(self, to, to_dir).await?;
+        // Only what was asked for reaches the other machine, whatever the first one sends.
+        let mut check = super::tar_filter::TarFilter::new(names);
+        if no_git {
+            check = check.without_git();
+        }
         let (mut done, started) = (0u64, Instant::now());
         let mut last = Instant::now();
         loop {
@@ -153,7 +159,17 @@ impl Engine {
             }
             match src.next().await {
                 Ok(Some(chunk)) => {
-                    dst.write(&chunk).await?;
+                    let pass = match check.push(&chunk) {
+                        Ok(pass) => pass,
+                        Err(e) => {
+                            src.stop();
+                            dst.stop();
+                            return Err(e);
+                        }
+                    };
+                    if !pass.is_empty() {
+                        dst.write(&pass).await?;
+                    }
                     src.ack(chunk.len());
                     done += chunk.len() as u64;
                     if last.elapsed() >= Duration::from_millis(250) {
@@ -170,6 +186,24 @@ impl Engine {
                     return Err(e);
                 }
             }
+        }
+        let end = match check.finish() {
+            Ok(end) => end,
+            Err(e) => {
+                dst.stop();
+                return Err(e);
+            }
+        };
+        dst.write(&end).await?;
+        let skipped = check.skipped();
+        if check.kept() == 0 && !skipped.is_empty() {
+            dst.finish().await?;
+            return Err(format!("Nothing was copied: {} points outside what was asked for.", skipped.join(", ")));
+        }
+        if !skipped.is_empty() {
+            let shown: Vec<&str> = skipped.iter().take(5).map(String::as_str).collect();
+            let more = if skipped.len() > 5 { format!(" and {} more", skipped.len() - 5) } else { String::new() };
+            self.op_log(id, format!("Not copied (outside what was asked for, or a link pointing out of it): {}{more}", shown.join(", ")));
         }
         dst.finish().await?;
         self.op_progress(id, OpProgress { done, total: Some(done), rate: None });

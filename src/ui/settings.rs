@@ -865,6 +865,8 @@ impl SettingsPage {
         let on = self.engine.settings().share_clipboard;
         let sharing: Vec<String> = self.snapshot.machines.iter().filter(|m| crate::fleet::clipboard::sharing(&m.id)).map(|m| m.name.clone()).collect();
         let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
+        // Linux doesn't say which copies are a password manager's (see pasteboard_state).
+        let passwords = if cfg!(target_os = "linux") { "Passwords copied here are shared too." } else { "Passwords from a password manager aren't shared." };
         let status = match (on, sharing.as_slice()) {
             (false, _) => "Off.".to_string(),
             (true, []) => "No machine with a desktop is connected right now.".to_string(),
@@ -887,7 +889,7 @@ impl SettingsPage {
                         let _ = engine.update_settings(s);
                         cx.refresh_windows();
                     }))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("Copy on {here}, paste on your machines, and back. Passwords stay here.")))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("Copy on {here}, paste on your machines, and back. {passwords}")))
                     .child(div().text_size(px(11.5)).text_color(theme.text_muted).child(status)),
             )
     }

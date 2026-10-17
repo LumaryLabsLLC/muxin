@@ -8,7 +8,7 @@ Use the MCP tools when they're connected: start the server with `muxin mcp`, and
 
 1. **Start with `status`** (`muxin status --json`) and read `attention` first. It lists what's wrong, most severe first, with the `machine_id` or `runner_id` each item is about.
 2. **The state may be stale.** `status` uses the last machine check. Look at `last_check_at` and each machine's `checked_at`. Call `check_machines` (or `status` with `refresh: true`) when you need it fresh. Checks are read-only.
-3. **Confirm before changing real things.** `install_runners` and `runner_action` with `stop`, `restart` or `remove` run commands on the user's machines and register or deregister runners on GitHub. Do them when the user asked for exactly that; otherwise say what you'd do and ask. `add_machine`, `remove_machine`, `rename_machine` and `connect_machine` only edit `config.toml`.
+3. **Confirm before changing real things.** `install_runners` and `runner_action` with `stop`, `restart` or `remove` run commands on the user's machines and register or deregister runners on GitHub. Do them when the user asked for exactly that; otherwise say what you'd do and ask. `add_machine`, `remove_machine`, `rename_machine` and `connect_machine` only edit `config.toml` (`remove_machine` also unpairs a machine paired for direct connections from this app).
 4. **Use the hints.** Errors have a `code`:
    - `not_found`
    - `invalid`
@@ -85,7 +85,7 @@ A workspace is a persistent folder on one of the user's machines, optionally a g
 
 1. Create a workspace on the target machine (no `repo`, or the same repo so `.git` exists), then call `workspace_sync(local_path: "<absolute path to the user's checkout>", direction: "push")`.
 2. Run the tests with `workspace_exec`. Fix things with `workspace_write_file` or `workspace_exec`, and review with `workspace_changes`.
-3. Confirm with the user, then `workspace_sync(direction: "pull")`. Only pass `delete: true` when they want deletions mirrored into their checkout.
+3. Confirm with the user, then `workspace_sync(direction: "pull")`. A pull brings files back but never the workspace's `.git`, so commits made there stay there: leave the changes uncommitted, or commit them in the user's checkout. Only pass `delete: true` when they want deletions mirrored into their checkout.
 
 The CLI equivalents are `muxin workspace create|ls|show|exec|cat|write|files|changes|sync|rm|allow`, aliased as `muxin ws`. `ws exec` exits with the command's own exit code.
 

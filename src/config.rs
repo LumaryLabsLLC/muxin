@@ -91,7 +91,7 @@ fn migrate(dir: &Path, base: Option<&Path>) {
     const OLD_FILES: [&str; 3] = ["fleet.toml", "settings.json", "ui.json"];
     let candidates = [Some(dir.to_path_buf()), base.map(|b| b.join("muxen")), base.map(|b| b.join("openrunner"))];
     let Some(old) = candidates.into_iter().flatten().find(|d| OLD_FILES.iter().any(|f| d.join(f).exists())) else { return };
-    if std::fs::create_dir_all(dir).is_err() {
+    if create_private_dir(dir).is_err() {
         return;
     }
     if old != dir {
@@ -549,6 +549,7 @@ pub struct Settings {
     /// Repositories the user starred in Muxin ("owner/name"), in the order added.
     pub favorite_repos: Vec<String>,
     /// Text copied here can be pasted on the machines (Linux desktops, Macs), and back.
+    /// Off until the user turns it on (a `true` saved before stays on).
     pub share_clipboard: bool,
     /// Ask GitHub now and then whether a newer Muxin is out (see crate::update).
     pub check_updates: bool,
@@ -622,7 +623,7 @@ impl Default for Settings {
             check_interval_minutes: 15,
             code_folders: default_code_folders(),
             favorite_repos: Vec::new(),
-            share_clipboard: true,
+            share_clipboard: false,
             check_updates: true,
             editor: String::new(),
             cloud: CloudSettings::default(),
@@ -640,7 +641,13 @@ impl Default for GitHubSettings {
 impl Settings {
     /// `[settings]` in config.toml.
     pub fn load(path: &Path) -> Settings {
-        read_section::<Settings>(path, "settings").normalized().unwrap_or_default()
+        let mut settings = read_section::<Settings>(path, "settings");
+        // An http:// API URL saved before those were refused is asked over https
+        // (the token never goes in the clear), rather than dropping every setting.
+        if let Some(rest) = settings.github.api_url.trim().strip_prefix("http://") {
+            settings.github.api_url = format!("https://{rest}");
+        }
+        settings.normalized().unwrap_or_default()
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -690,7 +697,8 @@ impl Settings {
         self.github.account = self.github.account.trim().trim_start_matches('@').to_string();
         let api = self.github.api_url.trim().trim_end_matches('/');
         self.github.api_url = if api.is_empty() { "https://api.github.com".into() } else { api.into() };
-        if !self.github.api_url.starts_with("https://") && !self.github.api_url.starts_with("http://") {
+        // The token goes along with every request: never in the clear.
+        if !self.github.api_url.starts_with("https://") {
             return Err("The GitHub API URL must start with https://".into());
         }
         self.github_poll_seconds = self.github_poll_seconds.clamp(10, 3600);
@@ -741,14 +749,57 @@ impl PersistedState {
     }
 }
 
+/// Writes a whole file (a temporary one, then renamed), readable by this user
+/// only from the start: some hold secrets (secrets.json). On Windows the
+/// user's own folders already are.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        create_private_dir(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+    // One left over from before keeps its old permissions: tighten them first.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600)).with_context(|| format!("writing {}", tmp.display()))?;
+    }
+    file.write_all(bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    drop(file);
     std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+/// Makes a folder that only this user can open (the folders above it, when
+/// missing, as usual). One that's already there keeps its permissions; on
+/// Windows the user's own folders already are private.
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    let made = {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(dir)
+    };
+    #[cfg(not(unix))]
+    let made = std::fs::create_dir(dir);
+    match made {
+        // Made in the meantime (another Muxin process).
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -864,5 +915,58 @@ mod tests {
         let mut bad = Settings::default();
         bad.github.repos = vec!["just-a-name".into()];
         assert!(bad.normalized().is_err());
+    }
+
+    #[test]
+    fn the_github_api_is_https_only() {
+        let api = |url: &str| {
+            let mut s = Settings::default();
+            s.github.api_url = url.into();
+            s.normalized().map(|s| s.github.api_url)
+        };
+        assert_eq!(api(" https://ghe.example.com/api/v3/ "), Ok("https://ghe.example.com/api/v3".into()));
+        assert_eq!(api(""), Ok("https://api.github.com".into()));
+        assert!(api("http://ghe.example.com/api/v3").is_err());
+        assert!(api("ghe.example.com").is_err());
+
+        // One saved before http:// was refused keeps the rest of the settings.
+        let path = std::env::temp_dir().join(format!("muxin-http-api-{}.toml", std::process::id()));
+        std::fs::write(&path, "[settings]\ngithub_poll_seconds = 45\nshare_clipboard = true\n\n[settings.github]\napi_url = \"http://ghe.example.com/api/v3\"\n").unwrap();
+        let s = Settings::load(&path);
+        assert_eq!(s.github.api_url, "https://ghe.example.com/api/v3");
+        assert_eq!((s.github_poll_seconds, s.share_clipboard), (45, true));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_are_private_from_the_start() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("muxin-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = root.join("muxin");
+        let secrets = dir.join("secrets.json");
+        write_atomic(&secrets, b"{}").unwrap();
+        assert_eq!((mode(&dir), mode(&secrets)), (0o700, 0o600));
+        // A temporary file left over from before, readable by anyone, isn't.
+        std::fs::write(dir.join("secrets.tmp"), b"old").unwrap();
+        std::fs::set_permissions(dir.join("secrets.tmp"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomic(&secrets, b"{\"token\":\"x\"}").unwrap();
+        assert_eq!(mode(&secrets), 0o600);
+        // A folder that was already there keeps its permissions.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_atomic(&dir.join("state.json"), b"{}").unwrap();
+        assert_eq!(mode(&dir), 0o755);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_clipboard_is_shared_only_once_turned_on() {
+        assert!(!Settings::default().share_clipboard);
+        let read = |text: &str| toml::from_str::<Settings>(text).unwrap().share_clipboard;
+        assert!(!read("github_poll_seconds = 30\n"));
+        // Turned on before it was off by default: it stays on.
+        assert!(read("share_clipboard = true\n"));
     }
 }

@@ -190,6 +190,40 @@ struct ApiRepo {
 #[derive(Deserialize)]
 struct ApiRelease {
     tag_name: String,
+    #[serde(default)]
+    body: Option<String>,
+}
+
+/// An actions/runner release, with the SHA-256 GitHub published for each package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerRelease {
+    /// e.g. "2.329.0"
+    pub version: String,
+    /// (platform, lowercase hex), e.g. ("linux-x64", "194f…"). The platform is the
+    /// package name's middle: actions-runner-<platform>-<version>.tar.gz or .zip.
+    pub sha256: Vec<(String, String)>,
+}
+
+/// The checksums in a release's notes, one line per package:
+/// `<!-- BEGIN SHA linux-x64 -->HEX<!-- END SHA linux-x64 -->`.
+fn runner_checksums(body: &str) -> Vec<(String, String)> {
+    const BEGIN: &str = "<!-- BEGIN SHA ";
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut rest = body;
+    while let Some(at) = rest.find(BEGIN) {
+        rest = &rest[at + BEGIN.len()..];
+        let Some((platform, after)) = rest.split_once(" -->") else { break };
+        let platform = platform.trim();
+        let end = format!("<!-- END SHA {platform} -->");
+        let Some((hex, _)) = after.split_once(&end) else { continue };
+        let hex = hex.trim().to_ascii_lowercase();
+        let platform_ok = !platform.is_empty() && platform.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+        let hex_ok = hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit());
+        if platform_ok && hex_ok && !out.iter().any(|(p, _)| p == platform) {
+            out.push((platform.to_string(), hex));
+        }
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -257,7 +291,7 @@ pub struct Client {
     scopes: Mutex<Option<Vec<String>>>,
     login: Mutex<Option<String>>,
     org_repos: Mutex<HashMap<String, (Instant, Vec<String>)>>,
-    release: Mutex<Option<(Instant, String)>>,
+    release: Mutex<Option<(Instant, RunnerRelease)>>,
 }
 
 impl Client {
@@ -313,7 +347,8 @@ impl Client {
         }
         let account = self.account.lock().unwrap().clone();
         let machine = self.account_machine.lock().unwrap().clone();
-        let found = match env_token() {
+        let api = self.api_url.lock().unwrap().clone();
+        let found = match env_token(&api, |var| std::env::var(var).ok()) {
             Some(t) => Some(t),
             None if machine.is_empty() => gh_token(&self.gh_hostname(), &account).await,
             None => {
@@ -586,15 +621,22 @@ impl Client {
     }
 
     async fn latest_runner_version(&self) -> Option<String> {
-        if let Some((at, v)) = self.release.lock().unwrap().clone() {
+        self.latest_release().await.map(|r| r.version)
+    }
+
+    async fn latest_release(&self) -> Option<RunnerRelease> {
+        if let Some((at, r)) = self.release.lock().unwrap().clone() {
             if at.elapsed() < RELEASE_TTL {
-                return Some(v);
+                return Some(r);
             }
         }
         let rel: ApiRelease = self.get("/repos/actions/runner/releases/latest").await.ok()?;
-        let v = rel.tag_name.trim_start_matches('v').to_string();
-        *self.release.lock().unwrap() = Some((Instant::now(), v.clone()));
-        Some(v)
+        let r = RunnerRelease {
+            version: rel.tag_name.trim_start_matches('v').to_string(),
+            sha256: runner_checksums(rel.body.as_deref().unwrap_or_default()),
+        };
+        *self.release.lock().unwrap() = Some((Instant::now(), r.clone()));
+        Some(r)
     }
 
     /// One full pass: runners for every configured scope, then active jobs.
@@ -691,14 +733,16 @@ impl Client {
     // -----------------------------------------------------------------------
     // Writes, used by runner provisioning. Never cached.
 
-    /// A short-lived token for `config.sh --token` (registering new runners).
+    /// A short-lived token for `config.sh` (registering new runners). The scripts
+    /// hand it over in ACTIONS_RUNNER_INPUT_TOKEN, never on a command line.
     pub async fn registration_token(&self, settings: &GitHubSettings, scope: &str) -> Result<String, String> {
         let (kind, name) = parse_scope(scope);
         let doing = format!("Registering runners with {name}");
         self.scoped_token(settings, kind, &name, "registration-token", &doing).await
     }
 
-    /// A short-lived token for `config.sh remove --token` (deregistering a runner).
+    /// A short-lived token for `config.sh remove` (deregistering a runner), handed
+    /// over the same way.
     pub async fn remove_token(&self, settings: &GitHubSettings, scope: &str) -> Result<String, String> {
         let (kind, name) = parse_scope(scope);
         let doing = format!("Removing runners from {name}");
@@ -726,10 +770,10 @@ impl Client {
         }
     }
 
-    /// The newest actions/runner release, e.g. "2.329.0".
-    pub async fn latest_runner_release(&self, settings: &GitHubSettings) -> Option<String> {
+    /// The newest actions/runner release (e.g. 2.329.0) and its packages' SHA-256.
+    pub async fn latest_runner_release(&self, settings: &GitHubSettings) -> Option<RunnerRelease> {
         self.configure(settings);
-        self.latest_runner_version().await
+        self.latest_release().await
     }
 
     /// The URL runners are registered against, e.g. https://github.com/acme.
@@ -901,11 +945,20 @@ fn scope_path(kind: ScopeKind, name: &str) -> String {
     }
 }
 
-/// `MUXEN_GITHUB_TOKEN`, `GITHUB_TOKEN` or `GH_TOKEN`, which win over any login.
-fn env_token() -> Option<Token> {
-    ["MUXEN_GITHUB_TOKEN", "OPENRUNNER_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"].into_iter().find_map(|var| {
-        let v = std::env::var(var).ok()?;
-        (!v.trim().is_empty()).then(|| Token { value: v.trim().to_string(), source: var.to_string(), fetched: Instant::now() })
+/// A token from the environment (`var` reads it), which wins over any login.
+/// By gh's rule: `MUXEN_GITHUB_TOKEN`, `GITHUB_TOKEN` and `GH_TOKEN` are
+/// github.com's, so they go to api.github.com only; any other server gets
+/// `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`. None over plain http.
+fn env_token(api_url: &str, var: impl Fn(&str) -> Option<String>) -> Option<Token> {
+    let url = reqwest::Url::parse(api_url).ok().filter(|u| u.scheme() == "https")?;
+    let names: &[&str] = if url.host_str() == Some("api.github.com") {
+        &["MUXEN_GITHUB_TOKEN", "OPENRUNNER_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"]
+    } else {
+        &["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
+    };
+    names.iter().find_map(|name| {
+        let v = var(name)?;
+        (!v.trim().is_empty()).then(|| Token { value: v.trim().to_string(), source: name.to_string(), fetched: Instant::now() })
     })
 }
 
@@ -989,6 +1042,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn env_tokens_go_only_to_their_own_server() {
+        let env = |name: &str| ["GH_TOKEN", "GH_ENTERPRISE_TOKEN"].contains(&name).then(|| format!("{name}-value"));
+        let source = |api: &str| env_token(api, env).map(|t| t.source);
+        assert_eq!(source("https://api.github.com").as_deref(), Some("GH_TOKEN"));
+        assert_eq!(source("https://ghe.example.com/api/v3").as_deref(), Some("GH_ENTERPRISE_TOKEN"));
+        // github.com's token goes nowhere else, whatever the URL looks like.
+        let github_only = |name: &str| (name == "GITHUB_TOKEN").then(|| "secret".to_string());
+        for api in ["https://ghe.example.com/api/v3", "https://api.github.com.evil.example", "https://api.github.com@evil.example", "http://api.github.com"] {
+            assert!(env_token(api, github_only).is_none(), "{api}");
+        }
+    }
+
+    #[test]
     fn parses_link_header() {
         let h = r#"<https://api.github.com/orgs/acme/actions/runners?page=2>; rel="next", <https://api.github.com/orgs/acme/actions/runners?page=5>; rel="last""#;
         assert_eq!(next_link(h).as_deref(), Some("https://api.github.com/orgs/acme/actions/runners?page=2"));
@@ -1018,6 +1084,49 @@ mod tests {
             msg,
             "Registering runners with acme needs an org admin token with the admin:org scope. Run `gh auth refresh -h github.com -s admin:org`."
         );
+    }
+
+    /// The end of actions/runner v2.338.0's release notes (they use CRLF).
+    const RUNNER_NOTES: &str = "## Using your self hosted runner\r\n\r\nSee the docs.\r\n\r\n\
+## SHA-256 Checksums\r\n\r\n\
+The SHA-256 checksums for the packages included in this build are shown below:\r\n\r\n\
+- actions-runner-win-x64-2.338.0.zip <!-- BEGIN SHA win-x64 -->f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f<!-- END SHA win-x64 -->\r\n\
+- actions-runner-win-arm64-2.338.0.zip <!-- BEGIN SHA win-arm64 -->a57a4d29c0dcf02210a16b01906ed76cb8091b26d728c41232736c0f627a557e<!-- END SHA win-arm64 -->\r\n\
+- actions-runner-osx-x64-2.338.0.tar.gz <!-- BEGIN SHA osx-x64 -->dea7a58796ce215fc424a8b27c0fdd9b813fa5fc03d109a4a1d38131d6bfa1a3<!-- END SHA osx-x64 -->\r\n\
+- actions-runner-osx-arm64-2.338.0.tar.gz <!-- BEGIN SHA osx-arm64 -->df4cebda25c86a886ed204e49fee63f5c2e7cec5f447b5c98440a826bbdf9df2<!-- END SHA osx-arm64 -->\r\n\
+- actions-runner-linux-x64-2.338.0.tar.gz <!-- BEGIN SHA linux-x64 -->af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32<!-- END SHA linux-x64 -->\r\n\
+- actions-runner-linux-arm64-2.338.0.tar.gz <!-- BEGIN SHA linux-arm64 -->628b4a7258487b80c1d3c221095a7ded349f5ae0175fd3dfab708d07428f041b<!-- END SHA linux-arm64 -->\r\n\
+- actions-runner-linux-arm-2.338.0.tar.gz <!-- BEGIN SHA linux-arm -->1d6a7688d2aca1a1fecd4df5d473e4aa4226c1f1785ff915cf84049665a3483f<!-- END SHA linux-arm -->\n";
+
+    #[test]
+    fn reads_runner_checksums_from_release_notes() {
+        let sums = runner_checksums(RUNNER_NOTES);
+        let sha = |platform: &str| sums.iter().find(|(p, _)| p == platform).map(|(_, h)| h.as_str());
+        // Every package install.sh (osx/linux: x64, arm64, arm) and install.ps1 (win: x64, arm64) picks.
+        assert_eq!(sha("osx-x64"), Some("dea7a58796ce215fc424a8b27c0fdd9b813fa5fc03d109a4a1d38131d6bfa1a3"));
+        assert_eq!(sha("osx-arm64"), Some("df4cebda25c86a886ed204e49fee63f5c2e7cec5f447b5c98440a826bbdf9df2"));
+        assert_eq!(sha("linux-x64"), Some("af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32"));
+        assert_eq!(sha("linux-arm64"), Some("628b4a7258487b80c1d3c221095a7ded349f5ae0175fd3dfab708d07428f041b"));
+        assert_eq!(sha("linux-arm"), Some("1d6a7688d2aca1a1fecd4df5d473e4aa4226c1f1785ff915cf84049665a3483f"));
+        assert_eq!(sha("win-x64"), Some("f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f"));
+        assert_eq!(sha("win-arm64"), Some("a57a4d29c0dcf02210a16b01906ed76cb8091b26d728c41232736c0f627a557e"));
+        assert_eq!(sums.len(), 7);
+    }
+
+    #[test]
+    fn skips_release_notes_without_good_checksums() {
+        // Notes from before the markers, or with none at all: nothing to check against.
+        assert!(runner_checksums("## Features\r\n- Faster\r\n").is_empty());
+        assert!(runner_checksums("").is_empty());
+        let odd = "<!-- BEGIN SHA linux-x64 -->not-hex<!-- END SHA linux-x64 -->\
+<!-- BEGIN SHA osx-x64 -->DEA7A58796CE215FC424A8B27C0FDD9B813FA5FC03D109A4A1D38131D6BFA1A3<!-- END SHA osx-x64 -->\
+<!-- BEGIN SHA osx-x64 -->0000000000000000000000000000000000000000000000000000000000000000<!-- END SHA osx-x64 -->\
+<!-- BEGIN SHA win x64 -->f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f<!-- END SHA win x64 -->\
+<!-- BEGIN SHA linux-arm -->1d6a7688d2aca1a1fecd4df5d473e4aa4226c1f1785ff915cf84049665a3483f<!-- END SHA linux-arm64 -->\
+<!-- BEGIN SHA win-arm64 -->a57a4d29";
+        // Short or non-hex values, names with spaces and mismatched ends are left out;
+        // hex is lowercased, and the first value for a platform wins.
+        assert_eq!(runner_checksums(odd), vec![("osx-x64".to_string(), "dea7a58796ce215fc424a8b27c0fdd9b813fa5fc03d109a4a1d38131d6bfa1a3".to_string())]);
     }
 
     #[test]

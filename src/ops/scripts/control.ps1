@@ -56,8 +56,10 @@ switch ($OR_ACTION) {
     Stop-Runner
     if (Test-Path (Join-Path $OR_DIR '.runner')) {
       say 'Removing the runner from GitHub…'
-      # config.cmd remove also uninstalls the Windows service.
-      & .\config.cmd remove --token $OR_TOKEN
+      # config.cmd remove also uninstalls the Windows service. The token goes in
+      # its environment, not on its command line, which other accounts can read.
+      $env:ACTIONS_RUNNER_INPUT_TOKEN = $OR_TOKEN
+      try { & .\config.cmd remove } finally { Remove-Item Env:\ACTIONS_RUNNER_INPUT_TOKEN -ErrorAction SilentlyContinue }
       if ($LASTEXITCODE -ne 0) { throw "config.cmd remove failed (exit $LASTEXITCODE)" }
     }
     if ($OR_DELETE) {

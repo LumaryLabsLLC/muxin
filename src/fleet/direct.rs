@@ -101,7 +101,7 @@ fn identity() -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), Strin
     if let (Ok(cert), Ok(key)) = (std::fs::read(&cert_path), std::fs::read(&key_path)) {
         return Ok((CertificateDer::from(cert), PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key))));
     }
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    crate::config::create_private_dir(&dir).map_err(|e| e.to_string())?;
     let made = rcgen::generate_simple_self_signed(vec!["muxen-app".to_string()]).map_err(|e| e.to_string())?;
     let (cert, key) = (made.cert.der().to_vec(), made.key_pair.serialize_der());
     {

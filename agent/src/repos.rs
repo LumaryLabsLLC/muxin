@@ -57,8 +57,12 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Runs a read-only git command for the scan. A checkout's own config can name
+/// commands for git to run (core.fsmonitor on status, gpg.program on log), so
+/// those are turned off here: looking at a repository runs nothing from it.
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")
+        .args(["-c", "core.fsmonitor=false", "-c", "log.showSignature=false"])
         .arg("--no-optional-locks")
         .arg("-C")
         .arg(dir)
@@ -143,7 +147,7 @@ pub fn info(path: &str) -> Value {
     let fork = base.as_deref().and_then(|b| git(&dir, &["merge-base", "HEAD", b])).map(|m| m.trim().to_string());
     let (mut files, mut added, mut removed, mut commits) = (0u64, 0u64, 0u64, 0u64);
     if let Some(m) = &fork {
-        (files, added, removed) = shortstat(&git(&dir, &["diff", "--shortstat", m]).unwrap_or_default());
+        (files, added, removed) = shortstat(&git(&dir, &["diff", "--no-ext-diff", "--no-textconv", "--shortstat", m]).unwrap_or_default());
         commits = git(&dir, &["rev-list", "--count", &format!("{m}..HEAD")]).and_then(|c| c.trim().parse().ok()).unwrap_or(0);
     }
     json!({
@@ -272,6 +276,32 @@ mod tests {
         assert_eq!(shortstat(" 1 file changed, 1 insertion(+)\n"), (1, 1, 0));
         assert_eq!(shortstat(" 2 files changed, 7 deletions(-)\n"), (2, 0, 7));
         assert_eq!(shortstat(""), (0, 0, 0));
+    }
+
+    /// A checkout whose config names an fsmonitor command: plain `git status`
+    /// runs it, the scan's doesn't.
+    #[cfg(unix)]
+    #[test]
+    fn looking_at_a_checkout_runs_nothing_from_its_config() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("muxen-fsmonitor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let marker = tmp.join("ran");
+        let hook = tmp.join("fsmonitor.sh");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let run = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap().status.success());
+        run(&["init", "-q"]);
+        run(&["config", "core.fsmonitor", hook.to_str().unwrap()]);
+
+        assert!(git(&repo, &["status", "--porcelain=v2", "--branch"]).is_some());
+        assert!(!marker.exists(), "the scan ran the checkout's fsmonitor command");
+        // Plain git does run it, so the check above means something.
+        let _ = Command::new("git").arg("-C").arg(&repo).arg("status").output();
+        assert!(marker.exists(), "git didn't run core.fsmonitor here; the test proves nothing");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// A clone of a repository with two commits, then a branch with work on it.

@@ -23,7 +23,7 @@ use std::time::Duration;
 use crate::config::{MachineSpec, Settings};
 use crate::fleet::model::Runner;
 use crate::fleet::Engine;
-use crate::github::scope_from_runner_url;
+use crate::github::{scope_from_runner_url, RunnerRelease};
 use crate::probe::{self, ProbeResult, Shell};
 use remote::{with_params, Param};
 
@@ -38,8 +38,27 @@ const RUNNER_IMAGE: &str = "ghcr.io/actions/actions-runner";
 
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(3 * 60);
-/// Used when GitHub can't tell us the latest runner release.
+/// Used when GitHub can't tell us the latest runner release (GitHub Enterprise
+/// Server doesn't have actions/runner's releases, say).
 const FALLBACK_RUNNER_VERSION: &str = "2.329.0";
+/// The SHA-256 of each FALLBACK_RUNNER_VERSION package, from its release notes
+/// (and GitHub's asset digests). Change them together with the version.
+const FALLBACK_RUNNER_SHA256: [(&str, &str); 7] = [
+    ("win-x64", "f60be5ddf373c52fd735388c3478536afd12bfd36d1d0777c6b855b758e70f25"),
+    ("win-arm64", "68c38a172b569ba7290136f3051e28aca4e1a0a3d40e68ec352d100907c2e927"),
+    ("osx-x64", "c5a14e84b358c72ca83bf14518e004a8ad195cc440322fbca2a4fec7649035c7"),
+    ("osx-arm64", "50c0d409040cc52e701ac1d5afb4672cb7803a65c1292a30e96c42051dfa690f"),
+    ("linux-x64", "194f1e1e4bd02f80b7e9633fc546084d8d4e19f3928a324d512ea53430102e1d"),
+    ("linux-arm64", "56768348b3d643a6a29d4ad71e9bdae0dc0ef1eb01afe0f7a8ee097b039bfaaf"),
+    ("linux-arm", "b958284b8af869bd6d3542210fbd23702449182ba1c2b1b1eef575913434f13a"),
+];
+
+fn fallback_release() -> RunnerRelease {
+    RunnerRelease {
+        version: FALLBACK_RUNNER_VERSION.into(),
+        sha256: FALLBACK_RUNNER_SHA256.iter().map(|(p, h)| (p.to_string(), h.to_string())).collect(),
+    }
+}
 
 /// Install one or more runners on a machine.
 #[derive(Debug, Clone)]
@@ -335,15 +354,19 @@ impl Engine {
         Ok(id)
     }
 
-    /// Removes a machine from config.toml. Doesn't touch the machine itself.
+    /// Removes a machine from config.toml. On the machine, only its agent
+    /// stops trusting this app's direct connections (when it was paired).
     pub fn remove_machine(self: &Arc<Self>, machine_id: &str) -> Result<(), String> {
-        if self.machine(machine_id).is_none() {
-            return Err("That machine isn't in config.toml anymore.".into());
-        }
+        let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in config.toml anymore.")?;
         if self.machine_busy(machine_id) {
             return Err("An operation is still running on this machine. Wait for it to finish.".into());
         }
-        self.forget_machine(machine_id)
+        let paired = crate::fleet::direct::paired(&spec.id).is_some();
+        self.forget_machine(machine_id)?;
+        if paired {
+            self.unpair_removed(spec);
+        }
+        Ok(())
     }
 
     /// Gives a machine a new name in config.toml. Its id doesn't change, so
@@ -376,6 +399,10 @@ impl Engine {
             None => inventory_edit::edit_file(self.inventory_path(), edit)?,
         }
         self.reload_inventory_now();
+        // Its pairing goes too, so a machine added later under its name starts unpaired.
+        if self.demo_world().is_none() && crate::fleet::direct::paired(machine_id).is_some() {
+            let _ = crate::fleet::direct::save(machine_id, None);
+        }
         Ok(())
     }
 
@@ -580,33 +607,48 @@ async fn install(engine: &Arc<Engine>, op: u64, req: &InstallRequest, spec: &Mac
     step(engine, op, format!("Requesting a registration token from GitHub for {}", req.scope));
     let token = engine.github().registration_token(&settings.github, &req.scope).await?;
     step(engine, op, "Looking up the latest runner release");
-    let version = engine
-        .github()
-        .latest_runner_release(&settings.github)
-        .await
-        .unwrap_or_else(|| FALLBACK_RUNNER_VERSION.to_string());
-    engine.op_log(op, format!("actions-runner {version}"));
+    let release = engine.github().latest_runner_release(&settings.github).await.unwrap_or_else(fallback_release);
+    engine.op_log(op, format!("actions-runner {}", release.version));
 
     step(engine, op, format!("Installing on {} ({})", spec.name, spec.host.trim()));
     let url = engine.github().web_url(&settings.github, &req.scope);
     let labels = req.labels.join(",");
     let group = req.group.clone().unwrap_or_default();
+    let script = install_script(shell, &release, &url, &token, &req.names, &labels, &group, as_service);
+    let ran = remote::run(engine, op, spec, shell, script, &[token], INSTALL_TIMEOUT).await;
+    record_installed(engine, op, req, spec, ran).await
+}
+
+/// install.sh or install.ps1 with its parameters. The script checks the package
+/// it downloads (or finds cached) against GitHub's SHA-256 for its platform.
+#[allow(clippy::too_many_arguments)]
+fn install_script(
+    shell: Shell,
+    release: &RunnerRelease,
+    url: &str,
+    token: &str,
+    names: &[String],
+    labels: &str,
+    group: &str,
+    as_service: bool,
+) -> String {
+    // Every package's, as "<platform>=<hex>": the script works out which one it needs.
+    let sha256: Vec<String> = release.sha256.iter().map(|(platform, hex)| format!("{platform}={hex}")).collect();
     let params = [
-        ("OR_VERSION", Param::Str(&version)),
-        ("OR_URL", Param::Str(&url)),
-        ("OR_TOKEN", Param::Str(&token)),
-        ("OR_NAMES", Param::List(&req.names)),
-        ("OR_LABELS", Param::Str(&labels)),
-        ("OR_GROUP", Param::Str(&group)),
+        ("OR_VERSION", Param::Str(&release.version)),
+        ("OR_SHA256", Param::List(&sha256)),
+        ("OR_URL", Param::Str(url)),
+        ("OR_TOKEN", Param::Str(token)),
+        ("OR_NAMES", Param::List(names)),
+        ("OR_LABELS", Param::Str(labels)),
+        ("OR_GROUP", Param::Str(group)),
         ("OR_SERVICE", Param::Bool(as_service)),
         ("OR_BASE", Param::Str("")),
     ];
-    let script = match shell {
+    match shell {
         Shell::Sh => with_params(shell, &params, INSTALL_SH),
         Shell::Powershell => with_params(shell, &params, INSTALL_PS1),
-    };
-    let ran = remote::run(engine, op, spec, shell, script, &[token], INSTALL_TIMEOUT).await;
-    record_installed(engine, op, req, spec, ran).await
+    }
 }
 
 fn mode_label(mode: &InstallMode) -> String {
@@ -646,7 +688,7 @@ async fn install_docker(
         Some(i) => (i, String::new()),
         None => {
             step(engine, op, "Looking up the latest runner release");
-            let version = engine.github().latest_runner_release(&settings.github).await.unwrap_or_else(|| FALLBACK_RUNNER_VERSION.to_string());
+            let version = engine.github().latest_runner_release(&settings.github).await.map(|r| r.version).unwrap_or_else(|| FALLBACK_RUNNER_VERSION.to_string());
             (format!("{RUNNER_IMAGE}:{version}"), format!("{RUNNER_IMAGE}:latest"))
         }
     };
@@ -1126,6 +1168,38 @@ Match host x
     }
 
     #[test]
+    fn install_scripts_get_the_checksums_and_keep_the_token_out_of_argv() {
+        let release = RunnerRelease {
+            version: "2.338.0".into(),
+            sha256: vec![("linux-x64".into(), "af4b".repeat(16)), ("win-x64".into(), "f48e".repeat(16))],
+        };
+        let names = vec!["b-01".to_string()];
+        let sh = install_script(Shell::Sh, &release, "https://github.com/acme", "SECRET", &names, "gpu", "", true);
+        assert!(sh.starts_with("OR_VERSION='2.338.0'\n"));
+        assert!(sh.contains(&format!("OR_SHA256='linux-x64={} win-x64={}'\n", "af4b".repeat(16), "f48e".repeat(16))), "{}", &sh[..300]);
+        assert!(sh.contains("ACTIONS_RUNNER_INPUT_TOKEN=$OR_TOKEN ./config.sh \"$@\""));
+        let ps = install_script(Shell::Powershell, &release, "https://github.com/acme", "SECRET", &names, "gpu", "", true);
+        assert!(ps.contains(&format!("$OR_SHA256 = @('linux-x64={}', 'win-x64={}')\n", "af4b".repeat(16), "f48e".repeat(16))), "{}", &ps[..300]);
+        assert!(ps.contains("$env:ACTIONS_RUNNER_INPUT_TOKEN = $OR_TOKEN"));
+        // Registration and removal tokens never go on config.sh's or config.cmd's command line.
+        for script in [INSTALL_SH, INSTALL_PS1, CONTROL_SH, CONTROL_PS1] {
+            assert!(!script.contains("--token"), "{script}");
+            assert!(script.contains("ACTIONS_RUNNER_INPUT_TOKEN"));
+        }
+    }
+
+    #[test]
+    fn fallback_release_has_a_checksum_for_every_package() {
+        let release = fallback_release();
+        assert_eq!(release.version, FALLBACK_RUNNER_VERSION);
+        // What install.sh (osx, linux: x64, arm64, arm) and install.ps1 (win: x64, arm64) look for.
+        for platform in ["osx-x64", "osx-arm64", "linux-x64", "linux-arm64", "linux-arm", "win-x64", "win-arm64"] {
+            let (_, hex) = release.sha256.iter().find(|(p, _)| p == platform).unwrap_or_else(|| panic!("no checksum for {platform}"));
+            assert!(hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "{platform}: {hex}");
+        }
+    }
+
+    #[test]
     fn validates_names_and_hosts() {
         assert!(valid_runner_name("mac-studio-08"));
         assert!(valid_runner_name("win_01.a"));
@@ -1164,6 +1238,88 @@ mod engine_tests {
         write_exec(&dir.join("config.sh"), "#!/bin/sh\nexit 0\n");
         write_exec(&dir.join("run.sh"), "#!/bin/sh\nDIR=$(cd \"$(dirname \"$0\")\" && pwd)\n\"$DIR/bin/Runner.Listener\" run\n");
         write_exec(&dir.join("bin/Runner.Listener"), "#!/bin/sh\n[ \"$1\" = --version ] && { echo 2.329.0; exit 0; }\nsleep 120\n");
+    }
+
+    /// The real install.sh against a stand-in runner package: it only unpacks a
+    /// package whose SHA-256 matches, cached or downloaded, and config.sh gets the
+    /// token in its environment, never in its arguments.
+    #[test]
+    fn install_script_checks_the_package_and_hides_the_token() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let tmp = std::env::temp_dir().join(format!("muxen-install-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (pkg, base, bin) = (tmp.join("pkg"), tmp.join("runners"), tmp.join("bin"));
+        let cache = base.join(".cache");
+        for d in [&pkg, &cache, &bin] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        // config.sh notes what it was given; run.sh does nothing.
+        write_exec(&pkg.join("config.sh"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > config.args\nprintf '%s' \"${ACTIONS_RUNNER_INPUT_TOKEN-}\" > config.token\n");
+        write_exec(&pkg.join("run.sh"), "#!/bin/sh\nexit 0\n");
+        let good = tmp.join("good.tar.gz");
+        let tar = Command::new("tar").env("COPYFILE_DISABLE", "1").arg("czf").arg(&good).arg("-C").arg(&pkg).arg(".").status().unwrap();
+        assert!(tar.success());
+        let bad = tmp.join("bad.tar.gz");
+        std::fs::write(&bad, "not a runner").unwrap();
+        let sha: String = ring::digest::digest(&ring::digest::SHA256, &std::fs::read(&good).unwrap()).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        // Stands in for curl: "downloads" whatever MUXEN_TEST_DOWNLOAD names.
+        write_exec(&bin.join("curl"), "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=$2; shift; done\ncp \"$MUXEN_TEST_DOWNLOAD\" \"$out\"\n");
+
+        // Whichever of these this machine is, its package is in the cache under its own name.
+        let platforms = ["osx-x64", "osx-arm64", "linux-x64", "linux-arm64", "linux-arm"];
+        let cached = |p: &str| cache.join(format!("actions-runner-{p}-9.9.9.tar.gz"));
+        let release = |platforms: &[&str]| RunnerRelease { version: "9.9.9".into(), sha256: platforms.iter().map(|p| (p.to_string(), sha.clone())).collect() };
+        let install = |release: &RunnerRelease, name: &str, download: &Path| {
+            let script = install_script(Shell::Sh, release, "https://github.com/acme", "SECRET-TOKEN", &[name.to_string()], "", "", false)
+                .replacen("OR_BASE=''\n", &format!("OR_BASE={}\n", remote::sh_quote(&base.to_string_lossy())), 1);
+            let mut child = Command::new("/bin/sh")
+                .arg("-s")
+                .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()))
+                .env("MUXEN_TEST_DOWNLOAD", download)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+            let out = child.wait_with_output().unwrap();
+            (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+        };
+
+        // A cached package that checks out is used as it is.
+        for p in platforms {
+            std::fs::copy(&good, cached(p)).unwrap();
+        }
+        let (ok, log) = install(&release(&platforms), "r1", &bad);
+        assert!(ok && log.contains("Using cached") && log.contains("✓ r1 is installed"), "{log}");
+        let args = std::fs::read_to_string(base.join("r1/config.args")).unwrap();
+        assert!(args.contains("--unattended") && !args.contains("SECRET-TOKEN") && !args.contains("--token"), "{args}");
+        assert_eq!(std::fs::read_to_string(base.join("r1/config.token")).unwrap(), "SECRET-TOKEN");
+
+        // A changed one is downloaded again, and the download is checked too.
+        for p in platforms {
+            std::fs::write(cached(p), "changed").unwrap();
+        }
+        let (ok, log) = install(&release(&platforms), "r2", &good);
+        assert!(ok && log.contains("doesn't match its SHA-256; downloading it again") && log.contains("✓ r2 is installed"), "{log}");
+
+        // A download that doesn't match is deleted, and nothing gets installed.
+        for p in platforms {
+            let _ = std::fs::remove_file(cached(p));
+        }
+        let (ok, log) = install(&release(&platforms), "r3", &bad);
+        assert!(!ok && log.contains("doesn't match the SHA-256 GitHub published for it"), "{log}");
+        assert!(!base.join("r3").exists());
+        assert!(std::fs::read_dir(&cache).unwrap().next().is_none(), "the bad download was left behind");
+
+        // No checksum for this machine's package: nothing is downloaded or installed.
+        let (ok, log) = install(&release(&["win-x64"]), "r4", &good);
+        assert!(!ok && log.contains("don't list a SHA-256"), "{log}");
+        assert!(!base.join("r4").exists() && std::fs::read_dir(&cache).unwrap().next().is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     async fn wait(engine: &Arc<Engine>, op: u64) -> Operation {

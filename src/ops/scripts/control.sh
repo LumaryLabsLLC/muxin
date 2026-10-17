@@ -120,7 +120,9 @@ case "$OR_ACTION" in
     fi
     if [ -f .runner ] && [ -n "$OR_TOKEN" ]; then
       say "Removing the runner from GitHub…"
-      ./config.sh remove --token "$OR_TOKEN" || fail "config.sh remove failed."
+      # The token goes in config.sh's environment, not its arguments: any account
+      # on the machine can read those with ps.
+      ACTIONS_RUNNER_INPUT_TOKEN=$OR_TOKEN ./config.sh remove || fail "config.sh remove failed."
     elif [ -f .runner ]; then
       say "Not removing it from GitHub (no removal token); dropping its registration here."
       rm -f .runner .credentials .credentials_rsaparams

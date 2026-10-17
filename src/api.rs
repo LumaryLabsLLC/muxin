@@ -1230,6 +1230,8 @@ pub async fn remove_machine(engine: &Arc<Engine>, req: MachineRequest) -> ApiRes
     let s = engine.current();
     let m = find_machine(&s, &req.machine_id)?.clone();
     engine.remove_machine(&m.id).map_err(op_error)?;
+    // Its agent forgetting this app (when it was paired) finishes before a CLI run exits.
+    engine.unpaired(&m.id).await;
     Ok(machine_summary(&m))
 }
 

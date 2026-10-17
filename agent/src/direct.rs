@@ -409,11 +409,32 @@ pub fn migrate() -> i32 {
     0
 }
 
-/// `{"op": "unpair"}`: stops `listen` and forgets every app.
-pub fn unpair() -> Value {
-    let _ = std::fs::remove_file(dir().join("trusted"));
-    remove_service();
+/// `{"op": "unpair", "client": "<app fingerprint>"}`: forgets that app, and
+/// stops `listen` once no app is left. Without a fingerprint (older apps),
+/// forgets every app.
+pub fn unpair(req: &Value) -> Value {
+    let left = after_unpair(trusted(), req["client"].as_str().unwrap_or(""));
+    if left.is_empty() {
+        let _ = std::fs::remove_file(dir().join("trusted"));
+        remove_service();
+    } else {
+        let list: String = left.iter().map(|f| format!("{f}\n")).collect();
+        if let Err(e) = write_private(&dir().join("trusted"), list.as_bytes()) {
+            return json!({ "ok": false, "error": e });
+        }
+    }
     json!({ "ok": true })
+}
+
+/// The apps still trusted once `client` is unpaired ("" for every app).
+fn after_unpair(mut trusted: HashSet<String>, client: &str) -> HashSet<String> {
+    let client = client.trim().to_lowercase();
+    if client.is_empty() {
+        trusted.clear();
+    } else {
+        trusted.remove(&client);
+    }
+    trusted
 }
 
 /// This user's id (launchd's domains are by user).
@@ -472,6 +493,11 @@ pub fn start_service() {
 #[cfg(windows)]
 const TASK: &str = "Muxen agent";
 
+/// Where Windows' firewall lets apps in from (a PowerShell list): the
+/// machine's own subnets, and Tailscale's addresses (see `is_tailnet`).
+#[cfg(windows)]
+const FIREWALL_REMOTE: &str = "'LocalSubnet', '100.64.0.0/10', 'fd7a:115c:a1e0::/48'";
+
 /// Runs `listen` as a service of this user: (how, a note when it couldn't).
 fn install_service() -> (&'static str, Option<String>) {
     #[cfg(windows)]
@@ -479,7 +505,8 @@ fn install_service() -> (&'static str, Option<String>) {
         // A task at sign-in, in the user's own desktop session (where the
         // screen and clipboard are), through a windowless console (nothing
         // shows on their screen), started now too; and a way in through
-        // Windows' firewall for the agent (administrators only).
+        // Windows' firewall for the agent (administrators only), on any
+        // network but only from its own subnets and from the tailnet.
         let script = format!(
             "$exe = {exe}\n\
              $action = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument ('--headless \"' + $exe + '\" listen')\n\
@@ -487,14 +514,15 @@ fn install_service() -> (&'static str, Option<String>) {
              $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited\n\
              $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew\n\
              Register-ScheduledTask -TaskName {task} -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null\n\
-             try {{ Remove-NetFirewallRule -DisplayName {task} -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName {task} -Direction Inbound -Program $exe -Protocol UDP -Action Allow -Profile Any -ErrorAction Stop | Out-Null; $fw = 'yes' }} catch {{ $fw = 'no' }}\n\
+             try {{ Remove-NetFirewallRule -DisplayName {task} -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName {task} -Direction Inbound -Program $exe -Protocol UDP -RemoteAddress {remote} -Action Allow -Profile Any -ErrorAction Stop | Out-Null; $fw = 'yes' }} catch {{ $fw = 'no' }}\n\
              Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object {{ $_.CommandLine -match ' listen' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}\n\
              Start-ScheduledTask -TaskName {task}\n\
              $running = $false\n\
              foreach ($i in 1..20) {{ Start-Sleep -Milliseconds 250; if (@(Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object {{ $_.CommandLine -match ' listen' }}).Count) {{ $running = $true; break }} }}\n\
              \"fw=$fw running=$running\"",
             exe = crate::win::quote(&exe()),
-            task = crate::win::quote(TASK)
+            task = crate::win::quote(TASK),
+            remote = FIREWALL_REMOTE
         );
         return match crate::win::ps(&script) {
             Ok(out) if out.contains("running=True") => ("task", (!out.contains("fw=yes")).then(|| "Windows' firewall may block it: allow muxen-agent.exe, or pair as an administrator".to_string())),
@@ -591,5 +619,15 @@ mod tests {
         let (lan, tailnet) = addresses();
         println!("lan {lan:?} tailnet {tailnet:?}");
         assert!(lan.iter().all(|a| !tailnet.contains(a)));
+    }
+
+    #[test]
+    fn unpairing_one_app_keeps_the_others() {
+        let (laptop, desktop) = ("a".repeat(64), "b".repeat(64));
+        let both: HashSet<String> = [laptop.clone(), desktop.clone()].into();
+        assert_eq!(after_unpair(both.clone(), &format!(" {} ", laptop.to_uppercase())), [desktop.clone()].into());
+        assert_eq!(after_unpair(both.clone(), &"c".repeat(64)), both);
+        // An app from before says no fingerprint: every app goes, as it did.
+        assert!(after_unpair(both, "").is_empty());
     }
 }

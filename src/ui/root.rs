@@ -1193,20 +1193,25 @@ impl Root {
         if self.engine.is_demo() || !self.engine.settings().share_clipboard {
             return;
         }
-        match super::pasteboard_state() {
-            Some((count, private)) => {
-                if count == self.clipboard_seen.0 {
-                    return;
-                }
-                self.clipboard_seen.0 = count;
-                if private {
-                    return;
-                }
+        // Without a change counter (Linux), the text is compared; a password
+        // manager's copies can't be told apart there (see pasteboard_state).
+        let state = super::pasteboard_state();
+        if let Some((count, private)) = state {
+            if count == self.clipboard_seen.0 {
+                return;
             }
-            // No change counter here: compare the text.
-            None => {}
+            self.clipboard_seen.0 = count;
+            if private {
+                return;
+            }
         }
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
+        // Copied again while reading: that copy is looked at next time.
+        if let Some((count, _)) = state
+            && super::pasteboard_state().map(|s| s.0) != Some(count)
+        {
+            return;
+        }
         if text != self.clipboard_seen.1 {
             crate::fleet::clipboard::local_changed(&text);
             self.clipboard_seen.1 = text;
@@ -1467,10 +1472,16 @@ impl Root {
             self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
             return;
         }
+        // A paired machine's agent forgets this app (see Engine::remove_machine).
+        let detail = if crate::fleet::direct::paired(&machine.id).is_some() {
+            "It's taken out of config.toml and stops taking direct connections from this app. Its runners stay registered."
+        } else {
+            "It's taken out of config.toml. Nothing on the machine changes, and its runners stay registered."
+        };
         let dialog = cx.new(|cx| {
             ConfirmDialog::new(
                 format!("Remove {} from Muxin?", machine.name),
-                "It's taken out of config.toml. Nothing on the machine changes, and its runners stay registered.".into(),
+                detail.into(),
                 "Remove machine",
                 None,
                 move |_, engine| engine.remove_machine(&machine_id).map(|_| None),

@@ -143,6 +143,18 @@ fn quotes_env_and_builds_commands() {
     let pull = rsync_args(&local, "/w/ws-1", "/dst", SyncDirection::Pull, false);
     assert_eq!(&pull[pull.len() - 2..], &["/w/ws-1/".to_string(), "/dst/".to_string()]);
     assert!(!pull.contains(&"-e".to_string()));
+    // A pull never brings a .git back (its config could run commands here); a push still sends yours.
+    assert!(pull.contains(&"--exclude=.git".to_string()));
+    assert!(!args.contains(&"--exclude=.git".to_string()));
+}
+
+#[test]
+fn names_github_repos_for_the_privacy_check() {
+    let name = |raw: &str| github_full_name(&normalize_repo(raw, "github.com").unwrap());
+    assert_eq!(name("acme/api").as_deref(), Some("acme/api"));
+    assert_eq!(name("https://github.com/acme/api.git").as_deref(), Some("acme/api"));
+    assert_eq!(name("https://x:secret@github.com/acme/api").as_deref(), Some("acme/api"));
+    assert_eq!(name("https://github.com/acme/api/tree/main"), None);
 }
 
 #[test]

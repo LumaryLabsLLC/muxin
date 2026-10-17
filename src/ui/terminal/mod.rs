@@ -310,16 +310,16 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
-        let events = cx.spawn(async move |this, cx| {
+        let events = cx.spawn_in(window, async move |this, cx| {
             while let Some(first) = rx.next().await {
                 // Output arrives in bursts; handle everything queued in one update.
                 let mut batch = vec![first];
                 while let Ok(more) = rx.try_recv() {
                     batch.push(more);
                 }
-                let alive = this.update(cx, |this, cx| {
+                let alive = this.update_in(cx, |this: &mut Self, window, cx| {
                     for event in batch {
-                        this.on_term_event(event, cx);
+                        this.on_term_event(event, window, cx);
                     }
                 });
                 if alive.is_err() {
@@ -376,11 +376,17 @@ impl TerminalView {
         *self.shared.term.lock().mode()
     }
 
-    fn on_term_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
+    fn on_term_event(&mut self, event: TermEvent, window: &Window, cx: &mut Context<Self>) {
         match event {
             TermEvent::Wakeup | TermEvent::MouseCursorDirty | TermEvent::CursorBlinkingChange => cx.notify(),
             TermEvent::PtyWrite(text) => self.shared.write(text.into_bytes()),
-            TermEvent::ClipboardStore(_, text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            // A program's copy (OSC 52) only while you're in its terminal, not
+            // from a session in the background; and it stays on this computer:
+            // the shared clipboard doesn't pass it on to the machines.
+            TermEvent::ClipboardStore(_, text) if window.is_window_active() && self.focus.is_focused(window) => {
+                crate::fleet::clipboard::keep_here(&text);
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
             TermEvent::ColorRequest(index, format) => {
                 let palette = Palette::new(&cx.theme());
                 self.shared.write(format(palette.rgb(index)).into_bytes());
@@ -392,8 +398,9 @@ impl TerminalView {
             }
             TermEvent::ChildExit(status) => self.finish(status.code(), cx),
             TermEvent::Exit => self.finish(None, cx),
-            // Never hand the clipboard to the program unasked.
-            TermEvent::ClipboardLoad(..) | TermEvent::Title(_) | TermEvent::ResetTitle | TermEvent::Bell => {}
+            // Never hand the clipboard to the program unasked (nor let one in
+            // the background set it).
+            TermEvent::ClipboardStore(..) | TermEvent::ClipboardLoad(..) | TermEvent::Title(_) | TermEvent::ResetTitle | TermEvent::Bell => {}
         }
     }
 

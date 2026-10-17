@@ -590,7 +590,8 @@ impl Engine {
             return Ok("Nothing to copy.".into());
         }
         let op = self.begin_op("copy", format!("Sync {} with {}", rec.info.id, spec.name), Some(spec.id.clone()), None);
-        let result = self.run_copy(op, &from, &dir, &names, &to, &to_dir, &std::sync::atomic::AtomicBool::new(false)).await;
+        let no_git = direction == SyncDirection::Pull;
+        let result = self.run_copy(op, &from, &dir, &names, &to, &to_dir, &std::sync::atomic::AtomicBool::new(false), no_git).await;
         self.op_finish(op, result.as_ref().map(|_| ()).map_err(|e| e.clone()));
         let bytes = result?;
         self.touch_workspace(&rec.info.id);
@@ -817,9 +818,21 @@ impl Engine {
             Ok(out) => out,
             Err(e) => {
                 // A private GitHub repo: try again with the user's token, passed only through the environment.
+                // The machine's exit code only says it wants credentials, and it could say so for any repo;
+                // whether this one is private is asked of GitHub from here. A public repo never gets the token.
                 let retry = match repo {
                     Some(r) if r.on_github && e.code == Some(4) => {
-                        self.github().git_credentials(&self.settings().github).await.filter(|(host, _)| *host == r.host)
+                        let settings = self.settings().github;
+                        let private = match github_full_name(r) {
+                            Some(name) => self.github().repo(&settings, &name).await.is_ok_and(|info| info.private),
+                            None => false,
+                        };
+                        if private {
+                            self.github().git_credentials(&settings).await.filter(|(host, _)| *host == r.host)
+                        } else {
+                            self.op_log(op, format!("▸ GitHub doesn't list {} as a private repository you can reach, so your token isn't sent", r.shown));
+                            None
+                        }
                     }
                     _ => None,
                 };
@@ -1200,6 +1213,18 @@ struct Repo {
     on_github: bool,
 }
 
+/// "owner/name" of a repository on the GitHub host, from "owner/name" or its https URL.
+fn github_full_name(r: &Repo) -> Option<String> {
+    let path = match r.shown.split_once("://") {
+        Some((_, rest)) => rest.split_once('/')?.1,
+        None => r.shown.as_str(),
+    };
+    let path = path.trim_end_matches('/').trim_end_matches(".git");
+    let mut parts = path.split('/');
+    let (owner, name) = (parts.next()?, parts.next()?);
+    (parts.next().is_none() && !owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
+}
+
 pub(crate) fn github_web_host(api_url: &str) -> String {
     let host = api_url.split("://").nth(1).unwrap_or(api_url).split('/').next().unwrap_or("api.github.com");
     if host == "api.github.com" { "github.com".into() } else { host.to_string() }
@@ -1415,6 +1440,13 @@ fn display_arg(a: &str) -> String {
 
 fn rsync_args(spec: &MachineSpec, remote_path: &str, local: &str, direction: SyncDirection, delete: bool) -> Vec<String> {
     let mut args = vec!["-az".to_string(), "--stats".to_string(), "--exclude=/.muxen/".to_string()];
+    if direction == SyncDirection::Pull {
+        // Files come back, git's own folder doesn't (nor a worktree's or a
+        // submodule's .git file): the machine could set a command in .git/config
+        // (core.fsmonitor, hooks) that the next `git status` here would run. Your
+        // .git isn't deleted either; --delete leaves excluded paths alone.
+        args.push("--exclude=.git".into());
+    }
     if delete {
         args.push("--delete".into());
     }

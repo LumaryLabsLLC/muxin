@@ -137,7 +137,8 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
 
 /// This computer's clipboard right now: a number that changes with every
 /// copy, and whether what's there is private (a password manager marks its
-/// copies, per nspasteboard.org). None where that can't be told (not macOS).
+/// copies: per nspasteboard.org on a Mac, with Windows' clipboard-history
+/// formats on Windows). None where that can't be told (Linux).
 #[cfg(target_os = "macos")]
 #[allow(unexpected_cfgs)] // objc's msg_send! checks a cfg this crate doesn't declare
 pub(crate) fn pasteboard_state() -> Option<(i64, bool)> {
@@ -169,7 +170,25 @@ pub(crate) fn pasteboard_state() -> Option<(i64, bool)> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows numbers clipboard changes. A copy that carries one of the formats
+/// that keep it out of clipboard history and other devices counts as private.
+/// (The last two hold a DWORD, 0 to keep it out; reading it would mean opening
+/// the clipboard every few hundred milliseconds, in other programs' way.)
+#[cfg(windows)]
+pub(crate) fn pasteboard_state() -> Option<(i64, bool)> {
+    use windows_sys::Win32::System::DataExchange::{GetClipboardSequenceNumber, IsClipboardFormatAvailable, RegisterClipboardFormatW};
+    let private = ["ExcludeClipboardContentFromMonitorProcessing", "CanIncludeInClipboardHistory", "CanUploadToCloudClipboard"].iter().any(|name| {
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let format = unsafe { RegisterClipboardFormatW(wide.as_ptr()) };
+        format != 0 && unsafe { IsClipboardFormatAvailable(format) } != 0
+    });
+    Some((unsafe { GetClipboardSequenceNumber() } as i64, private))
+}
+
+/// Linux: GPUI says neither what kinds of data a copy holds nor when it
+/// changed, so a password manager's copies (marked `x-kde-passwordManagerHint`)
+/// can't be told from others here; they're shared like any text.
+#[cfg(not(any(target_os = "macos", windows)))]
 pub(crate) fn pasteboard_state() -> Option<(i64, bool)> {
     None
 }

@@ -42,8 +42,10 @@ pub fn target(probe: Option<&ProbeResult>) -> Option<String> {
     Some(format!("{os}-{arch}"))
 }
 
-/// The folder of agent builds: in the app bundle, next to the binary, or
-/// `dist/agents` in a source checkout (`scripts/build-agents.sh`).
+/// The folder of agent builds: in the app bundle, next to the binary, or (a
+/// debug build) `dist/agents` in the source checkout it was built from
+/// (`scripts/build-agents.sh`). Not any folder above the binary: one planted
+/// there (`/tmp/dist/agents`) would be uploaded to every machine.
 pub fn builds_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("MUXEN_AGENTS_DIR") {
         return Some(PathBuf::from(dir));
@@ -55,12 +57,19 @@ pub fn builds_dir() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    dir.ancestors().map(|a| a.join("dist/agents")).find(|c| c.is_dir())
+    #[cfg(debug_assertions)]
+    {
+        let checkout = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/agents"));
+        if checkout.is_dir() {
+            return Some(checkout);
+        }
+    }
+    None
 }
 
 /// Where the build for `target` is.
 fn build_path(target: &str) -> Result<PathBuf, String> {
-    let dir = builds_dir().ok_or("Muxin can't find its agent builds (run scripts/build-agents.sh in a source checkout).")?;
+    let dir = builds_dir().ok_or("Muxin can't find its agent builds (run scripts/build-agents.sh in a source checkout, or set MUXEN_AGENTS_DIR).")?;
     let exe = if target.starts_with("windows") { ".exe" } else { "" };
     Ok(dir.join(format!("muxen-agent-{target}{exe}")))
 }

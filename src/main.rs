@@ -56,7 +56,7 @@ enum Command {
     Machine(MachineArgs),
     /// Add a machine to config.toml (and check it)
     AddMachine(AddMachineArgs),
-    /// Remove a machine from config.toml (nothing on the machine changes)
+    /// Remove a machine from config.toml (on the machine, only a direct connection from this app is turned off)
     RemoveMachine(MachineArgs),
     /// Give a machine a new name (its id stays the same)
     RenameMachine(RenameMachineArgs),
@@ -579,7 +579,7 @@ enum CloudCommand {
     Destroy(CloudMachineArgs),
     /// Power a cloud machine on or off (DigitalOcean still bills it while off)
     Power(CloudPowerArgs),
-    /// Sign in to DigitalOcean: --token TOKEN, --doctl, or --browser
+    /// Sign in to DigitalOcean: --token - (reads the token from stdin), --doctl, or --browser
     Login(CloudLoginArgs),
     /// Forget the DigitalOcean sign-in
     Logout(AgentArgs),
@@ -630,7 +630,9 @@ struct CloudPowerArgs {
 struct CloudLoginArgs {
     #[command(flatten)]
     agent: AgentArgs,
-    /// A DigitalOcean API token (kept in the Keychain)
+    /// A DigitalOcean API token (kept in the Keychain). `-` reads it from stdin, which
+    /// keeps it out of your shell's history and the process list:
+    /// `pbpaste | muxin cloud login --token -`
     #[arg(long, conflicts_with_all = ["doctl", "browser"])]
     token: Option<String>,
     /// Use doctl's login
@@ -1390,7 +1392,7 @@ fn main() -> ExitCode {
         Some(Command::RemoveMachine(a)) => {
             let req = api::MachineRequest { machine_id: a.machine_id };
             run(&runtime, &a.agent, async move |e| api::remove_machine(&e, req).await, |m| {
-                format!("Removed {} ({}) from config.toml. Nothing on the machine changed.\n", m.name, m.id)
+                format!("Removed {} ({}) from config.toml. On the machine, only a direct connection from this app (if it had one) is turned off.\n", m.name, m.id)
             })
         }
         Some(Command::Connect(a)) => {
@@ -2100,16 +2102,37 @@ fn cloud(cmd: CloudCommand, runtime: &tokio::runtime::Runtime) -> u8 {
         }
         CloudCommand::Login(a) => {
             let method = if a.doctl { "doctl" } else if a.browser { "oauth" } else { "token" };
-            let token = a.token.clone();
+            let mut token = a.token.clone();
             if method == "token" && token.is_none() {
-                eprintln!("error: pass --token TOKEN, --doctl or --browser");
+                eprintln!("error: pass --token - (and the token on stdin), --doctl or --browser");
                 return 2;
+            }
+            if token.as_deref() == Some("-") {
+                let stdin = std::io::stdin();
+                if stdin.is_terminal() {
+                    eprint!("DigitalOcean API token: ");
+                }
+                token = match read_token(&mut stdin.lock()) {
+                    Ok(t) => Some(t),
+                    Err(e) => return report_error(&a.agent, &ApiError::invalid(e)),
+                };
             }
             run(runtime, &a.agent, async move |e| e.cloud_sign_in(method, token, |url| crate::util::open_url(url)).await.map_err(api::ApiError::invalid), |email| {
                 format!("Signed in to DigitalOcean as {email}.\n")
             })
         }
         CloudCommand::Logout(a) => run(runtime, &a, async move |e| Ok::<_, api::ApiError>(e.cloud_sign_out()), |_| "Signed out of DigitalOcean.\n".to_string()),
+    }
+}
+
+/// `--token -`: the first line on stdin, so the token stays out of the shell's
+/// history and the process list.
+fn read_token(input: &mut impl std::io::BufRead) -> Result<String, String> {
+    let mut line = String::new();
+    input.read_line(&mut line).map_err(|e| format!("Couldn't read the token from stdin: {e}"))?;
+    match line.trim() {
+        "" => Err("No token came in on stdin. Pipe it in, e.g. muxin cloud login --token - < token.txt".into()),
+        token => Ok(token.to_string()),
     }
 }
 
@@ -2452,5 +2475,22 @@ mod tests {
         assert!(Cli::try_parse_from(["muxin", "workspace", "sync", "ws-1", "."]).is_err(), "needs --push or --pull");
         assert!(Cli::try_parse_from(["muxin", "workspace", "sync", "ws-1", ".", "--push", "--pull"]).is_err());
         assert!(Cli::try_parse_from(["muxin", "workspace", "create", "--platform", "linux", "--repo", "acme/api", "--ref", "main", "--json"]).is_ok());
+    }
+
+    #[test]
+    fn cloud_login_reads_the_token_from_stdin() {
+        let token = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Some(Command::Cloud(CloudCommand::Login(a))) => a.token,
+            _ => panic!("expected cloud login"),
+        };
+        assert_eq!(token(&["muxin", "cloud", "login", "--token", "-"]).as_deref(), Some("-"));
+        assert_eq!(token(&["muxin", "cloud", "login", "--token", "dop_v1_abc"]).as_deref(), Some("dop_v1_abc"));
+        assert!(Cli::try_parse_from(["muxin", "cloud", "login", "--token", "-", "--doctl"]).is_err());
+
+        let read = |input: &str| read_token(&mut std::io::Cursor::new(input.as_bytes()));
+        assert_eq!(read("dop_v1_abc\n").as_deref(), Ok("dop_v1_abc"));
+        assert_eq!(read("  dop_v1_abc\r\nmore\n").as_deref(), Ok("dop_v1_abc"), "only the first line, trimmed");
+        assert!(read("").is_err());
+        assert!(read("\n").is_err());
     }
 }

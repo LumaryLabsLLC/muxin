@@ -154,7 +154,7 @@ Runners installed in the usual places are discovered automatically: `~/actions-r
 
 Watch an org or a repo in Settings, or with `muxin watch acme` (or `acme/api`). Muxin then reads live runner status (online, busy) and the queued and running jobs of the most recently pushed repos.
 
-The token comes from `MUXEN_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth token`. Polling uses conditional requests, so unchanged responses don't count against your rate limit.
+The token comes from `MUXEN_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth token`. Like `gh`, Muxin sends those variables only to github.com; for GitHub Enterprise Server it uses `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`. Polling uses conditional requests, so unchanged responses don't count against your rate limit.
 
 Reading and registering **org** runners needs an org admin token with the `admin:org` scope:
 
@@ -203,7 +203,7 @@ The MCP server has these tools:
 | `list_runners` | Runners, optionally filtered by machine or state. |
 | `list_jobs` | Queued and running jobs, including which ones no runner can take. |
 | `check_machines` | Runs the read-only machine check over ssh now. |
-| `add_machine`, `remove_machine`, `rename_machine` | Edit `config.toml`. Nothing on the machine changes. |
+| `add_machine`, `remove_machine`, `rename_machine` | Edit `config.toml`. Nothing on the machine changes, except that `remove_machine` turns off a direct connection from this app. |
 | `connect_machine` | Disconnect from a machine (`connected: false`) or connect again. Its sessions keep running there. |
 | `machine_ports` | What's listening on a machine: ports, programs or containers, and web servers' page titles. |
 | `machine_processes`, `process_signal` | A machine's busiest processes and its GPUs; stop or kill one. |
@@ -509,7 +509,7 @@ muxin cp beelink:~/build/app.tar.gz adibs-macbook-pro:~/Downloads
 muxin cp adibs-macbook-pro:~/Projects/site beelink:~/www --no-wait
 ```
 
-**Shared clipboard.** Text you copy on your Mac can be pasted on your Linux desktops and other Macs, and what you copy there lands on your Mac (and on the other machines). Passwords copied from password managers (marked private on the clipboard) stay on your Mac. Turn it off in Settings › Clipboard.
+**Shared clipboard.** Turn it on in Settings › Clipboard. Text you copy on your Mac can then be pasted on your Linux desktops, Windows PCs and other Macs, and what you copy there lands on your Mac (and on the other machines). Passwords copied from password managers (marked private on the clipboard) aren't shared. Neither is text a program in a terminal copies. One exception: the app on Linux can't tell which copies on its own computer are passwords.
 
 ## Cloud machines
 
@@ -518,7 +518,7 @@ Need a machine you don't have? Muxin can make one in your DigitalOcean account. 
 DigitalOcean bills a droplet by the second while it exists, **powered on or off**, up to its monthly price; only destroying it stops the charges. Each cloud machine's page shows its rate, what it has cost this month and since it was created, and what this month comes to if you keep it, with **Power on/off** and **Destroy**. **Settings › Cloud › Usage and cost** adds them up: what you're paying per hour now, this month so far (machines destroyed this month included), the month's total if nothing changes, and your whole DigitalOcean bill this month (when Muxin may read it: sign in again in the browser, or use a token with `billing:read`). Settings › Cloud also says what happens when one sits idle: nothing, a reminder, power off, or destroy, after the hours you choose.
 
 ```sh
-muxin cloud login --token dop_v1_...
+pbpaste | muxin cloud login --token -   # the token on stdin, not in your shell history
 muxin cloud options
 muxin cloud create dev-1 --size s-2vcpu-4gb
 muxin cloud usage                     # what they cost

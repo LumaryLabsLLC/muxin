@@ -325,7 +325,7 @@ pub fn cloud_options(o: &crate::cloud::CloudOptions) -> String {
     match (&o.account, o.signed_in) {
         (Some(a), _) => out.push_str(&format!("DigitalOcean: {} ({method})\n", a.email)),
         (None, true) => out.push_str(&format!("DigitalOcean: signed in ({method})\n")),
-        (None, false) => out.push_str("DigitalOcean: not signed in. Run `muxin cloud login --token TOKEN` (or --doctl, --browser).\n"),
+        (None, false) => out.push_str("DigitalOcean: not signed in. Run `muxin cloud login --token -` with the token on stdin (or --doctl, --browser).\n"),
     }
     if let Some(e) = &o.error {
         out.push_str(&format!("  {e}\n"));

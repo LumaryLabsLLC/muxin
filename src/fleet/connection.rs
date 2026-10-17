@@ -2,7 +2,8 @@
 //! live ssh link, or one ssh call at a time; and turning direct connections on
 //! and off.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -10,6 +11,7 @@ use serde_json::json;
 
 use super::sessions::agent;
 use super::{Engine, direct, link};
+use crate::config::MachineSpec;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Connection {
@@ -162,8 +164,9 @@ impl Engine {
         }
         agent::ensure(&spec, probe.as_ref()).await?;
         if !enabled {
-            if let Some(l) = link::get(&spec).await {
-                let _ = l.request(json!({ "op": "unpair" }), Duration::from_secs(30)).await;
+            // Only this app: others paired with the machine keep their direct connections.
+            if let (Ok(app), Some(l)) = (direct::app_fingerprint(), link::get(&spec).await) {
+                let _ = l.request(json!({ "op": "unpair", "client": app }), Duration::from_secs(30)).await;
             }
             direct::save(&spec.id, None)?;
             link::reset(&spec.id);
@@ -201,6 +204,42 @@ impl Engine {
         }
         Ok(out)
     }
+
+    /// A machine that was paired left Muxin: its agent forgets this app too
+    /// (only this one). In the background and best-effort: a machine that
+    /// can't be reached is removed all the same. `unpaired` waits for it.
+    pub(crate) fn unpair_removed(self: &Arc<Self>, spec: MachineSpec) {
+        if spec.is_local() || self.demo_world().is_some() {
+            return;
+        }
+        let id = spec.id.clone();
+        let task = self.runtime().spawn(async move {
+            let ask = async {
+                let app = direct::app_fingerprint().ok()?;
+                let l = link::get(&spec).await?;
+                l.request(json!({ "op": "unpair", "client": app }), Duration::from_secs(15)).await.ok()
+            };
+            if tokio::time::timeout(Duration::from_secs(20), ask).await.ok().flatten().is_none() {
+                tracing::debug!("couldn't unpair {} on its way out", spec.name);
+            }
+            link::reset(&spec.id);
+        });
+        unpairing().lock().unwrap().insert(id, task);
+    }
+
+    /// Waits for a removed machine's unpairing (a command about to exit would cut it short).
+    pub async fn unpaired(&self, machine_id: &str) {
+        let task = unpairing().lock().unwrap().remove(machine_id);
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+    }
+}
+
+/// Removed machines being unpaired, by id.
+fn unpairing() -> &'static Mutex<HashMap<String, tokio::task::JoinHandle<()>>> {
+    static UNPAIRING: OnceLock<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>> = OnceLock::new();
+    UNPAIRING.get_or_init(Default::default)
 }
 
 /// Tailscale reaches the machine at one of its local-network addresses: it's
@@ -208,4 +247,26 @@ impl Engine {
 fn same_network(d: &super::model::TailnetDevice, lan: &[String]) -> bool {
     // Tailscale's own direct address isn't in what we keep; it's read fresh.
     super::tailscale::cached_direct_addr(&d.dns_name).is_some_and(|a| lan.iter().any(|l| a.starts_with(&format!("{l}:"))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Paths;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_removed_machine_leaves_no_pairing_behind() {
+        let tmp = std::env::temp_dir().join(format!("muxin-unpair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Disconnected, so nothing reaches out to it.
+        std::fs::write(tmp.join("config.toml"), "[[machine]]\nname = \"Paired\"\nhost = \"paired.invalid\"\ndisconnected = true\n").unwrap();
+        let engine = Engine::new(Paths::resolve(Some(tmp.clone()), None), false);
+        let pairing = direct::Paired { fingerprint: "f".repeat(64), host: "paired.invalid".into(), port: 47821, lan: Vec::new(), tailnet: Vec::new() };
+        direct::save("paired", Some(pairing)).unwrap();
+        engine.remove_machine("paired").unwrap();
+        engine.unpaired("paired").await;
+        assert!(engine.machine("paired").is_none() && direct::paired("paired").is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

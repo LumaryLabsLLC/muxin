@@ -1,6 +1,8 @@
 # Muxin: install GitHub Actions runners (macOS / Linux).
 # Muxin prepends these variables:
 #   OR_VERSION  runner release, e.g. 2.329.0
+#   OR_SHA256   each package's SHA-256 from the release notes, space separated
+#               <platform>=<hex> (e.g. linux-x64=194f...)
 #   OR_URL      https://github.com/<org> or https://github.com/<owner>/<repo>
 #   OR_TOKEN    registration token (short-lived)
 #   OR_NAMES    runner names, space separated
@@ -32,6 +34,22 @@ pkg="actions-runner-$ros-$rarch-$OR_VERSION.tar.gz"
 url="https://github.com/actions/runner/releases/download/v$OR_VERSION/$pkg"
 cache="$base/.cache"
 
+# The package has to match the SHA-256 GitHub published for it, downloaded or cached.
+sha=""
+for entry in $OR_SHA256; do
+  case "$entry" in
+    "$ros-$rarch="*) sha=${entry#*=} ;;
+  esac
+done
+[ -n "$sha" ] || fail "GitHub's release notes for actions-runner $OR_VERSION don't list a SHA-256 for $pkg, so it can't be checked. Not installing it."
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256() { sha256sum "$1" | awk '{ print $1 }'; }
+elif command -v shasum >/dev/null 2>&1; then
+  sha256() { shasum -a 256 "$1" | awk '{ print $1 }'; }
+else
+  fail "Neither sha256sum nor shasum is installed, so the runner package can't be checked."
+fi
+
 SUDO=""
 if [ "$ros" = linux ] && [ "$(id -u)" != 0 ]; then
   SUDO="sudo -n"
@@ -56,9 +74,13 @@ for name in $OR_NAMES; do
 done
 
 mkdir -p "$cache" || fail "Couldn't create $cache"
-if [ -s "$cache/$pkg" ]; then
+if [ -s "$cache/$pkg" ] && [ "$(sha256 "$cache/$pkg")" = "$sha" ]; then
   say "Using cached $pkg"
 else
+  if [ -e "$cache/$pkg" ]; then
+    say "The cached $pkg doesn't match its SHA-256; downloading it again."
+    rm -f "$cache/$pkg" || fail "Couldn't delete $cache/$pkg"
+  fi
   say "Downloading actions-runner $OR_VERSION for $ros-$rarch…"
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL --retry 3 -o "$cache/$pkg.part" "$url" || fail "Download failed: $url"
@@ -67,8 +89,14 @@ else
   else
     fail "Neither curl nor wget is installed."
   fi
+  got=$(sha256 "$cache/$pkg.part")
+  if [ "$got" != "$sha" ]; then
+    rm -f "$cache/$pkg.part"
+    fail "The downloaded $pkg doesn't match the SHA-256 GitHub published for it (expected $sha, got ${got:-nothing}), so it was deleted. Try again. If it keeps happening, something between this machine and GitHub is changing the download."
+  fi
   mv "$cache/$pkg.part" "$cache/$pkg" || fail "Couldn't save $pkg"
 fi
+say "Checked $pkg against GitHub's SHA-256"
 
 for name in $OR_NAMES; do
   dir="$base/$name"
@@ -77,10 +105,12 @@ for name in $OR_NAMES; do
   tar xzf "$cache/$pkg" -C "$dir" || fail "Couldn't unpack $pkg into $dir"
   cd "$dir" || fail "Couldn't enter $dir"
 
-  set -- --unattended --url "$OR_URL" --token "$OR_TOKEN" --name "$name" --work _work --replace
+  set -- --unattended --url "$OR_URL" --name "$name" --work _work --replace
   [ -n "$OR_LABELS" ] && set -- "$@" --labels "$OR_LABELS"
   [ -n "$OR_GROUP" ] && set -- "$@" --runnergroup "$OR_GROUP"
-  ./config.sh "$@" || fail "config.sh failed for $name. On Linux, missing libraries can be installed with: sudo $dir/bin/installdependencies.sh"
+  # The token goes in config.sh's environment, not its arguments: any account
+  # on the machine can read those with ps.
+  ACTIONS_RUNNER_INPUT_TOKEN=$OR_TOKEN ./config.sh "$@" || fail "config.sh failed for $name. On Linux, missing libraries can be installed with: sudo $dir/bin/installdependencies.sh"
 
   if [ "$OR_SERVICE" = 1 ]; then
     say "Installing $name as a service…"

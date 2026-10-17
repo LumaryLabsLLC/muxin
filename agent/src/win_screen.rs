@@ -342,7 +342,10 @@ fn vk_of(sym: u32) -> Option<(VIRTUAL_KEY, bool)> {
 
 const CF_UNICODETEXT: u32 = 13;
 
-/// The clipboard's text, if it has any.
+/// The clipboard's text, if it has any and isn't a password manager's: they
+/// keep their copies out of clipboard history and off other devices, with
+/// `ExcludeClipboardContentFromMonitorProcessing`, or with
+/// `CanIncludeInClipboardHistory` or `CanUploadToCloudClipboard` set to 0.
 fn clipboard_text() -> Option<String> {
     use windows_sys::Win32::System::DataExchange::*;
     use windows_sys::Win32::System::Memory::*;
@@ -350,7 +353,7 @@ fn clipboard_text() -> Option<String> {
         if IsClipboardFormatAvailable(CF_UNICODETEXT) == 0 || OpenClipboard(std::ptr::null_mut()) == 0 {
             return None;
         }
-        let h = GetClipboardData(CF_UNICODETEXT);
+        let h = if private_copy() { std::ptr::null_mut() } else { GetClipboardData(CF_UNICODETEXT) };
         let text = if h.is_null() {
             None
         } else {
@@ -370,6 +373,37 @@ fn clipboard_text() -> Option<String> {
         CloseClipboard();
         text
     }
+}
+
+/// Whether what's on the clipboard (open) is marked private (see `clipboard_text`).
+fn private_copy() -> bool {
+    use windows_sys::Win32::System::DataExchange::*;
+    use windows_sys::Win32::System::Memory::*;
+    let format = |name: &str| {
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe { RegisterClipboardFormatW(wide.as_ptr()) }
+    };
+    let excluded = format("ExcludeClipboardContentFromMonitorProcessing");
+    if excluded != 0 && unsafe { IsClipboardFormatAvailable(excluded) } != 0 {
+        return true;
+    }
+    // These two hold a DWORD: 0 keeps the copy out.
+    ["CanIncludeInClipboardHistory", "CanUploadToCloudClipboard"].into_iter().any(|name| {
+        let f = format(name);
+        let h = if f == 0 { std::ptr::null_mut() } else { unsafe { GetClipboardData(f) } };
+        if h.is_null() {
+            return false;
+        }
+        unsafe {
+            let p = GlobalLock(h) as *const u32;
+            if p.is_null() {
+                return false;
+            }
+            let zero = GlobalSize(h) >= 4 && p.read_unaligned() == 0;
+            GlobalUnlock(h);
+            zero
+        }
+    })
 }
 
 fn set_clipboard_text(text: &str) -> bool {

@@ -59,9 +59,10 @@ libc = "0.2"
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
-# Starting without a console window (see main.rs `without_console_window`).
+# Starting without a console window (see main.rs `without_console_window`);
+# telling a password manager's copies on the clipboard (ui/mod.rs).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_Security_Credentials", "Win32_Graphics_Dwm"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_Security_Credentials", "Win32_Graphics_Dwm", "Win32_System_DataExchange"] }
 # The window's handle, to color its title bar like the theme.
 raw-window-handle = { version = "0.6", optional = true }
 

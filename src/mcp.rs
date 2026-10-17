@@ -29,7 +29,8 @@ and the machine/runner they're about. Ids: machines are slugs like \"mac-studio\
 
 Read-only: status, get_machine, list_runners, list_jobs, check_machines (runs a read-only \
 check over ssh), get_operation, list_operations, get_settings, list_ssh_hosts, list_files.
-Changes things: add_machine / remove_machine edit config.toml only. install_runners and \
+Changes things: add_machine / remove_machine edit config.toml (remove_machine also unpairs a \
+machine paired for direct connections from this app). install_runners and \
 runner_action run commands on real machines and register or deregister runners on GitHub; \
 confirm with the user before stopping, removing or installing unless they asked for exactly that.
 
@@ -447,7 +448,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "remove_machine",
-            "description": "Remove a machine from config.toml. Nothing on the machine changes and its runners stay registered on GitHub; use runner_action remove first to take runners down.",
+            "description": "Remove a machine from config.toml. Its runners stay registered on GitHub; use runner_action remove first to take runners down. On the machine, only a direct-connection pairing with this app is undone (best-effort).",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
             "annotations": annotations("Remove machine", false, true, true, false),
         }),
@@ -782,7 +783,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "workspace_sync",
-            "description": "Copy code between a folder on this computer (usually the user's local checkout) and a workspace with rsync over ssh. direction=push sends the local folder to the workspace (e.g. to test uncommitted local changes on another OS); direction=pull brings the workspace's files back. delete=true also removes files on the receiving side that the sender doesn't have; pulling with delete into the user's checkout can remove their files, so confirm first.",
+            "description": "Copy code between a folder on this computer (usually the user's local checkout) and a workspace with rsync over ssh. direction=push sends the local folder to the workspace (e.g. to test uncommitted local changes on another OS); direction=pull brings the workspace's files back, but not its .git (commits made there stay there; commit here instead). delete=true also removes files on the receiving side that the sender doesn't have; pulling with delete into the user's checkout can remove their files, so confirm first.",
             "inputSchema": schema(json!({
                 "workspace_id": { "type": "string", "description": WORKSPACE_ID },
                 "local_path": { "type": "string", "description": "Folder on this computer; absolute is safest (relative paths resolve against the MCP server's working directory)." },

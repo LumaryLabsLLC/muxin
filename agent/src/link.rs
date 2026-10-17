@@ -260,7 +260,7 @@ fn handle(req: &Value, out: &Out, attached: &Attached) -> Value {
         "ping" => json!({ "ok": true, "version": crate::VERSION, "now": now() }),
         "addresses" => json!({ "ok": true, "addresses": crate::direct::lan_addresses(), "tailnet": crate::direct::tailnet_addresses(), "port": crate::direct::port() }),
         "pair" => crate::direct::pair(req),
-        "unpair" => crate::direct::unpair(),
+        "unpair" => crate::direct::unpair(req),
         // Everything `muxen-agent ctl` does.
         _ => client::handle(req),
     }

@@ -254,11 +254,15 @@ async fn check(spec: &MachineSpec, remembered: Option<Shell>) -> ProbeResult {
 
     let first = run(spec, shell).await;
     let result = match first {
-        // A Windows host without a POSIX shell: try PowerShell once, unless the user pinned the shell.
-        Err(RunError::Output { ref stderr, .. })
-            if shell == Shell::Sh && spec.shell.is_none() && !spec.is_local() && looks_like_no_sh(stderr) =>
-        {
-            run(spec, Shell::Powershell).await.map(|out| (out, Shell::Powershell))
+        // A Windows host without a POSIX shell: try PowerShell once, unless the
+        // user pinned the shell. Its shell's complaint about `sh` is in the
+        // machine's language, so this goes by ssh getting through; when
+        // PowerShell doesn't answer either, the first error stands.
+        Err(e @ RunError::Output { code, .. }) if shell == Shell::Sh && spec.shell.is_none() && !spec.is_local() && ssh_got_through(code) => {
+            match run(spec, Shell::Powershell).await {
+                Ok(out) => Ok((out, Shell::Powershell)),
+                Err(_) => Err(e),
+            }
         }
         other => other.map(|out| (out, shell)),
     };
@@ -460,9 +464,10 @@ fn script_for(spec: &MachineSpec, shell: Shell) -> String {
     }
 }
 
-fn looks_like_no_sh(stderr: &str) -> bool {
-    let s = stderr.to_ascii_lowercase();
-    s.contains("is not recognized") || s.contains("'sh' is not") || s.contains("the term 'sh'")
+/// Whether ssh reached the machine and its shell ran the command (ssh exits
+/// 255 for its own failures: refused, keys, host keys, ...).
+fn ssh_got_through(code: Option<i32>) -> bool {
+    code.is_some_and(|c| c != 255)
 }
 
 fn last_lines(s: &str, n: usize) -> String {
@@ -770,6 +775,16 @@ c1.restarts=7
     #[test]
     fn empty_output_is_not_ok() {
         assert!(!parse("").ok);
+    }
+
+    #[test]
+    fn tries_powershell_whenever_ssh_got_through() {
+        // cmd.exe's 9009 and PowerShell's 1, whatever language they complain in.
+        assert!(ssh_got_through(Some(9009)));
+        assert!(ssh_got_through(Some(1)));
+        // ssh's own failures, or killed: not a shell's answer.
+        assert!(!ssh_got_through(Some(255)));
+        assert!(!ssh_got_through(None));
     }
 
     #[test]

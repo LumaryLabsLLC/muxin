@@ -1,0 +1,33 @@
+# Advisory check on every push to main and once a week. A finding is
+# reported and does not fail the workflow.
+name: audit
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Monday 06:17 UTC.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # rustsec/audit-check v2.0.0, the latest release, runs on Node 20.
+      # Actions runners dropped Node 20 on 2026-09-23, and main's Node 24
+      # copy has no release. Install cargo-audit instead.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: cargo audit

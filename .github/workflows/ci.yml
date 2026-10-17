@@ -48,5 +48,8 @@ jobs:
         run: |
           $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter fxc.exe | Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1
           "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+      - name: Shell scripts checked out with LF (.gitattributes)
+        shell: bash
+        run: "! git ls-files --eol '*.sh' | grep crlf"
       - run: cargo build --workspace --locked
       - run: cargo test -p muxen-agent --locked

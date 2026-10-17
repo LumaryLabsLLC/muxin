@@ -1,0 +1,4 @@
+# Shell scripts are baked into every build (include_str!) and run by sh on
+# Linux and macOS: a Windows checkout (core.autocrlf) mustn't give them CRLF,
+# or sh fails with `\r: not found`.
+*.sh text eol=lf

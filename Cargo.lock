@@ -3611,6 +3611,7 @@ dependencies = [
  "futures",
  "gpui",
  "image",
+ "libc",
  "mdns-sd",
  "objc",
  "quinn",

@@ -90,20 +90,21 @@ fn runnable(f: &std::path::Path) -> bool {
 /// Asks an interactive login shell for its PATH, giving up after a few seconds.
 #[cfg(unix)]
 fn interactive_path() -> Option<String> {
-    let mut child = Command::new(user_shell())
-        .args(["-l", "-i", "-c", "printf '__OR_PATH=%s\\n' \"$PATH\""])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+    let mut cmd = Command::new(user_shell());
+    cmd.args(["-l", "-i", "-c", "printf '__OR_PATH=%s\\n' \"$PATH\""]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    // In a session of its own, without a terminal: an interactive shell takes
+    // over the terminal it finds (and stops its process group with SIGTTIN when
+    // that's not in front), which is the one Muxin was started from when the
+    // agent runs for this computer.
+    crate::sys::own_group(&mut cmd);
+    let mut child = cmd.spawn().ok()?;
     let started = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) if started.elapsed() < Duration::from_secs(6) => std::thread::sleep(Duration::from_millis(25)),
             _ => {
-                let _ = child.kill();
+                crate::sys::kill_tree(child.id(), false);
                 let _ = child.wait();
                 return None;
             }

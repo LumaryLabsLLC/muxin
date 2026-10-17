@@ -318,6 +318,15 @@ async fn connect_ssh(spec: &MachineSpec) -> Result<Arc<Link>, String> {
     let mut cmd = if spec.is_local() {
         let mut c = Command::new(local_agent());
         c.arg("link");
+        // Without the terminal Muxin may have been started from: nothing the
+        // agent runs (an interactive shell, say) can take it over and stop us.
+        #[cfg(unix)]
+        unsafe {
+            c.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
         c
     } else {
         let mut c = Command::new("ssh");

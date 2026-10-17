@@ -79,7 +79,9 @@ PLIST
 # keeps its Keychain items (cloud sign-ins) and permissions. Not --deep: the
 # agents inside are already signed with their own identifier, which the
 # permissions on the user's Macs (Screen Recording, Accessibility) belong to.
-identity=${MUXEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -n1)}
+# By fingerprint: a keychain can hold several certificates of the same name,
+# and codesign refuses an ambiguous one.
+identity=${MUXEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/^ *[0-9][0-9]*) \([0-9A-F]\{40\}\) "Developer ID Application: .*/\1/p' | head -n1)}
 if [ -n "$release" ]; then
     [ -n "$identity" ] || { echo "error: a release needs a Developer ID Application certificate in the keychain" >&2; exit 1; }
     codesign --force --options runtime --timestamp --identifier com.lumarylabs.muxen -s "$identity" "$app"

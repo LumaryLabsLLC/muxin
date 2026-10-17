@@ -27,8 +27,9 @@ case "$(uname -s)" in
     build x86_64-apple-darwin darwin-x86_64 build
     # Signed with a stable identity, a Mac keeps the agent's Screen Recording
     # and Accessibility permissions across updates (an ad-hoc signature
-    # changes with every build, and the permissions go with it).
-    identity=${MUXEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -n1)}
+    # changes with every build, and the permissions go with it). By fingerprint:
+    # a keychain can hold several certificates of the same name.
+    identity=${MUXEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/^ *[0-9][0-9]*) \([0-9A-F]\{40\}\) "Developer ID Application: .*/\1/p' | head -n1)}
     if [ "${MUXEN_RELEASE:-}" = 1 ]; then
       sign_flags="--options runtime --timestamp"
     else

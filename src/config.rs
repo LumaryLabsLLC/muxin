@@ -261,6 +261,9 @@ pub struct MachineSpec {
     /// "local" for this computer, any `ssh` destination otherwise. Empty: listed but never checked.
     #[serde(default)]
     pub host: String,
+    /// Set only on an operation-local clone for an explicit agent install.
+    #[serde(skip)]
+    pub agent_install_requested: bool,
     #[serde(default)]
     pub user: Option<String>,
     #[serde(default)]
@@ -306,6 +309,17 @@ pub struct MachineSpec {
     /// addresses don't: a VM behind its host's NAT, a router's forwarded port.
     #[serde(default)]
     pub direct_address: Option<String>,
+    /// Update the remote agent automatically, or report when it needs an update.
+    #[serde(default)]
+    pub agent_update: AgentUpdate,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentUpdate {
+    #[default]
+    Auto,
+    Manual,
 }
 
 /// Where a cloud machine lives, as config.toml records it:
@@ -792,6 +806,27 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn parses_agent_update_modes() {
+        for (setting, expected) in [
+            ("", AgentUpdate::Auto),
+            ("auto", AgentUpdate::Auto),
+            ("manual", AgentUpdate::Manual),
+        ] {
+            let mut text = "[[machine]]\nname = \"Box\"\nhost = \"box\"\n".to_string();
+            if !setting.is_empty() {
+                text.push_str(&format!("agent_update = \"{setting}\"\n"));
+            }
+            assert_eq!(
+                Inventory::parse(&text).unwrap().machines[0].agent_update,
+                expected
+            );
+        }
+        let err = Inventory::parse("[[machine]]\nname = \"Box\"\nagent_update = \"never\"\n")
+            .unwrap_err();
+        assert!(err.to_string().contains("agent_update"), "{err}");
+    }
 
     #[test]
     fn parses_inventory_and_dedupes_ids() {

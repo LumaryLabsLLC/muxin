@@ -15,13 +15,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use super::super::workspaces::transport::{self, Limits};
-use crate::config::MachineSpec;
+use crate::config::{AgentUpdate, MachineSpec};
 use crate::ops::remote::sh_quote;
 use crate::probe::{self, ProbeResult};
 
 /// Where the agent lives on every machine (and how attach commands name it).
 /// Windows: `%USERPROFILE%\.muxen\bin\muxen-agent.exe` (see `command`).
 pub const REMOTE_PATH: &str = "~/.muxen/bin/muxen-agent";
+/// Reserved refusal token carried unchanged through existing String wrappers.
+/// It stays readable in the window; agent-aware API converters attach a hint.
+pub const MANUAL_INSTALL_MARKER: &str = "[Install or update this agent manually.]";
 const CTL_TIMEOUT: Duration = Duration::from_secs(25);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -153,7 +156,7 @@ pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(
         // One that can't run (another system's build) is replaced like a missing one.
         run_sh(spec, &format!("a={REMOTE_PATH}; if [ -x \"$a\" ]; then \"$a\" hash 2>/dev/null || echo broken; else echo none; fi"), CTL_TIMEOUT).await?
     };
-    if installed.trim() != hash {
+    if needs_install(spec, &hash, &installed)? {
         tracing::info!("installing muxen-agent ({target}) on {}", spec.name);
         // Boxed: these futures are big, and `ensure` sits inside nearly every request's.
         let got = if windows { Box::pin(upload_windows(spec, &build_path(&target)?)).await? } else { Box::pin(upload(spec, bytes)).await? };
@@ -294,6 +297,23 @@ pub(crate) async fn run_sh(spec: &MachineSpec, script: &str, timeout: Duration) 
         _ => Err(out.reason()),
     }
 }
+
+fn needs_install(spec: &MachineSpec, hash: &str, installed: &str) -> Result<bool, String> {
+    if installed.trim() == hash {
+        return Ok(false);
+    }
+    if spec.agent_update == AgentUpdate::Manual && !spec.agent_install_requested {
+        return Err(format!(
+            "The agent on {} is out of date. {MANUAL_INSTALL_MARKER}",
+            spec.name
+        ));
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+#[path = "agent_update_tests.rs"]
+mod update_mode_tests;
 
 /// The token of the GitHub CLI's active login on a machine. It travels over the
 /// same ssh connection as everything else and is never logged. (Not `--user`:

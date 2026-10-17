@@ -140,6 +140,7 @@ runners = ["mac-studio-01", "mac-studio-02"]   # expected runners; missing ones 
 # discover = false                              # don't list runners found but not declared
 # notes = "Under the desk"
 # direct_address = "nas.example.com:47822"      # where a direct connection reaches it (NAT, a forwarded port)
+# agent_update = "manual"                      # report an old agent instead of updating it (default: "auto")
 
 [[machine]]
 name = "StudioNAS"   # no runners: shown under "Other machines"
@@ -147,6 +148,8 @@ host = "nas"
 ```
 
 A machine that runs on another one is shown under it: a VM or container reached through that machine (`ProxyJump` to its own address or `127.0.0.1`), or at its address on another port. Muxin works this out from `~/.ssh/config`, what each machine reports about itself (a VM says so), and the Docker containers that publish the port ssh goes to. When it can't be reached, it says whether the machine it's on is off or its container is stopped, and it can start or stop that container (`muxin power win11 on`).
+
+Muxin updates each machine's agent when it needs a different build. Set `agent_update = "manual"` on a machine to report this instead. To update it, set the value back to `"auto"` and try the request again.
 
 Runners installed in the usual places are discovered automatically: `~/actions-runner*`, `~/actions-runner/*`, `~/runners/*`, `/opt/actions-runner*` and `C:\actions-runner\*`. A runner is found from its `.runner` file and its running `Runner.Listener` / `Runner.Worker` processes.
 

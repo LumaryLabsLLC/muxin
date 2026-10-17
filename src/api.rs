@@ -70,6 +70,23 @@ impl ApiError {
     }
 }
 
+/// Promote only the installer's reserved token at agent-aware boundaries.
+/// Callers' specific errors (busy, unreachable, invalid input) keep their code.
+fn agent_error(mut error: ApiError) -> ApiError {
+    let marker = crate::fleet::sessions::agent::MANUAL_INSTALL_MARKER;
+    if error.code == "operation_failed" && error.message.contains(marker) {
+        error.code = "invalid";
+        error.message = error.message.replace(marker, "").trim().to_string();
+        if error.message.is_empty() {
+            error.message = "The agent needs an update.".into();
+        }
+        error.hint = Some(
+            "Set agent_update = \"auto\" for this machine in config.toml, then try again.".into(),
+        );
+    }
+    error
+}
+
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)?;
@@ -1430,7 +1447,7 @@ pub async fn schedule_save(engine: &Arc<Engine>, req: ScheduleSaveRequest) -> Ap
     let s = freshen(engine).await;
     let m = find_machine(&s, &req.machine_id)?.clone();
     let input = crate::fleet::schedules::ScheduleInput { id: req.id, name: req.name, when: req.when, command: req.command, agent: req.agent, prompt: req.prompt, folder: req.folder, enabled: req.enabled };
-    engine.schedule_save(&m.id, input).await.map_err(|e| ApiError::new("operation_failed", e))
+    engine.schedule_save(&m.id, input).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1446,21 +1463,21 @@ pub struct ScheduleRequest {
 pub async fn schedule_delete(engine: &Arc<Engine>, req: ScheduleRequest) -> ApiResult<serde_json::Value> {
     let s = freshen(engine).await;
     let m = find_machine(&s, &req.machine_id)?.clone();
-    engine.schedule_delete(&m.id, &req.schedule_id).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    engine.schedule_delete(&m.id, &req.schedule_id).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))?;
     Ok(serde_json::json!({ "deleted": req.schedule_id }))
 }
 
 pub async fn schedule_run(engine: &Arc<Engine>, req: ScheduleRequest) -> ApiResult<serde_json::Value> {
     let s = freshen(engine).await;
     let m = find_machine(&s, &req.machine_id)?.clone();
-    engine.schedule_run(&m.id, &req.schedule_id).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    engine.schedule_run(&m.id, &req.schedule_id).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))?;
     Ok(serde_json::json!({ "started": req.schedule_id, "next": "It runs in the background there. Read its output with schedule_log." }))
 }
 
 pub async fn schedule_log(engine: &Arc<Engine>, req: ScheduleRequest) -> ApiResult<crate::fleet::schedules::ScheduleLog> {
     let s = freshen(engine).await;
     let m = find_machine(&s, &req.machine_id)?.clone();
-    engine.schedule_log(&m.id, &req.schedule_id, req.started).await.map_err(|e| ApiError::new("operation_failed", e))
+    engine.schedule_log(&m.id, &req.schedule_id, req.started).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))
 }
 
 /// The machines VMs can run on (Docker; Windows also needs Linux with KVM),
@@ -2438,6 +2455,59 @@ mod tests {
     }
 
     #[test]
+    fn api_error_constructor_never_reclassifies_message_text() {
+        for code in ["busy", "unreachable", "operation_failed"] {
+            for message in [
+                "The agent on Box is out of date. Set agent_update = \"auto\" for this machine.",
+                crate::fleet::sessions::agent::MANUAL_INSTALL_MARKER,
+            ] {
+                let error = ApiError::new(code, message);
+                assert_eq!(error.code, code);
+                assert_eq!(error.message, message);
+                assert!(error.hint.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn agent_refusal_marker_maps_through_wrappers_with_a_structured_hint() {
+        let marker = crate::fleet::sessions::agent::MANUAL_INSTALL_MARKER;
+        let error = session_error(format!(
+            "While connecting: The agent on Box. Backup is out of date. {marker}"
+        ));
+        assert_eq!(error.code, "invalid");
+        assert_eq!(
+            error.message,
+            "While connecting: The agent on Box. Backup is out of date."
+        );
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.hint.unwrap().contains("agent_update = \"auto\""));
+        for code in ["busy", "unreachable", "invalid"] {
+            let error = agent_error(ApiError::new(code, format!("Wrapper: {marker}")));
+            assert_eq!(error.code, code);
+            assert!(error.hint.is_none());
+        }
+        assert_eq!(
+            session_error(format!("Machine is unreachable: {marker}")).code,
+            "unreachable"
+        );
+    }
+
+    #[test]
+    fn agent_refusal_lookalikes_are_not_markers() {
+        for message in [
+            "The agent on Box is out of date. Set agent_update = \"auto\" for this machine.",
+            "Install or update this agent manually.",
+            "[Install or update this agent manually.",
+            "[Install or update this agent manually later.]",
+        ] {
+            let error = agent_error(ApiError::new("operation_failed", message));
+            assert_eq!(error.code, "operation_failed", "{message}");
+            assert!(error.hint.is_none());
+        }
+    }
+
+    #[test]
     fn workspace_errors_map_to_codes() {
         assert_eq!(ws_error("No workspace \"ws-x\".".into(), Surface::Mcp).code, "not_found");
         assert_eq!(ws_error("ssh: connect to host x port 22: Operation timed out".into(), Surface::Mcp).code, "unreachable");
@@ -2672,7 +2742,7 @@ fn session_error(message: String) -> ApiError {
     if code == "unreachable" {
         err = err.with_hint("The machine didn't answer over ssh. Check that `ssh <host>` works without a password prompt.");
     }
-    err
+    agent_error(err)
 }
 
 /// Machines to look at: one, or every machine that can be reached.
@@ -3213,7 +3283,7 @@ async fn git_out(engine: &Arc<Engine>, m: &crate::fleet::model::Machine, setup: 
 /// Whether git on a machine can commit and push to GitHub.
 pub async fn git_status(engine: &Arc<Engine>, machine_id: &str) -> ApiResult<GitSetupOut> {
     let m = machine_with_gh(engine, machine_id).await?;
-    let setup = engine.git_setup_status(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    let setup = engine.git_setup_status(&m.id).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))?;
     Ok(git_out(engine, &m, setup).await)
 }
 
@@ -3239,7 +3309,7 @@ pub async fn git_setup(engine: &Arc<Engine>, req: GitSetupRequest) -> ApiResult<
         None
     };
     let setup = engine.git_setup_apply(&m.id, identity, req.credentials).await.map_err(|e| {
-        let err = ApiError::new("operation_failed", e.clone());
+        let err = agent_error(ApiError::new("operation_failed", e.clone()));
         if e.contains("Sign in to the GitHub CLI") { err.with_hint("gh auth login") } else { err }
     })?;
     Ok(git_out(engine, &m, setup).await)
@@ -3262,7 +3332,7 @@ pub async fn machine_connection(engine: &Arc<Engine>, machine_id: &str) -> ApiRe
 /// Turns direct (QUIC) connections to a machine on or off.
 pub async fn set_direct(engine: &Arc<Engine>, req: DirectRequest) -> ApiResult<crate::fleet::connection::Connection> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
-    engine.set_direct(&m.id, req.enabled).await.map_err(|e| ApiError::new("operation_failed", e))
+    engine.set_direct(&m.id, req.enabled).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3278,20 +3348,20 @@ pub struct DesktopInputRequest {
 /// What's on a machine's screen, or one of its displays (a JPEG, plus its size).
 pub async fn desktop_screenshot(engine: &Arc<Engine>, machine_id: &str, display: Option<&str>) -> ApiResult<crate::fleet::desktop::Screenshot> {
     let m = find_machine(&engine.current(), machine_id)?.clone();
-    engine.desktop_screenshot(&m.id, display).await.map_err(|e| ApiError::new("operation_failed", e))
+    engine.desktop_screenshot(&m.id, display).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))
 }
 
 /// Moves, clicks, scrolls and types on a machine's desktop.
 pub async fn desktop_input(engine: &Arc<Engine>, req: DesktopInputRequest) -> ApiResult<serde_json::Value> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
-    let n = engine.desktop_input(&m.id, req.display.as_deref(), &req.events).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    let n = engine.desktop_input(&m.id, req.display.as_deref(), &req.events).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))?;
     Ok(serde_json::json!({ "machine_id": m.id, "events": n, "next": "Take a desktop_screenshot to see the result." }))
 }
 
 /// A machine's monitors, virtual ones included.
 pub async fn desktop_displays(engine: &Arc<Engine>, req: MachineRequest) -> ApiResult<Vec<crate::fleet::model::DisplayInfo>> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
-    engine.displays(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))
+    engine.displays(&m.id).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3312,7 +3382,7 @@ fn display_error(e: crate::fleet::desktop::AddDisplayError) -> ApiError {
     match e {
         crate::fleet::desktop::AddDisplayError::NeedsPassword(why) => ApiError::invalid(why)
             .with_hint("Ask the user to add or remove this monitor from the Muxin app (the machine's desktop › Add monitor); it asks for their password there."),
-        crate::fleet::desktop::AddDisplayError::Failed(why) => ApiError::new("operation_failed", why),
+        crate::fleet::desktop::AddDisplayError::Failed(why) => agent_error(ApiError::new("operation_failed", why)),
     }
 }
 
@@ -3344,7 +3414,7 @@ pub async fn desktop_set_display(engine: &Arc<Engine>, req: SetDisplayRequest) -
     if size.is_none() && req.scale.is_none() {
         return Err(ApiError::new("invalid", "Pass width and height, or scale."));
     }
-    engine.set_display(&m.id, &req.display, size, req.scale).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    engine.set_display(&m.id, &req.display, size, req.scale).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))?;
     let shown = engine.current().machines.iter().find(|x| x.id == m.id).and_then(|x| x.displays.iter().find(|d| d.id == req.display).cloned());
     shown.ok_or_else(|| ApiError::new("not_found", format!("{} isn't one of {}'s displays now.", req.display, m.name)))
 }
@@ -3372,7 +3442,7 @@ pub struct LogSourcesRequest {
 /// What a machine has to read: its system log, log files, containers, services.
 pub async fn log_sources(engine: &Arc<Engine>, req: LogSourcesRequest) -> ApiResult<crate::fleet::logs::LogSources> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
-    engine.log_sources(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))
+    engine.log_sources(&m.id).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3395,7 +3465,7 @@ pub struct ReadLogsRequest {
 pub async fn logs_read(engine: &Arc<Engine>, req: ReadLogsRequest) -> ApiResult<serde_json::Value> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
     let source = crate::fleet::logs::LogSource { kind: req.kind.clone(), target: req.target.clone(), user: req.user, ..Default::default() };
-    let lines = engine.read_logs(&m.id, &source, req.lines.unwrap_or(200), req.filter.as_deref()).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    let lines = engine.read_logs(&m.id, &source, req.lines.unwrap_or(200), req.filter.as_deref()).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))?;
     Ok(serde_json::json!({ "machine_id": m.id, "kind": req.kind, "target": req.target, "lines": lines }))
 }
 
@@ -3408,7 +3478,7 @@ pub struct ServicesRequest {
 /// A machine's services (systemd's on Linux, Homebrew's on a Mac) and Docker containers.
 pub async fn machine_services(engine: &Arc<Engine>, req: ServicesRequest) -> ApiResult<crate::fleet::services::ServiceList> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
-    engine.services(&m.id, true).await.map_err(|e| ApiError::new("operation_failed", e))
+    engine.services(&m.id, true).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3435,7 +3505,7 @@ pub async fn service_action(engine: &Arc<Engine>, req: ServiceActionRequest) -> 
         "disable" => "disable",
         other => return Err(ApiError::new("invalid", format!("\"{other}\" isn't an action: start, stop, restart, enable or disable."))),
     };
-    let list = engine.services(&m.id, false).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    let list = engine.services(&m.id, false).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))?;
     let wanted = req.name.trim_end_matches(".service");
     let pool: Vec<_> = if req.container { list.containers } else { list.services.into_iter().chain(list.containers).collect() };
     let service = pool
@@ -3446,7 +3516,7 @@ pub async fn service_action(engine: &Arc<Engine>, req: ServiceActionRequest) -> 
         crate::fleet::desktop::AddDisplayError::NeedsPassword(_) => {
             ApiError::new("invalid", format!("{} wants the user's password for that (sudo).", m.name)).with_hint("Do it from the Muxin app (machine › Services), which asks for it.")
         }
-        crate::fleet::desktop::AddDisplayError::Failed(why) => ApiError::new("operation_failed", why),
+        crate::fleet::desktop::AddDisplayError::Failed(why) => agent_error(ApiError::new("operation_failed", why)),
     })?;
     Ok(serde_json::json!({ "machine_id": m.id, "name": service.name, "kind": service.kind, "action": action, "ok": true }))
 }
@@ -3522,7 +3592,7 @@ pub struct ComposeActionRequest {
 
 pub async fn compose_action(engine: &Arc<Engine>, req: ComposeActionRequest) -> ApiResult<OperationOut> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
-    let list = engine.services(&m.id, false).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    let list = engine.services(&m.id, false).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))?;
     let project = list.compose.into_iter().find(|p| p.name == req.project).ok_or_else(|| ApiError::new("not_found", format!("{} has no Compose project called {}.", m.name, req.project)))?;
     let op = match req.service.as_deref().filter(|s| !s.is_empty()) {
         Some(service) => engine.compose_service_action(&m.id, &project, service, &req.action),
@@ -3616,7 +3686,7 @@ pub struct ProcessesRequest {
 /// A machine's processes (the busiest few hundred, with CPU and memory) and its GPUs.
 pub async fn machine_processes(engine: &Arc<Engine>, req: ProcessesRequest) -> ApiResult<crate::fleet::procs::ProcessList> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
-    engine.processes(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))
+    engine.processes(&m.id).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3640,7 +3710,7 @@ pub async fn process_signal(engine: &Arc<Engine>, req: ProcessSignalRequest) -> 
     let process = crate::fleet::services::Service { kind: "process".into(), target: req.pid.to_string(), name: req.pid.to_string(), ..Default::default() };
     engine.service_action(&m.id, &process, action).await.map_err(|e| match e {
         crate::fleet::desktop::AddDisplayError::NeedsPassword(_) => ApiError::new("invalid", format!("{} wants the user's password for that: it's another user's process (sudo).", m.name)).with_hint("Do it from the Muxin app (machine › Services › Processes), which asks for it."),
-        crate::fleet::desktop::AddDisplayError::Failed(e) => ApiError::new("operation_failed", e),
+        crate::fleet::desktop::AddDisplayError::Failed(e) => agent_error(ApiError::new("operation_failed", e)),
     })?;
     Ok(serde_json::json!({ "machine_id": m.id, "pid": req.pid, "done": if action == "kill" { "killed" } else { "stopped" } }))
 }
@@ -3720,7 +3790,7 @@ pub struct PortsRequest {
 /// container, and for web servers the status and title of their front page.
 pub async fn machine_ports(engine: &Arc<Engine>, req: PortsRequest) -> ApiResult<Vec<crate::fleet::ports::ListeningPort>> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
-    engine.ports(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))
+    engine.ports(&m.id).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3752,9 +3822,9 @@ pub struct ComposeProjectRequest {
 /// its networks and volumes.
 pub async fn compose_project(engine: &Arc<Engine>, req: ComposeProjectRequest) -> ApiResult<crate::fleet::services::ComposeGraph> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
-    let list = engine.services(&m.id, false).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    let list = engine.services(&m.id, false).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))?;
     let project = list.compose.into_iter().find(|p| p.name == req.project).ok_or_else(|| ApiError::new("not_found", format!("{} has no Compose project called {}.", m.name, req.project)))?;
-    engine.compose_describe(&m.id, &project).await.map_err(|e| ApiError::new("operation_failed", e))
+    engine.compose_describe(&m.id, &project).await.map_err(|e| agent_error(ApiError::new("operation_failed", e)))
 }
 
 /// Git checkouts on the machines, re-read first.
@@ -3774,7 +3844,7 @@ pub async fn checkouts(engine: &Arc<Engine>, req: CheckoutsRequest) -> ApiResult
 
 pub async fn checkout_git(engine: &Arc<Engine>, req: GitRequest) -> ApiResult<GitOut> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
-    engine.checkout_git(&m.id, &req.path, &req.action).await.map(|output| GitOut { output }).map_err(|e| ApiError::new("operation_failed", e))
+    engine.checkout_git(&m.id, &req.path, &req.action).await.map(|output| GitOut { output }).map_err(|e| agent_error(ApiError::new("operation_failed", e)))
 }
 
 // ---------------------------------------------------------------------------

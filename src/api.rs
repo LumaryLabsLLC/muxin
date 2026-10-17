@@ -1171,14 +1171,8 @@ pub async fn check(engine: &Arc<Engine>, req: CheckRequest) -> ApiResult<Vec<Mac
         }
         None => None,
     };
-    match &only {
-        Some(id) => {
-            engine.run_check(Some(vec![id.clone()])).await;
-            // Another check of the same machine may have been in flight; wait it out.
-            wait_checked(engine, id, CHECK_WAIT).await;
-        }
-        None => engine.run_check(None).await,
-    }
+    // This also waits out a check of the same machine that was already in flight.
+    engine.run_check(only.clone().map(|id| vec![id])).await;
     engine.sync_github().await;
     let s = engine.current();
     Ok(s.machines.iter().filter(|m| only.as_ref().is_none_or(|id| &m.id == id)).map(machine_summary).collect())

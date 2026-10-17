@@ -947,9 +947,12 @@ impl Engine {
     }
 
     /// Probes the given machines (or all), publishing as each one finishes.
+    /// A machine that another check is already probing isn't probed twice:
+    /// this waits for that check instead, so every machine asked about has
+    /// been looked at when it returns.
     pub(crate) async fn run_check(self: &Arc<Self>, only: Option<Vec<String>>) {
         let full = only.is_none();
-        let jobs: Vec<(MachineSpec, Option<probe::Shell>)> = {
+        let (jobs, mut in_flight): (Vec<(MachineSpec, Option<probe::Shell>)>, Vec<String>) = {
             let mut st = self.state.lock().unwrap();
             if full && st.check_running {
                 return;
@@ -957,15 +960,14 @@ impl Engine {
             if self.demo.is_none() {
                 self.reload_inventory(&mut st, false);
             }
-            let specs: Vec<MachineSpec> = st
+            let (in_flight, specs): (Vec<MachineSpec>, Vec<MachineSpec>) = st
                 .inventory
                 .machines
                 .iter()
                 .filter(|m| m.is_connected())
                 .filter(|m| only.as_ref().is_none_or(|ids| ids.contains(&m.id)))
-                .filter(|m| !st.checking.contains(&m.id))
                 .cloned()
-                .collect();
+                .partition(|m| st.checking.contains(&m.id));
             if full {
                 st.check_running = true;
                 st.check_started_at = Some(Utc::now());
@@ -974,10 +976,11 @@ impl Engine {
                 st.checking.insert(s.id.clone());
             }
             self.publish(&mut st);
-            specs.into_iter().map(|s| {
+            let jobs = specs.into_iter().map(|s| {
                 let shell = st.probes.get(&s.id).and_then(|p| p.shell);
                 (s, shell)
-            }).collect()
+            }).collect();
+            (jobs, in_flight.into_iter().map(|m| m.id).collect())
         };
 
         let mut pending: FuturesUnordered<_> = jobs
@@ -1022,6 +1025,19 @@ impl Engine {
                         let _ = me.displays(&id).await;
                     }
                 });
+            }
+        }
+
+        // Machines another check was already probing: wait for that check.
+        // (Each finished probe is published, which wakes this up to look again.)
+        let mut rx = self.subscribe();
+        loop {
+            {
+                let st = self.state.lock().unwrap();
+                in_flight.retain(|id| st.checking.contains(id));
+            }
+            if in_flight.is_empty() || rx.changed().await.is_err() {
+                break;
             }
         }
 
@@ -1274,5 +1290,23 @@ mod tests {
         assert_eq!(window.current().machines[0].status, "online", "an older check must not win");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Adding a machine starts a check of it; checking it right after must
+    /// wait for that one, not return before the machine has been looked at.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn checking_a_machine_waits_for_a_check_already_running() {
+        let engine = Engine::new(Paths::resolve(Some(std::env::temp_dir().join("muxen-check-wait")), None), true);
+        let mut rx = engine.subscribe();
+        engine.trigger_check(Some("beacon".into()));
+        let started = |s: &Snapshot| s.machines.iter().any(|m| m.id == "beacon" && m.checking);
+        while !started(&rx.borrow_and_update()) {
+            rx.changed().await.unwrap();
+        }
+        engine.run_check(Some(vec!["beacon".into()])).await;
+        let s = engine.current();
+        let beacon = s.machines.iter().find(|m| m.id == "beacon").unwrap();
+        assert!(!beacon.checking && beacon.probe.is_some(), "run_check returned while beacon was still being checked");
+        assert_eq!(beacon.platform, "linux-x64");
     }
 }

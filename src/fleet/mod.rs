@@ -1,3 +1,4 @@
+pub mod agent_lifecycle;
 pub mod build;
 pub mod clipboard;
 pub mod code;

@@ -8,7 +8,7 @@ Use the MCP tools when they're connected: start the server with `muxin mcp`, and
 
 1. **Start with `status`** (`muxin status --json`) and read `attention` first. It lists what's wrong, most severe first, with the `machine_id` or `runner_id` each item is about.
 2. **The state may be stale.** `status` uses the last machine check. Look at `last_check_at` and each machine's `checked_at`. Call `check_machines` (or `status` with `refresh: true`) when you need it fresh. Checks are read-only.
-3. **Confirm before changing real things.** `install_runners` and `runner_action` with `stop`, `restart` or `remove` run commands on the user's machines and register or deregister runners on GitHub. Do them when the user asked for exactly that; otherwise say what you'd do and ask. `add_machine`, `remove_machine`, `rename_machine` and `connect_machine` only edit `config.toml`.
+3. **Confirm before changing real things.** `install_runners` and `runner_action` with `stop`, `restart` or `remove` run commands on the user's machines and register or deregister runners on GitHub. `agent_uninstall` removes a machine's agent, schedules and pairing. It stays uninstalled until `muxin agent install <machine>` succeeds. Do them when the user asked for exactly that; otherwise say what you'd do and ask. `add_machine`, `remove_machine`, `rename_machine` and `connect_machine` only edit `config.toml`.
 4. **Use the hints.** Errors have a `code`:
    - `not_found`
    - `invalid`

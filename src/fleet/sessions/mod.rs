@@ -10,6 +10,7 @@
 
 pub mod actions;
 pub(crate) mod agent;
+pub(crate) mod lifecycle_state;
 pub mod git;
 pub mod question;
 

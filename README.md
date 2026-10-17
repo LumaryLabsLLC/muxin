@@ -401,6 +401,8 @@ muxin session stop beelink/claude-3f9a
 
 Build the agent for every platform with `scripts/build-agents.sh` (needs `cargo-zigbuild` and Zig for the Linux builds); `scripts/bundle-macos.sh` runs it and ships the builds inside the app.
 
+Remove a machine's agent with `muxin agent uninstall <machine>`. The machine stays in config.toml. Background checks leave the agent uninstalled until you run `muxin agent install <machine>`.
+
 ## Connections and desktops
 
 Muxin first reaches a machine with `ssh`, installs its small agent there, and from then on talks to that agent over **one live connection** instead of a new ssh connection per request: requests take milliseconds instead of ~0.4 s, terminals open instantly, and the sidebar updates the moment a session changes.

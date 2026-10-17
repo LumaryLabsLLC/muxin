@@ -15,6 +15,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::fleet::Engine;
+pub use crate::fleet::agent_lifecycle::{agent_install, agent_uninstall};
 use crate::fleet::model::{Job, Machine, Operation, Runner, Snapshot, WorkspaceCommand, WorkspaceInfo};
 use crate::fleet::workspaces::{CreateWorkspace, ExecOptions, SyncDirection};
 use crate::ops::{InstallMode, InstallRequest, NewMachine, RunnerAction};

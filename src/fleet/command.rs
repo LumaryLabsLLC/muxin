@@ -28,7 +28,7 @@ fn sh_script(command: &str) -> String {
 /// output formatted as text, its `exit` its exit status).
 fn ps_script(command: &str) -> String {
     format!(
-        "$OR_CMD = '{}'\n\
+        "$OR_CMD = {}\n\
          $f = Join-Path ([IO.Path]::GetTempPath()) (\"muxen-run-$PID.ps1\")\n\
          Set-Content -LiteralPath $f -Value $OR_CMD -Encoding UTF8\n\
          Set-Location $env:USERPROFILE\n\
@@ -36,7 +36,7 @@ fn ps_script(command: &str) -> String {
          $c = $LASTEXITCODE\n\
          Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue\n\
          [Console]::Error.WriteLine(\"${{OR_MARK}}:exit=$c\")\n",
-        command.replace('\'', "''")
+        crate::ops::remote::ps_quote(command)
     )
 }
 

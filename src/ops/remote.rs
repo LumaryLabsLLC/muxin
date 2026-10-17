@@ -77,8 +77,20 @@ pub(crate) fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// A PowerShell single-quoted string. PowerShell takes ‘ ’ ‚ ‛ for single
+/// quotes too, so each of those is doubled like ' is, or text with one (a
+/// typographic "don’t") would end the string and run the rest as commands.
 pub(crate) fn ps_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
 }
 
 /// Runs `script` on the machine, forwarding every output line (secrets masked) to
@@ -287,6 +299,37 @@ mod tests {
             "",
         );
         assert_eq!(ps, "$OR_TOKEN = 'it''s'\n$OR_NAMES = @('a-01', 'b-02')\n$OR_SERVICE = $false\n");
+    }
+
+    /// How PowerShell reads a single-quoted string (its tokenizer): any of
+    /// ' ‘ ’ ‚ ‛ ends it, unless another one follows, which stands for that
+    /// second one. Returns the text and whatever comes after the string.
+    fn ps_read(quoted: &str) -> (String, String) {
+        let is_quote = |c: char| matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}');
+        let mut chars = quoted.chars().peekable();
+        assert!(chars.next().is_some_and(is_quote));
+        let mut text = String::new();
+        while let Some(c) = chars.next() {
+            if is_quote(c) {
+                match chars.peek() {
+                    Some(&n) if is_quote(n) => text.push(chars.next().unwrap()),
+                    _ => return (text, chars.collect()),
+                }
+            } else {
+                text.push(c);
+            }
+        }
+        panic!("unterminated string: {quoted}");
+    }
+
+    #[test]
+    fn powershell_strings_hold_any_quote() {
+        for s in ["it's", "don’t", "‘quoted’", "a‚b‛c", "x’; Remove-Item -Recurse ~; ’", "''’’", "", "$(whoami) `n"] {
+            let (text, rest) = ps_read(&ps_quote(s));
+            assert_eq!(text, s);
+            assert_eq!(rest, "", "{s:?} leaked out of its string");
+        }
+        assert_eq!(ps_quote("don’t"), "'don’’t'");
     }
 
     #[test]

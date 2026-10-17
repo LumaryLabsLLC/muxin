@@ -155,11 +155,11 @@ pub fn spawn_background(args: &[&str], log: PathBuf) -> io::Result<()> {
         if direct.is_ok() {
             return Ok(());
         }
-        let quote = |s: &str| s.replace('\'', "''");
+        let quote = crate::win::quote;
         let line = std::iter::once(format!("\"{}\"", exe.display())).chain(args.iter().map(|a| a.to_string())).collect::<Vec<_>>().join(" ");
         // Hidden (ShowWindow 0), should this be a desktop session.
         let script = format!(
-            "$startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{{ ShowWindow = [uint16]0 }}; $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{ CommandLine = '{}'; CurrentDirectory = '{}'; ProcessStartupInformation = $startup }}; exit $r.ReturnValue",
+            "$startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{{ ShowWindow = [uint16]0 }}; $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{ CommandLine = {}; CurrentDirectory = {}; ProcessStartupInformation = $startup }}; exit $r.ReturnValue",
             quote(&line),
             quote(&home.display().to_string())
         );

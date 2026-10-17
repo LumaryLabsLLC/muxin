@@ -49,9 +49,19 @@ fn clixml_error(stderr: &str) -> Option<String> {
     Some(text.trim().to_string()).filter(|t| !t.is_empty())
 }
 
-/// A PowerShell string literal.
+/// A PowerShell string literal. PowerShell takes ‘ ’ ‚ ‛ for single quotes
+/// too, so each is doubled like ' is (else one would end the string).
 pub fn quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
 }
 
 // --- Processes --------------------------------------------------------------
@@ -299,5 +309,7 @@ mod tests {
         let err = "#< CLIXML\r\n<Objs Version=\"1.1.0.1\"><S S=\"Error\">Cannot find any service with service name 'nope'._x000D__x000A_</S></Objs>";
         assert_eq!(clixml_error(err).as_deref(), Some("Cannot find any service with service name 'nope'."));
         assert_eq!(quote("it's"), "'it''s'");
+        // PowerShell's other single quotes are doubled too.
+        assert_eq!(quote("don\u{2019}t \u{2018}x\u{201A}\u{201B}"), "'don\u{2019}\u{2019}t \u{2018}\u{2018}x\u{201A}\u{201A}\u{201B}\u{201B}'");
     }
 }

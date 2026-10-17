@@ -458,7 +458,7 @@ fn script_for(spec: &MachineSpec, shell: Shell) -> String {
             format!("OR_DIRS='{dirs}'\n{PROBE_SH}")
         }
         Shell::Powershell => {
-            let dirs: Vec<String> = spec.runner_dirs.iter().map(|d| format!("'{}'", d.replace('\'', "''"))).collect();
+            let dirs: Vec<String> = spec.runner_dirs.iter().map(|d| crate::ops::remote::ps_quote(d)).collect();
             format!("$OR_DIRS = @({})\n{PROBE_PS1}", dirs.join(", "))
         }
     }

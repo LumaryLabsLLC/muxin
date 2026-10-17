@@ -16,7 +16,9 @@ $env:GIT_TERMINAL_PROMPT = '0'
 $runs = Join-Path $OR_DIR '.muxen'
 New-Item -ItemType Directory -Force -Path (Join-Path $runs 'logs') | Out-Null
 $f = Join-Path $runs ('run-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
-$q = { param($s) "'" + $s.Replace("'", "''") + "'" }
+# A string literal: PowerShell takes U+2018, U+2019, U+201A and U+201B for
+# single quotes too, so all five are doubled (as \u escapes: this file stays ASCII).
+$q = { param($s) "'" + ($s -replace '[\u0027\u2018\u2019\u201A\u201B]', '$0$0') + "'" }
 
 if ($OR_BG) {
   # Started through WMI, so it outlives this ssh session (sshd ends what a

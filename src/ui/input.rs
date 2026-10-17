@@ -2,6 +2,7 @@
 //! built-in text field). Emits `InputEvent`s for changes, Enter and Escape.
 
 use std::ops::Range;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
@@ -284,30 +285,8 @@ impl TextInput {
         cx.notify()
     }
 
-    fn offset_from_utf16(&self, offset: usize) -> usize {
-        let mut utf8_offset = 0;
-        let mut utf16_count = 0;
-        for ch in self.content.chars() {
-            if utf16_count >= offset {
-                break;
-            }
-            utf16_count += ch.len_utf16();
-            utf8_offset += ch.len_utf8();
-        }
-        utf8_offset
-    }
-
     fn offset_to_utf16(&self, offset: usize) -> usize {
-        let mut utf16_offset = 0;
-        let mut utf8_count = 0;
-        for ch in self.content.chars() {
-            if utf8_count >= offset {
-                break;
-            }
-            utf8_count += ch.len_utf8();
-            utf16_offset += ch.len_utf16();
-        }
-        utf16_offset
+        utf8_to_utf16(&self.content, offset)
     }
 
     fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
@@ -315,7 +294,15 @@ impl TextInput {
     }
 
     fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
-        self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
+        clamp(&self.content, utf16_to_utf8(&self.content, range_utf16.start)..utf16_to_utf8(&self.content, range_utf16.end))
+    }
+
+    /// Runs an input method call (`EntityInputHandler`). On a Mac these come
+    /// from AppKit, through Objective-C, where a panic can't unwind and aborts
+    /// the app (#1). If one slips through anyway, the call is dropped and the
+    /// text stays usable.
+    fn guard<R>(&mut self, fallback: R, f: impl FnOnce(&mut Self) -> R) -> R {
+        guard(self, fallback, f, |this| recover(&this.content, &mut this.marked_range, &mut this.selected_range))
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
@@ -338,9 +325,11 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
-        let range = self.range_from_utf16(&range_utf16);
-        actual_range.replace(self.range_to_utf16(&range));
-        Some(self.content[range].to_string())
+        self.guard(None, |this| {
+            let range = this.range_from_utf16(&range_utf16);
+            actual_range.replace(this.range_to_utf16(&range));
+            Some(this.content[range].to_string())
+        })
     }
 
     fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
@@ -356,14 +345,17 @@ impl EntityInputHandler for TextInput {
     }
 
     fn replace_text_in_range(&mut self, range_utf16: Option<Range<usize>>, new_text: &str, _: &mut Window, cx: &mut Context<Self>) {
-        let range = range_utf16
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
-        self.content = (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
-        self.selected_range = range.start + new_text.len()..range.start + new_text.len();
-        self.marked_range.take();
+        self.guard((), |this| {
+            let range = range_utf16
+                .as_ref()
+                .map(|r| this.range_from_utf16(r))
+                .or(this.marked_range.clone())
+                .unwrap_or(this.selected_range.clone());
+            let (content, _, selected) = splice(&this.content, range, new_text, None);
+            this.content = content.into();
+            this.selected_range = selected;
+            this.marked_range.take();
+        });
         cx.emit(InputEvent::Changed);
         cx.notify();
     }
@@ -376,37 +368,111 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
-        self.content = (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
-        self.marked_range = (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.guard((), |this| {
+            let range = range_utf16
+                .as_ref()
+                .map(|r| this.range_from_utf16(r))
+                .or(this.marked_range.clone())
+                .unwrap_or(this.selected_range.clone());
+            let (content, inserted, selected) = splice(&this.content, range, new_text, new_selected_range_utf16);
+            this.content = content.into();
+            this.marked_range = (!new_text.is_empty()).then_some(inserted);
+            this.selected_range = selected;
+        });
         cx.emit(InputEvent::Changed);
         cx.notify();
     }
 
     fn bounds_for_range(&mut self, range_utf16: Range<usize>, bounds: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
-        let last_layout = self.last_layout.as_ref()?;
-        let range = self.range_from_utf16(&range_utf16);
-        Some(Bounds::from_corners(
-            point(bounds.left() + last_layout.x_for_index(self.to_display(range.start)) - self.scroll_x, bounds.top()),
-            point(bounds.left() + last_layout.x_for_index(self.to_display(range.end)) - self.scroll_x, bounds.bottom()),
-        ))
+        self.guard(None, |this| {
+            let last_layout = this.last_layout.as_ref()?;
+            let range = this.range_from_utf16(&range_utf16);
+            Some(Bounds::from_corners(
+                point(bounds.left() + last_layout.x_for_index(this.to_display(range.start)) - this.scroll_x, bounds.top()),
+                point(bounds.left() + last_layout.x_for_index(this.to_display(range.end)) - this.scroll_x, bounds.bottom()),
+            ))
+        })
     }
 
     fn character_index_for_point(&mut self, point: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
-        let line_point = self.last_bounds?.localize(&point)?;
-        let last_layout = self.last_layout.as_ref()?;
-        let utf8_index = self.from_display(last_layout.index_for_x(point.x - line_point.x + self.scroll_x)?);
-        Some(self.offset_to_utf16(utf8_index))
+        self.guard(None, |this| {
+            let line_point = this.last_bounds?.localize(&point)?;
+            let last_layout = this.last_layout.as_ref()?;
+            let utf8_index = this.from_display(last_layout.index_for_x(point.x - line_point.x + this.scroll_x)?);
+            Some(this.offset_to_utf16(utf8_index))
+        })
     }
+}
+
+/// Runs `f` on `target`, catching a panic: then `recover` puts it right and
+/// `fallback` is returned.
+fn guard<T, R>(target: &mut T, fallback: R, f: impl FnOnce(&mut T) -> R, recover: impl FnOnce(&mut T)) -> R {
+    match catch_unwind(AssertUnwindSafe(|| f(&mut *target))) {
+        Ok(result) => result,
+        Err(_) => {
+            recover(target);
+            fallback
+        }
+    }
+}
+
+/// After a caught panic: nothing marked, and the cursor at the end.
+fn recover(content: &str, marked: &mut Option<Range<usize>>, selected: &mut Range<usize>) {
+    *marked = None;
+    *selected = content.len()..content.len();
+}
+
+/// A UTF-16 offset (what input methods count in) as a byte offset into
+/// `text`, never past its end or inside a character.
+fn utf16_to_utf8(text: &str, offset: usize) -> usize {
+    let mut utf8_offset = 0;
+    let mut utf16_count = 0;
+    for ch in text.chars() {
+        if utf16_count >= offset {
+            break;
+        }
+        utf16_count += ch.len_utf16();
+        utf8_offset += ch.len_utf8();
+    }
+    utf8_offset
+}
+
+fn utf8_to_utf16(text: &str, offset: usize) -> usize {
+    let mut utf16_offset = 0;
+    let mut utf8_count = 0;
+    for ch in text.chars() {
+        if utf8_count >= offset {
+            break;
+        }
+        utf8_count += ch.len_utf8();
+        utf16_offset += ch.len_utf16();
+    }
+    utf16_offset
+}
+
+/// A byte range that's safe to slice `text` with: in order, inside it, and
+/// on character boundaries.
+fn clamp(text: &str, range: Range<usize>) -> Range<usize> {
+    let floor = |i: usize| (0..=i.min(text.len())).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+    let (start, end) = (floor(range.start), floor(range.end));
+    start.min(end)..start.max(end)
+}
+
+/// Replaces `range` of `content` with `new_text`. Returns the new content,
+/// where `new_text` went, and what to select: `selected_utf16` counted from
+/// the start of `new_text` (how an input method places the cursor in text it's
+/// composing), else the end of `new_text`.
+fn splice(content: &str, range: Range<usize>, new_text: &str, selected_utf16: Option<Range<usize>>) -> (String, Range<usize>, Range<usize>) {
+    let range = clamp(content, range);
+    let inserted = range.start..range.start + new_text.len();
+    let selected = match selected_utf16 {
+        Some(r) => {
+            let r = clamp(new_text, utf16_to_utf8(new_text, r.start)..utf16_to_utf8(new_text, r.end));
+            inserted.start + r.start..inserted.start + r.end
+        }
+        None => inserted.end..inserted.end,
+    };
+    (format!("{}{new_text}{}", &content[..range.start], &content[range.end..]), inserted, selected)
 }
 
 struct TextElement {
@@ -621,5 +687,131 @@ impl Render for TextInput {
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The field's text and ranges, changed the way the input method calls
+    /// above change them.
+    struct Field {
+        content: String,
+        selected: Range<usize>,
+        marked: Option<Range<usize>>,
+    }
+
+    impl Field {
+        fn new(content: &str) -> Field {
+            Field { content: content.into(), selected: content.len()..content.len(), marked: None }
+        }
+
+        fn target(&self, range_utf16: Option<Range<usize>>) -> Range<usize> {
+            let range = range_utf16.map(|r| clamp(&self.content, utf16_to_utf8(&self.content, r.start)..utf16_to_utf8(&self.content, r.end)));
+            range.or(self.marked.clone()).unwrap_or(self.selected.clone())
+        }
+
+        /// AppKit's setMarkedText.
+        fn mark(&mut self, text: &str, selected_utf16: Option<Range<usize>>, range_utf16: Option<Range<usize>>) {
+            let (content, inserted, selected) = splice(&self.content, self.target(range_utf16), text, selected_utf16);
+            self.content = content;
+            self.marked = (!text.is_empty()).then_some(inserted);
+            self.selected = selected;
+            self.check();
+        }
+
+        /// AppKit's insertText.
+        fn insert(&mut self, text: &str, range_utf16: Option<Range<usize>>) {
+            let (content, _, selected) = splice(&self.content, self.target(range_utf16), text, None);
+            self.content = content;
+            self.marked = None;
+            self.selected = selected;
+            self.check();
+        }
+
+        /// Every range can be used to slice the text.
+        fn check(&self) {
+            for r in [Some(self.selected.clone()), self.marked.clone()].into_iter().flatten() {
+                assert!(self.content.get(r.clone()).is_some(), "{r:?} doesn't fit {:?}", self.content);
+            }
+        }
+    }
+
+    #[test]
+    fn composing_chinese_then_switching_input_mode() {
+        // Typing pinyin, then switching the input method's mode, which clears
+        // the marked text and then types into the selection (#1).
+        let mut f = Field::new("");
+        f.mark("n", Some(1..1), None);
+        f.mark("ni", Some(2..2), None);
+        f.mark("", Some(0..0), None);
+        assert_eq!((f.content.as_str(), f.selected.clone(), f.marked.clone()), ("", 0..0, None));
+        f.insert("ni", None);
+        assert_eq!((f.content.as_str(), f.selected.clone()), ("ni", 2..2));
+    }
+
+    #[test]
+    fn composing_after_chinese_text() {
+        let mut f = Field::new("你好");
+        f.mark("shi", Some(3..3), None);
+        assert_eq!((f.content.as_str(), f.marked.clone(), f.selected.clone()), ("你好shi", Some(6..9), 9..9));
+        f.mark("是", Some(1..1), None);
+        assert_eq!((f.content.as_str(), f.marked.clone(), f.selected.clone()), ("你好是", Some(6..9), 9..9));
+        f.mark("是的", Some(1..1), None);
+        assert_eq!(f.selected, 9..9);
+        f.insert("是的", None);
+        assert_eq!((f.content.as_str(), f.marked.clone(), f.selected.clone()), ("你好是的", None, 12..12));
+    }
+
+    #[test]
+    fn a_panic_in_an_input_method_call_is_caught_and_editing_goes_on() {
+        let mut f = Field::new("你好");
+        f.mark("ni", Some(2..2), None);
+        assert_eq!(f.marked, Some(6..8));
+        let got = guard(
+            &mut f,
+            "fallback",
+            |f| {
+                f.selected = 4..40;
+                panic!("an input method edge case");
+            },
+            |f| recover(&f.content, &mut f.marked, &mut f.selected),
+        );
+        assert_eq!(got, "fallback");
+        assert_eq!((f.content.as_str(), f.marked.clone(), f.selected.clone()), ("你好ni", None, 8..8));
+        f.check();
+        f.insert("是", None);
+        assert_eq!((f.content.as_str(), f.selected.clone()), ("你好ni是", 11..11));
+        f.mark("a", Some(1..1), None);
+        assert_eq!((f.content.as_str(), f.marked.clone()), ("你好ni是a", Some(11..12)));
+    }
+
+    #[test]
+    fn emoji_count_as_two_utf16_units() {
+        assert_eq!(utf16_to_utf8("a😀b", 1), 1);
+        assert_eq!(utf16_to_utf8("a😀b", 3), 5);
+        // Halfway through the emoji's pair: not inside its bytes.
+        assert_eq!(utf16_to_utf8("a😀b", 2), 5);
+        assert_eq!(utf8_to_utf16("a😀b", 5), 3);
+        let mut f = Field::new("a😀b");
+        f.insert("x", Some(1..3));
+        assert_eq!(f.content, "axb");
+    }
+
+    #[test]
+    #[allow(clippy::reversed_empty_ranges)]
+    fn ranges_past_the_end_or_inside_a_character_are_clamped() {
+        assert_eq!(clamp("你好", 4..100), 3..6);
+        assert_eq!(clamp("abc", 2..1), 1..2);
+        assert_eq!(clamp("", 3..5), 0..0);
+        assert_eq!(splice("ab", 5..9, "你", Some(5..9)), ("ab你".to_string(), 2..5, 5..5));
+        let mut f = Field::new("你好");
+        f.selected = 4..40;
+        f.insert("x", None);
+        assert_eq!(f.content, "你x");
+        let mut f = Field::new("你好");
+        f.mark("ni", Some(9..1), Some(50..60));
+        assert_eq!((f.content.as_str(), f.marked.clone(), f.selected.clone()), ("你好ni", Some(6..8), 7..8));
     }
 }

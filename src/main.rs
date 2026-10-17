@@ -2,6 +2,8 @@ mod api;
 mod cli;
 mod cloud;
 mod config;
+#[path = "../agent/src/crash.rs"]
+mod crash;
 mod demo;
 mod fleet;
 mod github;
@@ -187,7 +189,9 @@ struct CommonArgs {
 
 impl CommonArgs {
     fn paths(&self) -> Paths {
-        Paths::resolve(self.config_dir.clone(), self.inventory.clone())
+        let paths = Paths::resolve(self.config_dir.clone(), self.inventory.clone());
+        crash::log_to(paths.dir.join("crash.log"));
+        paths
     }
 }
 
@@ -1347,6 +1351,7 @@ struct InitArgs {
 }
 
 fn main() -> ExitCode {
+    crash::install(concat!("muxin ", env!("CARGO_PKG_VERSION")), config::dir_from_env().join("crash.log"));
     // Logs always go to stderr: stdout is reserved for --json output and MCP messages.
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -2414,6 +2419,15 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn crash_log_goes_in_the_config_dir_asked_for() {
+        let dir = std::env::temp_dir().join(format!("muxen-crash-dir-{}", std::process::id()));
+        let cli = Cli::try_parse_from(["muxin", "machines", "--config-dir", dir.to_str().unwrap()]).unwrap();
+        let Some(Command::Machines(a)) = cli.command else { panic!("not machines") };
+        assert_eq!(a.common.paths().dir, dir);
+        assert_eq!(crash::current_log(), Some(dir.join("crash.log")));
     }
 
     #[test]

@@ -16,6 +16,7 @@
 
 mod client;
 mod clipboard;
+mod crash;
 mod daemon;
 mod detect;
 mod desktop;
@@ -48,6 +49,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() {
+    crash::install(concat!("muxen-agent ", env!("CARGO_PKG_VERSION")), sys::user_home().join(".muxen").join("crash.log"));
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         Some("version" | "--version") => {

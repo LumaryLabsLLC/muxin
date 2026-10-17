@@ -470,6 +470,8 @@ muxin logs beelink --file '~/app/storage/logs/laravel.log' --grep error
 muxin logs beelink --container postgres --follow   # keep printing (Ctrl-C to stop)
 ```
 
+If Muxin itself crashes, it writes what happened to `crash.log` in its config folder (`~/.config/muxin`, or `%APPDATA%\muxin` on Windows). The agent on a machine writes to `~/.muxen/crash.log`.
+
 ## Services and containers
 
 A machine's services, and its Docker containers: **Services** on its page (or right-click it, or ⌘P › Services). Failed ones come first, then running ones; Find narrows the list.

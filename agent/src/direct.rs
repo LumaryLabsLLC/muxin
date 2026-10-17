@@ -387,6 +387,7 @@ fn is_tailnet(ip: std::net::IpAddr) -> bool {
 /// is brought up to date.
 pub fn migrate() -> i32 {
     if cfg!(windows) {
+        narrow_firewall_rule();
         return 0;
     }
     let home = crate::sys::user_home();
@@ -466,6 +467,24 @@ fn systemd_unit() -> String {
         exe()
     )
 }
+
+/// Before 0.5.7 the firewall rule let the agent in from any address: one made
+/// then is narrowed to FIREWALL_REMOTE. Only where pairing made one; changing
+/// it takes an administrator, as making it did, and otherwise it stays as it was.
+#[cfg(windows)]
+fn narrow_firewall_rule() {
+    if !home_dir().join("direct").is_dir() {
+        return;
+    }
+    let _ = crate::win::ps(&format!(
+        "try {{ Get-NetFirewallRule -DisplayName {task} -ErrorAction Stop | Where-Object {{ ($_ | Get-NetFirewallAddressFilter).RemoteAddress -contains 'Any' }} | Set-NetFirewallRule -RemoteAddress {remote} -ErrorAction Stop }} catch {{ }}",
+        task = crate::win::quote(TASK),
+        remote = FIREWALL_REMOTE
+    ));
+}
+
+#[cfg(not(windows))]
+fn narrow_firewall_rule() {}
 
 /// Brings an installed systemd unit up to date (without restarting it), so the
 /// restart after an update already leaves sessions alone.

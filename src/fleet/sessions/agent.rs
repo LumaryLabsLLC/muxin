@@ -221,7 +221,8 @@ async fn upload(spec: &MachineSpec, bytes: Vec<u8>) -> Result<String, String> {
 /// Puts an uploaded build (`muxen-agent.upload.exe`) in place on Windows and
 /// prints its hash. A running agent holds its file, but Windows lets it be
 /// renamed: the old one moves aside and goes once nothing runs it; the
-/// desktop helper, running the old build, goes now.
+/// desktop helper, running the old build, goes now. Then `migrate` brings up
+/// to date what an older build set up (its firewall rule).
 const SWAP_PS1: &str = "$ErrorActionPreference = 'Stop'\n\
          $d = Join-Path $env:USERPROFILE '.muxen\\bin'\n\
          $t = Join-Path $d 'muxen-agent.exe'\n\
@@ -229,6 +230,7 @@ const SWAP_PS1: &str = "$ErrorActionPreference = 'Stop'\n\
          Move-Item -Force (Join-Path $d 'muxen-agent.upload.exe') $t\n\
          Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object { $_.CommandLine -match ' gui-serve' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\n\
          Get-ChildItem $d -Filter 'muxen-agent.old.*.exe' | ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }\n\
+         & $t migrate | Out-Null\n\
          & $t hash\n";
 
 /// Copies the build into place on Windows and prints its hash: over sftp

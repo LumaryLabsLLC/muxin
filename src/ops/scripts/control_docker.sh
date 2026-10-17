@@ -21,7 +21,7 @@ case "$OR_ACTION" in
     if [ "$(state)" = running ]; then
       say "Already running."
     else
-      say "Starting $c…"
+      say "Starting ${c}…"
       docker start "$c" >/dev/null || fail "docker start $c failed."
       say "Started."
     fi
@@ -36,7 +36,7 @@ case "$OR_ACTION" in
     fi
     ;;
   restart)
-    say "Restarting $c…"
+    say "Restarting ${c}…"
     docker restart -t 30 "$c" >/dev/null || fail "docker restart $c failed."
     say "Restarted."
     ;;
@@ -51,7 +51,7 @@ case "$OR_ACTION" in
       vol=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/home/runner"}}{{.Name}}{{end}}{{end}}' "$c" 2>/dev/null)
     fi
     if [ "$(state)" = running ]; then
-      say "Stopping $c…"
+      say "Stopping ${c}…"
       docker stop -t 30 "$c" >/dev/null 2>&1
     fi
     if [ -n "$vol" ] && docker run --rm -v "$vol:/home/runner" --entrypoint test "$image" -f /home/runner/.runner 2>/dev/null; then

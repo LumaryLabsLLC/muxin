@@ -81,7 +81,7 @@ else
     say "The cached $pkg doesn't match its SHA-256; downloading it again."
     rm -f "$cache/$pkg" || fail "Couldn't delete $cache/$pkg"
   fi
-  say "Downloading actions-runner $OR_VERSION for $ros-$rarch…"
+  say "Downloading actions-runner $OR_VERSION for $ros-${rarch}…"
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL --retry 3 -o "$cache/$pkg.part" "$url" || fail "Download failed: $url"
   elif command -v wget >/dev/null 2>&1; then

@@ -2,19 +2,21 @@
 //! runs pinned to the cell grid (`force_width`), then the cursor.
 
 use std::sync::{Arc, OnceLock};
+use std::ops::Range;
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 use gpui::{
-    App, Bounds, ContentMask, Font, FontFeatures, FontStyle, FontWeight, Hsla, Pixels, Point, ShapedLine, SharedString, StrikethroughStyle,
+    App, Bounds, ContentMask, ElementInputHandler, Entity, Font, FontFeatures, FontStyle, FontWeight, Hsla, Pixels, Point, ShapedLine, SharedString, StrikethroughStyle,
     TextRun, UnderlineStyle, Window, canvas, fill, point, prelude::*, px, size,
 };
 
 use super::boxdraw::{self, Shape};
 use super::colors::{Palette, dim};
-use super::{Geometry, Metrics, PAD_X, PAD_Y, Shared};
-use crate::ui::theme::mono_font;
+use super::ime::Composition;
+use super::{Geometry, Metrics, PAD_X, PAD_Y, Shared, TerminalView};
+use crate::ui::theme::{ActiveTheme, mono_font};
 
 /// The terminal font when none is chosen, and what's used when the chosen
 /// one isn't installed: SF Mono, then Menlo, then the app's monospace font.
@@ -85,12 +87,70 @@ pub(super) struct Frame {
     shapes: Vec<Shape>,
     cursor: Vec<(Bounds<Pixels>, Hsla)>,
     bounds: Bounds<Pixels>,
+    preedit: Option<InputLayout>,
 }
 
 /// `cursor`: draw the cursor (false in a blink's off phase).
-pub(super) fn grid(shared: Arc<Shared>, palette: Palette, focused: bool, cursor: bool, metrics: Metrics) -> impl IntoElement {
-    canvas(move |bounds, window, cx| prepaint(&shared, &palette, focused, cursor, metrics, bounds, window, cx), |_, frame, window, cx| paint(frame, window, cx))
-        .size_full()
+pub(super) fn grid(view: Entity<TerminalView>, palette: Palette, focused: bool, cursor: bool, metrics: Metrics) -> impl IntoElement {
+    let entity = view.clone();
+    canvas(
+        move |bounds, window, cx| {
+            let view = entity.read(cx);
+            let mut frame = prepaint(&view.shared, &palette, focused, cursor && view.ime.text.is_empty(), metrics, bounds, window);
+            if focused && !view.ime.text.is_empty() {
+                frame.preedit = Some(input_layout(&view.shared, &view.ime, metrics, window, cx));
+            }
+            frame
+        },
+        move |bounds, frame, window, cx| {
+            let focus = view.read(cx).focus.clone();
+            // Registration must happen during paint, and only the focused
+            // terminal receives the platform's text-input callbacks.
+            window.handle_input(&focus, ElementInputHandler::new(bounds, view), cx);
+            paint(frame, window, cx);
+        },
+    ).size_full()
+}
+
+/// A local preedit overlay, also used to position the native candidate window.
+pub(super) struct InputLayout {
+    pub line: ShapedLine,
+    pub origin: Point<Pixels>,
+    line_h: Pixels,
+    selected: Range<usize>,
+    bg: Hsla,
+    fg: Hsla,
+    selection: Hsla,
+}
+
+impl InputLayout {
+    pub fn bounds_for_range(&self, range: Range<usize>) -> Bounds<Pixels> {
+        let start = self.line.x_for_index(range.start);
+        let end = self.line.x_for_index(range.end);
+        Bounds::new(self.origin + point(start, px(0.)), size((end - start).max(px(1.)), self.line_h))
+    }
+}
+
+pub(super) fn input_layout(shared: &Shared, ime: &Composition, metrics: Metrics, window: &Window, cx: &App) -> InputLayout {
+    let palette = Palette::new(&cx.theme());
+    let text = SharedString::from(ime.text.clone());
+    let run = TextRun {
+        len: text.len(), font: base_font(window), color: palette.fg, background_color: None,
+        underline: Some(UnderlineStyle { thickness: px(1.), color: None, wavy: false }), strikethrough: None,
+    };
+    let line = window.text_system().shape_line(text, px(metrics.size), &[run], None);
+    let g = *shared.geometry.lock().unwrap();
+    let term = shared.term.lock();
+    let cursor = term.renderable_content().cursor.point;
+    let row = (cursor.line.0 + term.grid().display_offset() as i32).clamp(0, g.rows.saturating_sub(1) as i32);
+    let col = cursor.column.0.min(g.cols.saturating_sub(1));
+    let left = f32::from(g.origin.x);
+    let right = left + g.cols as f32 * g.cell_w;
+    // Shift a long preedit left at the right edge rather than hiding the
+    // candidate anchor outside the terminal. The normal content mask clips it.
+    let x = (left + col as f32 * g.cell_w).min((right - f32::from(line.width)).max(left));
+    let origin = point(px(x), g.origin.y + px(row as f32 * g.line_h));
+    InputLayout { line, origin, line_h: px(g.line_h.max(1.)), selected: ime.selected.clone(), bg: palette.bg, fg: palette.fg, selection: palette.selection }
 }
 
 fn base_font(window: &Window) -> Font {
@@ -130,7 +190,7 @@ pub(super) fn family(window: &Window) -> SharedString {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepaint(shared: &Shared, palette: &Palette, focused: bool, show_cursor: bool, m: Metrics, bounds: Bounds<Pixels>, window: &mut Window, _cx: &mut App) -> Frame {
+fn prepaint(shared: &Shared, palette: &Palette, focused: bool, show_cursor: bool, m: Metrics, bounds: Bounds<Pixels>, window: &mut Window) -> Frame {
     let (cell_w, line_h) = cell_size(window, m);
     let cols = ((f32::from(bounds.size.width) - 2. * PAD_X) / cell_w).floor().max(2.) as usize;
     let rows = ((f32::from(bounds.size.height) - 2. * PAD_Y) / line_h).floor().max(1.) as usize;
@@ -207,7 +267,7 @@ fn prepaint(shared: &Shared, palette: &Palette, focused: bool, show_cursor: bool
     };
 
     let at = |row: usize, col: usize| origin + point(px(col as f32 * cell_w), px(row as f32 * line_h));
-    let mut frame = Frame { line_h: px(line_h), rects: Vec::new(), lines: Vec::new(), shapes: Vec::new(), cursor: Vec::new(), bounds };
+    let mut frame = Frame { line_h: px(line_h), rects: Vec::new(), lines: Vec::new(), shapes: Vec::new(), cursor: Vec::new(), bounds, preedit: None };
 
     // Backgrounds, merged along each row.
     let mut run: Option<(usize, usize, usize, Hsla)> = None; // row, start col, end col (exclusive), color
@@ -343,6 +403,16 @@ fn paint(frame: Frame, window: &mut Window, cx: &mut App) {
         }
         for (b, color) in frame.cursor {
             window.paint_quad(fill(b, color));
+        }
+        if let Some(preedit) = frame.preedit {
+            // Paint after the grid so its contents cannot show through the
+            // marked text. Nothing here is written into alacritty's buffer.
+            window.paint_quad(fill(Bounds::new(preedit.origin, size(preedit.line.width + px(2.), preedit.line_h)), preedit.bg));
+            if !preedit.selected.is_empty() {
+                window.paint_quad(fill(preedit.bounds_for_range(preedit.selected.clone()), preedit.selection));
+            }
+            let _ = preedit.line.paint(preedit.origin, preedit.line_h, window, cx);
+            window.paint_quad(fill(preedit.bounds_for_range(preedit.selected.end..preedit.selected.end), preedit.fg));
         }
     });
 }

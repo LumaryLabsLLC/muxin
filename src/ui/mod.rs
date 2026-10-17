@@ -104,6 +104,9 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
                 ..Default::default()
             },
             |window, cx| {
+                // GPUI gives Wayland no title from the options: without one, a
+                // dock or app switcher shows "unknown".
+                window.set_window_title("Muxin");
                 theme::apply(window, cx);
                 let view = cx.new(|cx| Root::new(engine.clone(), window, cx));
                 window.focus(&view.focus_handle(cx));

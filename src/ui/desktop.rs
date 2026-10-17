@@ -953,15 +953,18 @@ impl Render for DesktopWindow {
 /// Opens a machine's desktop in its own window.
 pub fn open_window(engine: Arc<Engine>, machine_id: String, display: Option<String>, name: String, cx: &mut App) {
     let bounds = Bounds::centered(None, gpui::size(px(1440.), px(900.)), cx);
+    let title = format!("{name} · Desktop");
     let options = gpui::WindowOptions {
         window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
-        titlebar: Some(gpui::TitlebarOptions { title: Some(format!("{name} · Desktop").into()), appears_transparent: cfg!(target_os = "macos"), traffic_light_position: None }),
+        titlebar: Some(gpui::TitlebarOptions { title: Some(title.clone().into()), appears_transparent: cfg!(target_os = "macos"), traffic_light_position: None }),
         window_min_size: Some(gpui::size(px(480.), px(320.))),
         app_id: Some("muxin".into()),
         window_decorations: super::frame::requested(),
         ..Default::default()
     };
     let opened = cx.open_window(options, |window, cx| {
+        // (Wayland gets no title from the options.)
+        window.set_window_title(&title);
         super::theme::apply(window, cx);
         let view = cx.new(|cx| {
             let mut v = DesktopView::new(engine, machine_id, window, cx);

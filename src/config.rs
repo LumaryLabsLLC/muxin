@@ -38,10 +38,10 @@ impl Paths {
     /// `~/.config/muxin` ($XDG_CONFIG_HOME on Linux), `%APPDATA%\muxin` on Windows.
     pub fn resolve(dir: Option<PathBuf>, inventory: Option<PathBuf>) -> Paths {
         let base = config_base();
-        let chosen = dir.or_else(|| std::env::var_os("MUXIN_HOME").map(PathBuf::from)).or_else(|| std::env::var_os("MUXEN_HOME").map(PathBuf::from));
+        let chosen = dir.or_else(home_from_env);
         // Only the default folder takes over the old default folder's files; a
         // folder that was asked for keeps to itself.
-        let dir = chosen.clone().unwrap_or_else(|| base.as_ref().map(|b| b.join("muxin")).unwrap_or_else(|| PathBuf::from(".muxin")));
+        let dir = chosen.clone().unwrap_or_else(|| default_dir(base.as_deref()));
         migrate(&dir, if chosen.is_some() { None } else { base.as_deref() });
         let config = dir.join("config.toml");
         Paths {
@@ -54,6 +54,20 @@ impl Paths {
             dir,
         }
     }
+}
+
+/// The folder `Paths::resolve` picks without `--config-dir`, and without
+/// moving old files into it: for the crash log, set up before the arguments are read.
+pub fn dir_from_env() -> PathBuf {
+    home_from_env().unwrap_or_else(|| default_dir(config_base().as_deref()))
+}
+
+fn home_from_env() -> Option<PathBuf> {
+    std::env::var_os("MUXIN_HOME").map(PathBuf::from).or_else(|| std::env::var_os("MUXEN_HOME").map(PathBuf::from))
+}
+
+fn default_dir(base: Option<&Path>) -> PathBuf {
+    base.map(|b| b.join("muxin")).unwrap_or_else(|| PathBuf::from(".muxin"))
 }
 
 /// Where per-user config folders go on this platform.

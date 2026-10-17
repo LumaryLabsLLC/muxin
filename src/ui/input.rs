@@ -285,16 +285,7 @@ impl TextInput {
     }
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
-        let mut utf8_offset = 0;
-        let mut utf16_count = 0;
-        for ch in self.content.chars() {
-            if utf16_count >= offset {
-                break;
-            }
-            utf16_count += ch.len_utf16();
-            utf8_offset += ch.len_utf8();
-        }
-        utf8_offset
+        offset_from_utf16(&self.content, offset)
     }
 
     fn offset_to_utf16(&self, offset: usize) -> usize {
@@ -330,6 +321,55 @@ impl TextInput {
     }
 }
 
+fn offset_from_utf16(text: &str, offset: usize) -> usize {
+    let mut utf8_offset = 0;
+    let mut utf16_count = 0;
+    for ch in text.chars() {
+        if utf16_count >= offset {
+            break;
+        }
+        utf16_count += ch.len_utf16();
+        utf8_offset += ch.len_utf8();
+    }
+    utf8_offset
+}
+
+struct MarkedEdit {
+    content: String,
+    marked: Option<Range<usize>>,
+    selected: Range<usize>,
+}
+
+/// Keep cached selections valid even if an input method returns a stale range
+/// after switching modes or cancelling composition.
+fn clamped_range(text: &str, range: Range<usize>) -> Range<usize> {
+    let boundary = |offset: usize| {
+        let mut offset = offset.min(text.len());
+        while !text.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        offset
+    };
+    let start = boundary(range.start);
+    start..boundary(range.end).max(start)
+}
+
+fn marked_edit(content: &str, range: Range<usize>, text: &str, selected_utf16: Option<Range<usize>>) -> MarkedEdit {
+    let range = clamped_range(content, range);
+    // NSTextInputClient's selectedRange is relative to the newly marked
+    // string. Both endpoints are offset from the replacement's start.
+    let selected = selected_utf16
+        .map(|r| {
+            let start = offset_from_utf16(text, r.start);
+            start..offset_from_utf16(text, r.end).max(start)
+        })
+        .unwrap_or(text.len()..text.len());
+    let selected = range.start + selected.start..range.start + selected.end;
+    let content = content[..range.start].to_string() + text + &content[range.end..];
+    let marked = (!text.is_empty()).then(|| range.start..range.start + text.len());
+    MarkedEdit { content, marked, selected }
+}
+
 impl EntityInputHandler for TextInput {
     fn text_for_range(
         &mut self,
@@ -351,8 +391,9 @@ impl EntityInputHandler for TextInput {
         self.marked_range.as_ref().map(|range| self.range_to_utf16(range))
     }
 
-    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.marked_range = None;
+        cx.notify();
     }
 
     fn replace_text_in_range(&mut self, range_utf16: Option<Range<usize>>, new_text: &str, _: &mut Window, cx: &mut Context<Self>) {
@@ -361,8 +402,10 @@ impl EntityInputHandler for TextInput {
             .map(|r| self.range_from_utf16(r))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = clamped_range(&self.content, range);
         self.content = (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
+        self.selection_reversed = false;
         self.marked_range.take();
         cx.emit(InputEvent::Changed);
         cx.notify();
@@ -381,13 +424,11 @@ impl EntityInputHandler for TextInput {
             .map(|r| self.range_from_utf16(r))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        self.content = (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
-        self.marked_range = (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        let edit = marked_edit(&self.content, range, new_text, new_selected_range_utf16);
+        self.content = edit.content.into();
+        self.marked_range = edit.marked;
+        self.selected_range = edit.selected;
+        self.selection_reversed = false;
         cx.emit(InputEvent::Changed);
         cx.notify();
     }
@@ -406,6 +447,58 @@ impl EntityInputHandler for TextInput {
         let last_layout = self.last_layout.as_ref()?;
         let utf8_index = self.from_display(last_layout.index_for_x(point.x - line_point.x + self.scroll_x)?);
         Some(self.offset_to_utf16(utf8_index))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn composing_again_after_unmarking_a_replaced_selection_does_not_panic() {
+        // Select all of an existing field, start composing, switch input
+        // modes (unmark), then compose again at the returned caret.
+        let first = marked_edit("old", 0..3, "n", Some(1..1));
+        let second = marked_edit(&first.content, first.selected, "i", Some(1..1));
+        assert_eq!(second.content, "ni");
+        assert_eq!(second.selected, 2..2);
+    }
+
+    #[test]
+    fn marked_selection_is_relative_to_inserted_text_after_unicode_prefix() {
+        let edit = marked_edit("你好world", 3..6, "😀", Some(2..2));
+        assert_eq!(edit.content, "你😀world");
+        assert_eq!(edit.selected, 7..7);
+        assert_eq!(edit.marked, Some(3..7));
+    }
+
+    #[test]
+    fn stale_ranges_after_switching_input_modes_stay_on_valid_boundaries() {
+        let edit = marked_edit("你好😀", 2..usize::MAX, "中", Some(usize::MAX..0));
+        assert_eq!(edit.content, "中");
+        assert_eq!(edit.selected, 3..3);
+        assert_eq!(edit.marked, Some(0..3));
+        let committed = clamped_range("中", edit.selected);
+        assert_eq!(committed, 3..3);
+    }
+
+    #[test]
+    fn repeated_composition_changes_keep_all_ranges_sliceable() {
+        let mut content = "已有text😀".to_string();
+        let mut selected = 0..content.len();
+        for text in ["n", "ni", "你", "", "hao", "好😀", "e\u{301}", "中文"] {
+            for range in [Some(0..0), Some(1..1), Some(2..usize::MAX), Some(usize::MAX..0), None] {
+                let edit = marked_edit(&content, selected.clone(), text, range);
+                // Model an unmark (e.g. switching input modes) before the
+                // next edit, which then uses the selected range as-is.
+                assert!(edit.content.get(edit.selected.clone()).is_some());
+                if let Some(marked) = edit.marked {
+                    assert_eq!(&edit.content[marked], text);
+                }
+                content = edit.content;
+                selected = edit.selected;
+            }
+        }
     }
 }
 

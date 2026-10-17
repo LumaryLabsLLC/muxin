@@ -156,7 +156,11 @@ pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(
     if installed.trim() != hash {
         tracing::info!("installing muxen-agent ({target}) on {}", spec.name);
         // Boxed: these futures are big, and `ensure` sits inside nearly every request's.
-        let got = if windows { Box::pin(upload_windows(spec, &build_path(&target)?)).await? } else { Box::pin(upload(spec, bytes)).await? };
+        let got = if windows {
+            Box::pin(upload_windows(spec, &build_path(&target)?, &hash)).await?
+        } else {
+            Box::pin(upload(spec, bytes, &hash)).await?
+        };
         if got.trim() != hash {
             return Err(format!("The agent didn't install correctly on {} (got {}).", spec.name, got.trim()));
         }
@@ -175,22 +179,22 @@ pub fn forget(machine_id: &str) {
 }
 
 /// Copies the build into place atomically and prints its hash.
-async fn upload(spec: &MachineSpec, bytes: Vec<u8>) -> Result<String, String> {
+async fn upload(spec: &MachineSpec, bytes: Vec<u8>, hash: &str) -> Result<String, String> {
     // The folder from before the rename (OpenRunner) moves over first: running
     // sessions keep their server (its socket moves with the folder). Then the
     // direct-connection service (if set up) moves to the new name or restarts
     // onto the new build. A listener the service doesn't know about (one left
     // from before, holding the port) goes first, or the old build would keep
     // answering.
-    let script = r#"set -e; if [ -d "$HOME/.openrunner" ] && [ ! -e "$HOME/.muxen" ]; then mv "$HOME/.openrunner" "$HOME/.muxen"; fi; d="$HOME/.muxen/bin"; mkdir -p "$d"; n="$d/muxen-agent.new.$$"; cat > "$n"; chmod 755 "$n"; mv -f "$n" "$d/muxen-agent"; rm -f "$d/openrunner-agent"; "$d/muxen-agent" migrate >/dev/null 2>&1 || true; rmdir "$HOME/.openrunner" 2>/dev/null || true; if systemctl --user is-enabled muxen-agent.service >/dev/null 2>&1; then pkill -f "$d/muxen-agent listen" >/dev/null 2>&1 || true; systemctl --user restart muxen-agent.service >/dev/null 2>&1 || true; elif launchctl print "gui/$(id -u)/com.lumarylabs.muxen-agent" >/dev/null 2>&1; then pkill -f "$d/muxen-agent listen" >/dev/null 2>&1 || true; launchctl kickstart -k "gui/$(id -u)/com.lumarylabs.muxen-agent" >/dev/null 2>&1 || true; fi; "$d/muxen-agent" hash"#;
+    let script = upload_script(hash);
     let mut cmd = if spec.is_local() {
         let mut c = Command::new("/bin/sh");
-        c.args(["-c", script]);
+        c.args(["-c", &script]);
         c
     } else {
         let mut c = Command::new("ssh");
         c.args(probe::ssh_args(spec));
-        c.arg(format!("sh -c {}", sh_quote(script)));
+        c.arg(ssh_upload_command(&script));
         c
     };
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -209,30 +213,51 @@ async fn upload(spec: &MachineSpec, bytes: Vec<u8>) -> Result<String, String> {
     tokio::time::timeout(UPLOAD_TIMEOUT, work).await.map_err(|_| format!("{} took too long to receive the agent.", spec.name))?
 }
 
-/// Puts an uploaded build (`muxen-agent.upload.exe`) in place on Windows and
-/// prints its hash. A running agent holds its file, but Windows lets it be
-/// renamed: the old one moves aside and goes once nothing runs it; the
-/// desktop helper, running the old build, goes now.
-const SWAP_PS1: &str = "$ErrorActionPreference = 'Stop'\n\
-         $d = Join-Path $env:USERPROFILE '.muxen\\bin'\n\
-         $t = Join-Path $d 'muxen-agent.exe'\n\
-         if (Test-Path $t) { Move-Item -Force $t (Join-Path $d \"muxen-agent.old.$PID.exe\") }\n\
-         Move-Item -Force (Join-Path $d 'muxen-agent.upload.exe') $t\n\
-         Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object { $_.CommandLine -match ' gui-serve' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\n\
-         Get-ChildItem $d -Filter 'muxen-agent.old.*.exe' | ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }\n\
-         & $t hash\n";
+fn upload_script(hash: &str) -> String {
+    format!(
+        "set -e\nif [ -d \"$HOME/.openrunner\" ] && [ ! -e \"$HOME/.muxen\" ]; then mv \"$HOME/.openrunner\" \"$HOME/.muxen\"; fi\nd=\"$HOME/.muxen/bin\"\nmkdir -p \"$d\"\n{}\nrmdir \"$HOME/.openrunner\" 2>/dev/null || true\n",
+        install_script(false, hash)
+    )
+}
+
+/// The login shell sees one line. POSIX printf restores the script without
+/// consuming stdin, which carries the binary rather than shell commands.
+fn ssh_upload_command(script: &str) -> String {
+    let encoded: String = script.bytes().map(|b| format!("\\0{b:03o}")).collect();
+    let command = format!("eval \"$(printf '%b' '{encoded}')\"");
+    format!("sh -c {}", sh_quote(&command))
+}
+
+/// Verify before the swap, keep a backup and restore it on a failed health check.
+fn install_script(windows: bool, hash: &str) -> String {
+    let script = if windows {
+        include_str!("scripts/install-agent.ps1")
+    } else {
+        include_str!("scripts/install-agent.sh")
+    };
+    script
+        .replace("\r\n", "\n")
+        .replace("__EXPECTED_HASH__", hash)
+}
 
 /// Copies the build into place on Windows and prints its hash: over sftp
 /// (Windows' sshd stalls on a few hundred KB through a program's stdin), or
-/// a copy on this computer; then SWAP_PS1.
-async fn upload_windows(spec: &MachineSpec, build: &std::path::Path) -> Result<String, String> {
+/// a copy on this computer; then the verified swap.
+async fn upload_windows(
+    spec: &MachineSpec,
+    build: &std::path::Path,
+    hash: &str,
+) -> Result<String, String> {
     let fail = |e: String| format!("couldn't install the agent on {}: {e}", spec.name);
     if spec.is_local() {
         // This computer: a copy, then the same swap.
         let bin = dirs::home_dir().unwrap_or_default().join(".muxen").join("bin");
         std::fs::create_dir_all(&bin).map_err(|e| fail(e.to_string()))?;
-        std::fs::copy(build, bin.join("muxen-agent.upload.exe")).map_err(|e| fail(e.to_string()))?;
-        return run_ps(spec, SWAP_PS1, CTL_TIMEOUT).await.map_err(fail);
+        std::fs::copy(build, bin.join("muxen-agent.upload.exe"))
+            .map_err(|e| fail(e.to_string()))?;
+        return run_ps(spec, &install_script(true, hash), CTL_TIMEOUT)
+            .await
+            .map_err(fail);
     }
     // sftp takes ssh's options, but its own spelling of the port and user.
     let mut args: Vec<String> = Vec::new();
@@ -258,8 +283,13 @@ async fn upload_windows(spec: &MachineSpec, build: &std::path::Path) -> Result<S
         let status = child.wait().await.map_err(|e| e.to_string())?;
         if status.success() { Ok(()) } else { Err(err.lines().last().unwrap_or("sftp failed").trim().to_string()) }
     };
-    tokio::time::timeout(UPLOAD_TIMEOUT, sent).await.map_err(|_| fail("the copy took too long".into()))?.map_err(fail)?;
-    run_ps(spec, SWAP_PS1, CTL_TIMEOUT).await.map_err(fail)
+    tokio::time::timeout(UPLOAD_TIMEOUT, sent)
+        .await
+        .map_err(|_| fail("the copy took too long".into()))?
+        .map_err(fail)?;
+    run_ps(spec, &install_script(true, hash), CTL_TIMEOUT)
+        .await
+        .map_err(fail)
 }
 
 /// Runs a short PowerShell script on a Windows machine (with the user's profile, like workspace commands).
@@ -355,4 +385,263 @@ pub async fn ctl_reply(spec: &MachineSpec, request: &Value) -> Result<Value, Str
         .and_then(|l| serde_json::from_str(l).ok())
         .ok_or_else(|| format!("The agent on {} gave no answer.", spec.name))?;
     Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_verifies_before_an_atomic_swap_and_keeps_a_restore_path() {
+        assert!(!install_script(false, "0123456789abcdef").contains('\r'));
+        let script = install_script(true, "0123456789abcdef");
+        assert!(script.contains("$expected = '0123456789abcdef'"));
+        assert!(
+            script.find("    Check-Hash $n").unwrap()
+                < script.find("[IO.File]::Replace($n, $t, $p)").unwrap()
+        );
+        assert!(
+            script.find("[IO.File]::Replace($n, $t, $p)").unwrap()
+                < script.find("    Check-Hash $t").unwrap()
+        );
+        assert!(script.contains("muxen-agent.old.$PID."));
+        assert!(script.contains("[Guid]::NewGuid()"));
+        assert!(script.contains("$_.FullName -ne $p"));
+        assert!(
+            script.contains(
+                "Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue"
+            )
+        );
+        assert!(script.contains("[IO.File]::Replace($restore, $t, $null)"));
+    }
+
+    #[test]
+    fn uploads_keep_the_remote_command_on_one_line_and_remove_the_old_folder() {
+        let script = upload_script("0123456789abcdef");
+        let command = ssh_upload_command(&script);
+        assert!(!command.contains(['\n', '\r']));
+        assert!(script.contains("rmdir \"$HOME/.openrunner\" 2>/dev/null || true"));
+    }
+
+    #[cfg(unix)]
+    mod unix {
+        use super::*;
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Machine {
+            dir: PathBuf,
+        }
+
+        impl Machine {
+            fn new(service: bool) -> Self {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let unique = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                let dir = std::env::temp_dir().join(format!(
+                    "muxin-install-{}-{unique}-{sequence}",
+                    std::process::id()
+                ));
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::create_dir_all(dir.join("tools")).unwrap();
+                std::fs::create_dir_all(dir.join("bin")).unwrap();
+                let me = Self { dir };
+                let systemctl = if service {
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$MUXEN_TEST_EVENTS\"\ncase \"$*\" in\n'--user is-enabled muxen-agent.service') exit 0;;\n'--user restart muxen-agent.service') if [ ! -e \"$MUXEN_TEST_FAILED\" ]; then touch \"$MUXEN_TEST_FAILED\"; exit 1; fi;;\nesac\n"
+                } else {
+                    "#!/bin/sh\nexit 1\n"
+                };
+                me.write("tools/systemctl", systemctl.as_bytes());
+                me.write("tools/launchctl", b"#!/bin/sh\nexit 1\n");
+                me.write("tools/pkill", b"#!/bin/sh\nexit 1\n");
+                me
+            }
+
+            fn write(&self, name: &str, bytes: &[u8]) {
+                let path = self.dir.join(name);
+                std::fs::write(&path, bytes).unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+
+            fn run(&self, binary: &[u8]) -> std::process::Output {
+                self.run_with_shell(binary, false)
+            }
+
+            fn run_with_shell(&self, binary: &[u8], ssh: bool) -> std::process::Output {
+                let script = format!(
+                    "d={}\n{}",
+                    sh_quote(&self.dir.join("bin").display().to_string()),
+                    install_script(false, "new")
+                );
+                let command = if ssh {
+                    ssh_upload_command(&script)
+                } else {
+                    script
+                };
+                let mut child = std::process::Command::new("/bin/sh")
+                    .args(["-c", &command])
+                    .env(
+                        "PATH",
+                        format!(
+                            "{}:{}",
+                            self.dir.join("tools").display(),
+                            std::env::var("PATH").unwrap_or_default()
+                        ),
+                    )
+                    .env("MUXEN_TEST_EVENTS", self.dir.join("events"))
+                    .env("MUXEN_TEST_FAILED", self.dir.join("failed"))
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                child.stdin.take().unwrap().write_all(binary).unwrap();
+                child.wait_with_output().unwrap()
+            }
+
+            fn installed(&self) -> Vec<u8> {
+                std::fs::read(self.dir.join("bin/muxen-agent")).unwrap()
+            }
+
+            fn previous(&self) -> Vec<u8> {
+                std::fs::read(self.dir.join("bin/muxen-agent.prev")).unwrap()
+            }
+
+            fn no_staging_files(&self) {
+                assert!(
+                    std::fs::read_dir(self.dir.join("bin")).unwrap().all(|e| !e
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".new."))
+                );
+            }
+        }
+
+        impl Drop for Machine {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        fn binary(staged: &str, live: &str) -> Vec<u8> {
+            format!("#!/bin/sh\ncase \"$1\" in\nhash) case \"$0\" in *.new.*) echo {staged};; *) {live};; esac;;\nmigrate) exit 0;;\nesac\n").into_bytes()
+        }
+
+        #[test]
+        fn a_good_upload_keeps_the_previous_binary() {
+            let machine = Machine::new(false);
+            machine.write("bin/muxen-agent", b"previous");
+            let new = binary("new", "echo new");
+            let result = machine.run(&new);
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "new");
+            assert_eq!(machine.installed(), new);
+            assert_eq!(machine.previous(), b"previous");
+            machine.no_staging_files();
+        }
+
+        #[test]
+        fn the_single_line_ssh_command_preserves_the_script_and_binary_stdin() {
+            let machine = Machine::new(false);
+            machine.write("bin/muxen-agent", b"previous");
+            let new = binary("new", "echo new");
+            let result = machine.run_with_shell(&new, true);
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(machine.installed(), new);
+            assert_eq!(machine.previous(), b"previous");
+            assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "new");
+        }
+
+        #[test]
+        fn a_wrong_upload_leaves_the_live_binary_and_backup_alone() {
+            let machine = Machine::new(true);
+            machine.write("bin/muxen-agent", b"previous");
+            machine.write("bin/muxen-agent.prev", b"older");
+            let result = machine.run(&binary("wrong", "echo new"));
+            assert!(!result.status.success());
+            assert!(String::from_utf8_lossy(&result.stderr).contains("wrong hash"));
+            assert_eq!(machine.installed(), b"previous");
+            assert_eq!(machine.previous(), b"older");
+            assert!(
+                !machine.dir.join("events").exists(),
+                "no service command before verification"
+            );
+            machine.no_staging_files();
+        }
+
+        #[test]
+        fn a_binary_that_cannot_run_does_not_replace_the_live_one() {
+            let machine = Machine::new(false);
+            machine.write("bin/muxen-agent", b"previous");
+            assert!(!machine.run(b"#!/bin/sh\nexit 23\n").status.success());
+            assert_eq!(machine.installed(), b"previous");
+            assert!(!machine.dir.join("bin/muxen-agent.prev").exists());
+            machine.no_staging_files();
+        }
+
+        #[test]
+        fn a_failed_health_check_restores_the_previous_binary() {
+            for health in ["echo wrong", "exit 23"] {
+                let machine = Machine::new(false);
+                machine.write("bin/muxen-agent", b"previous");
+                let result = machine.run(&binary("new", health));
+                assert!(!result.status.success());
+                assert!(
+                    String::from_utf8_lossy(&result.stderr).contains("Restored the previous agent")
+                );
+                assert_eq!(machine.installed(), b"previous");
+                assert_eq!(machine.previous(), b"previous");
+                machine.no_staging_files();
+            }
+        }
+
+        #[test]
+        fn a_failed_service_restart_restores_and_restarts_the_previous_agent() {
+            let machine = Machine::new(true);
+            machine.write("bin/muxen-agent", b"previous");
+            let result = machine.run(&binary("new", "echo new"));
+            assert!(!result.status.success());
+            assert_eq!(machine.installed(), b"previous");
+            let events = std::fs::read_to_string(machine.dir.join("events")).unwrap();
+            assert_eq!(
+                events
+                    .lines()
+                    .filter(|l| *l == "--user restart muxen-agent.service")
+                    .count(),
+                2
+            );
+            machine.no_staging_files();
+        }
+
+        #[test]
+        fn a_first_install_is_removed_if_its_health_check_fails() {
+            let machine = Machine::new(false);
+            assert!(!machine.run(&binary("new", "exit 23")).status.success());
+            assert!(!machine.dir.join("bin/muxen-agent").exists());
+            assert!(!machine.dir.join("bin/muxen-agent.prev").exists());
+            machine.no_staging_files();
+        }
+
+        #[test]
+        fn a_first_install_can_succeed_without_a_backup() {
+            let machine = Machine::new(false);
+            let new = binary("new", "echo new");
+            assert!(machine.run(&new).status.success());
+            assert_eq!(machine.installed(), new);
+            assert!(!machine.dir.join("bin/muxen-agent.prev").exists());
+            machine.no_staging_files();
+        }
+    }
 }

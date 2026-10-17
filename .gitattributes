@@ -1,0 +1,12 @@
+# Checkouts keep these line endings. Without this, a Windows build
+# (core.autocrlf) bakes CR into a shell script and Linux reports
+# `sh: \r: not found`.
+* text=auto
+*.sh text eol=lf
+*.ps1 text eol=crlf
+
+*.png binary
+*.webp binary
+*.icns binary
+*.ico binary
+*.ttf binary

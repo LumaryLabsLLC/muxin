@@ -29,7 +29,7 @@ use super::Engine;
 use super::model::{Machine, WorkspaceCommand, WorkspaceInfo};
 use crate::config::MachineSpec;
 use crate::ops::remote::{self, Param, ps_quote, sh_quote, with_params};
-use crate::probe::Shell;
+use crate::probe::{lf_script, Shell};
 pub(crate) use registry::WorkspaceRecord;
 use transport::{Limits, Output};
 
@@ -503,7 +503,7 @@ impl Engine {
         let (script, windows) = if rec.windows {
             (with_params(Shell::Powershell, &[("OR_ACTION", Param::Str("changes")), ("OR_DIR", Param::Str(&rec.info.path))], OTHER_PS1), true)
         } else {
-            (with_params(Shell::Sh, &[("OR_DIR", Param::Str(&rec.info.path))], CHANGES_SH), false)
+            (with_params(Shell::Sh, &[("OR_DIR", Param::Str(&rec.info.path))], &lf_script(CHANGES_SH)), false)
         };
         let out = run_checked(&spec, windows, script, FILE_TIMEOUT, CHANGES_LIMITS, &[], None).await?;
         let mut text = out.stdout;
@@ -774,7 +774,7 @@ impl Engine {
                     params.insert(0, ("OR_ACTION", Param::Str("worktree")));
                     with_params(Shell::Powershell, &params, OTHER_PS1)
                 } else {
-                    with_params(Shell::Sh, &params, WORKTREE_SH)
+                    with_params(Shell::Sh, &params, &lf_script(WORKTREE_SH))
                 }
             } else if rec.windows {
                 params.insert(0, ("OR_ACTION", Param::Str("create")));
@@ -878,9 +878,9 @@ impl Engine {
                     ("OR_SOCKET", Param::Bool(rec.docker_socket)),
                     ("OR_ENV", Param::Str(&names)),
                 ];
-                with_params(shell, &all, &format!("{exports}{LIB_SH}\n{DOCKER_SH}\n{EXEC_DOCKER_SH}"))
+                with_params(shell, &all, &format!("{exports}{}\n{}\n{}", lf_script(LIB_SH), lf_script(DOCKER_SH), lf_script(EXEC_DOCKER_SH)))
             }
-            (_, Shell::Sh) => with_params(shell, &params, &format!("{exports}{LIB_SH}\n{EXEC_SH}")),
+            (_, Shell::Sh) => with_params(shell, &params, &format!("{exports}{}\n{}", lf_script(LIB_SH), lf_script(EXEC_SH))),
             (_, Shell::Powershell) => with_params(shell, &params, &format!("{exports}{EXEC_PS1}")),
         };
         let marker = transport::new_marker();
@@ -910,7 +910,7 @@ impl Engine {
         let (script, windows) = if rec.windows {
             (with_params(Shell::Powershell, &all, FILES_PS1), true)
         } else {
-            (with_params(Shell::Sh, &all, FILES_SH), false)
+            (with_params(Shell::Sh, &all, &lf_script(FILES_SH)), false)
         };
         run_checked(spec, windows, script, FILE_TIMEOUT, Limits::DATA, &[], None).await.map_err(|e| e.message)
     }
@@ -946,7 +946,7 @@ impl Engine {
                     ("OR_IMAGE", Param::Str(&image)),
                     ("OR_SRC", Param::Str(rec.info.worktree_of.as_deref().unwrap_or_default())),
                 ],
-                &format!("{LIB_SH}\n{DESTROY_SH}"),
+                &format!("{}\n{}", lf_script(LIB_SH), lf_script(DESTROY_SH)),
             )
         };
         let me = self.clone();
@@ -1381,12 +1381,14 @@ pub(crate) fn same_folder(a: &str, b: &str) -> bool {
 }
 
 fn create_script(docker: bool) -> String {
+    let create = lf_script(CREATE_SH);
     if docker {
         format!(
-            "{DOCKER_SH}\nor_docker_check || exit 6\n{CREATE_SH}\nor_docker_up \"$(pwd -P)\" || exit 6\necho \"Container $OR_CONTAINER is running\"\n"
+            "{}\nor_docker_check || exit 6\n{create}\nor_docker_up \"$(pwd -P)\" || exit 6\necho \"Container $OR_CONTAINER is running\"\n",
+            lf_script(DOCKER_SH),
         )
     } else {
-        CREATE_SH.to_string()
+        create.into_owned()
     }
 }
 

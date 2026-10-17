@@ -24,7 +24,7 @@ use crate::config::{MachineSpec, Settings};
 use crate::fleet::model::Runner;
 use crate::fleet::Engine;
 use crate::github::scope_from_runner_url;
-use crate::probe::{self, ProbeResult, Shell};
+use crate::probe::{self, lf_script, ProbeResult, Shell};
 use remote::{with_params, Param};
 
 const INSTALL_SH: &str = include_str!("scripts/install.sh");
@@ -602,7 +602,7 @@ async fn install(engine: &Arc<Engine>, op: u64, req: &InstallRequest, spec: &Mac
         ("OR_BASE", Param::Str("")),
     ];
     let script = match shell {
-        Shell::Sh => with_params(shell, &params, INSTALL_SH),
+        Shell::Sh => with_params(shell, &params, &lf_script(INSTALL_SH)),
         Shell::Powershell => with_params(shell, &params, INSTALL_PS1),
     };
     let ran = remote::run(engine, op, spec, shell, script, &[token], INSTALL_TIMEOUT).await;
@@ -693,7 +693,7 @@ fn docker_install_script(
         ("OR_SOCKET", Param::Bool(docker_socket)),
         ("OR_STUB", Param::Bool(stub)),
     ];
-    with_params(Shell::Sh, &params, INSTALL_DOCKER_SH)
+    with_params(Shell::Sh, &params, &lf_script(INSTALL_DOCKER_SH))
 }
 
 /// Adds what got installed to config.toml (even if a later runner failed) and refreshes.
@@ -754,7 +754,7 @@ async fn run_action(engine: &Arc<Engine>, op: u64, runner: &Runner, action: Runn
                         ("OR_DELETE", Param::Bool(delete_files)),
                     ];
                     match shell {
-                        Shell::Sh => with_params(shell, &params, CONTROL_SH),
+                        Shell::Sh => with_params(shell, &params, &lf_script(CONTROL_SH)),
                         Shell::Powershell => with_params(shell, &params, CONTROL_PS1),
                     }
                 }
@@ -805,7 +805,7 @@ fn control_docker_script(action: RunnerAction, container: &str, token: &str, del
         ("OR_TOKEN", Param::Str(token)),
         ("OR_DELETE", Param::Bool(delete_files)),
     ];
-    with_params(Shell::Sh, &params, CONTROL_DOCKER_SH)
+    with_params(Shell::Sh, &params, &lf_script(CONTROL_DOCKER_SH))
 }
 
 /// Drops a removed runner from config.toml if it was listed there.

@@ -14,7 +14,7 @@ use super::{inventory_edit, remote};
 use crate::config::{MachineSpec, VmRef};
 use crate::fleet::model::Machine;
 use crate::fleet::Engine;
-use crate::probe::Shell;
+use crate::probe::{lf_script, Shell};
 use remote::{Param, with_params};
 
 const CREATE_SH: &str = include_str!("scripts/vm_create.sh");
@@ -241,6 +241,8 @@ impl Engine {
         // The agent CLIs asked for, as npm packages (Linux; Windows has its own ways).
         let npm = if windows { String::new() } else { req.install.iter().filter_map(|a| crate::cloud::setup::npm_package(a)).collect::<Vec<_>>().join(" ") };
 
+        let setup = lf_script(LINUX_SETUP_SH);
+        let create = lf_script(CREATE_SH);
         let script = with_params(
             Shell::Sh,
             &[
@@ -255,10 +257,10 @@ impl Engine {
                 ("OR_PASS", Param::Str(&password)),
                 ("OR_KEY", Param::Str(&key)),
                 ("OR_HOSTNAME", Param::Str(&slug)),
-                ("OR_SETUP", Param::Str(LINUX_SETUP_SH)),
+                ("OR_SETUP", Param::Str(&setup)),
                 ("OR_NPM", Param::Str(&npm)),
             ],
-            CREATE_SH,
+            &create,
         );
         let secrets: Vec<String> = [password.clone()].into_iter().filter(|p| !p.is_empty()).collect();
         let printed = remote::run_lines(self, op, host, Shell::Sh, script, &secrets, Duration::from_secs(30 * 60)).await?;
@@ -363,7 +365,7 @@ impl Engine {
         let me = self.clone();
         self.runtime().spawn(async move {
             let result = async {
-                let script = with_params(Shell::Sh, &[("OR_NAME", Param::Str(&vm.container))], DESTROY_SH);
+                let script = with_params(Shell::Sh, &[("OR_NAME", Param::Str(&vm.container))], &lf_script(DESTROY_SH));
                 remote::run(&me, op, &host, Shell::Sh, script, &[], Duration::from_secs(5 * 60)).await?;
                 crate::fleet::link::reset(&spec.id);
                 // Not remove_machine: this operation is the one keeping the machine busy.

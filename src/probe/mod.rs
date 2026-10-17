@@ -15,6 +15,16 @@ use crate::config::MachineSpec;
 const PROBE_SH: &str = include_str!("scripts/probe.sh");
 const PROBE_PS1: &str = include_str!("scripts/probe.ps1");
 const TIMEOUT: Duration = Duration::from_secs(45);
+
+/// A POSIX script with LF line endings. `include_str!` keeps CR when a Windows
+/// checkout converted the file, and `sh` then fails with `\r: not found`.
+pub(crate) fn lf_script(script: &str) -> std::borrow::Cow<'_, str> {
+    if !script.contains('\r') {
+        return std::borrow::Cow::Borrowed(script);
+    }
+    std::borrow::Cow::Owned(script.replace("\r\n", "\n").replace('\r', ""))
+}
+
 /// `-Command -` runs stdin line by line and breaks multi-line blocks; read it whole instead.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,7 +461,7 @@ fn script_for(spec: &MachineSpec, shell: Shell) -> String {
     match shell {
         Shell::Sh => {
             let dirs = spec.runner_dirs.join("\n").replace('\'', r"'\''");
-            format!("OR_DIRS='{dirs}'\n{PROBE_SH}")
+            format!("OR_DIRS='{dirs}'\n{}", lf_script(PROBE_SH))
         }
         Shell::Powershell => {
             let dirs: Vec<String> = spec.runner_dirs.iter().map(|d| format!("'{}'", d.replace('\'', "''"))).collect();
@@ -770,6 +780,45 @@ c1.restarts=7
     #[test]
     fn empty_output_is_not_ok() {
         assert!(!parse("").ok);
+    }
+
+    #[test]
+    fn embedded_shell_scripts_have_no_cr() {
+        let spec: MachineSpec = toml::from_str("name = \"x\"\nhost = \"h\"").unwrap();
+        let sent = script_for(&spec, Shell::Sh);
+        let body = sent.strip_prefix("OR_DIRS=''\n").unwrap();
+        assert_eq!(body, lf_script(PROBE_SH));
+        assert!(!sent.contains('\r'));
+        // A Windows checkout of the same file: CR is stripped before sh sees it.
+        let crlf = PROBE_SH.replace('\n', "\r\n");
+        assert!(crlf.contains('\r'));
+        assert_eq!(lf_script(&crlf).as_ref(), PROBE_SH);
+        assert!(!lf_script(&crlf).contains('\r'));
+
+        // Every POSIX script baked in with include_str!. .gitattributes keeps
+        // the checkout as LF; this fails if a CR is committed.
+        let scripts = [
+            include_str!("scripts/probe.sh"),
+            include_str!("../ops/scripts/install.sh"),
+            include_str!("../ops/scripts/control.sh"),
+            include_str!("../ops/scripts/install_docker.sh"),
+            include_str!("../ops/scripts/control_docker.sh"),
+            include_str!("../ops/scripts/vm_create.sh"),
+            include_str!("../ops/scripts/vm_linux_setup.sh"),
+            include_str!("../ops/scripts/vm_destroy.sh"),
+            include_str!("../fleet/workspaces/scripts/lib.sh"),
+            include_str!("../fleet/workspaces/scripts/exec.sh"),
+            include_str!("../fleet/workspaces/scripts/exec_docker.sh"),
+            include_str!("../fleet/workspaces/scripts/files.sh"),
+            include_str!("../fleet/workspaces/scripts/changes.sh"),
+            include_str!("../fleet/workspaces/scripts/create.sh"),
+            include_str!("../fleet/workspaces/scripts/destroy.sh"),
+            include_str!("../fleet/workspaces/scripts/worktree.sh"),
+            include_str!("../fleet/workspaces/scripts/docker.sh"),
+        ];
+        for script in scripts {
+            assert!(!script.contains('\r'));
+        }
     }
 
     #[test]

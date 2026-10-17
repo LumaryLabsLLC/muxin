@@ -73,3 +73,34 @@ gui = ["dep:gpui", "dep:unicode-segmentation", "dep:cocoa", "dep:objc", "dep:raw
 [profile.release]
 lto = "thin"
 strip = true
+
+# Baseline to tighten later.
+[workspace.lints.clippy]
+chunks_exact_to_as_chunks = "allow"
+cloned_ref_to_slice_refs = "allow"
+collapsible_if = "allow"
+double_ended_iterator_last = "allow"
+enum_variant_names = "allow"
+field_reassign_with_default = "allow"
+items_after_test_module = "allow"
+large_enum_variant = "allow"
+manual_contains = "allow"
+manual_range_contains = "allow"
+needless_borrow = "allow"
+needless_borrows_for_generic_args = "allow"
+precedence = "allow"
+redundant_closure = "allow"
+redundant_guards = "allow"
+result_large_err = "allow"
+single_match = "allow"
+too_many_arguments = "allow"
+trim_split_whitespace = "allow"
+type_complexity = "allow"
+unnecessary_sort_by = "allow"
+unit_arg = "allow"
+useless_format = "allow"
+while_let_loop = "allow"
+wrong_self_convention = "allow"
+
+[lints]
+workspace = true

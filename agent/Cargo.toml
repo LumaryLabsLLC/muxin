@@ -45,3 +45,6 @@ jpeg-encoder = "0.6"
 
 [build-dependencies]
 cc = "1"
+
+[lints]
+workspace = true

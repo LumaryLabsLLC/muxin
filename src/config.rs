@@ -261,6 +261,9 @@ pub struct MachineSpec {
     /// "local" for this computer, any `ssh` destination otherwise. Empty: listed but never checked.
     #[serde(default)]
     pub host: String,
+    /// Set only on an operation-local clone for an explicit agent install.
+    #[serde(skip)]
+    pub agent_install_requested: bool,
     #[serde(default)]
     pub user: Option<String>,
     #[serde(default)]
@@ -834,6 +837,19 @@ mod tests {
         let inv = Inventory::parse(&default_inventory()).unwrap();
         assert_eq!(inv.machines.len(), 1);
         assert!(inv.machines[0].is_local());
+    }
+
+    #[test]
+    fn explicit_agent_install_is_not_a_persisted_setting() {
+        let spec = Inventory::parse("[[machine]]\nname = \"Box\"\nhost = \"box\"\n")
+            .unwrap()
+            .machines
+            .remove(0);
+        assert!(!spec.agent_install_requested);
+        assert!(
+            Inventory::parse("[[machine]]\nname = \"Box\"\nagent_install_requested = true\n")
+                .is_err()
+        );
     }
 
     #[test]

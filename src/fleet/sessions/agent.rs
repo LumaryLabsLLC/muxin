@@ -82,6 +82,10 @@ fn fnv(bytes: &[u8]) -> u64 {
     h
 }
 
+#[cfg(test)]
+#[path = "agent_lifecycle_tests.rs"]
+mod lifecycle_tests;
+
 /// Which machines run Windows, by machine id, as their last check said (so
 /// links and requests know how to name the agent there).
 fn windows_machines() -> &'static Mutex<HashMap<String, bool>> {
@@ -127,24 +131,41 @@ fn verified() -> &'static Mutex<HashMap<String, String>> {
 /// Makes sure the machine runs this Muxin's agent build, installing it if
 /// not. Cheap after the first time per machine.
 pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(), String> {
+    super::lifecycle_state::refuse_if_uninstalled(spec)?;
     spec.refuse_if_disconnected()?;
     let target = target(probe).ok_or_else(|| match probe {
         Some(p) => format!("Muxin has no agent for {}-{} machines yet.", p.os.as_deref().unwrap_or("?"), p.arch.as_deref().unwrap_or("?")),
         None => format!("Muxin hasn't reached {} yet, so it doesn't know which agent build it needs. Refresh it first.", spec.name),
     })?;
     let (bytes, hash) = build(&target)?;
-    if verified().lock().unwrap().get(&spec.id) == Some(&hash) {
+    if !spec.agent_install_requested && verified().lock().unwrap().get(&spec.id) == Some(&hash) {
         return Ok(());
     }
     // One check (and install) at a time per machine.
     let gate = {
-        static GATES: OnceLock<Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
-        GATES.get_or_init(Default::default).lock().unwrap().entry(spec.id.clone()).or_default().clone()
+        static GATES: OnceLock<Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
+            OnceLock::new();
+        GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .entry(spec.id.clone())
+            .or_default()
+            .clone()
     };
     let _turn = gate.lock().await;
-    if verified().lock().unwrap().get(&spec.id) == Some(&hash) {
+    if !spec.agent_install_requested && verified().lock().unwrap().get(&spec.id) == Some(&hash) {
         return Ok(());
     }
+    super::lifecycle_state::ensure(spec, ensure_current(spec, target, bytes, hash)).await
+}
+
+async fn ensure_current(
+    spec: &MachineSpec,
+    target: String,
+    bytes: Vec<u8>,
+    hash: String,
+) -> Result<(), String> {
     let windows = target.starts_with("windows");
     note_os(&spec.id, Some(if windows { "windows" } else { "unix" }));
     let installed = if windows {

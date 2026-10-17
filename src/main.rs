@@ -98,6 +98,9 @@ enum Command {
     Git(GitCommand),
     /// How Muxin reaches a machine (direct, ssh link); --direct on|off to change it
     Connection(ConnectionArgs),
+    /// Install or remove a machine's remote agent
+    #[command(subcommand)]
+    Agent(RemoteAgentCommand),
     /// A machine's desktop: a screenshot, or mouse and keyboard input
     #[command(subcommand)]
     Desktop(DesktopCommand),
@@ -148,6 +151,14 @@ enum Command {
     ShellCommand(ShellCommandArgs),
     /// Whether a newer Muxin is out, and how to update this copy
     Updates(UpdatesArgs),
+}
+
+#[derive(Subcommand)]
+enum RemoteAgentCommand {
+    /// Install the agent again after an uninstall
+    Install(MachineArgs),
+    /// Remove the agent, its schedules and pairing; keep the machine in config.toml
+    Uninstall(MachineArgs),
 }
 
 #[derive(Args)]
@@ -1594,6 +1605,28 @@ fn main() -> ExitCode {
             run(&runtime, &a.agent, async move |e| api::list_files(&e, req).await, cli::listing)
         }
         Some(Command::Cp(a)) => cp(a, &runtime),
+        Some(Command::Agent(RemoteAgentCommand::Uninstall(a))) => {
+            let req = api::MachineRequest {
+                machine_id: a.machine_id,
+            };
+            run(
+                &runtime,
+                &a.agent,
+                async move |e| api::agent_uninstall(&e, req).await,
+                |r| r.text(),
+            )
+        }
+        Some(Command::Agent(RemoteAgentCommand::Install(a))) => {
+            let req = api::MachineRequest {
+                machine_id: a.machine_id,
+            };
+            run(
+                &runtime,
+                &a.agent,
+                async move |e| api::agent_install(&e, req).await,
+                |r| format!("{}\n", r.summary),
+            )
+        }
         Some(Command::Connection(a)) => {
             let machine = a.machine.clone();
             match a.direct.as_deref() {
@@ -2414,6 +2447,26 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn parses_agent_uninstall() {
+        let cli = Cli::try_parse_from(["muxin", "agent", "uninstall", "box", "--demo", "--json"])
+            .unwrap();
+        match cli.command {
+            Some(Command::Agent(RemoteAgentCommand::Uninstall(a))) => {
+                assert_eq!(a.machine_id, "box");
+                assert!(a.agent.demo && a.agent.json);
+            }
+            _ => panic!("expected agent uninstall"),
+        }
+        assert!(Cli::try_parse_from(["muxin", "agent", "uninstall"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["muxin", "agent", "install", "box", "--demo", "--json"])
+                .unwrap()
+                .command,
+            Some(Command::Agent(RemoteAgentCommand::Install(_)))
+        ));
     }
 
     #[test]

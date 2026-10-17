@@ -371,6 +371,9 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "run_on_machines" => ok(api::run_on_machines(engine, args(a)?).await?),
         "wake_machine" => ok(api::wake_machine(engine, args(a)?).await?),
         "direct_connection" => ok(api::set_direct(engine, args(a)?).await?),
+        "agent_uninstall" => {
+            ok(crate::fleet::agent_lifecycle::agent_uninstall(engine, args(a)?).await?)
+        }
         "git_setup" => ok(api::git_setup(engine, args(a)?).await?),
         other => Err(ApiError::not_found(format!("Unknown tool: {other}"))),
     }
@@ -964,6 +967,12 @@ pub fn tools() -> Vec<Value> {
             "annotations": annotations("Direct connection", false, false, true, false),
         }),
         json!({
+            "name": "agent_uninstall",
+            "description": "Remove a machine's agent, its schedules and pairing over ssh. Stops the agent and removes its files. Keeps the machine in config.toml. Reports any cleanup that failed. Only when asked.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
+            "annotations": annotations("Uninstall agent", false, true, true, false),
+        }),
+        json!({
             "name": "desktop_screenshot",
             "description": "A picture of a machine's screen (Linux with an X11 desktop, or a Mac on a direct connection), or of one of its displays. Coordinates for desktop_input are in its pixels.",
             "inputSchema": schema(json!({
@@ -1214,7 +1223,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 89);
+        assert_eq!(tools.len(), 90);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

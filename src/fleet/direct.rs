@@ -59,6 +59,10 @@ fn store() -> Option<PathBuf> {
     DIR.get().map(|d| d.join("direct.json"))
 }
 
+pub(crate) fn config_dir() -> Option<&'static std::path::Path> {
+    DIR.get().map(PathBuf::as_path)
+}
+
 fn load() -> HashMap<String, Paired> {
     store().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
@@ -77,6 +81,31 @@ pub fn save(machine_id: &str, entry: Option<Paired>) -> Result<(), String> {
     crate::config::write_atomic(&path, &serde_json::to_vec_pretty(&all).unwrap_or_default()).map_err(|e| e.to_string())?;
     failures().lock().unwrap().remove(machine_id);
     Ok(())
+}
+
+/// Remove only this machine's trusted fingerprint. The app's identity is
+/// shared by its other pairings and stays in place.
+pub fn forget_pairing(machine_id: &str) -> Result<bool, String> {
+    let path = store().ok_or("Muxin's config folder isn't set")?;
+    let removed = forget_pairing_at(&path, machine_id)?;
+    failures().lock().unwrap().remove(machine_id);
+    Ok(removed)
+}
+
+fn forget_pairing_at(path: &std::path::Path, machine_id: &str) -> Result<bool, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut all: HashMap<String, Paired> =
+        serde_json::from_str(&text).map_err(|e| format!("direct.json doesn't read: {e}"))?;
+    if all.remove(machine_id).is_none() {
+        return Ok(false);
+    }
+    let bytes = serde_json::to_vec_pretty(&all).map_err(|e| e.to_string())?;
+    crate::config::write_atomic(path, &bytes).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// Try the direct connection again right away (after the agent was updated).
@@ -317,4 +346,54 @@ fn client_config(p: &Paired) -> Result<quinn::ClientConfig, String> {
 pub async fn resolve_host(spec: &MachineSpec) -> Option<String> {
     let out = tokio::process::Command::new("ssh").arg("-G").args(probe::ssh_args(spec)).output().await.ok()?;
     String::from_utf8_lossy(&out.stdout).lines().find_map(|l| l.strip_prefix("hostname ").map(|h| h.trim().to_string())).filter(|h| !h.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forgetting_one_pairing_keeps_the_other_pairings_and_identity() {
+        let dir = std::env::temp_dir().join(format!("muxin-forget-pairing-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("identity")).unwrap();
+        let path = dir.join("direct.json");
+        std::fs::write(dir.join("identity/key.der"), b"shared identity").unwrap();
+        let entry = |name: &str| Paired {
+            fingerprint: name.into(),
+            host: name.into(),
+            port: 47821,
+            lan: Vec::new(),
+            tailnet: Vec::new(),
+        };
+        let pairs = HashMap::from([
+            ("box".to_string(), entry("box")),
+            ("other".to_string(), entry("other")),
+        ]);
+        std::fs::write(&path, serde_json::to_vec(&pairs).unwrap()).unwrap();
+        assert!(forget_pairing_at(&path, "box").unwrap());
+        let kept: HashMap<String, Paired> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(kept, HashMap::from([("other".to_string(), entry("other"))]));
+        assert_eq!(
+            std::fs::read(dir.join("identity/key.der")).unwrap(),
+            b"shared identity"
+        );
+        assert!(!forget_pairing_at(&path, "box").unwrap());
+        assert!(!forget_pairing_at(&dir.join("absent.json"), "box").unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_broken_pairing_store_is_reported_and_left_alone() {
+        let path =
+            std::env::temp_dir().join(format!("muxin-broken-pairing-{}.json", std::process::id()));
+        std::fs::write(&path, b"broken").unwrap();
+        assert!(
+            forget_pairing_at(&path, "box")
+                .unwrap_err()
+                .contains("direct.json")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"broken");
+        let _ = std::fs::remove_file(path);
+    }
 }

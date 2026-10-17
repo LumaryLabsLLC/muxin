@@ -30,6 +30,8 @@ AppImage run as it is.
 
 ## Making a release
 
+Before you run it, add an entry for the release to CHANGELOG.md.
+
 ```sh
 git switch main && git pull
 scripts/release.sh 0.2.0 --push

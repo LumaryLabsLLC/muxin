@@ -105,7 +105,8 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("escape", Dismiss, Some(WORKSPACE)),
-        KeyBinding::new("/", FocusFilter, Some(WORKSPACE)),
+        // Not while typing in a text field (see input.rs), where "/" is a slash.
+        KeyBinding::new("/", FocusFilter, Some("Root && !TextInput")),
     ]);
 }
 

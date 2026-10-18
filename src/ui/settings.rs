@@ -63,6 +63,9 @@ pub struct SettingsPage {
     engine: Arc<Engine>,
     snapshot: Arc<Snapshot>,
     add: Entity<TextInput>,
+    /// A folder to look for checkouts in, and what adding the last one did.
+    code_add: Entity<TextInput>,
+    code_note: Option<(bool, String)>,
     poll: Entity<TextInput>,
     scan: Entity<TextInput>,
     interval: Entity<TextInput>,
@@ -93,6 +96,7 @@ impl SettingsPage {
     pub fn new(engine: Arc<Engine>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let s = engine.settings();
         let add = cx.new(|cx| TextInput::new(cx, "acme  or  acme/api").mono());
+        let code_add = cx.new(|cx| TextInput::new(cx, "~/app").mono());
         let poll = cx.new(|cx| TextInput::new(cx, "20").mono().with_text(s.github_poll_seconds.to_string()));
         let scan = cx.new(|cx| TextInput::new(cx, "10").mono().with_text(s.github.scan_repos.to_string()));
         let interval = cx.new(|cx| TextInput::new(cx, "15").mono().with_text(s.check_interval_minutes.to_string()));
@@ -105,6 +109,17 @@ impl SettingsPage {
             }
             InputEvent::Cancel => {}
         })];
+        subs.push(cx.subscribe_in(&code_add, window, |this, input, e: &InputEvent, _, cx| match e {
+            InputEvent::Submit => this.add_code_folder(cx),
+            // Typing clears what the last add said (emptying the field after one doesn't).
+            InputEvent::Changed => {
+                if !input.read(cx).text().is_empty() {
+                    this.code_note = None;
+                }
+                cx.notify()
+            }
+            InputEvent::Cancel => {}
+        }));
         for input in [&poll, &scan, &interval] {
             subs.push(cx.subscribe_in(input, window, |this, _, e: &InputEvent, _, cx| {
                 if *e == InputEvent::Submit {
@@ -136,6 +151,8 @@ impl SettingsPage {
             engine,
             snapshot,
             add,
+            code_add,
+            code_note: None,
             poll,
             scan,
             interval,
@@ -260,6 +277,144 @@ impl SettingsPage {
             self.save_error = Some(e);
         }
         cx.notify();
+    }
+
+    /// Adds a folder to look for checkouts in (as deep as the usual ones,
+    /// unless it says how deep: "~/app:2").
+    fn add_code_folder(&mut self, cx: &mut Context<Self>) {
+        let typed = self.code_add.read(cx).text().trim().trim_end_matches(['/', '\\']).to_string();
+        if typed.is_empty() {
+            return;
+        }
+        let entry = if code_folder_depth(&typed).is_some() { typed } else { format!("{typed}:4") };
+        let folder = code_folder_path(&entry).to_string();
+        let mut s = self.engine.settings();
+        if s.code_folders.iter().any(|f| code_folder_path(f) == folder) {
+            self.code_note = Some((false, format!("{folder} is on the list already.")));
+        } else {
+            s.code_folders.push(entry);
+            match self.engine.update_settings(s) {
+                Ok(_) => {
+                    self.code_note = Some((true, format!("Looking for checkouts in {folder} on your machines.")));
+                    self.code_add.update(cx, |i, cx| i.set_text("", cx));
+                    self.rescan_checkouts();
+                }
+                Err(e) => self.code_note = Some((false, e)),
+            }
+        }
+        cx.notify();
+    }
+
+    fn remove_code_folder(&mut self, entry: &str, cx: &mut Context<Self>) {
+        let mut s = self.engine.settings();
+        s.code_folders.retain(|f| f != entry);
+        self.save_code_folders(s, cx);
+    }
+
+    fn reset_code_folders(&mut self, cx: &mut Context<Self>) {
+        let mut s = self.engine.settings();
+        s.code_folders = crate::config::default_code_folders();
+        self.save_code_folders(s, cx);
+    }
+
+    fn save_code_folders(&mut self, s: Settings, cx: &mut Context<Self>) {
+        match self.engine.update_settings(s) {
+            Ok(_) => {
+                self.code_note = None;
+                self.rescan_checkouts();
+            }
+            Err(e) => self.code_note = Some((false, e)),
+        }
+        cx.notify();
+    }
+
+    /// Looks for checkouts again on the machines that are on.
+    fn rescan_checkouts(&self) {
+        for m in self.snapshot.machines.iter().filter(|m| m.status == "online") {
+            let engine = self.engine.clone();
+            let id = m.id.clone();
+            engine.runtime().clone().spawn(async move {
+                let _ = engine.refresh_checkouts(&id).await;
+            });
+        }
+    }
+
+    /// Where the agents look for git checkouts, for worktrees of them.
+    fn code_folders_section(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let folders = self.engine.settings().code_folders;
+        let usual = folders == crate::config::default_code_folders();
+        let chips: Vec<AnyElement> = folders
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                let remove = entry.clone();
+                // "~:1": checkouts right in the home folder.
+                let label = match code_folder_path(entry) {
+                    "~" => "~ (its own folders)".to_string(),
+                    folder => folder.to_string(),
+                };
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .h(px(26.))
+                    .pl(px(8.))
+                    .pr(px(2.))
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(theme.border_variant)
+                    .bg(theme.element)
+                    .font_family(mono_font())
+                    .text_size(px(12.))
+                    .child(icon("folder", 12., theme.text_muted))
+                    .child(label)
+                    .child(
+                        Button::icon_only(("code-folder-remove", i), "x")
+                            .tooltip("Stop looking here")
+                            .on_click(cx.listener(move |this, _, _, cx| this.remove_code_folder(&remove, cx))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        // As wide as the column (760, see render): a row of chips that wraps
+        // would otherwise make it as wide as all of them in one line.
+        div()
+            .w_full()
+            .min_w(px(0.))
+            .max_w(px(760.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(section_title(theme, "Code folders", None))
+            .child(
+                card(theme)
+                    .w_full()
+                    .min_w(px(0.))
+                    .px(px(14.))
+                    .py(px(12.))
+                    .gap(px(10.))
+                    .child(div().w_full().min_w(px(0.)).flex().flex_wrap().gap(px(6.)).children(chips))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(div().flex().flex_col().flex_1().min_w(px(0.)).child(self.code_add.clone()))
+                            .child(Button::new("code-folder-add", "Add").icon("plus").on_click(cx.listener(|this, _, _, cx| this.add_code_folder(cx))))
+                            .when(!usual, |d| {
+                                d.child(
+                                    Button::new("code-folder-reset", "Usual folders")
+                                        .style(ButtonStyle::Ghost)
+                                        .tooltip("Back to Muxin's own list: ~/Developer, ~/code, ~/src and the like")
+                                        .on_click(cx.listener(|this, _, _, cx| this.reset_code_folders(cx))),
+                                )
+                            }),
+                    )
+                    .children(self.code_note.as_ref().map(|(ok, text)| note(theme, if *ok { "circle-check" } else { "circle-alert" }, if *ok { theme.success } else { theme.error }, text.clone())))
+                    .child(div().w_full().min_w(px(0.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(
+                        "Muxin's agent on each machine looks for git checkouts in these folders, a few levels deep. Fix with agent and Review with agent then work in a new worktree of a checkout found there, so the agent has your repo's own rules.",
+                    )),
+            )
     }
 
     fn save_intervals(&mut self, cx: &mut Context<Self>) {
@@ -1039,6 +1194,7 @@ impl Render for SettingsPage {
                 .child(self.shell_section(&theme, cx))
                 .child(self.clipboard_section(&theme))
                 .child(self.editor_section(&theme))
+                .child(self.code_folders_section(&theme, cx))
                 .child(self.updates_section(&theme))
                 .children(self.tailscale_section(&theme))
                 .child(self.checks_section(&theme, false, cx))
@@ -1271,6 +1427,23 @@ impl SettingsPage {
     }
 }
 
+/// A code folder's folder: "~/code" in "~/code:4" (how deep to look).
+fn code_folder_path(entry: &str) -> &str {
+    match entry.rsplit_once(':') {
+        Some((folder, depth)) if !depth.is_empty() && depth.chars().all(|c| c.is_ascii_digit()) => folder,
+        _ => entry,
+    }
+}
+
+/// How deep to look in a code folder, when the entry says.
+fn code_folder_depth(entry: &str) -> Option<usize> {
+    let (_, depth) = entry.rsplit_once(':')?;
+    if depth.is_empty() || !depth.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    depth.parse().ok()
+}
+
 fn note(_theme: &Theme, icon_name: &'static str, color: gpui::Hsla, text: impl Into<SharedString>) -> impl IntoElement {
     div().flex().items_center().gap(px(8.)).text_size(px(12.5)).child(icon(icon_name, 14., color)).child(text.into())
 }
@@ -1398,4 +1571,20 @@ fn swatch_rows(swatches: Vec<AnyElement>) -> gpui::Div {
         rows.push(div().flex().gap(px(12.)).children(row));
     }
     div().flex().flex_col().gap(px(14.)).children(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_code_folder_entries() {
+        assert_eq!((code_folder_path("~/code:4"), code_folder_depth("~/code:4")), ("~/code", Some(4)));
+        assert_eq!((code_folder_path("~/app"), code_folder_depth("~/app")), ("~/app", None));
+        assert_eq!((code_folder_path("~:1"), code_folder_depth("~:1")), ("~", Some(1)));
+        // A Windows folder's drive letter isn't a depth.
+        assert_eq!((code_folder_path("C:\\code"), code_folder_depth("C:\\code")), ("C:\\code", None));
+        assert_eq!((code_folder_path("C:\\code:2"), code_folder_depth("C:\\code:2")), ("C:\\code", Some(2)));
+        assert_eq!(code_folder_depth("~/odd:"), None);
+    }
 }

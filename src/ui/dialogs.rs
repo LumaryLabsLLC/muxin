@@ -1858,12 +1858,20 @@ impl NewSessionDialog {
                     cx.notify()
                 })))
         });
+        // No checkout of it found there: say how to point Muxin at one.
+        let missing = plan.filter(|_| source.is_none()).map(|p| {
+            div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!(
+                "No checkout of {} found on {name}. Have one? Add its folder in Settings › General › Code folders and start this again: the agent then works in a worktree of it, with your repo's own rules.",
+                p.repo
+            ))
+        });
         div()
             .flex()
             .flex_col()
             .gap(px(8.))
             .child(field(theme, "Branch", self.branch.clone(), None))
             .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(what))
+            .children(missing)
             .children(off)
             .into_any_element()
     }

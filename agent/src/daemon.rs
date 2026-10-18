@@ -302,6 +302,13 @@ fn launch(state: &Arc<State>, s: &Arc<Session>) -> anyhow::Result<()> {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("SHELL", &shell);
+        // On a Mac the agent has no locale under launchd (direct connections)
+        // or when an app opened from the Dock started it: Terminal.app sets
+        // one itself. Without it, bash drops an é as it's typed and ls shows ?.
+        #[cfg(target_os = "macos")]
+        if let Some((name, value)) = default_locale(&cmd, has_c_utf8()) {
+            cmd.env(name, value);
+        }
     }
     cmd.cwd(&s.cwd);
     cmd.env("COLORTERM", "truecolor");
@@ -324,6 +331,30 @@ fn launch(state: &Arc<State>, s: &Arc<Session>) -> anyhow::Result<()> {
     let (state, s) = (state.clone(), s.clone());
     thread::spawn(move || pump(&state, &s, reader, generation));
     Ok(())
+}
+
+/// The locale a Mac session gets when the agent has none (no LC_ALL, LC_CTYPE
+/// or LANG): LANG=C.UTF-8 where the Mac has it (macOS 27's /etc/zprofile sets
+/// it too), else LC_CTYPE=UTF-8, since a Mac's UTF-8 is only a character set.
+/// C.UTF-8 first: ssh passes it on to Linux machines, which don't know UTF-8.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn default_locale(cmd: &CommandBuilder, has_c_utf8: bool) -> Option<(&'static str, &'static str)> {
+    if ["LC_ALL", "LC_CTYPE", "LANG"].iter().any(|v| cmd.get_env(v).is_some_and(|x| !x.is_empty())) {
+        return None;
+    }
+    Some(if has_c_utf8 { ("LANG", "C.UTF-8") } else { ("LC_CTYPE", "UTF-8") })
+}
+
+/// Whether this Mac's C library knows the C.UTF-8 locale.
+#[cfg(target_os = "macos")]
+fn has_c_utf8() -> bool {
+    unsafe {
+        let locale = libc::newlocale(libc::LC_ALL_MASK, c"C.UTF-8".as_ptr(), std::ptr::null_mut());
+        if !locale.is_null() {
+            libc::freelocale(locale);
+        }
+        !locale.is_null()
+    }
 }
 
 /// Reads the program's output into the terminal state and out to clients.
@@ -522,4 +553,46 @@ fn attach(state: &State, mut stream: Stream, req: &Value) {
         }
     }
     s.inner.lock().unwrap().clients.retain(|(c, _)| *c != id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A session's command with only these of the locale variables.
+    fn with_locale(vars: &[(&str, &str)]) -> CommandBuilder {
+        let mut cmd = CommandBuilder::new("sh");
+        for v in ["LC_ALL", "LC_CTYPE", "LANG"] {
+            cmd.env_remove(v);
+        }
+        for (k, v) in vars {
+            cmd.env(k, v);
+        }
+        cmd
+    }
+
+    #[test]
+    fn mac_sessions_get_a_utf8_locale_unless_one_is_set() {
+        // launchd's environment, as `listen` has for direct connections.
+        assert_eq!(default_locale(&with_locale(&[]), true), Some(("LANG", "C.UTF-8")));
+        assert_eq!(default_locale(&with_locale(&[]), false), Some(("LC_CTYPE", "UTF-8")));
+        // An empty LANG is none, and LC_MESSAGES alone doesn't pick a character set.
+        assert_eq!(default_locale(&with_locale(&[("LANG", ""), ("LC_MESSAGES", "fr_FR.UTF-8")]), true), Some(("LANG", "C.UTF-8")));
+        // A locale the agent was given (ssh brings the terminal's) stays, even C.
+        for set in [("LANG", "en_US.UTF-8"), ("LC_CTYPE", "UTF-8"), ("LC_ALL", "C")] {
+            assert_eq!(default_locale(&with_locale(&[set]), true), None, "{set:?}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn this_mac_knows_the_locale_it_would_give() {
+        let (name, value) = default_locale(&with_locale(&[]), has_c_utf8()).unwrap();
+        // LANG sets every category, LC_CTYPE only the character set.
+        let mask = if name == "LANG" { libc::LC_ALL_MASK } else { libc::LC_CTYPE_MASK };
+        let value = std::ffi::CString::new(value).unwrap();
+        let locale = unsafe { libc::newlocale(mask, value.as_ptr(), std::ptr::null_mut()) };
+        assert!(!locale.is_null(), "{name}={value:?}");
+        unsafe { libc::freelocale(locale) };
+    }
 }

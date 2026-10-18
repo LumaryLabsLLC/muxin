@@ -42,9 +42,10 @@ pub struct Peer {
     pub relay: Option<String>,
     /// Traffic went to it recently.
     pub active: bool,
-    /// One of Mullvad's exit nodes, shared into the tailnet by Tailscale's
-    /// Mullvad add-on: not the user's, and nothing to ssh to.
-    pub mullvad: bool,
+    /// One of Tailscale's own devices shared into every tailnet: Mullvad's
+    /// exit nodes (Tailscale's Mullvad add-on) or the hello.ts.net demo. Not
+    /// the user's, and nothing to ssh to.
+    pub tailscale_owned: bool,
 }
 
 impl Tailnet {
@@ -89,9 +90,9 @@ impl Peer {
         self.dns_name.split('.').next().filter(|s| !s.is_empty()).unwrap_or(&self.host_name)
     }
 
-    /// Whether you can ssh to it (phones, tablets and Mullvad's exit nodes: no).
+    /// Whether you can ssh to it (phones, tablets and Tailscale's own devices: no).
     pub fn is_computer(&self) -> bool {
-        !self.mullvad && !matches!(self.os.to_ascii_lowercase().as_str(), "ios" | "android" | "tvos")
+        !self.tailscale_owned && !matches!(self.os.to_ascii_lowercase().as_str(), "ios" | "android" | "tvos")
     }
 
     /// "direct" (peer-to-peer), "relay" (through a Tailscale relay), or
@@ -129,8 +130,7 @@ pub fn parse(output: &str) -> Option<Tailnet> {
                     direct_addr: text(&p["CurAddr"]),
                     relay: text(&p["Relay"]),
                     active: p["Active"].as_bool().unwrap_or(false),
-                    // Only Mullvad's nodes come with a location.
-                    mullvad: p["DNSName"].as_str().is_some_and(|d| d.trim_end_matches('.').ends_with(".mullvad.ts.net")) || p["Location"].is_object(),
+                    tailscale_owned: tailscale_owned(p),
                 })
                 .collect()
         })
@@ -140,6 +140,15 @@ pub fn parse(output: &str) -> Option<Tailnet> {
         name: text(&json["CurrentTailnet"]["Name"]),
         peers,
     })
+}
+
+/// Whether a peer is one of Tailscale's own devices rather than the user's (or
+/// one shared with them from another tailnet, which stays).
+fn tailscale_owned(p: &Value) -> bool {
+    let dns = p["DNSName"].as_str().unwrap_or("").trim_end_matches('.').to_ascii_lowercase();
+    let tagged = |t: &str| p["Tags"].as_array().is_some_and(|tags| tags.iter().any(|x| x.as_str() == Some(t)));
+    // Only Mullvad's nodes come with a location.
+    dns == "hello.ts.net" || dns.ends_with(".mullvad.ts.net") || tagged("tag:mullvad-exit-node") || p["Location"].is_object()
 }
 
 /// The Tailscale command-line tool, if Tailscale is installed. On macOS the
@@ -283,7 +292,12 @@ mod tests {
                    "Online": true, "LastSeen": "0001-01-01T00:00:00Z", "CurAddr": "", "Relay": "mia", "Active": true },
     "nodekey:d": { "HostName": "us-nyc-wg-301.mullvad.ts.net", "DNSName": "us-nyc-wg-301.mullvad.ts.net.", "OS": "linux", "TailscaleIPs": ["100.101.12.34"],
                    "Online": true, "LastSeen": "0001-01-01T00:00:00Z", "CurAddr": "", "Relay": "nyc", "Active": false, "ExitNodeOption": true,
-                   "Location": { "Country": "USA", "CountryCode": "US", "City": "New York, NY", "CityCode": "NYC", "Priority": 100 } }
+                   "Tags": ["tag:mullvad-exit-node"],
+                   "Location": { "Country": "USA", "CountryCode": "US", "City": "New York, NY", "CityCode": "NYC", "Priority": 100 } },
+    "nodekey:e": { "HostName": "hello", "DNSName": "hello.ts.net.", "OS": "linux", "TailscaleIPs": ["100.101.102.103"],
+                   "Online": true, "LastSeen": "0001-01-01T00:00:00Z", "CurAddr": "", "Relay": "sea", "Active": false },
+    "nodekey:f": { "HostName": "pi", "DNSName": "pi.friend-tailnet.ts.net.", "OS": "linux", "TailscaleIPs": ["100.77.1.2"],
+                   "Online": true, "LastSeen": "0001-01-01T00:00:00Z", "CurAddr": "", "Relay": "den", "Active": false }
   }
 }"#;
 
@@ -292,7 +306,7 @@ mod tests {
         let t = parse(STATUS).unwrap();
         assert!(t.running());
         assert_eq!(t.name.as_deref(), Some("someone@example.com"));
-        assert_eq!(t.peers.len(), 4);
+        assert_eq!(t.peers.len(), 6);
         let box_ = t.peers.iter().find(|p| p.host_name == "box-SER").unwrap();
         assert_eq!((box_.dns_name.as_str(), box_.short_name(), box_.path()), ("box-ser.tail0000.ts.net", "box-ser", "direct"));
         assert_eq!(box_.last_seen, None, "online devices have no last-seen time");
@@ -301,8 +315,12 @@ mod tests {
         assert_eq!(phone.path(), "idle");
         assert_eq!(t.peers.iter().find(|p| p.host_name == "nas").unwrap().path(), "relay");
         let exit = t.peers.iter().find(|p| p.dns_name.ends_with(".mullvad.ts.net")).unwrap();
-        assert!(exit.mullvad && !exit.is_computer(), "Mullvad's exit nodes aren't machines to add");
-        assert!(t.peers.iter().filter(|p| p.os == "linux" && !p.mullvad).all(|p| p.is_computer()));
+        assert!(exit.tailscale_owned && !exit.is_computer(), "Mullvad's exit nodes aren't machines to add");
+        let hello = t.peers.iter().find(|p| p.dns_name == "hello.ts.net").unwrap();
+        assert!(hello.tailscale_owned && !hello.is_computer(), "nor is Tailscale's demo device");
+        // A machine shared in from another tailnet is.
+        assert!(t.peers.iter().find(|p| p.dns_name == "pi.friend-tailnet.ts.net").unwrap().is_computer());
+        assert!(t.peers.iter().filter(|p| p.os == "linux" && !p.tailscale_owned).all(|p| p.is_computer()));
     }
 
     #[test]

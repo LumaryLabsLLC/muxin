@@ -52,6 +52,8 @@ impl Root {
                 .tooltip("Its Windows account's password (Muxin made it; it's kept in your Keychain)")
                 .on_click(cx.listener(move |this, _, _, cx| match this.engine.vm_password(&mid) {
                     Some(p) => {
+                        // It stays on this computer: the shared clipboard doesn't pass it on.
+                        crate::fleet::clipboard::keep_here(&p);
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(p));
                         this.notify_user("Copied its password".to_string(), false, cx);
                     }

@@ -287,6 +287,18 @@ pub struct PulseSample {
     pub online: usize,
 }
 
+/// This computer's clipboard as the shared clipboard last saw it.
+#[derive(Default)]
+struct ClipboardSeen {
+    /// Its change number (see pasteboard_state; 0 on Linux).
+    count: i64,
+    /// Its text.
+    text: String,
+    /// Text from the machines written there last, until a copy made here
+    /// goes out. Wayland takes it a moment later, which isn't a new copy.
+    written: Option<String>,
+}
+
 pub struct Root {
     pub(super) engine: Arc<Engine>,
     pub(super) snapshot: Arc<Snapshot>,
@@ -390,7 +402,7 @@ pub struct Root {
     window_active: bool,
     pub(super) ws_ui: WorkspaceUi,
     /// This computer's clipboard as last seen (see watch_clipboard).
-    clipboard_seen: (i64, String),
+    clipboard_seen: ClipboardSeen,
     _tasks: Vec<Task<()>>,
     pub(super) _subscriptions: Vec<Subscription>,
 }
@@ -443,11 +455,7 @@ impl Root {
             loop {
                 match copied_there.recv().await {
                     Ok(text) => {
-                        let alive = this.update(cx, |this, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
-                            this.clipboard_seen = (super::pasteboard_state().map(|s| s.0).unwrap_or(0), text);
-                        });
-                        if alive.is_err() {
+                        if this.update(cx, |this, cx| this.paste_copied_there(text, cx)).is_err() {
                             break;
                         }
                     }
@@ -563,7 +571,7 @@ impl Root {
             palette: None,
             window_active: false,
             ws_ui: WorkspaceUi::default(),
-            clipboard_seen: (super::pasteboard_state().map(|s| s.0).unwrap_or(0), String::new()),
+            clipboard_seen: ClipboardSeen { count: super::pasteboard_state().map(|s| s.0).unwrap_or(0), ..Default::default() },
             _tasks: vec![updates, ticker, clipboard_out, clipboard_in],
             _subscriptions: subscriptions,
         };
@@ -1189,34 +1197,70 @@ impl Root {
     }
 
     /// Offers what was just copied on this computer to the machines sharing
-    /// the clipboard (not a password manager's copies).
-    fn watch_clipboard(&mut self, cx: &mut Context<Self>) {
+    /// the clipboard (not a password manager's copies). Whether something
+    /// new was copied here since the last look, text or not.
+    fn watch_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
         if self.engine.is_demo() || !self.engine.settings().share_clipboard {
-            return;
+            return false;
+        }
+        // Wayland says what's on the clipboard only to the program with the
+        // keyboard: with no Muxin window focused, GPUI reads an old copy.
+        if cx.compositor_name() == "Wayland" && cx.active_window().is_none() {
+            return false;
         }
         // Without a change counter (Linux), the text is compared; a password
         // manager's copies can't be told apart there (see pasteboard_state).
         let state = super::pasteboard_state();
         if let Some((count, private)) = state {
-            if count == self.clipboard_seen.0 {
-                return;
+            if count == self.clipboard_seen.count {
+                return false;
             }
-            self.clipboard_seen.0 = count;
+            // A copy made here: a write from the machines is counted as soon
+            // as it's made (see paste_copied_there).
+            self.clipboard_seen.count = count;
+            self.clipboard_seen.written = None;
             if private {
-                return;
+                return true;
             }
         }
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return state.is_some() };
         // Copied again while reading: that copy is looked at next time.
         if let Some((count, _)) = state
             && super::pasteboard_state().map(|s| s.0) != Some(count)
         {
+            return true;
+        }
+        let seen = &mut self.clipboard_seen;
+        if text == seen.text {
+            return false;
+        }
+        // What was written from the machines, set a moment later (Wayland).
+        if seen.written.as_ref() == Some(&text) {
+            seen.text = text;
+            seen.written = None;
+            return false;
+        }
+        crate::fleet::clipboard::local_changed(&text);
+        seen.text = text;
+        seen.written = None;
+        true
+    }
+
+    /// Puts text copied on a machine on this computer's clipboard: not when
+    /// a newer copy was made here (that one goes to the machines instead),
+    /// nor when it's there already. Then notes what the clipboard really
+    /// holds, which isn't always the text: Wayland ignores the write while no
+    /// Muxin window has focus, and the old text still there isn't a new copy
+    /// to offer the machines (#20).
+    fn paste_copied_there(&mut self, text: String, cx: &mut Context<Self>) {
+        if !self.engine.settings().share_clipboard || self.watch_clipboard(cx) {
             return;
         }
-        if text != self.clipboard_seen.1 {
-            crate::fleet::clipboard::local_changed(&text);
-            self.clipboard_seen.1 = text;
+        let holds = |cx: &Context<Self>| cx.read_from_clipboard().and_then(|item| item.text());
+        if holds(cx).as_ref() != Some(&text) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
         }
+        self.clipboard_seen = ClipboardSeen { count: super::pasteboard_state().map(|s| s.0).unwrap_or(0), text: holds(cx).unwrap_or_default(), written: Some(text) };
     }
 
     /// Powers a cloud machine on or off.

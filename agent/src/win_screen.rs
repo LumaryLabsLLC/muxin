@@ -429,33 +429,29 @@ fn set_clipboard_text(text: &str) -> bool {
     }
 }
 
-/// `muxen-agent clip` on Windows: what's copied here goes out; what the app
-/// sends is put on the clipboard. Windows numbers clipboard changes, so a
-/// look every few hundred milliseconds sees each one.
-pub fn clip(rx: std::sync::mpsc::Receiver<String>, changed: impl Fn(&str) -> bool) {
-    use windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber;
-    let mut seen = unsafe { GetClipboardSequenceNumber() };
-    loop {
-        match rx.recv_timeout(Duration::from_millis(300)) {
-            Ok(text) => {
-                let text: String = text.chars().take(super::clipboard::MAX).collect();
-                if set_clipboard_text(&text) {
-                    seen = unsafe { GetClipboardSequenceNumber() };
-                }
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        let now = unsafe { GetClipboardSequenceNumber() };
-        if now != seen {
-            seen = now;
-            if let Some(text) = clipboard_text().filter(|t| !t.is_empty() && t.len() <= super::clipboard::MAX)
-                && !changed(&text)
-            {
-                return;
-            }
-        }
+/// Windows' clipboard, for `muxen-agent clip`: Windows numbers its changes.
+struct Clipboard;
+
+impl super::clipboard::Board for Clipboard {
+    /// (A password manager's copy shows as no text: see `clipboard_text`.)
+    fn state(&mut self) -> (i64, bool) {
+        (unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() } as i64, false)
     }
+
+    fn text(&mut self) -> Option<String> {
+        clipboard_text()
+    }
+
+    fn set(&mut self, text: &str) -> bool {
+        set_clipboard_text(text)
+    }
+}
+
+/// `muxen-agent clip` on Windows: what's copied here goes out; what the app
+/// sends is put on the clipboard (see clipboard.rs). A look every few hundred
+/// milliseconds sees each change.
+pub fn clip(rx: std::sync::mpsc::Receiver<String>, changed: impl Fn(&str) -> bool) {
+    super::clipboard::share(&mut Clipboard, rx, Duration::from_millis(300), changed);
 }
 
 // --- Running in the signed-in user's desktop session ------------------------

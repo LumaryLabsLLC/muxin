@@ -42,36 +42,66 @@ pub fn target(probe: Option<&ProbeResult>) -> Option<String> {
     Some(format!("{os}-{arch}"))
 }
 
-/// The folder of agent builds: in the app bundle, next to the binary, or (a
-/// debug build) `dist/agents` in the source checkout it was built from
+/// This binary, its symlinks resolved.
+fn this_exe() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.canonicalize().ok()
+}
+
+/// The source checkout this binary was built in, when it still runs from
+/// there (`target/release/muxin`, debug or release).
+fn checkout(exe: &std::path::Path) -> Option<PathBuf> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).canonicalize().ok()?;
+    exe.starts_with(&root).then_some(root)
+}
+
+/// The folder of agent builds: in the app bundle, next to the binary, or
+/// `dist/agents` in the source checkout it was built in and runs from
 /// (`scripts/build-agents.sh`). Not any folder above the binary: one planted
 /// there (`/tmp/dist/agents`) would be uploaded to every machine.
 pub fn builds_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("MUXEN_AGENTS_DIR") {
         return Some(PathBuf::from(dir));
     }
-    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let exe = this_exe()?;
     let dir = exe.parent()?;
     for candidate in [dir.join("../Resources/agents"), dir.join("agents")] {
         if candidate.is_dir() {
             return Some(candidate);
         }
     }
-    #[cfg(debug_assertions)]
-    {
-        let checkout = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/dist/agents"));
-        if checkout.is_dir() {
-            return Some(checkout);
-        }
-    }
-    None
+    let dist = checkout(&exe)?.join("dist/agents");
+    dist.is_dir().then_some(dist)
 }
 
-/// Where the build for `target` is.
+/// This computer's agent build name ("darwin-aarch64").
+fn host_target() -> String {
+    let os = if std::env::consts::OS == "macos" { "darwin" } else { std::env::consts::OS };
+    format!("{os}-{}", std::env::consts::ARCH)
+}
+
+/// Where the build for `target` is. With no folder of builds, a
+/// `muxen-agent` built next to the binary (`cargo build --workspace` in a
+/// checkout) serves this computer's own platform.
 fn build_path(target: &str) -> Result<PathBuf, String> {
-    let dir = builds_dir().ok_or("Muxin can't find its agent builds (run scripts/build-agents.sh in a source checkout, or set MUXEN_AGENTS_DIR).")?;
     let exe = if target.starts_with("windows") { ".exe" } else { "" };
-    Ok(dir.join(format!("muxen-agent-{target}{exe}")))
+    if let Some(dir) = builds_dir() {
+        return Ok(dir.join(format!("muxen-agent-{target}{exe}")));
+    }
+    let this = this_exe();
+    if target == host_target()
+        && let Some(sibling) = this.as_deref().and_then(|e| e.parent()).map(|d| d.join(format!("muxen-agent{exe}")))
+        && sibling.is_file()
+    {
+        return Ok(sibling);
+    }
+    Err(match this {
+        Some(e) if checkout(&e).is_some() => {
+            let cargo = if cfg!(debug_assertions) { "cargo build --workspace" } else { "cargo build --release --workspace" };
+            format!("This build of Muxin has no agent builds. In its checkout, run `{cargo}` for this computer, or scripts/build-agents.sh for every platform.")
+        }
+        Some(e) => format!("Muxin can't find its agent builds next to {}. Reinstall Muxin, or set MUXEN_AGENTS_DIR to a folder of them.", e.display()),
+        None => "Muxin can't tell where it's installed, so it can't find its agent builds. Set MUXEN_AGENTS_DIR to a folder of them.".to_string(),
+    })
 }
 
 /// The build for `target` and its hash (what `muxen-agent hash` prints).
@@ -366,4 +396,22 @@ pub async fn ctl_reply(spec: &MachineSpec, request: &Value) -> Result<Value, Str
         .and_then(|l| serde_json::from_str(l).ok())
         .ok_or_else(|| format!("The agent on {} gave no answer.", spec.name))?;
     Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_target_names_a_build_like_a_check_would() {
+        let probe = ProbeResult { os: Some(std::env::consts::OS.into()), arch: Some(std::env::consts::ARCH.into()), ..Default::default() };
+        assert_eq!(target(Some(&probe)), Some(host_target()));
+    }
+
+    #[test]
+    fn only_a_binary_inside_the_checkout_uses_it() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).canonicalize().unwrap();
+        assert_eq!(checkout(&root.join("target/release/muxin")), Some(root));
+        assert_eq!(checkout(std::path::Path::new("/Applications/Muxin.app/Contents/MacOS/muxin")), None);
+    }
 }

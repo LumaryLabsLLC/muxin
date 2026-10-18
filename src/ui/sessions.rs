@@ -515,18 +515,31 @@ impl Root {
                     .min_w(px(0.))
                     .gap(px(2.))
                     .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(info.title.clone()))
+                    // A folder too long to fit goes onto its own line (and wraps at
+                    // its slashes) instead of running under the buttons.
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
-                            .gap(px(6.))
+                            .gap_x(px(6.))
+                            .gap_y(px(2.))
                             .text_size(px(12.))
                             .text_color(theme.text_placeholder)
                             .child(info.agent_name.clone())
                             .child("·")
                             .child(machine)
-                            .child("·")
-                            .child(div().font_family(mono_font()).text_size(px(11.5)).child(info.cwd.clone())),
+                            .when(!info.cwd.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .items_start()
+                                        .gap(px(4.))
+                                        .min_w(px(0.))
+                                        .child(kit::icon("folder", 12., theme.text_placeholder).flex_none().mt(px(2.)))
+                                        .child(div().flex_1().min_w(px(0.)).font_family(mono_font()).text_size(px(11.5)).child(info.cwd.clone())),
+                                )
+                            }),
                     )
                     .children(info.git.as_ref().map(|g| git_line(&theme, &info.id, g, true).mt(px(2.)))),
             )

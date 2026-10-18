@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tokio::sync::broadcast;
@@ -17,10 +17,12 @@ use super::link::{self, Link};
 const CLIP: u8 = 40;
 /// Bigger text isn't shared.
 const MAX: usize = 256 * 1024;
+/// How long a replaced text coming back counts as an old copy (see `History`).
+const BOUNCE: Duration = Duration::from_secs(3);
 
 struct Shared {
-    /// The text last copied anywhere (so nothing echoes back).
-    last: Mutex<String>,
+    /// The last copies (so nothing echoes or bounces back).
+    history: Mutex<History>,
     /// What a program in a terminal here last put on the clipboard (see `keep_here`).
     kept: Mutex<Option<String>>,
     /// Machines sharing the clipboard: their link and channel.
@@ -31,7 +33,40 @@ struct Shared {
 
 fn shared() -> &'static Shared {
     static SHARED: OnceLock<Shared> = OnceLock::new();
-    SHARED.get_or_init(|| Shared { last: Mutex::new(String::new()), kept: Mutex::new(None), peers: Mutex::new(HashMap::new()), incoming: broadcast::channel(16).0 })
+    SHARED.get_or_init(|| Shared { history: Mutex::new(History::default()), kept: Mutex::new(None), peers: Mutex::new(HashMap::new()), incoming: broadcast::channel(16).0 })
+}
+
+/// The text last copied anywhere, and the texts it replaced moments ago.
+#[derive(Default)]
+struct History {
+    last: String,
+    /// Each with where the copy that replaced it was made (None: this
+    /// computer) and when.
+    replaced: Vec<(String, Option<String>, Instant)>,
+}
+
+impl History {
+    /// Whether text copied `from` this computer (None) or a machine is a new
+    /// copy; it then becomes the last one. Not when it's the last one again,
+    /// nor when a copy made elsewhere replaced it moments ago: that's a
+    /// clipboard that hadn't caught up, offering its old text (#20: Wayland
+    /// doesn't let an unfocused window set or read the clipboard).
+    fn copied(&mut self, from: Option<&str>, text: &str, now: Instant) -> bool {
+        self.replaced.retain(|(_, _, at)| now.duration_since(*at) < BOUNCE);
+        if self.last == text || self.replaced.iter().any(|(old, by, _)| old == text && by.as_deref() != from) {
+            return false;
+        }
+        // It's the last one now: when it was replaced before no longer matters.
+        self.replaced.retain(|(old, _, _)| old != text);
+        let old = std::mem::replace(&mut self.last, text.to_string());
+        if !old.is_empty() {
+            if self.replaced.len() >= 8 {
+                self.replaced.remove(0);
+            }
+            self.replaced.push((old, from.map(str::to_string), now));
+        }
+        true
+    }
 }
 
 /// Text copied on a machine, to put on this computer's clipboard.
@@ -43,15 +78,8 @@ pub fn subscribe() -> broadcast::Receiver<String> {
 /// Something new was copied on this computer: offer it to every machine.
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub fn local_changed(text: &str) {
-    if text.is_empty() || text.len() > MAX || kept(text) {
+    if text.is_empty() || text.len() > MAX || kept(text) || !shared().history.lock().unwrap().copied(None, text, Instant::now()) {
         return;
-    }
-    {
-        let mut last = shared().last.lock().unwrap();
-        if *last == text {
-            return;
-        }
-        *last = text.to_string();
     }
     for (link, channel) in shared().peers.lock().unwrap().values() {
         link.send(*channel, CLIP, text.as_bytes());
@@ -78,15 +106,8 @@ fn kept(text: &str) -> bool {
 
 /// Something new was copied on a machine: here, and the other machines.
 fn remote_changed(from: &str, text: String) {
-    if text.is_empty() || text.len() > MAX {
+    if text.is_empty() || text.len() > MAX || !shared().history.lock().unwrap().copied(Some(from), &text, Instant::now()) {
         return;
-    }
-    {
-        let mut last = shared().last.lock().unwrap();
-        if *last == text {
-            return;
-        }
-        *last = text.clone();
     }
     for (id, (link, channel)) in shared().peers.lock().unwrap().iter() {
         if id != from {
@@ -156,5 +177,49 @@ mod tests {
         assert!(!kept("from a program"));
         keep_here("osc 52");
         assert!(!kept("something else"));
+    }
+
+    #[test]
+    fn an_old_copy_coming_back_moments_later_isnt_shared() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut h = History::default();
+        assert!(h.copied(None, "old path", at(0)));
+        // Copied on the Mac; a second later this computer's clipboard, which
+        // didn't take the Mac's copy, still offers the old text (#20).
+        assert!(h.copied(Some("mac"), "from the mac", at(10_000)));
+        assert!(!h.copied(None, "old path", at(11_000)));
+        // So does another machine that hadn't caught up.
+        assert!(!h.copied(Some("linux"), "old path", at(12_000)));
+        assert_eq!(h.last, "from the mac");
+        // Long after, copying it again is a new copy.
+        assert!(h.copied(None, "old path", at(13_500)));
+        assert_eq!(h.last, "old path");
+    }
+
+    #[test]
+    fn copying_back_and_forth_on_one_machine_isnt_a_bounce() {
+        let t0 = Instant::now();
+        let mut h = History::default();
+        assert!(h.copied(Some("mac"), "a", t0));
+        assert!(h.copied(Some("mac"), "b", t0));
+        assert!(h.copied(Some("mac"), "a", t0));
+        assert!(h.copied(None, "c", t0));
+        assert!(h.copied(None, "a", t0));
+        // The last text again is an echo, from anywhere.
+        assert!(!h.copied(None, "a", t0));
+        assert!(!h.copied(Some("mac"), "a", t0));
+    }
+
+    #[test]
+    fn replaced_texts_are_kept_briefly() {
+        let t0 = Instant::now();
+        let mut h = History::default();
+        for i in 0..100 {
+            assert!(h.copied(None, &i.to_string(), t0));
+        }
+        assert!(h.replaced.len() <= 8);
+        h.copied(Some("mac"), "later", t0 + BOUNCE);
+        assert_eq!(h.replaced.len(), 1);
     }
 }

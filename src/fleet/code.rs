@@ -177,12 +177,15 @@ fn parse_git_setup(out: &str) -> GitSetup {
             if !applies || helper.is_empty() {
                 continue;
             }
-            let short = if helper.contains("gh auth git-credential") {
+            // gh writes `!<its path> auth git-credential`, its path in '…' when
+            // it has a space or a backslash (always, on Windows).
+            let words = helper_words(helper);
+            let short = if matches!(words.as_slice(), [p, a, c, ..] if program_name(p).eq_ignore_ascii_case("gh") && a == "auth" && c == "git-credential") {
                 s.uses_gh = true;
                 "gh".to_string()
             } else {
-                let first = helper.split_whitespace().next().unwrap_or(helper);
-                first.rsplit('/').next().unwrap_or(first).trim_start_matches('!').trim_start_matches("git-credential-").to_string()
+                let first = words.first().map(String::as_str).unwrap_or(helper);
+                program_name(first).trim_start_matches("git-credential-").to_string()
             };
             if !s.helpers.contains(&short) {
                 s.helpers.push(short);
@@ -190,6 +193,36 @@ fn parse_git_setup(out: &str) -> GitSetup {
         }
     }
     s
+}
+
+/// A credential helper's words as git's shell splits them: a leading `!`
+/// dropped, and what's in '…' or "…" kept as one.
+fn helper_words(helper: &str) -> Vec<String> {
+    let (mut words, mut word, mut quote) = (Vec::new(), None::<String>, None::<char>);
+    for c in helper.trim().trim_start_matches('!').chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => word.get_or_insert_with(String::new).push(c),
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                word.get_or_insert_with(String::new);
+            }
+            None if c.is_whitespace() => words.extend(word.take()),
+            None => word.get_or_insert_with(String::new).push(c),
+        }
+    }
+    words.extend(word);
+    words
+}
+
+/// A program's name without its folder (either slash: a Windows machine's
+/// paths are read here too) or `.exe`.
+fn program_name(path: &str) -> &str {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    match base.len().checked_sub(4) {
+        Some(i) if base.is_char_boundary(i) && base[i..].eq_ignore_ascii_case(".exe") => &base[..i],
+        _ => base,
+    }
 }
 
 #[cfg(test)]
@@ -207,6 +240,21 @@ mod tests {
         assert_eq!(s.helpers, vec!["osxkeychain", "gh"]);
         assert_eq!(s.ssh_keys, vec!["id_ed25519"]);
         assert_eq!(parse_git_setup("git=\n").git, None);
+    }
+
+    #[test]
+    fn knows_gh_on_windows_and_quoted_paths() {
+        let out = "cred=credential.helper manager\ncred=credential.https://github.com.helper \ncred=credential.https://github.com.helper !'C:\\Program Files\\GitHub CLI\\gh.exe' auth git-credential\n";
+        let s = parse_git_setup(out);
+        assert!(s.uses_gh);
+        assert_eq!(s.helpers, vec!["manager", "gh"]);
+        for helper in ["!\"C:\\Program Files\\GitHub CLI\\GH.EXE\" auth git-credential", "!'/home/me/my apps/gh' auth git-credential", "!gh auth git-credential"] {
+            assert!(parse_git_setup(&format!("cred=credential.helper {helper}\n")).uses_gh, "{helper}");
+        }
+        // Other helpers keep their own names, from a quoted path too.
+        let s = parse_git_setup("cred=credential.helper !'C:\\Program Files\\Git\\mingw64\\bin\\git-credential-manager.exe'\ncred=credential.helper !gh-other auth git-credential\n");
+        assert!(!s.uses_gh);
+        assert_eq!(s.helpers, vec!["manager", "gh-other"]);
     }
 }
 

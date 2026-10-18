@@ -1421,12 +1421,21 @@ impl Root {
     /// Runs a GitHub CLI command (sign-in, granting a permission) in a terminal
     /// on a machine, where its browser steps can be followed.
     pub(super) fn gh_cli_run(&mut self, machine_id: &str, args: &str, title: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // Windows runs it in PowerShell, which has no printf or read; and gh
+        // by the path the agent found it at, in case the shell's PATH is older.
+        let windows = self.snapshot.machines.iter().any(|m| m.id == machine_id && m.platform.starts_with("windows"));
+        let command = if windows {
+            let gh = self.engine.sessions_of(machine_id).and_then(|s| s.gh).and_then(|g| g.path).map(|p| crate::ops::remote::ps_quote(&p)).unwrap_or_else(|| "gh".into());
+            format!("& {gh} {args}; Write-Host ''; [void](Read-Host 'Press Enter to close')")
+        } else {
+            format!("gh {args}; printf '\\nPress Enter to close.'; read _")
+        };
         let req = StartSession {
             machine_id: machine_id.to_string(),
             agent: "shell".into(),
             cwd: "~".into(),
             title: Some(title.into()),
-            command: Some(format!("gh {args}; printf '\\nPress Enter to close.'; read _")),
+            command: Some(command),
             ..Default::default()
         };
         self.notify_user("Follow the steps in the terminal: copy the code, then open github.com/login/device.", false, cx);

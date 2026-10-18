@@ -250,10 +250,22 @@ fn run_with_timeout(cmd: &mut Command, limit: Duration) -> Result<(bool, String,
     }
 }
 
+/// The GitHub CLI in those PATH folders (gh.exe on Windows), else where its
+/// Windows installer puts it: a PATH read before it was installed (a
+/// long-running agent's) doesn't have it yet.
+fn find_gh(path_dirs: &[String]) -> Option<PathBuf> {
+    let name = if cfg!(windows) { "gh.exe" } else { "gh" };
+    let mut places: Vec<PathBuf> = path_dirs.iter().map(|d| Path::new(d).join(name)).collect();
+    if cfg!(windows) {
+        let programs = std::env::var_os("ProgramFiles").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
+        places.push(programs.join("GitHub CLI").join("gh.exe"));
+    }
+    places.into_iter().find(|p| p.is_file())
+}
+
 /// Whether the GitHub CLI is here and signed in (for agents that use it).
 pub fn gh_status(path_dirs: &[String]) -> Value {
-    let gh = path_dirs.iter().map(|d| Path::new(d).join("gh")).find(|p| p.is_file());
-    let Some(gh) = gh else { return json!({ "installed": false }) };
+    let Some(gh) = find_gh(path_dirs) else { return json!({ "installed": false }) };
     let out = run_with_timeout(Command::new(&gh).args(["auth", "status", "--hostname", "github.com"]), Duration::from_secs(8));
     let (ok, stdout, stderr) = out.unwrap_or((false, String::new(), String::new()));
     let text = format!("{stdout}{stderr}");
@@ -269,6 +281,19 @@ pub fn gh_status(path_dirs: &[String]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_github_cli_on_the_path() {
+        let tmp = std::env::temp_dir().join(format!("muxen-gh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("bin")).unwrap();
+        // On Windows the program is gh.exe; a plain "gh" there isn't it.
+        let name = if cfg!(windows) { "gh.exe" } else { "gh" };
+        std::fs::write(tmp.join("bin").join(name), b"").unwrap();
+        let dirs = [tmp.join("empty").display().to_string(), tmp.join("bin").display().to_string()];
+        assert_eq!(find_gh(&dirs), Some(tmp.join("bin").join(name)));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn reads_shortstat() {

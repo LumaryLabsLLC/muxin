@@ -56,9 +56,11 @@ Muxin was called Muxen before 0.5.1. Updating keeps your settings, machines and 
 
 ```sh
 git clone https://github.com/LumaryLabsLLC/muxin && cd muxin
-cargo build --release
+cargo build --release --workspace
 ./target/release/muxin            # opens the window
 ```
+
+`--workspace` also builds Muxin's agent for this computer, which the app sets up on it. For your other machines' platforms, `./scripts/build-agents.sh` builds every agent into `dist/agents` (it needs zig and cargo-zigbuild).
 
 Requirements:
 

@@ -5,6 +5,15 @@
 use alacritty_terminal::term::TermMode;
 use gpui::Keystroke;
 
+/// Printable keys belong to the platform input method. Terminal escape
+/// sequences and Control/Meta shortcuts continue through `to_bytes`.
+pub fn is_text_input(ks: &Keystroke) -> bool {
+    let m = &ks.modifiers;
+    !m.platform && !m.control && !m.alt && !m.function
+        && (ks.key == "space" || ks.key.chars().count() == 1
+            || ks.key_char.as_ref().is_some_and(|text| !text.is_empty() && !text.chars().any(char::is_control)))
+}
+
 pub fn to_bytes(ks: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     let m = &ks.modifiers;
     if m.platform {
@@ -131,5 +140,40 @@ mod tests {
         assert_eq!(to_bytes(&ks("f5"), none).unwrap(), b"\x1b[15~");
         assert!(to_bytes(&ks("cmd-c"), none).is_none());
         assert_eq!(paste("a\nb", TermMode::BRACKETED_PASTE), b"\x1b[200~a\rb\x1b[201~");
+    }
+
+    #[test]
+    fn text_goes_to_ime_but_terminal_controls_do_not() {
+        for key in ["a", "shift-a", "1", "/", "space", "shift-space"] {
+            assert!(is_text_input(&ks(key)), "{key}");
+        }
+        for key in ["enter", "shift-enter", "backspace", "escape", "tab", "up", "ctrl-c", "ctrl-space", "alt-b", "cmd-v"] {
+            assert!(!is_text_input(&ks(key)), "{key}");
+        }
+        // macOS supplies key_char for these named keys as well. In
+        // particular Shift+Enter must keep its terminal escape sequence.
+        for (key, text) in [("enter", "\n"), ("shift-enter", "\n"), ("tab", "\t")] {
+            let mut stroke = ks(key);
+            stroke.key_char = Some(text.into());
+            assert!(!is_text_input(&stroke), "{key}");
+        }
+    }
+
+    #[test]
+    fn function_modified_letters_keep_the_terminal_path() {
+        for key in ["a", "j"] {
+            let mut stroke = ks(&format!("fn-{key}"));
+            for text in [None, Some(key.to_string())] {
+                stroke.key_char = text;
+                assert!(!is_text_input(&stroke), "fn-{key}");
+                assert_eq!(to_bytes(&stroke, TermMode::empty()).unwrap(), key.as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn chinese_paste_preserves_utf8_and_bracketed_paste_mode() {
+        assert_eq!(paste("你好😀", TermMode::empty()), "你好😀".as_bytes());
+        assert_eq!(paste("你好\n世界", TermMode::BRACKETED_PASTE), "\x1b[200~你好\r世界\x1b[201~".as_bytes());
     }
 }

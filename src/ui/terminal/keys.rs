@@ -9,7 +9,7 @@ use gpui::Keystroke;
 /// sequences and Control/Meta shortcuts continue through `to_bytes`.
 pub fn is_text_input(ks: &Keystroke) -> bool {
     let m = &ks.modifiers;
-    !m.platform && !m.control && !m.alt
+    !m.platform && !m.control && !m.alt && !m.function
         && (ks.key == "space" || ks.key.chars().count() == 1
             || ks.key_char.as_ref().is_some_and(|text| !text.is_empty() && !text.chars().any(char::is_control)))
 }
@@ -156,6 +156,18 @@ mod tests {
             let mut stroke = ks(key);
             stroke.key_char = Some(text.into());
             assert!(!is_text_input(&stroke), "{key}");
+        }
+    }
+
+    #[test]
+    fn function_modified_letters_keep_the_terminal_path() {
+        for key in ["a", "j"] {
+            let mut stroke = ks(&format!("fn-{key}"));
+            for text in [None, Some(key.to_string())] {
+                stroke.key_char = text;
+                assert!(!is_text_input(&stroke), "fn-{key}");
+                assert_eq!(to_bytes(&stroke, TermMode::empty()).unwrap(), key.as_bytes());
+            }
         }
     }
 

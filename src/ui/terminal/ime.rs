@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use gpui::{Bounds, Context, EntityInputHandler, Pixels, Point, UTF16Selection, Window};
+use gpui::{App, Bounds, Context, ElementInputHandler, EntityInputHandler, InputHandler, Pixels, Point, UTF16Selection, Window};
 
 use super::{Metrics, TerminalView, render};
 
@@ -53,6 +53,54 @@ fn byte_range(text: &str, range: Range<usize>) -> Range<usize> {
     };
     let start = offset(range.start);
     start..offset(range.end).max(start)
+}
+
+/// Keep terminal key repeat instead of macOS's press-and-hold accent picker.
+pub(super) struct TerminalInputHandler(pub ElementInputHandler<TerminalView>);
+
+impl InputHandler for TerminalInputHandler {
+    fn selected_text_range(&mut self, ignore_disabled_input: bool, window: &mut Window, cx: &mut App) -> Option<UTF16Selection> {
+        self.0.selected_text_range(ignore_disabled_input, window, cx)
+    }
+
+    fn marked_text_range(&mut self, window: &mut Window, cx: &mut App) -> Option<Range<usize>> {
+        self.0.marked_text_range(window, cx)
+    }
+
+    fn text_for_range(&mut self, range: Range<usize>, adjusted_range: &mut Option<Range<usize>>, window: &mut Window, cx: &mut App) -> Option<String> {
+        self.0.text_for_range(range, adjusted_range, window, cx)
+    }
+
+    fn replace_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, window: &mut Window, cx: &mut App) {
+        self.0.replace_text_in_range(range, text, window, cx);
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        selected: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.0.replace_and_mark_text_in_range(range, text, selected, window, cx);
+    }
+
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut App) {
+        self.0.unmark_text(window, cx);
+    }
+
+    fn bounds_for_range(&mut self, range: Range<usize>, window: &mut Window, cx: &mut App) -> Option<Bounds<Pixels>> {
+        self.0.bounds_for_range(range, window, cx)
+    }
+
+    fn character_index_for_point(&mut self, point: Point<Pixels>, window: &mut Window, cx: &mut App) -> Option<usize> {
+        self.0.character_index_for_point(point, window, cx)
+    }
+
+    fn apple_press_and_hold_enabled(&mut self) -> bool {
+        false
+    }
 }
 
 impl EntityInputHandler for TerminalView {
@@ -144,6 +192,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::reversed_empty_ranges)] // Deliberately exercise an invalid IME range.
     fn input_method_ranges_never_split_utf8_or_panic() {
         let ime = Composition { text: "a😀中".into(), selected: 0..0 };
         assert_eq!(&ime.text[ime.range_from_utf16(1..3)], "😀");

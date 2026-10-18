@@ -14,7 +14,7 @@ use gpui::{
 
 use super::boxdraw::{self, Shape};
 use super::colors::{Palette, dim};
-use super::ime::Composition;
+use super::ime::{Composition, TerminalInputHandler};
 use super::{Geometry, Metrics, PAD_X, PAD_Y, Shared, TerminalView};
 use crate::ui::theme::{ActiveTheme, mono_font};
 
@@ -106,7 +106,7 @@ pub(super) fn grid(view: Entity<TerminalView>, palette: Palette, focused: bool, 
             let focus = view.read(cx).focus.clone();
             // Registration must happen during paint, and only the focused
             // terminal receives the platform's text-input callbacks.
-            window.handle_input(&focus, ElementInputHandler::new(bounds, view), cx);
+            window.handle_input(&focus, TerminalInputHandler(ElementInputHandler::new(bounds, view)), cx);
             paint(frame, window, cx);
         },
     ).size_full()

@@ -197,6 +197,16 @@ impl Engine {
     /// Sets up the machine's agent if needed, then re-reads its sessions (and,
     /// now and then, which agent CLIs are installed).
     pub async fn refresh_sessions(self: &Arc<Self>, machine_id: &str) -> Result<MachineSessions, String> {
+        self.discover_sessions(machine_id, false).await
+    }
+
+    /// `refresh_sessions`, looking up the installed CLIs (and the GitHub CLI's
+    /// login) now rather than when they're due: a sign-in there changes them.
+    pub async fn refresh_tools(self: &Arc<Self>, machine_id: &str) -> Result<MachineSessions, String> {
+        self.discover_sessions(machine_id, true).await
+    }
+
+    async fn discover_sessions(self: &Arc<Self>, machine_id: &str, tools: bool) -> Result<MachineSessions, String> {
         if let Some(world) = self.demo_world() {
             let found = self.sessions_of(machine_id).unwrap_or_else(|| world.sessions(machine_id));
             self.maybe_look_at_git(machine_id, Some(&found), &found);
@@ -208,7 +218,7 @@ impl Engine {
         }
         spec.refuse_if_disconnected()?;
         let previous = self.sessions_of(&spec.id);
-        let detect = previous.as_ref().and_then(|p| p.agents_checked_at).is_none_or(|t| Utc::now() - t > AGENTS_EVERY);
+        let detect = tools || previous.as_ref().and_then(|p| p.agents_checked_at).is_none_or(|t| Utc::now() - t > AGENTS_EVERY);
         let agents: Vec<&str> = if detect { AGENTS.iter().map(|a| a.command).filter(|c| !c.is_empty()).collect() } else { Vec::new() };
         let result = match agent::ensure(&spec, probe.as_ref()).await {
             Ok(()) => agent::ctl(&spec, &json!({ "op": "discover", "agents": agents })).await,

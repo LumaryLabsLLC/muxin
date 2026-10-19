@@ -396,9 +396,14 @@ fn desktop(req: &Value, out: &Out, attached: &Attached) -> Value {
     if channel == CONTROL {
         return json!({ "ok": false, "error": "desktop needs a channel" });
     }
+    // Nobody's screen to show: `no_session` lets the app offer the machine's
+    // own remote desktop (RDP, VNC) instead, which can sign someone in.
     let Some(env) = crate::desktop::session_env() else {
-        return json!({ "ok": false, "error": "No graphical session found here (nobody logged in to a desktop?)." });
+        return json!({ "ok": false, "error": "No graphical session found here (nobody logged in to a desktop?).", "no_session": true });
     };
+    if let Some(why) = crate::desktop::no_session() {
+        return json!({ "ok": false, "error": why, "no_session": true });
+    }
     let arg = |k: &str, d: u64| req[k].as_u64().unwrap_or(d).to_string();
     let mode = if req["tiles"].as_bool() == Some(true) { "tiles" } else { "frames" };
     let display = req["display"].as_str().unwrap_or("").to_string();

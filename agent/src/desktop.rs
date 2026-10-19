@@ -70,6 +70,45 @@ pub fn session_env() -> Option<Vec<(String, String)>> {
     Some(Vec::new())
 }
 
+/// Why this user's screen isn't there to show, when that's so: nobody is
+/// signed in at the screen, or someone else is. Asked before starting
+/// anything in the desktop session, so the answer is quick.
+#[cfg(target_os = "macos")]
+pub fn no_session() -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    // The console belongs to whoever's session is on the screen; root's at the login window.
+    let owner = std::fs::metadata("/dev/console").ok()?.uid();
+    let me = unsafe { libc::getuid() };
+    if owner == me {
+        return None;
+    }
+    if owner == 0 {
+        return Some("Nobody is signed in to this Mac, so there's no screen to show. Sign in first, at the Mac or with Screen Sharing.".into());
+    }
+    let name = |uid: u32| unsafe {
+        let pw = libc::getpwuid(uid);
+        if pw.is_null() || (*pw).pw_name.is_null() {
+            return format!("user {uid}");
+        }
+        std::ffi::CStr::from_ptr((*pw).pw_name).to_string_lossy().into_owned()
+    };
+    Some(format!("{} is using this Mac's screen, not {}. Muxin shows the screen of the account it connects as.", name(owner), name(me)))
+}
+
+#[cfg(windows)]
+pub fn no_session() -> Option<String> {
+    if crate::win_screen::in_desktop_session() {
+        return None;
+    }
+    crate::win_screen::no_desktop_session()
+}
+
+#[cfg(target_os = "linux")]
+pub fn no_session() -> Option<String> {
+    // `session_env` says it: no DISPLAY to borrow.
+    None
+}
+
 /// `muxen-agent screen [fps] [quality] [max_width] [tiles|frames] [display]`:
 /// streams a screen on stdout and applies input from stdin until either
 /// closes. `display` is one from `displays` (see displays.rs); without it, the

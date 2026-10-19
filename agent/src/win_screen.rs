@@ -463,6 +463,70 @@ pub fn in_desktop_session() -> bool {
     unsafe { ProcessIdToSessionId(std::process::id(), &mut session) != 0 && session != 0 && session == WTSGetActiveConsoleSessionId() }
 }
 
+/// A signed-in Windows session: its user's name, and whether it's on a
+/// screen (connected) rather than disconnected.
+struct SignedIn {
+    user: String,
+    connected: bool,
+}
+
+/// Who is signed in to a desktop here, at the screen or through Remote
+/// Desktop, from Windows' list of sessions. None when Windows won't say.
+fn signed_in_users() -> Option<Vec<SignedIn>> {
+    use windows_sys::Win32::System::RemoteDesktop::*;
+    let query = |id: u32, class: WTS_INFO_CLASS| -> String {
+        let mut buf: windows_sys::core::PWSTR = std::ptr::null_mut();
+        let mut bytes = 0u32;
+        if unsafe { WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, id, class, &mut buf, &mut bytes) } == 0 || buf.is_null() {
+            return String::new();
+        }
+        let units = unsafe { std::slice::from_raw_parts(buf, bytes as usize / 2) };
+        let text = String::from_utf16_lossy(units.split(|u| *u == 0).next().unwrap_or_default());
+        unsafe { WTSFreeMemory(buf as _) };
+        text
+    };
+    let mut list: *mut WTS_SESSION_INFOW = std::ptr::null_mut();
+    let mut count = 0u32;
+    if unsafe { WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut list, &mut count) } == 0 || list.is_null() {
+        return None;
+    }
+    let sessions = unsafe { std::slice::from_raw_parts(list, count as usize) };
+    // Session 0 is services'; the sign-in screen's session is only connected.
+    let users: Vec<SignedIn> = sessions
+        .iter()
+        .filter(|s| s.SessionId != 0 && (s.State == WTSActive || s.State == WTSDisconnected))
+        .map(|s| SignedIn { user: query(s.SessionId, WTSUserName), connected: s.State == WTSActive })
+        .collect();
+    unsafe { WTSFreeMemory(list as _) };
+    // A signed-in session whose user Windows won't name: don't guess.
+    (!users.iter().any(|u| u.user.is_empty())).then_some(users)
+}
+
+/// Why there's no desktop session with a screen to start in, when Windows
+/// says so: nobody signed in, only someone else (a scheduled task only runs
+/// in its own user's session), or this user's session is disconnected (its
+/// Remote Desktop window closed: Windows draws nothing for it).
+pub fn no_desktop_session() -> Option<String> {
+    let users = signed_in_users()?;
+    // By name, as the task names its user (`$env:USERNAME`); sshd's
+    // USERDOMAIN says WORKGROUP rather than the computer's name.
+    let me = std::env::var("USERNAME").unwrap_or_default();
+    if me.is_empty() {
+        return None;
+    }
+    let own: Vec<&SignedIn> = users.iter().filter(|u| u.user.eq_ignore_ascii_case(&me)).collect();
+    if own.iter().any(|u| u.connected) {
+        return None;
+    }
+    if !own.is_empty() {
+        return Some(format!("{me} is signed in to Windows here, but that session is disconnected (its Remote Desktop window was closed), so there's no screen to show. Open it with Remote Desktop again."));
+    }
+    Some(match users.first() {
+        Some(other) => format!("{} is signed in to Windows here, not {me}. Muxin shows the screen of the account it connects as.", other.user),
+        None => "Nobody is signed in to Windows here, so there's no screen to show. Sign in first, at the machine or with Remote Desktop.".into(),
+    })
+}
+
 /// Where the desktop session's helper listens: "port token".
 fn gui_port_file() -> std::path::PathBuf {
     crate::home_dir().join("gui.port")
@@ -487,6 +551,10 @@ pub fn start_in_desktop(args: &[String]) -> Result<TcpStream, String> {
     if let Ok(s) = ask_gui_server(args) {
         return Ok(s);
     }
+    // The task would never start: say so now, not after waiting for it.
+    if let Some(why) = no_desktop_session() {
+        return Err(why);
+    }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let task = format!("Muxen desktop {}", std::process::id());
     let q = crate::win::quote;
@@ -508,7 +576,7 @@ pub fn start_in_desktop(args: &[String]) -> Result<TcpStream, String> {
             match ask_gui_server(args) {
                 Ok(s) => break Ok(s),
                 Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(150)),
-                Err(_) => break Err("Nobody is signed in to Windows' desktop here, so there's no screen to show.".to_string()),
+                Err(_) => break Err("Windows didn't start Muxin's helper in your desktop session, so there's no screen to show.".to_string()),
             }
         },
     };

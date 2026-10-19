@@ -1327,6 +1327,24 @@ impl Root {
         self.track(task);
     }
 
+    /// Opens a machine's own remote desktop (RDP, VNC) in this computer's app for it.
+    pub(super) fn open_remote_desktop(&mut self, machine_id: &str, cx: &mut Context<Self>) {
+        let (engine, machine) = (self.engine.clone(), machine_id.to_string());
+        let name = self.snapshot.machines.iter().find(|m| m.id == machine).map(|m| m.name.clone()).unwrap_or_else(|| machine.clone());
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.open_remote_desktop(&machine, None).await }
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(r) => this.notify_user(r.summary(&name), false, cx),
+                Err(e) => this.notify_user(e, true, cx),
+            });
+        });
+        self.track(task);
+    }
+
     /// Connects to a machine again, or disconnects from it (its sessions go on there).
     pub(super) fn set_machine_connected(&mut self, machine_id: &str, connected: bool, cx: &mut Context<Self>) {
         if let Err(e) = self.engine.set_connected(machine_id, connected) {

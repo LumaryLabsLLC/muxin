@@ -254,7 +254,7 @@ async fn upload(spec: &MachineSpec, bytes: Vec<u8>, hash: &str) -> Result<String
 /// direct-connection service (if set up) moves to the new name or restarts
 /// onto the new build. A listener the service doesn't know about (one left
 /// from before, holding the port) goes first, or the old build would keep
-/// answering.
+/// answering. (With no service, `migrate` starts the listener again.)
 fn upload_script(hash: &str) -> String {
     format!(
         "want={}; {}",
@@ -268,7 +268,8 @@ fn upload_script(hash: &str) -> String {
 /// goes, and the agent there stays as it was. A running agent holds its file,
 /// but Windows lets it be renamed: the old one moves aside and goes once
 /// nothing runs it; the desktop helper, running the old build, goes now. Then
-/// `migrate` brings up to date what an older build set up (its firewall rule).
+/// `migrate` brings up to date what an older build set up (its firewall rule)
+/// and starts the direct-connection listener again from the new build.
 fn swap_ps1(hash: &str) -> String {
     format!("$want = {}\n{SWAP_PS1}", crate::ops::remote::ps_quote(hash))
 }
@@ -283,8 +284,8 @@ const SWAP_PS1: &str = "$ErrorActionPreference = 'Stop'\n\
          if (Test-Path $t) { Move-Item -Force $t (Join-Path $d \"muxen-agent.old.$PID.exe\") }\n\
          Move-Item -Force $u $t\n\
          Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object { $_.CommandLine -match ' gui-serve' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\n\
-         Get-ChildItem $d -Filter 'muxen-agent.old.*.exe' | ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }\n\
          & $t migrate | Out-Null\n\
+         Get-ChildItem $d -Filter 'muxen-agent.old.*.exe' | ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }\n\
          & $t hash\n";
 
 /// Copies the build into place on Windows and prints its hash: over sftp

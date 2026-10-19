@@ -384,10 +384,12 @@ fn is_tailnet(ip: std::net::IpAddr) -> bool {
 
 /// `muxen-agent migrate`, run after an update: the direct-connection service
 /// from before the rename (OpenRunner) becomes Muxen's, and an installed one
-/// is brought up to date.
+/// is brought up to date. A running `listen` that no service restarts (see
+/// `restart_listener`) starts again from the new build.
 pub fn migrate() -> i32 {
     if cfg!(windows) {
         narrow_firewall_rule();
+        restart_listener();
         return 0;
     }
     let home = crate::sys::user_home();
@@ -402,12 +404,58 @@ pub fn migrate() -> i32 {
         let _ = std::fs::remove_file(&old_plist);
     } else {
         refresh_unit();
+        restart_listener();
         return 0;
     }
     if dir().join("trusted").exists() {
         install_service();
     }
     0
+}
+
+/// After an update, `listen` still runs the build from before (Windows lets a
+/// running program's file be moved aside; Unix keeps the replaced file for
+/// whoever runs it), so direct connections would reach the old agent. One
+/// that systemd or launchd runs is restarted by the update itself (see
+/// upload_script in the app); this stops the others and starts them again
+/// from this build: Windows' task, and one started in the background (a
+/// container has no systemd).
+fn restart_listener() {
+    if !home_dir().join("direct").is_dir() {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        let script = format!("if (-not @({LISTENERS}).Count) {{ 'idle'; exit 0 }}\n{}\"running=$running\"", restart_task_ps());
+        match crate::win::ps(&script) {
+            Ok(out) if out.contains("idle") || out.contains("running=True") => {}
+            // Nobody signed in, so the task waits for that: until then, in the background.
+            _ => {
+                let _ = crate::sys::spawn_background(&["listen"], dir().join("listen.log"));
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        let managed = if cfg!(target_os = "macos") {
+            run("launchctl", &["print", &format!("gui/{}/{LAUNCHD_LABEL}", uid())])
+        } else {
+            run("systemctl", &["--user", "is-enabled", &format!("{SERVICE}.service")])
+        };
+        // Anchored: the update's own shell has "muxen-agent listen" in its command line too.
+        let listener = r"/\.muxen/bin/muxen-agent listen$";
+        if managed || !run("pkill", &["-f", listener]) {
+            return;
+        }
+        // It lets go of its port as it ends.
+        for _ in 0..30 {
+            if !run("pgrep", &["-f", listener]) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let _ = crate::sys::spawn_background(&["listen"], dir().join("listen.log"));
+    }
 }
 
 /// `{"op": "unpair", "client": "<app fingerprint>"}`: forgets that app, and
@@ -517,6 +565,24 @@ const TASK: &str = "Muxen agent";
 #[cfg(windows)]
 const FIREWALL_REMOTE: &str = "'LocalSubnet', '100.64.0.0/10', 'fd7a:115c:a1e0::/48'";
 
+/// PowerShell: the running `listen` processes.
+#[cfg(windows)]
+const LISTENERS: &str = "Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object { $_.CommandLine -match ' listen' }";
+
+/// PowerShell that stops every `listen` and starts the task again, so the
+/// listener runs the build in place; `$running` says whether one came up.
+#[cfg(windows)]
+fn restart_task_ps() -> String {
+    format!(
+        "Stop-ScheduledTask -TaskName {task} -ErrorAction SilentlyContinue\n\
+         {LISTENERS} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}\n\
+         Start-ScheduledTask -TaskName {task}\n\
+         $running = $false\n\
+         foreach ($i in 1..20) {{ Start-Sleep -Milliseconds 250; if (@({LISTENERS}).Count) {{ $running = $true; break }} }}\n",
+        task = crate::win::quote(TASK)
+    )
+}
+
 /// Runs `listen` as a service of this user: (how, a note when it couldn't).
 fn install_service() -> (&'static str, Option<String>) {
     #[cfg(windows)]
@@ -534,14 +600,12 @@ fn install_service() -> (&'static str, Option<String>) {
              $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew\n\
              Register-ScheduledTask -TaskName {task} -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null\n\
              try {{ Remove-NetFirewallRule -DisplayName {task} -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName {task} -Direction Inbound -Program $exe -Protocol UDP -RemoteAddress {remote} -Action Allow -Profile Any -ErrorAction Stop | Out-Null; $fw = 'yes' }} catch {{ $fw = 'no' }}\n\
-             Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object {{ $_.CommandLine -match ' listen' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}\n\
-             Start-ScheduledTask -TaskName {task}\n\
-             $running = $false\n\
-             foreach ($i in 1..20) {{ Start-Sleep -Milliseconds 250; if (@(Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object {{ $_.CommandLine -match ' listen' }}).Count) {{ $running = $true; break }} }}\n\
+             {restart}\
              \"fw=$fw running=$running\"",
             exe = crate::win::quote(&exe()),
             task = crate::win::quote(TASK),
-            remote = FIREWALL_REMOTE
+            remote = FIREWALL_REMOTE,
+            restart = restart_task_ps()
         );
         return match crate::win::ps(&script) {
             Ok(out) if out.contains("running=True") => ("task", (!out.contains("fw=yes")).then(|| "Windows' firewall may block it: allow muxen-agent.exe, or pair as an administrator".to_string())),
@@ -605,7 +669,7 @@ fn remove_service() {
         let _ = crate::win::ps(&format!(
             "Unregister-ScheduledTask -TaskName {task} -Confirm:$false -ErrorAction SilentlyContinue\n\
              Remove-NetFirewallRule -DisplayName {task} -ErrorAction SilentlyContinue\n\
-             Get-CimInstance Win32_Process -Filter \"Name='muxen-agent.exe'\" | Where-Object {{ $_.CommandLine -match ' listen' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
+             {LISTENERS} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
         ));
         return;
     }

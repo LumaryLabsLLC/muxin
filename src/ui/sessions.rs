@@ -1446,9 +1446,11 @@ impl Root {
     /// `ssh-copy-id` typed in (making a key first if there's none), for the
     /// user to run and type their password for that machine once.
     pub(super) fn setup_ssh_access(&mut self, machine_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((spec, _)) = self.engine.machine(machine_id) else { return };
+        let Some((spec, probe)) = self.engine.machine(machine_id) else { return };
+        // The account to sign in as, so ssh-copy-id doesn't guess another one.
+        let user = crate::probe::ssh_user(&spec, probe.as_ref());
         let Some(local) = self.snapshot.machines.iter().find(|m| m.local).map(|m| m.id.clone()) else {
-            let cmd = format!("ssh-copy-id {}", spec.host.trim());
+            let cmd = crate::probe::copy_id_command(&spec, user.as_deref(), None);
             cx.write_to_clipboard(ClipboardItem::new_string(cmd));
             self.notify_user("Copied. Run it in Terminal, then check again.", false, cx);
             return;
@@ -1459,10 +1461,12 @@ impl Root {
         });
         let task = cx.spawn_in(window, async move |this, cx| {
             let key = job.await.ok().flatten();
-            let host = spec.host.trim().to_string();
             let typed = match key {
-                Some(k) => format!("ssh-copy-id -i {k} {host}"),
-                None => format!("ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N '' && ssh-copy-id -i ~/.ssh/id_ed25519.pub {host}"),
+                Some(k) => crate::probe::copy_id_command(&spec, user.as_deref(), Some(&k)),
+                None => format!(
+                    "ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N '' && {}",
+                    crate::probe::copy_id_command(&spec, user.as_deref(), Some("~/.ssh/id_ed25519.pub"))
+                ),
             };
             let _ = this.update_in(cx, |this, window, cx| {
                 let req = StartSession {
@@ -1473,7 +1477,10 @@ impl Root {
                     typed: Some(typed),
                     ..Default::default()
                 };
-                let then = format!("Press Enter and type your password for {}, then check again.", spec.name);
+                let then = match &user {
+                    Some(u) => format!("Press Enter and type your password for {u} on {}, then check again.", spec.name),
+                    None => format!("Press Enter and type your password for {}, then check again.", spec.name),
+                };
                 this.start_session_then(req, Some(then), window, cx);
             });
         });

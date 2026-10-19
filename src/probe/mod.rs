@@ -87,6 +87,11 @@ pub struct ProbeResult {
     /// Linux: it has /dev/kvm, so it can run VMs (Windows in Docker, say).
     #[serde(default)]
     pub kvm: bool,
+    /// The account the machine turned away before asking for its password,
+    /// after the key wasn't accepted for one ssh guessed: there's no such
+    /// account there, or ssh there doesn't let it in.
+    #[serde(default)]
+    pub refused_user: Option<String>,
 }
 
 /// A Docker container that publishes ports on its machine.
@@ -111,13 +116,15 @@ pub struct PublishedPort {
 }
 
 /// Where ssh goes for a machine: through a jump host (`ProxyJump`, its last
-/// hop), and the address and port at the end.
+/// hop), and the address and port at the end. And as whom: the account it
+/// signs in as there (its config's User, else this computer's login name).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SshRoute {
     pub jump: Option<String>,
     pub hostname: String,
     pub port: u16,
+    pub user: Option<String>,
 }
 
 impl ProbeResult {
@@ -213,8 +220,140 @@ pub async fn probe(spec: &MachineSpec, remembered: Option<Shell>) -> ProbeResult
     let mut r = check(spec, remembered).await;
     if spec.is_checkable() && !spec.is_local() {
         r.route = ssh_route(spec).await;
+        r.refused_user = refused_user(spec, &r).await;
     }
     r
+}
+
+/// The account a machine turns away, when its key wasn't accepted for one
+/// ssh guessed (the host names none). Asked once, after that failure, and
+/// only of a machine that offers keyboard-interactive sign-in: see `turns_away`.
+async fn refused_user(spec: &MachineSpec, r: &ProbeResult) -> Option<String> {
+    let error = r.error.as_deref()?;
+    if names_user(spec) || crate::fleet::build::unreachable_kind(error) != "auth" || !error.contains("keyboard-interactive") {
+        return None;
+    }
+    let user = ssh_user(spec, Some(r))?;
+    turns_away(spec).await.then_some(user)
+}
+
+/// Whether the machine's host or settings say which account to sign in as.
+fn names_user(spec: &MachineSpec) -> bool {
+    spec.host.contains('@') || spec.user.as_deref().is_some_and(|u| !u.is_empty())
+}
+
+/// The account ssh signs in to a machine as: the one its host or settings
+/// name, else ssh's config's (from the last check), else the one its error
+/// names, else this computer's login name.
+pub fn ssh_user(spec: &MachineSpec, p: Option<&ProbeResult>) -> Option<String> {
+    let named = spec.host.trim().rsplit_once('@').map(|(u, _)| u.to_string()).or_else(|| spec.user.clone());
+    named
+        .or_else(|| p.and_then(|p| p.route.as_ref()?.user.clone()))
+        .or_else(|| p.and_then(|p| signed_in_as(p.error.as_deref()?)))
+        .or_else(|| std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).ok())
+        .filter(|u| !u.is_empty())
+}
+
+/// Who ssh signed in as, from its "adib@box.local: Permission denied (...)"
+/// (after a known-hosts warning, say: a check's error is one line).
+fn signed_in_as(error: &str) -> Option<String> {
+    error
+        .lines()
+        .find_map(|l| l.split_once(": Permission denied"))
+        .and_then(|(who, _)| who.split_whitespace().last()?.rsplit_once('@'))
+        .map(|(u, _)| u.to_string())
+        .filter(|u| !u.is_empty())
+}
+
+/// The command that gives a machine this computer's public key (like
+/// "~/.ssh/id_ed25519.pub"; ssh-copy-id's own pick without one), signed in as
+/// `user` when the host names no one: ssh-copy-id alone guesses this
+/// computer's login name, which may not be an account there.
+pub fn copy_id_command(spec: &MachineSpec, user: Option<&str>, key: Option<&str>) -> String {
+    let host = spec.host.trim();
+    let key = key.map(|k| format!(" -i {k}")).unwrap_or_default();
+    let port = spec.port.map(|p| format!(" -p {p}")).unwrap_or_default();
+    let target = match user.filter(|u| !u.is_empty()) {
+        Some(u) if !host.contains('@') => format!("{u}@{host}"),
+        _ => host.to_string(),
+    };
+    format!("ssh-copy-id{key}{port} {target}")
+}
+
+/// Whether the machine closes the connection for ssh's account before it
+/// asks for a password: it has no such account, or doesn't let it in (a Mac's
+/// Remote Login can allow only some users). A password sign-in can't tell:
+/// servers ask for one even for accounts they don't have. Keyboard-interactive
+/// on a Mac says no first. ssh is stopped at the prompt when there is one, so
+/// nothing is ever typed or sent.
+#[cfg(unix)]
+async fn turns_away(spec: &MachineSpec) -> bool {
+    let Some(askpass) = askpass_stop() else { return false };
+    let mut cmd = Command::new("ssh");
+    // ssh keeps the first value it's given for an option: these go before
+    // ssh_args' BatchMode=yes, which turns keyboard-interactive off.
+    cmd.args([
+        "-o", "BatchMode=no",
+        "-o", "PreferredAuthentications=keyboard-interactive",
+        "-o", "KbdInteractiveAuthentication=yes",
+        "-o", "PubkeyAuthentication=no",
+        "-o", "NumberOfPasswordPrompts=1",
+        "-o", "ControlPath=none",
+    ]);
+    cmd.args(ssh_args(spec)).arg("true");
+    cmd.env("SSH_ASKPASS", askpass).env("SSH_ASKPASS_REQUIRE", "force");
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
+    // Without the terminal Muxin may have been started from: an older ssh
+    // would ask there instead of through SSH_ASKPASS.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    match tokio::time::timeout(Duration::from_secs(15), cmd.output()).await {
+        Ok(Ok(out)) => closed_before_asking(&String::from_utf8_lossy(&out.stderr)),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+async fn turns_away(_spec: &MachineSpec) -> bool {
+    false
+}
+
+/// What `turns_away` gives ssh as SSH_ASKPASS: it says ssh asked (ASKED, on
+/// ssh's stderr) and ends ssh, its parent, before an answer goes out. An
+/// askpass that only fails would have ssh send an empty one.
+#[cfg(unix)]
+const ASKPASS_STOP: &str = "#!/bin/sh\necho \"muxin: asked: $1\" >&2\nkill -TERM \"$PPID\"\nexit 1\n";
+#[cfg_attr(not(unix), allow(dead_code))]
+const ASKED: &str = "muxin: asked:";
+
+/// ASKPASS_STOP as a file to run, in this user's cache folder.
+#[cfg(unix)]
+fn askpass_stop() -> Option<std::path::PathBuf> {
+    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = dirs::cache_dir()?.join("muxen");
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join("askpass-stop");
+        let tmp = dir.join(format!("askpass-stop.{}", std::process::id()));
+        std::fs::write(&tmp, ASKPASS_STOP).ok()?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700)).ok()?;
+        std::fs::rename(&tmp, &path).ok()?;
+        Some(path)
+    })
+    .clone()
+}
+
+/// From ssh's stderr in `turns_away`: the machine closed the connection
+/// ("Connection closed by fe80::1%en0 port 22"), and nothing asked for a
+/// password first.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn closed_before_asking(stderr: &str) -> bool {
+    !stderr.contains(ASKED) && stderr.lines().any(|l| l.trim().starts_with("Connection closed by ") && l.contains(" port "))
 }
 
 /// Where ssh goes for the machine (its config resolved by `ssh -G`).
@@ -229,6 +368,7 @@ pub fn parse_route(text: &str) -> Option<SshRoute> {
     let get = |key: &str| text.lines().find_map(|l| l.strip_prefix(key).map(|v| v.trim().to_string()));
     let hostname = get("hostname ").filter(|h| !h.is_empty())?;
     let port = get("port ").and_then(|p| p.parse().ok()).unwrap_or(22);
+    let user = get("user ").filter(|u| !u.is_empty());
     let jump = get("proxyjump ").filter(|j| !j.is_empty() && j != "none").and_then(|j| {
         let hop = j.rsplit(',').next()?.trim().trim_start_matches("ssh://");
         let hop = hop.rsplit_once('@').map(|(_, h)| h).unwrap_or(hop);
@@ -238,7 +378,7 @@ pub fn parse_route(text: &str) -> Option<SshRoute> {
         };
         (!host.is_empty()).then(|| host.to_string())
     });
-    Some(SshRoute { jump, hostname, port })
+    Some(SshRoute { jump, hostname, port, user })
 }
 
 async fn check(spec: &MachineSpec, remembered: Option<Shell>) -> ProbeResult {
@@ -720,11 +860,46 @@ r1.listener=
     #[test]
     fn reads_where_ssh_goes() {
         let r = parse_route("user adib\nhostname 127.0.0.1\nport 2222\nproxyjump beelink\n").unwrap();
-        assert_eq!(r, SshRoute { jump: Some("beelink".into()), hostname: "127.0.0.1".into(), port: 2222 });
+        assert_eq!(r, SshRoute { jump: Some("beelink".into()), hostname: "127.0.0.1".into(), port: 2222, user: Some("adib".into()) });
         let r = parse_route("hostname 10.0.0.5\nport 22\nproxyjump a@bastion:2200,ssh://me@[fd00::1]:22\n").unwrap();
         assert_eq!(r.jump.as_deref(), Some("fd00::1"));
         let r = parse_route("hostname adib-ser\nport 22\n").unwrap();
         assert_eq!(r.jump, None);
+    }
+
+    #[test]
+    fn knows_which_account_ssh_signs_in_as() {
+        let inv = crate::config::Inventory::parse("[[machine]]\nname = \"A\"\nhost = \"ahanna@a.local\"\n\n[[machine]]\nname = \"B\"\nhost = \"b.local\"\nuser = \"bee\"\n\n[[machine]]\nname = \"C\"\nhost = \"c.local\"\n").unwrap();
+        let (a, b, c) = (&inv.machines[0], &inv.machines[1], &inv.machines[2]);
+        let route = |user: &str| ProbeResult { route: Some(SshRoute { hostname: "c.local".into(), port: 22, user: Some(user.into()), ..Default::default() }), ..Default::default() };
+        assert_eq!(ssh_user(a, Some(&route("adib"))).as_deref(), Some("ahanna"));
+        assert_eq!(ssh_user(b, Some(&route("adib"))).as_deref(), Some("bee"));
+        assert_eq!(ssh_user(c, Some(&route("adib"))).as_deref(), Some("adib"));
+        let denied = ProbeResult { error: Some("cee@c.local: Permission denied (publickey).".into()), ..Default::default() };
+        assert_eq!(ssh_user(c, Some(&denied)).as_deref(), Some("cee"));
+        // A check's error is ssh's last lines, joined.
+        let error = "Warning: Permanently added 'c.local' (ED25519) to the list of known hosts. cee@c.local: Permission denied (publickey,password,keyboard-interactive).";
+        assert_eq!(signed_in_as(error).as_deref(), Some("cee"));
+        assert_eq!(signed_in_as("Permission denied, please try again."), None);
+        assert!(names_user(a) && names_user(b) && !names_user(c));
+
+        assert_eq!(copy_id_command(c, Some("adib"), Some("~/.ssh/id_ed25519.pub")), "ssh-copy-id -i ~/.ssh/id_ed25519.pub adib@c.local");
+        assert_eq!(copy_id_command(a, Some("adib"), None), "ssh-copy-id ahanna@a.local");
+        assert_eq!(copy_id_command(c, None, None), "ssh-copy-id c.local");
+    }
+
+    #[test]
+    fn tells_a_turned_away_account_from_a_password_prompt() {
+        // macOS: no such account, or Remote Login doesn't allow it.
+        assert!(closed_before_asking("Connection closed by fe80::1c2b:3d4e:5f60:7a8b%en0 port 22\n"));
+        assert!(closed_before_asking("Connection closed by 192.168.1.20 port 22\r\n"));
+        // It asked: the account is there.
+        assert!(!closed_before_asking("muxin: asked: (ahanna@mac-webtech-025.local) Password:\n"));
+        assert!(!closed_before_asking("muxin: asked: (ahanna@host) Password:\nConnection closed by 10.0.0.2 port 22\n"));
+        // It doesn't offer keyboard-interactive, or never got that far: can't tell.
+        assert!(!closed_before_asking("adib@box: Permission denied (publickey,password).\n"));
+        assert!(!closed_before_asking("kex_exchange_identification: Connection closed by remote host\n"));
+        assert!(!closed_before_asking("ssh: connect to host box port 22: Operation timed out\n"));
     }
 
     #[test]

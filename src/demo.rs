@@ -391,6 +391,7 @@ impl World {
             published: demo_containers(hw.id),
             route: None,
             kvm: hw.id == "beacon",
+            refused_user: None,
         }
     }
 

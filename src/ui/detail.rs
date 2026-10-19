@@ -890,7 +890,8 @@ impl Root {
                         )
                     }),
             )
-            .when(u.kind == "auth", |d| {
+            // Not for an account the machine turns away (no hint): a key can't fix that.
+            .when(u.kind == "auth" && u.hint.is_some(), |d| {
                 let mid = m.id.clone();
                 d.child(
                     Button::new("m-offline-access", "Set up access")

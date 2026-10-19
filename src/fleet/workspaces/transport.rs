@@ -15,7 +15,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::config::MachineSpec;
-use crate::ops::remote::clean_line;
+use crate::ops::remote::{clean_line, clixml_text};
 use crate::probe;
 
 /// sh-family login shells read the script from stdin as a login shell; anything
@@ -73,20 +73,6 @@ impl Output {
             (true, None) => "The command on the machine was terminated.".into(),
         }
     }
-}
-
-/// The text of PowerShell's CLIXML error records (`<S S="Error">…</S>`), as
-/// lines; anything else as it is.
-pub fn clixml_text(stderr: &str) -> String {
-    if !stderr.contains("<S S=\"Error\">") {
-        return stderr.to_string();
-    }
-    let mut out = String::new();
-    for part in stderr.split("<S S=\"Error\">").skip(1) {
-        let text = part.split("</S>").next().unwrap_or("");
-        out.push_str(&text.replace("_x000D__x000A_", "\n").replace("&apos;", "'").replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"));
-    }
-    out
 }
 
 pub fn new_marker() -> String {

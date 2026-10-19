@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::fleet::Engine;
-use crate::fleet::model::{Job, Machine, Operation, Runner, Snapshot, WorkspaceCommand, WorkspaceInfo};
+use crate::fleet::model::{GhCli, Job, Machine, Operation, Runner, Snapshot, WorkspaceCommand, WorkspaceInfo};
 use crate::fleet::workspaces::{CreateWorkspace, ExecOptions, SyncDirection};
 use crate::ops::{InstallMode, InstallRequest, NewMachine, RunnerAction};
 use crate::util;
@@ -2529,6 +2529,17 @@ mod tests {
         workspace_destroy(&engine, WorkspaceDestroyRequest { workspace_id: id.clone(), keep_files: false }, Surface::Mcp).await.unwrap();
         assert_eq!(workspace_get(&engine, WorkspaceRequest { workspace_id: id }, Surface::Mcp).unwrap_err().code, "not_found");
     }
+
+    #[test]
+    fn a_machine_that_is_not_signed_in_to_the_github_cli_is_asked_again() {
+        let cli = |logged_in| Some(GhCli { installed: true, logged_in, ..Default::default() });
+        assert!(gh_answer_stands(&cli(true)));
+        // Signed out, not installed, and never looked at are all asked again:
+        // signing in on the machine is what changes the answer.
+        assert!(!gh_answer_stands(&cli(false)));
+        assert!(!gh_answer_stands(&Some(GhCli::default())));
+        assert!(!gh_answer_stands(&None));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3168,13 +3179,22 @@ pub struct GitSetupRequest {
 }
 
 /// The machine, with its GitHub CLI state known (asked for when it isn't yet).
+///
+/// Only "signed in" is taken as known. A machine with no sessions isn't re-read
+/// on the timer, so what it said before the user signed in on it is still there
+/// when they come back: asking again is what sees the sign-in.
 async fn machine_with_gh(engine: &Arc<Engine>, machine_id: &str) -> ApiResult<crate::fleet::model::Machine> {
     let m = find_machine(&engine.current(), machine_id)?.clone();
-    if m.gh.is_some() {
+    if gh_answer_stands(&m.gh) {
         return Ok(m);
     }
     let _ = engine.refresh_sessions(&m.id).await;
     Ok(find_machine(&engine.current(), &m.id)?.clone())
+}
+
+/// Whether a machine's GitHub CLI answer stands as it is (see `machine_with_gh`).
+fn gh_answer_stands(gh: &Option<GhCli>) -> bool {
+    gh.as_ref().is_some_and(|g| g.logged_in)
 }
 
 async fn git_out(engine: &Arc<Engine>, m: &crate::fleet::model::Machine, setup: crate::fleet::code::GitSetup) -> GitSetupOut {

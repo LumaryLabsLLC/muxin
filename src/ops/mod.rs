@@ -1201,6 +1201,18 @@ Match host x
     }
 
     #[test]
+    fn windows_stop_asks_the_runner_before_killing_it() {
+        // Killed outright, the listener leaves its session on GitHub for minutes
+        // and a runner started meanwhile can't connect. Ctrl+C in its console
+        // (what the runner's own service sends) makes it delete the session first.
+        let stop = &CONTROL_PS1[CONTROL_PS1.find("function Send-CtrlC").unwrap()..CONTROL_PS1.find("switch ($OR_ACTION)").unwrap()];
+        let ctrl_c = stop.find("$sent = Send-CtrlC").unwrap();
+        let kill = stop.find("foreach ($p in $left) { Stop-Process").unwrap();
+        assert!(stop.contains("GenerateConsoleCtrlEvent(0, 0)"));
+        assert!(ctrl_c < kill, "{stop}");
+    }
+
+    #[test]
     fn fallback_release_has_a_checksum_for_every_package() {
         let release = fallback_release();
         assert_eq!(release.version, FALLBACK_RUNNER_VERSION);

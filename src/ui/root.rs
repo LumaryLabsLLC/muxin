@@ -602,6 +602,11 @@ impl Root {
         self.announce_notices(&snapshot);
         // Terminals of sessions that ended go away (one without the agent stops with its terminal).
         self.terminals.retain(|id, _| snapshot.sessions.iter().any(|s| &s.id == id));
+        // A session that ended may have changed git or the GitHub CLI there (the
+        // sign-in terminal does): the machine's Git card looks again when shown.
+        for s in self.snapshot.sessions.iter().filter(|s| !snapshot.sessions.iter().any(|n| n.id == s.id)) {
+            self.machine_git.remove(&s.machine_id);
+        }
         // Looking at a session that just closed: back to its machine.
         if let Route::Session(id) = self.route.clone() {
             let gone = !snapshot.sessions.iter().any(|s| s.id == id) && self.snapshot.sessions.iter().any(|s| s.id == id);

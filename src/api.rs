@@ -3182,13 +3182,14 @@ pub struct GitSetupRequest {
 ///
 /// Only "signed in" is taken as known. A machine with no sessions isn't re-read
 /// on the timer, so what it said before the user signed in on it is still there
-/// when they come back: asking again is what sees the sign-in.
+/// when they come back: asking again is what sees the sign-in. Asked now, not
+/// when the timer would look at its CLIs again (every 10 minutes).
 async fn machine_with_gh(engine: &Arc<Engine>, machine_id: &str) -> ApiResult<crate::fleet::model::Machine> {
     let m = find_machine(&engine.current(), machine_id)?.clone();
     if gh_answer_stands(&m.gh) {
         return Ok(m);
     }
-    let _ = engine.refresh_sessions(&m.id).await;
+    let _ = engine.refresh_tools(&m.id).await;
     Ok(find_machine(&engine.current(), &m.id)?.clone())
 }
 

@@ -31,6 +31,7 @@ function Start-Detached($file, $dir) {
     ProcessStartupInformation = $startup
   }
   if ($r.ReturnValue -ne 0) { throw "Couldn't start $file (WMI returned $($r.ReturnValue))." }
+  $r.ProcessId
 }
 
 function Start-Runner {
@@ -41,10 +42,16 @@ function Start-Runner {
     say 'Already running.'
   } else {
     say 'Starting run.cmd in the background (no service installed)…'
-    Start-Detached (Join-Path $OR_DIR 'run.cmd') $OR_DIR
-    # It takes a moment to come up. Say it started only if it really did.
-    for ($i = 0; $i -lt 10 -and -not (Get-RunnerProcesses); $i++) { Start-Sleep -Milliseconds 500 }
-    if (-not (Get-RunnerProcesses)) { throw 'run.cmd started, but no runner process is running.' }
+    $id = Start-Detached (Join-Path $OR_DIR 'run.cmd') $OR_DIR
+    # It takes a moment to come up, longer on a slow machine. run.cmd runs as
+    # long as the runner does, so it ending first means the runner didn't start.
+    for ($i = 0; $i -lt 20 -and -not (Get-RunnerProcesses); $i++) {
+      if (-not (Get-Process -Id $id -ErrorAction SilentlyContinue)) {
+        throw "run.cmd stopped before the runner started. To see why, run $OR_DIR\run.cmd on the machine."
+      }
+      Start-Sleep -Milliseconds 500
+    }
+    if (-not (Get-RunnerProcesses)) { say 'Still starting; the check after this shows whether it came up.' }
   }
 }
 

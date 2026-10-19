@@ -5,7 +5,9 @@
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-trap { Write-Error ("error: " + $_.Exception.Message); exit 1 }
+# A plain line, not an error record: PowerShell writes those as CLIXML when
+# stderr isn't a terminal.
+trap { [Console]::Error.WriteLine("error: " + $_.Exception.Message); exit 1 }
 function say($m) { Write-Output $m }
 
 # Starts a program that outlives this session. Muxin runs this script over ssh,
@@ -103,7 +105,7 @@ if ((Test-Path -LiteralPath $zip) -and (Test-Cached $zip)) {
   }
   # A new file, not one someone else made: its owner could still change it.
   Remove-Item -LiteralPath "$zip.part" -Force -ErrorAction SilentlyContinue
-  say "Downloading actions-runner $OR_VERSION for win-$arch…"
+  say "Downloading actions-runner $OR_VERSION for win-${arch}…"
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
   Invoke-WebRequest -Uri $url -OutFile "$zip.part" -UseBasicParsing
   $got = Get-Sha256 "$zip.part"

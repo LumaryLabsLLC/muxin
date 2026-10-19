@@ -4,7 +4,9 @@
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-trap { Write-Error ("error: " + $_.Exception.Message); exit 1 }
+# A plain line, not an error record: PowerShell writes those as CLIXML when
+# stderr isn't a terminal.
+trap { [Console]::Error.WriteLine("error: " + $_.Exception.Message); exit 1 }
 function say($m) { Write-Output $m }
 
 if (-not $OR_DIR -or -not (Test-Path $OR_DIR)) { throw "$OR_DIR doesn't exist." }
@@ -36,7 +38,7 @@ function Start-Detached($file, $dir) {
 
 function Start-Runner {
   if ($svcName) {
-    say "Starting service $svcName…"
+    say "Starting service ${svcName}…"
     Start-Service -Name $svcName
   } elseif (Get-RunnerProcesses) {
     say 'Already running.'
@@ -57,7 +59,7 @@ function Start-Runner {
 
 function Stop-Runner {
   if ($svcName) {
-    say "Stopping service $svcName…"
+    say "Stopping service ${svcName}…"
     Stop-Service -Name $svcName -Force
     return
   }

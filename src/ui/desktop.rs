@@ -48,6 +48,8 @@ enum Msg {
     /// The stream ended: why, and whether it may well work again in a moment
     /// (the connection dropped, as opposed to the machine saying no).
     Ended(String, bool),
+    /// Nobody's screen is there to show (nobody signed in): why.
+    NoScreen(String),
     /// The monitor asked for is gone: showing the default one instead.
     Gone,
 }
@@ -125,6 +127,14 @@ pub struct DesktopView {
     offline: Option<String>,
     /// The machine is a Mac (⌘ stays ⌘).
     mac: bool,
+    /// Its platform ("windows-x64"), for what its own remote desktop is called.
+    platform: String,
+    /// Nobody's screen is there (nobody signed in): its own remote desktop
+    /// (RDP, VNC) is offered instead, which can sign someone in.
+    no_screen: bool,
+    /// Opening that, and what came of it (text, failed).
+    opening: bool,
+    opened: Option<(String, bool)>,
     /// What the machine says about the stream (e.g. view only).
     note: Option<String>,
     /// A monitor's size or scale being changed, and why the last change didn't happen.
@@ -170,6 +180,10 @@ impl DesktopView {
             frames: 0,
             offline: None,
             mac: false,
+            platform: String::new(),
+            no_screen: false,
+            opening: false,
+            opened: None,
             note: None,
             resuming: false,
             retries: 0,
@@ -179,7 +193,8 @@ impl DesktopView {
             _tasks: Vec::new(),
             _subscriptions: Vec::new(),
         };
-        view.mac = view.engine.current().machines.iter().any(|m| m.id == view.machine && m.platform.starts_with("darwin"));
+        view.platform = view.engine.current().machines.iter().find(|m| m.id == view.machine).map(|m| m.platform.clone()).unwrap_or_default();
+        view.mac = view.platform.starts_with("darwin");
         view.start(window, cx);
         // Keys and buttons held when the view loses the keyboard (another
         // app, ⌘Q, a click elsewhere): let go on the machine too.
@@ -291,10 +306,38 @@ impl DesktopView {
         .detach();
     }
 
+    /// Opens the machine's own remote desktop (RDP, VNC) in this computer's
+    /// app for it: what there is when nobody's screen is.
+    fn open_remote(&mut self, cx: &mut Context<Self>) {
+        self.opening = true;
+        self.opened = None;
+        let (engine, id) = (self.engine.clone(), self.machine.clone());
+        let name = engine.current().machines.iter().find(|m| m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone());
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.open_remote_desktop(&id, None).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                this.opening = false;
+                this.opened = Some(match result {
+                    Ok(r) => (r.summary(&name), false),
+                    Err(e) => (e, true),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// (Re)starts the stream from the machine.
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.remote = None;
         self.state = State::Connecting;
+        self.no_screen = false;
+        self.opened = None;
         // Each stream has its own flag: an old stream's undelivered draw request
         // mustn't hold up the new one.
         self.pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -345,7 +388,8 @@ impl DesktopView {
                 }
                 Ok(r) => {
                     link.close_channel(channel);
-                    let _ = tx.unbounded_send(Msg::Ended(r["error"].as_str().unwrap_or("The machine can't show its desktop.").to_string(), false));
+                    let why = r["error"].as_str().unwrap_or("The machine can't show its desktop.").to_string();
+                    let _ = tx.unbounded_send(if r["no_session"].as_bool() == Some(true) { Msg::NoScreen(why) } else { Msg::Ended(why, false) });
                     return;
                 }
                 Err(e) => {
@@ -405,6 +449,12 @@ impl DesktopView {
                                 }
                             }
                             Msg::Gone => this.display = None,
+                            Msg::NoScreen(why) => {
+                                this.remote = None;
+                                this.resuming = false;
+                                this.no_screen = true;
+                                this.state = State::Ended(why);
+                            }
                             Msg::Ended(why, may_return) => {
                                 this.remote = None;
                                 // The connection dropped (another network, a
@@ -729,11 +779,29 @@ impl Render for DesktopView {
                     .gap(px(10.))
                     .child(kit::color_tile("monitor", 44.))
                     .child(div().max_w(px(460.)).text_center().text_size(px(13.)).text_color(theme.text_muted).child(why.clone()))
-                    .child(Button::new("desktop-retry", "Try again").icon("refresh-cw").on_click(cx.listener(|this, _, window, cx| {
-                        this.retries = 0;
-                        this.start(window, cx);
-                        cx.notify();
-                    }))),
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            // Nobody's screen: the machine's own remote desktop can sign someone in.
+                            .when(self.no_screen, |d| {
+                                d.child(
+                                    Button::new("desktop-remote", crate::fleet::remote_desktop::open_label(&self.platform))
+                                        .icon("external-link")
+                                        .style(ButtonStyle::Primary)
+                                        .disabled(self.opening)
+                                        .on_click(cx.listener(|this, _, _, cx| this.open_remote(cx))),
+                                )
+                            })
+                            .child(Button::new("desktop-retry", "Try again").icon("refresh-cw").on_click(cx.listener(|this, _, window, cx| {
+                                this.retries = 0;
+                                this.start(window, cx);
+                                cx.notify();
+                            }))),
+                    )
+                    .children(self.opened.clone().map(|(text, failed)| {
+                        div().max_w(px(460.)).text_center().text_size(px(12.5)).text_color(if failed { theme.error } else { theme.text_muted }).child(text)
+                    })),
             ),
             (State::Connecting, None) if self.resuming && self.frame.is_some() => Some(
                 div().flex().items_center().gap(px(10.)).child(spinner("desktop-resume", 16., theme.text_muted)).child(

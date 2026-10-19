@@ -966,7 +966,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "desktop_screenshot",
-            "description": "A picture of a machine's screen (Linux with an X11 desktop, or a Mac on a direct connection), or of one of its displays. Coordinates for desktop_input are in its pixels.",
+            "description": "A picture of a machine's screen (Linux with an X11 desktop, a Mac, or Windows), or of one of its displays. The account Muxin connects as must be signed in there; when nobody is, it says so (the user can open the machine's own Remote Desktop or Screen Sharing from its menu in the app). Coordinates for desktop_input are in its pixels.",
             "inputSchema": schema(json!({
                 "machine_id": { "type": "string", "description": MACHINE_ID },
                 "display": { "type": "string", "description": DISPLAY_ID }

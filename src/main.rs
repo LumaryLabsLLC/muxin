@@ -657,6 +657,10 @@ enum DesktopCommand {
     Remove(DesktopRemoveArgs),
     /// Change a monitor's resolution or scale
     Set(DesktopSetArgs),
+    /// Open the machine's own Remote Desktop (RDP) in your app for it, through Muxin, until Ctrl-C
+    Rdp(MachineArgs),
+    /// Open the machine's own VNC (a Mac's Screen Sharing) in your app for it, through Muxin, until Ctrl-C
+    Vnc(MachineArgs),
 }
 
 #[derive(Args)]
@@ -2197,7 +2201,28 @@ fn desktop(cmd: DesktopCommand, runtime: &tokio::runtime::Runtime) -> u8 {
             let req = api::RemoveDisplayRequest { machine_id: a.machine, display: a.display };
             run(runtime, &a.agent, async move |e| api::desktop_remove_display(&e, req).await, |v| format!("Removed display {}.\n", v["removed"].as_str().unwrap_or("")))
         }
+        DesktopCommand::Rdp(a) => remote_desktop(a, crate::fleet::remote_desktop::Protocol::Rdp, runtime),
+        DesktopCommand::Vnc(a) => remote_desktop(a, crate::fleet::remote_desktop::Protocol::Vnc, runtime),
     }
+}
+
+/// `muxin desktop rdp|vnc`: the machine's own remote desktop in this
+/// computer's app for it, its port open here until Ctrl-C.
+fn remote_desktop(a: MachineArgs, protocol: crate::fleet::remote_desktop::Protocol, runtime: &tokio::runtime::Runtime) -> u8 {
+    let req = api::RemoteDesktopRequest { machine_id: a.machine_id, protocol: Some(protocol) };
+    run(
+        runtime,
+        &a.agent,
+        async move |e| {
+            let opened = api::open_remote_desktop(&e, req).await?;
+            let name = e.machine(&opened.machine_id).map(|(spec, _)| spec.name).unwrap_or_else(|| opened.machine_id.clone());
+            eprintln!("{} Ctrl-C closes it.", opened.summary(&name));
+            let _ = tokio::signal::ctrl_c().await;
+            e.stop_forward(&opened.machine_id, opened.port);
+            Ok(opened)
+        },
+        |_| String::new(),
+    )
 }
 
 fn services(a: ServicesArgs, runtime: &tokio::runtime::Runtime) -> u8 {

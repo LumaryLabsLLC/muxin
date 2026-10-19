@@ -3737,6 +3737,22 @@ pub async fn forward_port(engine: &Arc<Engine>, req: ForwardRequest) -> ApiResul
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RemoteDesktopRequest {
+    pub machine_id: String,
+    /// "rdp" or "vnc" (default: the one the machine has; RDP first, VNC on a Mac).
+    #[serde(default)]
+    pub protocol: Option<crate::fleet::remote_desktop::Protocol>,
+}
+
+/// Opens a machine's own remote desktop (RDP or VNC) in this computer's app
+/// for it, through a port opened here for as long as this process runs.
+pub async fn open_remote_desktop(engine: &Arc<Engine>, req: RemoteDesktopRequest) -> ApiResult<crate::fleet::remote_desktop::RemoteDesktop> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    engine.open_remote_desktop(&m.id, req.protocol).await.map_err(|e| ApiError::new("invalid", e))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComposeProjectRequest {
     pub machine_id: String,
     /// The project's name, as machine_services lists it.

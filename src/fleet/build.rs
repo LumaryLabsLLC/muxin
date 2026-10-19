@@ -567,6 +567,7 @@ pub fn explain_unreachable(spec: &MachineSpec, p: &ProbeResult, retrying: bool, 
     let kind = if spec.is_local() { "error" } else { unreachable_kind(&error) };
     let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
     let again = if retrying { "Reconnects when it's back." } else { "Check again when it's back." };
+    let os = p.os.as_deref().or(spec.platform.as_deref()).or(device.map(|d| d.os.as_str())).unwrap_or("").to_ascii_lowercase();
     let (title, detail, hint) = match kind {
         "offline" => (format!("{name} is offline"), format!("Shut down, asleep, or off the network. {again}"), None),
         // ssh got to the machine it goes through (ProxyJump), and nothing
@@ -575,7 +576,6 @@ pub fn explain_unreachable(spec: &MachineSpec, p: &ProbeResult, retrying: bool, 
             (format!("{name} isn't answering"), format!("The machine it's reached through is up, but nothing answers behind it: {name} is off, or its ssh server isn't running."), None)
         }
         "refused" => {
-            let os = p.os.as_deref().or(spec.platform.as_deref()).unwrap_or("").to_ascii_lowercase();
             let ssh = if os.starts_with("darwin") || os.starts_with("macos") {
                 "Remote Login (ssh) is off"
             } else if os.starts_with("windows") {
@@ -587,21 +587,31 @@ pub fn explain_unreachable(spec: &MachineSpec, p: &ProbeResult, retrying: bool, 
             };
             (format!("{name} isn't accepting connections"), format!("Starting up, or {ssh}."), None)
         }
+        // The account ssh guessed isn't one the machine lets in: a key can't
+        // fix that, the right account name can.
+        "auth" if p.refused_user.is_some() => {
+            let user = p.refused_user.as_deref().unwrap_or_default();
+            let again = format!("Add this machine again as name@{host}, with your account's name there.");
+            let sharing = "System Settings › General › Sharing › Remote Login › ⓘ";
+            let detail = if os.starts_with("darwin") || os.starts_with("macos") {
+                format!("There's no account {user} there, or Remote Login doesn't allow it. {again} If {user} is there, allow it in {sharing}.")
+            } else if os.is_empty() {
+                format!("There's no account {user} there, or ssh doesn't allow it. {again} On a Mac, allowed users are in {sharing}.")
+            } else {
+                format!("There's no account {user} there, or its ssh server doesn't allow it. {again}")
+            };
+            (format!("{name} doesn't accept {user}"), detail, None)
+        }
         "auth" => {
-            // "adib@box.local: Permission denied (...)": who ssh signed in as.
-            let user = error
-                .lines()
-                .find_map(|l| l.split_once(": Permission denied"))
-                .and_then(|(who, _)| who.rsplit_once('@'))
-                .map(|(u, _)| u.trim().to_string())
-                .filter(|u| !u.is_empty() && !u.contains(' '));
+            let user = crate::probe::ssh_user(spec, Some(p));
+            let key = crate::probe::default_ssh_key().unwrap_or_else(|| "~/.ssh/id_ed25519.pub".into());
             (
                 format!("{name} doesn't know {here} yet"),
-                match user {
+                match &user {
                     Some(u) => format!("Set up access once with your password for {u} there."),
                     None => "Set up access once with your password there.".to_string(),
                 },
-                Some(format!("ssh-copy-id -i {} {host}", crate::probe::default_ssh_key().unwrap_or_else(|| "~/.ssh/id_ed25519.pub".into()))),
+                Some(crate::probe::copy_id_command(spec, user.as_deref(), Some(&key))),
             )
         }
         "unknown-host" => (format!("Can't find {name}"), format!("Check \"{host}\", or join its network or VPN."), None),
@@ -1420,14 +1430,70 @@ mod tests {
         let u = explain_unreachable(&inv.machines[0], &p, true, None, None);
         assert_eq!(u.kind, "auth");
         assert!(u.detail.contains("password for adib"), "{}", u.detail);
-        assert!(u.hint.unwrap().starts_with("ssh-copy-id -i "));
+        // The account goes in the command, so ssh-copy-id doesn't guess another.
+        let hint = u.hint.unwrap();
+        assert!(hint.starts_with("ssh-copy-id -i "), "{hint}");
+        assert!(hint.ends_with(" adib@Hub.local"), "{hint}");
+    }
+
+    #[test]
+    fn copy_id_hint_signs_in_as_sshs_account() {
+        use crate::probe::SshRoute;
+        let denied = |error: &str, user: Option<&str>| ProbeResult {
+            ok: false,
+            error: Some(error.into()),
+            route: Some(SshRoute { hostname: "box.local".into(), port: 22, user: user.map(Into::into), ..Default::default() }),
+            ..Default::default()
+        };
+        // ssh's config (or this computer's login name) says who, even when the error doesn't.
+        let inv = inventory("[[machine]]\nname = \"Box\"\nhost = \"box.local\"\nport = 2222\n");
+        let u = explain_unreachable(&inv.machines[0], &denied("Permission denied (publickey).", Some("adib")), true, None, None);
+        assert!(u.detail.contains("password for adib"), "{}", u.detail);
+        let hint = u.hint.unwrap();
+        assert!(hint.ends_with(" -p 2222 adib@box.local"), "{hint}");
+
+        // A host that names its account keeps it.
+        let inv = inventory("[[machine]]\nname = \"Box\"\nhost = \"ahanna@box.local\"\n");
+        let u = explain_unreachable(&inv.machines[0], &denied("ahanna@box.local: Permission denied (publickey).", Some("ahanna")), true, None, None);
+        assert!(u.hint.unwrap().ends_with(" ahanna@box.local"));
+        assert!(u.detail.contains("password for ahanna"), "{}", u.detail);
+    }
+
+    #[test]
+    fn says_when_the_account_is_the_problem() {
+        let inv = inventory("[[machine]]\nname = \"Mac-Webtech-025\"\nhost = \"Mac-Webtech-025.local\"\n");
+        let spec = &inv.machines[0];
+        let refused = |os: Option<&str>| ProbeResult {
+            ok: false,
+            error: Some("adibhanna@mac-webtech-025.local: Permission denied (publickey,password,keyboard-interactive).".into()),
+            os: os.map(Into::into),
+            refused_user: Some("adibhanna".into()),
+            ..Default::default()
+        };
+        // Never reached, so it may be a Mac.
+        let u = explain_unreachable(spec, &refused(None), true, None, None);
+        assert_eq!(u.kind, "auth");
+        assert_eq!(u.title, "Mac-Webtech-025 doesn't accept adibhanna");
+        assert!(u.detail.starts_with("There's no account adibhanna there, or ssh doesn't allow it."), "{}", u.detail);
+        assert!(u.detail.contains("Add this machine again as name@Mac-Webtech-025.local, with your account's name there."), "{}", u.detail);
+        assert!(u.detail.contains("On a Mac, allowed users are in System Settings › General › Sharing › Remote Login › ⓘ."), "{}", u.detail);
+        // ssh-copy-id would fail the same way: no command, and no Set up access.
+        assert_eq!(u.hint, None);
+
+        let u = explain_unreachable(spec, &refused(Some("darwin")), true, None, None);
+        assert!(u.detail.starts_with("There's no account adibhanna there, or Remote Login doesn't allow it."), "{}", u.detail);
+        assert!(u.detail.ends_with("If adibhanna is there, allow it in System Settings › General › Sharing › Remote Login › ⓘ."), "{}", u.detail);
+
+        let u = explain_unreachable(spec, &refused(Some("linux")), true, None, None);
+        assert!(u.detail.contains("its ssh server doesn't allow it"), "{}", u.detail);
+        assert!(!u.detail.contains("Remote Login"), "{}", u.detail);
     }
 
     #[test]
     fn knows_a_vm_runs_on_another_machine() {
         use crate::probe::{PublishedContainer, PublishedPort, SshRoute};
         let inv = inventory("[[machine]]\nname = \"Beelink\"\nhost = \"beelink\"\n\n[[machine]]\nname = \"Win11\"\nhost = \"win11\"\n\n[[machine]]\nname = \"Inner\"\nhost = \"inner\"\n");
-        let route = |jump: Option<&str>, hostname: &str, port: u16| Some(SshRoute { jump: jump.map(Into::into), hostname: hostname.into(), port });
+        let route = |jump: Option<&str>, hostname: &str, port: u16| Some(SshRoute { jump: jump.map(Into::into), hostname: hostname.into(), port, user: None });
         let zn = |state: &str| PublishedContainer {
             name: "zn-win11".into(),
             state: state.into(),

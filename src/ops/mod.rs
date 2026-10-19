@@ -1189,6 +1189,18 @@ Match host x
     }
 
     #[test]
+    fn windows_scripts_start_a_runner_outside_the_ssh_session() {
+        // sshd ends everything the connection that started it leaves behind when
+        // it closes, so a runner started over ssh has to come from outside that
+        // session: WMI, which is how the agent starts itself too.
+        for script in [INSTALL_PS1, CONTROL_PS1] {
+            let wmi = "Invoke-CimMethod -ClassName Win32_Process -MethodName Create";
+            assert!(script.contains(wmi), "{script}");
+            assert!(!script.contains("Start-Process -FilePath"), "{script}");
+        }
+    }
+
+    #[test]
     fn fallback_release_has_a_checksum_for_every_package() {
         let release = fallback_release();
         assert_eq!(release.version, FALLBACK_RUNNER_VERSION);

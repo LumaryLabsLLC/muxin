@@ -8,6 +8,21 @@ $ProgressPreference = 'SilentlyContinue'
 trap { Write-Error ("error: " + $_.Exception.Message); exit 1 }
 function say($m) { Write-Output $m }
 
+# Starts a program that outlives this session. Muxin runs this script over ssh,
+# and sshd ends everything the connection that started it leaves behind when it
+# closes, so a plain Start-Process leaves nothing running. A process made by WMI
+# isn't in that session; the agent starts itself the same way (agent/src/sys.rs).
+function Start-Detached($file, $dir) {
+  $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
+  $cmd = 'cmd.exe /c ""' + $file + '""'
+  $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+    CommandLine = $cmd
+    CurrentDirectory = $dir
+    ProcessStartupInformation = $startup
+  }
+  if ($r.ReturnValue -ne 0) { throw "Couldn't start $file (WMI returned $($r.ReturnValue))." }
+}
+
 $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
   'AMD64' { 'x64' }
   'ARM64' { 'arm64' }
@@ -116,7 +131,7 @@ foreach ($name in $OR_NAMES) {
   try { & .\config.cmd @cfg } finally { Remove-Item Env:\ACTIONS_RUNNER_INPUT_TOKEN -ErrorAction SilentlyContinue }
   if ($LASTEXITCODE -ne 0) { throw "config.cmd failed for $name (exit $LASTEXITCODE)" }
   if (-not $OR_SERVICE) {
-    Start-Process -FilePath (Join-Path $dir 'run.cmd') -WorkingDirectory $dir -WindowStyle Hidden
+    Start-Detached (Join-Path $dir 'run.cmd') $dir
     say "Started $name in the background (not a service, so it won't come back after a reboot)"
   }
   Pop-Location

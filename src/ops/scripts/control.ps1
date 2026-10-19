@@ -18,6 +18,22 @@ function Get-RunnerProcesses {
     Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith("$OR_DIR\bin\", [StringComparison]::OrdinalIgnoreCase) }
 }
 
+# Starts a program that outlives this session. Muxin runs this script over ssh,
+# and sshd ends everything the connection that started it leaves behind when it
+# closes, so a plain Start-Process leaves nothing running. A process made by WMI
+# isn't in that session; the agent starts itself the same way (agent/src/sys.rs).
+function Start-Detached($file, $dir) {
+  $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
+  $cmd = 'cmd.exe /c ""' + $file + '""'
+  $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+    CommandLine = $cmd
+    CurrentDirectory = $dir
+    ProcessStartupInformation = $startup
+  }
+  if ($r.ReturnValue -ne 0) { throw "Couldn't start $file (WMI returned $($r.ReturnValue))." }
+  $r.ProcessId
+}
+
 function Start-Runner {
   if ($svcName) {
     say "Starting service $svcName…"
@@ -26,7 +42,16 @@ function Start-Runner {
     say 'Already running.'
   } else {
     say 'Starting run.cmd in the background (no service installed)…'
-    Start-Process -FilePath (Join-Path $OR_DIR 'run.cmd') -WorkingDirectory $OR_DIR -WindowStyle Hidden
+    $id = Start-Detached (Join-Path $OR_DIR 'run.cmd') $OR_DIR
+    # It takes a moment to come up, longer on a slow machine. run.cmd runs as
+    # long as the runner does, so it ending first means the runner didn't start.
+    for ($i = 0; $i -lt 20 -and -not (Get-RunnerProcesses); $i++) {
+      if (-not (Get-Process -Id $id -ErrorAction SilentlyContinue)) {
+        throw "run.cmd stopped before the runner started. To see why, run $OR_DIR\run.cmd on the machine."
+      }
+      Start-Sleep -Milliseconds 500
+    }
+    if (-not (Get-RunnerProcesses)) { say 'Still starting; the check after this shows whether it came up.' }
   }
 }
 

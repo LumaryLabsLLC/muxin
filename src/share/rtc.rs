@@ -1,7 +1,8 @@
 //! WebRTC for both sides of a share: a peer connection with one data
 //! channel, its events as a stream, and the certificate checks.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -147,9 +148,64 @@ pub async fn gathered(pc: &Arc<dyn PeerConnection>, events: &mut mpsc::Unbounded
     }
 }
 
-/// Sends a frame, waiting while too much is already on its way; an error
-/// when the other side has gone or fell too far behind.
+/// The largest message sent: a data channel carries 64 KB a message (RFC
+/// 8841's default) and maybe no more, so a bigger frame (a whole screen)
+/// goes in pieces: `[channel][MORE][part]`..., then the last part with the
+/// frame's own kind. The other side puts them back together (`Pieces`).
+const PIECE: usize = 48 * 1024;
+
+/// What one channel sends goes one frame at a time, so its pieces never mix
+/// with another frame's (other channels' frames may come in between).
+fn channel_lock(dc: &Arc<dyn DataChannel>, channel: u32) -> Arc<tokio::sync::Mutex<()>> {
+    let key = (Arc::as_ptr(dc) as *const () as usize, channel);
+    LOCKS.get_or_init(Default::default).lock().unwrap().entry(key).or_default().clone()
+}
+
+/// Each data channel's per-channel send locks, by its address.
+static LOCKS: OnceLock<Mutex<HashMap<(usize, u32), Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+
+/// Forgets a closed data channel's locks.
+pub fn forget(dc: &Arc<dyn DataChannel>) {
+    if let Some(locks) = LOCKS.get() {
+        let id = Arc::as_ptr(dc) as *const () as usize;
+        locks.lock().unwrap().retain(|(d, _), _| *d != id);
+    }
+}
+
+/// Sends a frame (in pieces when it's big), waiting while too much is
+/// already on its way; an error when the other side has gone or fell too far
+/// behind. A frame always goes whole: the sending carries on even when the
+/// caller stops waiting for it.
 pub async fn send(dc: &Arc<dyn DataChannel>, frame: Vec<u8>) -> Result<(), String> {
+    let Some((channel, kind, _)) = super::parse_frame(&frame) else { return Ok(()) };
+    let lock = channel_lock(dc, channel);
+    if frame.len() <= PIECE {
+        let _one_at_a_time = lock.lock().await;
+        return send_one(dc, frame).await;
+    }
+    let dc = dc.clone();
+    let sending = tokio::spawn(async move {
+        let _one_at_a_time = lock.lock().await;
+        for part in parts_of(channel, kind, &frame[5..]) {
+            send_one(&dc, part).await?;
+        }
+        Ok(())
+    });
+    sending.await.map_err(|e| e.to_string())?
+}
+
+/// A frame's payload as messages of at most `PIECE` bytes: MORE frames,
+/// then the last part with its own kind.
+fn parts_of(channel: u32, kind: u8, payload: &[u8]) -> Vec<Vec<u8>> {
+    let mut parts: Vec<Vec<u8>> = payload.chunks(PIECE - 5).map(|p| super::frame(channel, super::MORE, p)).collect();
+    if let Some(last) = parts.last_mut() {
+        last[4] = kind;
+    }
+    parts
+}
+
+/// One message, once there's room for it.
+async fn send_one(dc: &Arc<dyn DataChannel>, frame: Vec<u8>) -> Result<(), String> {
     let mut waited = Duration::ZERO;
     while dc.outstanding_bytes().await.unwrap_or(0) > MAX_BUFFERED {
         if waited > Duration::from_secs(10) {
@@ -171,6 +227,41 @@ pub async fn flush(dc: &Arc<dyn DataChannel>) {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     tokio::time::sleep(Duration::from_millis(150)).await;
+}
+
+/// Frames put back together from their pieces (see `PIECE`), per channel.
+#[derive(Default)]
+pub struct Pieces {
+    parts: HashMap<u32, Vec<u8>>,
+    held: usize,
+}
+
+impl Pieces {
+    /// The most held at once: a frame bigger than this is dropped (the
+    /// other side sending more than any frame needs).
+    const MAX: usize = 64 << 20;
+
+    /// A message off the data channel: the frame, once its last piece is in.
+    pub fn add(&mut self, msg: Vec<u8>) -> Option<Vec<u8>> {
+        let (channel, kind, body) = super::parse_frame(&msg)?;
+        if kind == super::MORE {
+            if self.held + body.len() > Self::MAX {
+                self.held -= self.parts.remove(&channel).map_or(0, |p| p.len());
+                return None;
+            }
+            self.held += body.len();
+            self.parts.entry(channel).or_default().extend_from_slice(body);
+            return None;
+        }
+        match self.parts.remove(&channel) {
+            None => Some(msg),
+            Some(mut whole) => {
+                self.held -= whole.len();
+                whole.extend_from_slice(body);
+                Some(super::frame(channel, kind, &whole))
+            }
+        }
+    }
 }
 
 /// What arrives on a data channel, as frames (None: it closed).
@@ -211,6 +302,25 @@ pub fn error_frame(why: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn big_frames_go_in_pieces_and_come_back_whole() {
+        let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let parts = parts_of(7, super::super::DATA, &big);
+        assert!(parts.len() > 1 && parts.iter().all(|p| p.len() <= PIECE));
+        assert!(parts[..parts.len() - 1].iter().all(|p| p[4] == super::super::MORE));
+        let mut pieces = Pieces::default();
+        // Another channel's frame in between doesn't get mixed in.
+        assert_eq!(pieces.add(parts[0].clone()), None);
+        let small = super::super::frame(9, super::super::DATA, b"hi");
+        assert_eq!(pieces.add(small.clone()), Some(small));
+        let mut whole = None;
+        for p in &parts[1..] {
+            whole = pieces.add(p.clone());
+        }
+        assert_eq!(whole, Some(super::super::frame(7, super::super::DATA, &big)));
+        assert_eq!(pieces.held, 0);
+    }
 
     #[test]
     fn reads_one_fingerprint() {

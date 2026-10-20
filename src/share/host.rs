@@ -158,6 +158,8 @@ pub struct ShareView {
     /// Unix seconds.
     pub ends_at: i64,
     pub guests: Vec<GuestView>,
+    /// Why the machine couldn't be reached for a guest, until it can.
+    pub problem: Option<String>,
 }
 
 struct Guest {
@@ -192,6 +194,9 @@ struct Share {
     guests: Mutex<HashMap<u64, Arc<Guest>>>,
     stop: watch::Sender<Option<&'static str>>,
     bad_proofs: Mutex<u32>,
+    /// Why the machine couldn't be reached for a guest (the sharer sees it;
+    /// guests hear only that it can't be reached).
+    problem: Mutex<Option<String>>,
 }
 
 impl Share {
@@ -213,7 +218,29 @@ impl Share {
             ports: o.ports,
             ends_at: unix(*self.ends_at.lock().unwrap()),
             guests,
+            problem: self.problem.lock().unwrap().clone(),
         }
+    }
+
+    /// The machine, for a guest. When it can't be reached, why goes to the
+    /// sharer, and the guest hears only that (not this computer's paths or
+    /// fixes that are the sharer's to make).
+    async fn machine(&self) -> Result<Arc<Link>, String> {
+        let result = self.source.link().await;
+        let problem = result.as_ref().err().cloned();
+        let news = {
+            let mut p = self.problem.lock().unwrap();
+            let news = *p != problem;
+            *p = problem;
+            news
+        };
+        if news {
+            changed();
+        }
+        result.map_err(|e| {
+            tracing::warn!("share: can't reach {}: {e}", self.target.machine_name);
+            format!("{} can't be reached from {}'s computer right now.", self.target.machine_name, self.target.by)
+        })
     }
 
     fn ends_in(&self) -> Duration {
@@ -309,6 +336,7 @@ pub async fn start(server: &str, target: Target, options: Options, source: Arc<d
         guests: Mutex::new(HashMap::new()),
         stop: watch::channel(None).0,
         bad_proofs: Mutex::new(0),
+        problem: Mutex::new(None),
     });
     registry().shares.lock().unwrap().insert(share.ticket.room(), share.clone());
     changed();
@@ -522,7 +550,9 @@ async fn connect_guest(share: Arc<Share>, id: String, offer: String, ice: Value)
     share.connecting.fetch_sub(1, Ordering::Relaxed);
     let Some((pc, dc, events)) = connected else { return };
     let host_fp = hex(&share.ticket.fingerprint);
+    let dc_of_guest = dc.clone();
     run_guest(&share, &pc, dc, &host_fp, &guest_fp, events).await;
+    rtc::forget(&dc_of_guest);
     let _ = pc.close().await;
 }
 
@@ -532,8 +562,10 @@ async fn run_guest(share: &Arc<Share>, pc: &Arc<dyn PeerConnection>, dc: Arc<dyn
     let (msg_tx, mut from_guest) = mpsc::unbounded_channel::<Vec<u8>>();
     let reader = dc.clone();
     tokio::spawn(async move {
+        let mut pieces = rtc::Pieces::default();
         while let Some(m) = rtc::next_message(&reader).await {
-            if msg_tx.send(m).is_err() {
+            let Some(frame) = pieces.add(m) else { continue };
+            if msg_tx.send(frame).is_err() {
                 break;
             }
         }
@@ -804,7 +836,7 @@ impl Open {
     }
 
     async fn attach(&self, name: &str, can_type: bool) -> Result<(Arc<Link>, u32, mpsc::UnboundedReceiver<(u8, Vec<u8>)>), String> {
-        let link = self.share.source.link().await?;
+        let link = self.share.machine().await?;
         if !supports_sharing(link.version()) {
             return Err(format!("Muxin's agent on {} needs an update to share sessions.", self.share.target.machine_name));
         }
@@ -823,7 +855,7 @@ impl Open {
         if !self.share.target.is_machine() || self.share.options().desktop == Desktop::None {
             return Err("The desktop isn't shared.".into());
         }
-        let link = self.share.source.link().await?;
+        let link = self.share.machine().await?;
         let (link_channel, frames) = link.open_channel();
         let (quality, (fps, jpeg, max_width)) = desktop_quality(quality);
         let request = json!({ "op": "desktop", "channel": link_channel, "fps": fps, "quality": jpeg, "max_width": max_width, "tiles": true, "display": "" });
@@ -842,7 +874,7 @@ impl Open {
         let Some(shared) = shared else {
             return Err("That server isn't shared.".into());
         };
-        let link = self.share.source.link().await?;
+        let link = self.share.machine().await?;
         let (link_channel, frames) = link.open_channel();
         let request = json!({ "op": "tcp", "channel": link_channel, "port": port, "host": shared.host });
         let reply = link.request(request, Duration::from_secs(15)).await?;
@@ -1060,7 +1092,7 @@ fn desktop_quality(name: &str) -> (&'static str, (u32, u32, u32)) {
 /// A machine's sessions, as a machine share's guests see them: no folders
 /// or commands, just what to pick from.
 async fn sessions(share: &Arc<Share>) -> Result<Value, String> {
-    let link = share.source.link().await?;
+    let link = share.machine().await?;
     let reply = link.request(json!({ "op": "list" }), Duration::from_secs(10)).await?;
     let now = chrono::Utc::now().timestamp();
     let list: Vec<Value> = reply["sessions"]

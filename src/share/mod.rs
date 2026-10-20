@@ -26,7 +26,9 @@
 //!    anyone with the link watch).
 //!
 //! On the data channel each message is one frame, `[channel: u32 BE][kind:
-//! u8][payload]`, the link's kinds (`fleet::link`): JSON on channel 0; on
+//! u8][payload]`, or, for one over 48 KB, its parts in order: MORE frames,
+//! then the last part with the frame's kind. The link's kinds
+//! (`fleet::link`): JSON on channel 0; on
 //! the others what the guest opened: a terminal (DATA, EXIT, SIZE, CLOSE),
 //! the desktop (TILES and FRAME out, INPUT in) or a server (DATA, CLOSE).
 //!
@@ -55,6 +57,8 @@ pub const DATA: u8 = 0;
 pub const EXIT: u8 = 2;
 pub const SIZE: u8 = 3;
 pub const CLOSE: u8 = 11;
+/// Part of a frame too big for one message; the rest follows on its channel.
+pub const MORE: u8 = 12;
 
 /// A frame for the data channel.
 pub fn frame(channel: u32, kind: u8, payload: &[u8]) -> Vec<u8> {

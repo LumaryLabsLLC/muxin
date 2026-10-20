@@ -322,6 +322,7 @@ pub async fn join(link: &str, name: &str) -> Result<(Arc<Joined>, mpsc::Unbounde
         }
         j.keep_forwards(&[]);
         let _ = tx.send(Update::Ended(why));
+        rtc::forget(&dc);
         let _ = pc.close().await;
     });
     Ok((joined, rx))
@@ -329,6 +330,7 @@ pub async fn join(link: &str, name: &str) -> Result<(Arc<Joined>, mpsc::Unbounde
 
 /// The host's messages and the channels' frames, until it ends: why.
 async fn relay(dc: &Arc<dyn DataChannel>, tx: &mpsc::UnboundedSender<Update>, joined: &Joined, events: &mut mpsc::UnboundedReceiver<Event>) -> String {
+    let mut pieces = rtc::Pieces::default();
     loop {
         let msg = tokio::select! {
             m = rtc::next_message(dc) => m,
@@ -338,6 +340,7 @@ async fn relay(dc: &Arc<dyn DataChannel>, tx: &mpsc::UnboundedSender<Update>, jo
             },
         };
         let Some(msg) = msg else { return "The connection dropped.".into() };
+        let Some(msg) = pieces.add(msg) else { continue };
         let Some((channel, kind, body)) = super::parse_frame(&msg) else { continue };
         if channel != 0 {
             let mut channels = joined.channels.lock().unwrap();

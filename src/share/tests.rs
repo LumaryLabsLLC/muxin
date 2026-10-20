@@ -296,6 +296,18 @@ async fn a_guest_uses_a_shared_machine() {
         Ok(Some((super::DATA, b))) => assert_eq!(b, b"ping"),
         other => panic!("the echo: {other:?}"),
     }
+    // A frame bigger than a data channel message goes in pieces, and comes
+    // back (in the server's own reads) whole.
+    let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    joined.send(echo_ch, super::DATA, &big);
+    let mut back = Vec::new();
+    while back.len() < big.len() {
+        match tokio::time::timeout(Duration::from_secs(10), echo_frames.recv()).await {
+            Ok(Some((super::DATA, b))) => back.extend(b),
+            other => panic!("the big echo, {} bytes in: {other:?}", back.len()),
+        }
+    }
+    assert!(back == big, "300 KB through and back, in order");
     let refused = joined.open(json!({ "op": "tcp", "port": closed })).await.err().expect("not shared");
     assert!(refused.contains("isn't shared"), "{refused}");
     // Forwarded to a port here, as the app's Open does.

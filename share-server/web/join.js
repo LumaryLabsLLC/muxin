@@ -6,7 +6,8 @@
 "use strict";
 
 (() => {
-  const JSON_KIND = 10, DATA = 0, EXIT = 2, SIZE = 3, CLOSE = 11;
+  // MORE: part of a frame too big for one message; the rest follows on its channel.
+  const JSON_KIND = 10, DATA = 0, EXIT = 2, SIZE = 3, CLOSE = 11, MORE = 12;
   // The screen's frames: whole ones, input back, what changed (agent/src/desktop.rs).
   const FRAME = 20, INPUT = 21, TILES = 23;
   const $ = (id) => document.getElementById(id);
@@ -405,12 +406,30 @@
     }
   }
 
+  // Frames that came in parts, per channel, until their last part.
+  const pieces = new Map();
+
   function onFrame(buf) {
     const bytes = new Uint8Array(buf);
     if (bytes.length < 5) return;
     const channel = new DataView(bytes.buffer, bytes.byteOffset).getUint32(0);
     const kind = bytes[4];
-    const body = bytes.subarray(5);
+    let body = bytes.subarray(5);
+    if (kind === MORE) {
+      const parts = pieces.get(channel) || [];
+      parts.push(body);
+      pieces.set(channel, parts);
+      return;
+    }
+    const parts = pieces.get(channel);
+    if (parts) {
+      pieces.delete(channel);
+      parts.push(body);
+      const whole = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+      let at = 0;
+      for (const p of parts) { whole.set(p, at); at += p.length; }
+      body = whole;
+    }
     if (channel !== 0) return onChannel(channel, kind, body);
     if (kind !== JSON_KIND) return;
     let m;

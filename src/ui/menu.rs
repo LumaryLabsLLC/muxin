@@ -349,6 +349,9 @@ impl Root {
             MenuTarget::Share(sid) => {
                 let Some(share) = self.share_of(sid).cloned() else { return Vec::new() };
                 let mut items = vec![Item::Note(format!("Ends in {}", super::share::time_left(share.ends_at)))];
+                if let Some(problem) = &share.problem {
+                    items.insert(0, Item::Note(format!("Guests can't reach {} right now: {problem}", share.target.machine_name)));
+                }
                 if share.guests.is_empty() {
                     items.push(Item::Note("No one has joined yet.".into()));
                 }

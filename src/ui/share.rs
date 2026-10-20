@@ -298,8 +298,10 @@ impl ShareDialog {
             (copied, true) => format!("{}They see {}'s sessions, in their browser or in Muxin.", if copied { "Link copied. " } else { "" }, self.target.machine_name),
         };
         let what = if machine { "its sessions" } else { "this session" };
+        let problem = view.problem.clone().map(|p| format!("Guests can't reach {} right now: {p}", self.target.machine_name));
         frame(theme, format!("Share {}", self.target.title), Some(intro.into()))
             .w(px(540.))
+            .children(error_line(theme, &problem))
             .child(
                 div()
                     .flex()
@@ -751,7 +753,15 @@ impl Root {
     /// Shares changed (a guest knocked, came in, left): show it, and say
     /// who's asking to join when they first do.
     pub(super) fn shares_changed(&mut self, cx: &mut Context<Self>) {
-        self.shares = host::list();
+        let before = std::mem::replace(&mut self.shares, host::list());
+        // The machine stopped being reachable for guests: say why, once.
+        let news = self.shares.iter().find_map(|s| {
+            let was = before.iter().find(|b| b.id == s.id).and_then(|b| b.problem.as_ref());
+            s.problem.as_ref().filter(|p| was != Some(*p)).map(|p| format!("Guests can't reach {}: {p}", s.target.machine_name))
+        });
+        if let Some(news) = news {
+            self.notify_user(news, true, cx);
+        }
         let mut knocks = Vec::new();
         for s in &self.shares {
             for g in s.guests.iter().filter(|g| g.state == "waiting") {

@@ -411,7 +411,7 @@ pub struct Root {
     pub(super) shares: Vec<crate::share::host::ShareView>,
     pub(super) knocks_seen: HashSet<(String, u64)>,
     /// Sessions others shared with you, joined here.
-    pub(super) joined: Vec<super::share::JoinedSession>,
+    pub(super) joined: Vec<super::share::JoinedShare>,
     pub(super) joined_count: u32,
     /// A share link opened with Muxin, for the Join dialog on the next render.
     pending_join: Option<String>,
@@ -1013,7 +1013,14 @@ impl Root {
             "activity" => self.show(Route::Activity, cx),
             "about" => self.navigate(Route::About, window, cx),
             // A share link, in the Join dialog.
-            "join" => self.show_join((!arg.is_empty()).then(|| arg.to_string()), window, cx),
+            "join" => {
+                self.show_join((!arg.is_empty()).then(|| arg.to_string()), window, cx);
+            }
+            // A share link, joined right away (for screenshots).
+            "join-go" => {
+                let dialog = self.show_join(Some(arg.to_string()), window, cx);
+                dialog.update(cx, |d, cx| d.join(cx));
+            }
             // The Share dialog for a session.
             "share" => self.show_share(arg, window, cx),
             // "desktop:<machine>", or "desktop:<machine>@<display>" for one of its displays.
@@ -2816,7 +2823,13 @@ impl Root {
     fn render_toolbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let s = self.snapshot.clone();
-        let (section, title) = route_title(&s, &self.route);
+        let (section, mut title) = route_title(&s, &self.route);
+        // A shared machine goes by its name.
+        if let Route::Shared(id) = &self.route
+            && let Some(j) = self.joined.iter().find(|j| &j.id == id && j.info.whole_machine)
+        {
+            title = j.info.title.clone();
+        }
         // Without the sidebar, the macOS window buttons sit on this bar.
         let traffic_lights = self.sidebar_hidden && cfg!(target_os = "macos") && !window.is_fullscreen();
         div()
@@ -3259,7 +3272,7 @@ impl Root {
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(link) = self.pending_join.take() {
-            self.show_join(Some(link), window, cx);
+            let _ = self.show_join(Some(link), window, cx);
         }
         let theme = cx.theme();
         // A drag released outside the window never reaches `on_drop`.
@@ -3288,6 +3301,8 @@ impl Render for Root {
         let modal_top = if window_height > 800. { 96. } else { 40. };
         let modal_max_height = (window_height - modal_top - 24.).max(200.);
         let page = self.render_page(window, cx);
+        // Someone asking to join a share: over whatever page shows.
+        let knocks = self.knock_cards(cx);
         let modal = self.modal.as_ref().map(|m| match m {
             Modal::AddMachine(d) => d.clone().into_any_element(),
             Modal::Install(d) => d.clone().into_any_element(),
@@ -3378,7 +3393,14 @@ impl Render for Root {
                     .flex_1()
                     .min_w(px(0.))
                     .child(self.render_toolbar(window, cx))
-                    .child(div().flex_1().min_h(px(0.)).child(page)),
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .child(page)
+                            .when(!knocks.is_empty(), |d| d.child(div().absolute().top_0().left_0().right_0().flex().flex_col().children(knocks))),
+                    ),
             )
             .when(!self.sidebar_hidden, |d| d.child(self.sidebar_handle(&theme, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))

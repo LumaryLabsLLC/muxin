@@ -115,3 +115,27 @@ button:disabled { opacity: 0.6; cursor: default; }
   padding: 10px 14px; border-radius: 10px; background: var(--surface); font-size: 13px;
 }
 .term-bar > :first-child { flex: 1 1 220px; }
+
+.tabs {
+  width: 100%; max-width: 1200px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+}
+.tab {
+  min-height: 34px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border-soft);
+  background: var(--surface); font-size: 13px; display: inline-flex; align-items: center; gap: 8px; max-width: 260px;
+}
+.tab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.tab.exited { color: var(--muted); }
+.tab .busy { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.tabs .gap { flex: 1; }
+.tabs .hint { font-size: 12px; color: var(--muted); }
+
+.screen {
+  width: 100%; max-width: 1600px; flex: 1; min-height: 320px; display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border-soft); border-radius: 10px; background: #000; overflow: hidden; position: relative;
+}
+.screen canvas { max-width: 100%; max-height: 100%; display: block; outline: none; cursor: default; }
+.screen canvas.control { cursor: crosshair; }
+.screen canvas:focus-visible { outline: 2px solid var(--accent); }
+.screen p { position: absolute; margin: 0; }
+.empty { flex: 1; display: flex; align-items: center; justify-content: center; margin: 0; }

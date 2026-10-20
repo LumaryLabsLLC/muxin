@@ -687,15 +687,7 @@ impl Root {
             }
             None => body.into_any_element(),
         };
-        // Over the terminal, not above it: the session keeps its size.
-        let knocks = self.knock_cards(&info.id, cx);
-        let body = div()
-            .relative()
-            .flex_1()
-            .min_h(px(0.))
-            .flex()
-            .child(body)
-            .when(!knocks.is_empty(), |d| d.child(div().absolute().top_0().left_0().right_0().flex().flex_col().children(knocks)));
+        let body = div().flex_1().min_h(px(0.)).flex().child(body);
         div().size_full().flex().flex_col().child(header).child(body).into_any_element()
     }
 

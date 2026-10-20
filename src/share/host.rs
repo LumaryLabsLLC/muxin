@@ -1,12 +1,16 @@
 //! Hosting shares: each one waits for guests at the share server, checks
-//! them, asks the user to let them in, then relays the one session shared.
+//! them, asks the user to let them in, then relays what's shared: one
+//! session, or a machine (its sessions, its desktop, servers the user
+//! picked).
 //!
 //! The gateway is the security boundary. A guest never speaks the machine's
-//! link protocol: it may say `hello`, `watch` and `bye`, and send keys on
-//! the channel it watches, which reach the session only when the user let
-//! that guest type. Its size is never applied (the session keeps the
-//! user's), and nothing else it asks for (another session, a shell, files)
-//! exists here.
+//! link protocol. It may ask for what the share holds (`sessions`, `watch`,
+//! `desktop`, `tcp`, `close`) on channels of its own, and what it sends on
+//! them gets through only as the user allows: keys to a session when the
+//! user lets it type, mouse and keyboard to the desktop when the user lets
+//! it control, bytes to a server the user picked. Its size is never applied
+//! (sessions keep the user's), and nothing else (a shell, files, other
+//! ports) exists here.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,33 +38,76 @@ const MAX_BAD_PROOFS: u32 = 20;
 const CHECK_IN: Duration = Duration::from_secs(2);
 /// The longest a share can last.
 pub const MAX_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
+/// Channels one guest can have open at once (sessions, the desktop, servers).
+const MAX_CHANNELS: usize = 32;
+/// How often a machine share's guests hear about its sessions.
+const SESSIONS_EVERY: Duration = Duration::from_secs(3);
 
-/// What's shared: one session.
+/// Frame kinds of the desktop (agent/src/desktop.rs).
+pub const FRAME: u8 = 20;
+pub const INPUT: u8 = 21;
+pub const TILES: u8 = 23;
+
+/// What's shared: one session, or (`session_id` empty) a machine.
 #[derive(Clone, Debug, Serialize)]
 pub struct Target {
-    /// `<machine>/<session>`.
+    /// `<machine>/<session>`; empty for a machine.
     pub session_id: String,
     pub machine_id: String,
     /// The session's name on the machine.
     pub name: String,
+    /// The session's title, or the machine's name.
     pub title: String,
-    /// "claude", "codex", "shell"...
+    /// "claude", "codex", "shell"...; empty for a machine.
     pub agent: String,
     pub machine_name: String,
+    /// The machine's platform ("darwin-arm64"), for its desktop's keys.
+    pub platform: String,
     /// Who shares it, as guests see it.
     pub by: String,
 }
 
-#[derive(Clone, Copy, Debug)]
+impl Target {
+    pub fn is_machine(&self) -> bool {
+        self.session_id.is_empty()
+    }
+}
+
+/// What guests can do with a machine's desktop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Desktop {
+    #[default]
+    None,
+    View,
+    Control,
+}
+
+/// A server on the machine guests can open.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Port {
+    pub port: u16,
+    /// What it is ("Checkout dev"), as the user knows it.
+    pub name: String,
+    /// Where the machine's agent connects for it (127.0.0.1 when empty).
+    #[serde(skip)]
+    pub host: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct Options {
     /// Ask before letting each guest in.
     pub approve: bool,
-    /// New guests may type.
+    /// Guests may type in sessions.
     pub can_type: bool,
+    /// A machine's desktop.
+    pub desktop: Desktop,
+    /// A machine's servers.
+    pub ports: Vec<Port>,
     pub ttl: Duration,
 }
 
-/// Where the shared session's machine is reached.
+/// Where the shared machine is reached.
 #[async_trait::async_trait]
 pub trait Source: Send + Sync + 'static {
     async fn link(&self) -> Result<Arc<Link>, String>;
@@ -92,6 +139,8 @@ pub struct GuestView {
     /// "waiting" (for the user to let them in) or "in".
     pub state: String,
     pub can_type: bool,
+    /// Uses the desktop's mouse and keyboard.
+    pub can_control: bool,
     /// "direct" or "relay", once known.
     pub path: String,
 }
@@ -104,6 +153,8 @@ pub struct ShareView {
     pub target: Target,
     pub approve: bool,
     pub can_type: bool,
+    pub desktop: Desktop,
+    pub ports: Vec<Port>,
     /// Unix seconds.
     pub ends_at: i64,
     pub guests: Vec<GuestView>,
@@ -119,6 +170,7 @@ struct Guest {
 #[derive(Clone, Copy, PartialEq)]
 struct Control {
     can_type: bool,
+    can_control: bool,
     /// Why the guest is being let go.
     end: Option<&'static str>,
 }
@@ -134,6 +186,8 @@ struct Share {
     target: Target,
     source: Arc<dyn Source>,
     options: Mutex<Options>,
+    /// Bumps when the desktop or servers shared change.
+    access: watch::Sender<u64>,
     ends_at: Mutex<SystemTime>,
     guests: Mutex<HashMap<u64, Arc<Guest>>>,
     stop: watch::Sender<Option<&'static str>>,
@@ -141,8 +195,12 @@ struct Share {
 }
 
 impl Share {
+    fn options(&self) -> Options {
+        self.options.lock().unwrap().clone()
+    }
+
     fn view(&self) -> ShareView {
-        let o = *self.options.lock().unwrap();
+        let o = self.options();
         let mut guests: Vec<GuestView> = self.guests.lock().unwrap().values().map(|g| g.view.lock().unwrap().clone()).collect();
         guests.sort_by_key(|g| g.id);
         ShareView {
@@ -151,6 +209,8 @@ impl Share {
             target: self.target.clone(),
             approve: o.approve,
             can_type: o.can_type,
+            desktop: o.desktop,
+            ports: o.ports,
             ends_at: unix(*self.ends_at.lock().unwrap()),
             guests,
         }
@@ -160,14 +220,22 @@ impl Share {
         self.ends_at.lock().unwrap().duration_since(SystemTime::now()).unwrap_or(Duration::ZERO)
     }
 
-    fn info(&self, can_type: bool) -> Value {
+    /// What's shared, as the guest hears it (`control`: this guest's own).
+    fn info(&self, control: &Control) -> Value {
+        let o = self.options();
         json!({
             "event": "share",
+            "kind": if self.target.is_machine() { "machine" } else { "session" },
             "title": self.target.title,
             "agent": self.target.agent,
             "machine": self.target.machine_name,
             "by": self.target.by,
-            "can_type": can_type,
+            "can_type": control.can_type,
+            "desktop": o.desktop,
+            "can_control": control.can_control,
+            // A Mac's ⌘ stays ⌘ on its desktop.
+            "mac": self.target.platform.starts_with("darwin"),
+            "ports": o.ports,
             "ends_at": unix(*self.ends_at.lock().unwrap()),
         })
     }
@@ -202,7 +270,7 @@ pub fn subscribe() -> watch::Receiver<u64> {
 /// Every share running.
 pub fn list() -> Vec<ShareView> {
     let mut all: Vec<ShareView> = registry().shares.lock().unwrap().values().map(|s| s.view()).collect();
-    all.sort_by(|a, b| a.target.session_id.cmp(&b.target.session_id).then(a.id.cmp(&b.id)));
+    all.sort_by(|a, b| a.target.machine_id.cmp(&b.target.machine_id).then(a.target.session_id.cmp(&b.target.session_id)).then(a.id.cmp(&b.id)));
     all
 }
 
@@ -214,8 +282,9 @@ fn guest(share: &str, guest: u64) -> Option<Arc<Guest>> {
     find(share)?.guests.lock().unwrap().get(&guest).cloned()
 }
 
-/// Starts sharing a session; the view carries the link to give out. Runs
-/// on the current Tokio runtime until stopped, expired, or the app quits.
+/// Starts sharing a session or a machine; the view carries the link to give
+/// out. Runs on the current Tokio runtime until stopped, expired, or the
+/// app quits.
 pub async fn start(server: &str, target: Target, options: Options, source: Arc<dyn Source>) -> Result<ShareView, String> {
     let (cert, fingerprint) = rtc::certificate()?;
     let ticket = Ticket::new(server, fingerprint)?;
@@ -224,6 +293,8 @@ pub async fn start(server: &str, target: Target, options: Options, source: Arc<d
     // The first check-in: the server answers, and keeps the room for us.
     server.check_in(&ticket.room(), &key).await.map_err(|e| e.to_string())?;
     let ttl = options.ttl.min(MAX_TTL);
+    // Only a machine has a desktop and servers to share.
+    let options = if target.is_machine() { Options { ttl, ..options } } else { Options { ttl, desktop: Desktop::None, ports: Vec::new(), ..options } };
     let share = Arc::new(Share {
         ticket,
         server,
@@ -232,7 +303,8 @@ pub async fn start(server: &str, target: Target, options: Options, source: Arc<d
         cert,
         target,
         source,
-        options: Mutex::new(Options { ttl, ..options }),
+        options: Mutex::new(options),
+        access: watch::channel(0).0,
         ends_at: Mutex::new(SystemTime::now() + ttl),
         guests: Mutex::new(HashMap::new()),
         stop: watch::channel(None).0,
@@ -286,6 +358,18 @@ pub fn set_typing(share: &str, guest_id: u64, allowed: bool) {
     }
 }
 
+/// Lets a guest use the desktop's mouse and keyboard, or not (only while
+/// the share lets guests control it at all).
+pub fn set_control(share: &str, guest_id: u64, allowed: bool) {
+    let Some(s) = find(share) else { return };
+    let allowed = allowed && s.options().desktop == Desktop::Control;
+    if let Some(g) = guest(share, guest_id) {
+        g.control.send_modify(|c| c.can_control = allowed);
+        g.view.lock().unwrap().can_control = allowed;
+        changed();
+    }
+}
+
 /// Who can join and whether guests can type, for a share already going:
 /// new guests follow it, and guests in get typing on or off with it. Only
 /// guests the user lets in can type; letting anyone in lets in whoever waits.
@@ -308,6 +392,29 @@ pub fn set_options(id: &str, approve: bool, can_type: bool) {
         g.control.send_modify(|c| c.can_type = can_type);
         g.view.lock().unwrap().can_type = can_type;
     }
+    changed();
+}
+
+/// What a machine share's guests can do with its desktop, and which of its
+/// servers they can open: guests in follow it right away (control only for
+/// guests the user lets in).
+pub fn set_access(id: &str, desktop: Desktop, ports: Vec<Port>) {
+    let Some(s) = find(id) else { return };
+    if !s.target.is_machine() {
+        return;
+    }
+    let approve = {
+        let mut o = s.options.lock().unwrap();
+        o.desktop = desktop;
+        o.ports = ports;
+        o.approve
+    };
+    let can_control = desktop == Desktop::Control && approve;
+    for g in s.guests.lock().unwrap().values() {
+        g.control.send_modify(|c| c.can_control = can_control);
+        g.view.lock().unwrap().can_control = can_control;
+    }
+    s.access.send_modify(|n| *n += 1);
     changed();
 }
 
@@ -447,9 +554,11 @@ async fn run_guest(share: &Arc<Share>, pc: &Arc<dyn PeerConnection>, dc: Arc<dyn
         rtc::flush(&dc).await;
         return;
     }
-    let options = *share.options.lock().unwrap();
+    let options = share.options();
     let id = registry().next_guest.fetch_add(1, Ordering::Relaxed) + 1;
     let client = if hello["client"] == "browser" { "browser" } else { "app" };
+    // Only someone the user let in types, or controls the desktop.
+    let can_control = options.desktop == Desktop::Control && options.approve;
     let view = GuestView {
         id,
         name: clean_name(hello["name"].as_str().unwrap_or("")),
@@ -457,13 +566,14 @@ async fn run_guest(share: &Arc<Share>, pc: &Arc<dyn PeerConnection>, dc: Arc<dyn
         client: client.into(),
         state: if options.approve { "waiting" } else { "in" }.into(),
         can_type: options.can_type,
+        can_control,
         path: String::new(),
     };
     let (decide_tx, decide_rx) = oneshot::channel();
     let guest = Arc::new(Guest {
         view: Mutex::new(view),
         decide: Mutex::new(options.approve.then_some(decide_tx)),
-        control: watch::channel(Control { can_type: options.can_type, end: None }).0,
+        control: watch::channel(Control { can_type: options.can_type, can_control, end: None }).0,
     });
     share.guests.lock().unwrap().insert(id, guest.clone());
     changed();
@@ -476,7 +586,7 @@ async fn run_guest(share: &Arc<Share>, pc: &Arc<dyn PeerConnection>, dc: Arc<dyn
         }
     });
 
-    let result = admitted(share, &guest, &dc, decide_rx, options, &mut from_guest, &mut events).await;
+    let result = admitted(share, &guest, &dc, decide_rx, options.approve, &mut from_guest, &mut events).await;
     if let Err(why) = result {
         let _ = rtc::send(&dc, rtc::json_frame(&json!({ "event": "ended", "why": why }))).await;
         rtc::flush(&dc).await;
@@ -485,20 +595,21 @@ async fn run_guest(share: &Arc<Share>, pc: &Arc<dyn PeerConnection>, dc: Arc<dyn
     changed();
 }
 
-/// Lets the guest in (asking first when the share says so), then relays
-/// the session until something ends it: Err(why) to tell the guest.
+/// Lets the guest in (asking first when the share says so), then serves
+/// what it asks for until something ends it: Err(why) to tell the guest.
 async fn admitted(
     share: &Arc<Share>,
     guest: &Arc<Guest>,
     dc: &Arc<dyn DataChannel>,
     decide: oneshot::Receiver<bool>,
-    options: Options,
+    approve: bool,
     from_guest: &mut mpsc::UnboundedReceiver<Vec<u8>>,
     events: &mut mpsc::UnboundedReceiver<Event>,
 ) -> Result<(), &'static str> {
     let mut control = guest.control.subscribe();
-    rtc::send(dc, rtc::json_frame(&share.info(options.can_type))).await.map_err(|_| "gone")?;
-    if options.approve {
+    let first = *control.borrow();
+    rtc::send(dc, rtc::json_frame(&share.info(&first))).await.map_err(|_| "gone")?;
+    if approve {
         rtc::send(dc, rtc::json_frame(&json!({ "event": "waiting" }))).await.map_err(|_| "gone")?;
         let mut decide = decide;
         let yes = loop {
@@ -517,89 +628,86 @@ async fn admitted(
         guest.view.lock().unwrap().state = "in".into();
         changed();
     }
-    let can_type = control.borrow().can_type;
-    rtc::send(dc, rtc::json_frame(&json!({ "event": "admitted", "can_type": can_type }))).await.map_err(|_| "gone")?;
+    let now = *control.borrow();
+    rtc::send(dc, rtc::json_frame(&json!({ "event": "admitted", "can_type": now.can_type, "can_control": now.can_control }))).await.map_err(|_| "gone")?;
 
-    // The session, once the guest asks for it.
-    let mut watching: Option<Watching> = None;
+    let mut open = Open { share: share.clone(), dc: dc.clone(), channels: HashMap::new(), ended: mpsc::unbounded_channel(), generation: 0 };
+    let mut access = share.access.subscribe();
+    let mut sessions_tick = tokio::time::interval(SESSIONS_EVERY);
+    let mut sessions_sent = Value::Null;
+    let mut last = now;
     let result = loop {
-        let session = async {
-            match watching.as_mut() {
-                Some(w) => w.frames.recv().await,
-                None => std::future::pending().await,
-            }
-        };
         tokio::select! {
             m = from_guest.recv() => {
                 let Some(m) = m else { break Ok(()) };
+                let c = *control.borrow();
                 match super::parse_frame(&m) {
                     Some((0, super::JSON, body)) => {
                         let req: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
-                        match req["op"].as_str().unwrap_or("") {
-                            "watch" => {
-                                let channel = req["channel"].as_u64().filter(|c| (1..1 << 20).contains(c)).unwrap_or(1) as u32;
-                                if let Some(w) = watching.take() {
-                                    w.close();
-                                }
-                                let can_type = control.borrow().can_type;
-                                match watch_session(share, channel, can_type).await {
-                                    Ok(w) => watching = Some(w),
-                                    Err(e) => {
-                                        let _ = rtc::send(dc, rtc::error_frame(&e)).await;
-                                    }
-                                }
-                            }
-                            "bye" => break Ok(()),
-                            _ => {}
-                        }
-                    }
-                    // Keys, only from a guest the user lets type.
-                    Some((channel, super::DATA, keys)) => {
-                        if let Some(w) = watching.as_ref().filter(|w| w.guest_channel == channel && w.can_type) {
-                            w.link.send(w.link_channel, crate::fleet::link::DATA, keys);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            f = session => {
-                let w = watching.as_ref().expect("watching");
-                match f {
-                    Some((kind, bytes)) if [super::DATA, super::SIZE, super::EXIT].contains(&kind) => {
-                        if rtc::send(dc, super::frame(w.guest_channel, kind, &bytes)).await.is_err() {
+                        if req["op"] == "bye" {
                             break Ok(());
                         }
+                        if req["op"] == "sessions" {
+                            sessions_sent = Value::Null;
+                            sessions_tick.reset_immediately();
+                            continue;
+                        }
+                        open.request(&req, &c).await;
                     }
-                    Some(_) => {}
-                    None => {
-                        let channel = w.guest_channel;
-                        watching = None;
-                        let _ = rtc::send(dc, super::frame(channel, super::CLOSE, &[])).await;
+                    Some((channel, kind, payload)) => open.pass(channel, kind, payload, &c),
+                    None => {}
+                }
+            }
+            p = open.ended.1.recv() => {
+                // A channel ended on the machine's side, or the guest fell too
+                // far behind to keep.
+                let Some((channel, generation, gone)) = p else { continue };
+                if gone {
+                    break Ok(());
+                }
+                if open.channels.get(&channel).is_some_and(|j| j.generation == generation) {
+                    open.channels.remove(&channel);
+                }
+            }
+            _ = sessions_tick.tick(), if share.target.is_machine() => {
+                // A machine's sessions as they are, when they changed.
+                if let Ok(list) = sessions(share).await
+                    && list != sessions_sent
+                {
+                    sessions_sent = list.clone();
+                    if rtc::send(dc, rtc::json_frame(&json!({ "event": "sessions", "sessions": list }))).await.is_err() {
+                        break Ok(());
                     }
                 }
+            }
+            _ = access.changed() => {
+                // The desktop or the servers shared changed: what's open beyond
+                // them closes, and the guest hears what it has now.
+                let c = *control.borrow();
+                open.prune().await;
+                let o = share.options();
+                let _ = rtc::send(dc, rtc::json_frame(&json!({ "event": "access", "desktop": o.desktop, "ports": o.ports, "can_control": c.can_control }))).await;
             }
             _ = control.changed() => {
                 let c = *control.borrow();
                 if let Some(why) = c.end {
                     break Err(why);
                 }
-                if watching.as_ref().is_some_and(|w| w.can_type != c.can_type) {
-                    // Typing on or off: attach again the other way (the
-                    // session server enforces it too).
-                    let channel = watching.as_ref().map(|w| w.guest_channel).unwrap_or(1);
-                    if let Some(w) = watching.take() {
-                        w.close();
-                    }
-                    watching = watch_session(share, channel, c.can_type).await.ok();
+                if c.can_type != last.can_type {
+                    // Typing on or off: sessions attach again the other way
+                    // (the session server enforces it too).
+                    open.retype(c.can_type).await;
+                    let _ = rtc::send(dc, rtc::json_frame(&json!({ "event": "typing", "allowed": c.can_type }))).await;
                 }
-                let _ = rtc::send(dc, rtc::json_frame(&json!({ "event": "typing", "allowed": c.can_type }))).await;
+                if c.can_control != last.can_control {
+                    let _ = rtc::send(dc, rtc::json_frame(&json!({ "event": "control", "allowed": c.can_control }))).await;
+                }
+                last = c;
             }
             e = events.recv() => if gone(e) { break Ok(()) },
         }
     };
-    if let Some(w) = watching {
-        w.close();
-    }
+    open.close_all();
     result
 }
 
@@ -608,34 +716,355 @@ fn gone(e: Option<Event>) -> bool {
     matches!(e, None | Some(Event::State(RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed)))
 }
 
-/// The shared session, attached for one guest.
-struct Watching {
-    link: Arc<Link>,
-    link_channel: u32,
-    guest_channel: u32,
-    can_type: bool,
-    frames: mpsc::UnboundedReceiver<(u8, Vec<u8>)>,
+/// What a guest's channel is joined to.
+#[derive(Clone, PartialEq)]
+enum Kind {
+    Session { name: String, can_type: bool },
+    Desktop,
+    Tcp(u16),
 }
 
-impl Watching {
+/// One of the guest's channels, joined to one of the machine's.
+struct Joined {
+    link: Arc<Link>,
+    link_channel: u32,
+    kind: Kind,
+    /// Tells this joining from an earlier one on the same channel.
+    generation: u64,
+    pump: tokio::task::JoinHandle<()>,
+}
+
+impl Joined {
     fn close(self) {
+        self.pump.abort();
         self.link.close_channel(self.link_channel);
     }
 }
 
-async fn watch_session(share: &Arc<Share>, guest_channel: u32, can_type: bool) -> Result<Watching, String> {
+/// What a request on channel 0 got going: the reply, and the machine's
+/// channel to join.
+type Attached = (Value, Arc<Link>, u32, mpsc::UnboundedReceiver<(u8, Vec<u8>)>, Kind);
+
+/// A guest's open channels.
+struct Open {
+    share: Arc<Share>,
+    dc: Arc<dyn DataChannel>,
+    channels: HashMap<u32, Joined>,
+    /// (channel, generation, the guest is gone) as pumps end.
+    ended: (mpsc::UnboundedSender<(u32, u64, bool)>, mpsc::UnboundedReceiver<(u32, u64, bool)>),
+    generation: u64,
+}
+
+impl Open {
+    /// A request on channel 0: `watch`, `desktop`, `tcp`, `close`.
+    async fn request(&mut self, req: &Value, c: &Control) {
+        let op = req["op"].as_str().unwrap_or("");
+        let Some(channel) = req["channel"].as_u64().filter(|ch| (1..1 << 20).contains(ch)).map(|ch| ch as u32) else { return };
+        if !matches!(op, "watch" | "desktop" | "tcp" | "close") {
+            return;
+        }
+        // A channel holds one thing: asking again replaces it.
+        if let Some(j) = self.channels.remove(&channel) {
+            j.close();
+        }
+        let result = match op {
+            "close" => return,
+            _ if self.channels.len() >= MAX_CHANNELS => Err("Too much open at once. Close something first.".to_string()),
+            "watch" => self.watch(channel, req["session"].as_str().unwrap_or(""), c.can_type).await,
+            "desktop" => self.desktop(channel).await,
+            _ => self.tcp(channel, req["port"].as_u64().unwrap_or(0)).await,
+        };
+        match result {
+            // The reply first, then what the channel carries.
+            Ok((reply, link, link_channel, frames, kind)) => {
+                let _ = rtc::send(&self.dc, rtc::json_frame(&reply)).await;
+                self.join(channel, link, link_channel, frames, kind);
+            }
+            Err(e) => {
+                let _ = rtc::send(&self.dc, rtc::json_frame(&json!({ "event": "refused", "channel": channel, "error": e }))).await;
+            }
+        }
+    }
+
+    /// A session: the shared one, or (a machine) one of its sessions.
+    async fn watch(&self, channel: u32, asked: &str, can_type: bool) -> Result<Attached, String> {
+        let name = if self.share.target.is_machine() {
+            let list = sessions(&self.share).await?;
+            let known = list.as_array().into_iter().flatten().any(|s| s["name"] == asked);
+            if asked.is_empty() || !known {
+                return Err("That session isn't there anymore.".into());
+            }
+            asked.to_string()
+        } else {
+            self.share.target.name.clone()
+        };
+        let (link, link_channel, frames) = self.attach(&name, can_type).await?;
+        let reply = json!({ "event": "watching", "channel": channel, "session": name });
+        Ok((reply, link, link_channel, frames, Kind::Session { name, can_type }))
+    }
+
+    async fn attach(&self, name: &str, can_type: bool) -> Result<(Arc<Link>, u32, mpsc::UnboundedReceiver<(u8, Vec<u8>)>), String> {
+        let link = self.share.source.link().await?;
+        if !supports_sharing(link.version()) {
+            return Err(format!("Muxin's agent on {} needs an update to share sessions.", self.share.target.machine_name));
+        }
+        let (link_channel, frames) = link.open_channel();
+        let request = json!({ "op": "attach", "name": name, "channel": link_channel, "watch_only": !can_type, "sizes": true });
+        let reply = link.request(request, Duration::from_secs(15)).await?;
+        if reply["ok"].as_bool() != Some(true) {
+            link.close_channel(link_channel);
+            return Err(reply["error"].as_str().unwrap_or("The session couldn't be shown.").to_string());
+        }
+        Ok((link, link_channel, frames))
+    }
+
+    /// The machine's desktop, at a size and pace a connection across the
+    /// internet keeps up with.
+    async fn desktop(&self, channel: u32) -> Result<Attached, String> {
+        if !self.share.target.is_machine() || self.share.options().desktop == Desktop::None {
+            return Err("The desktop isn't shared.".into());
+        }
+        let link = self.share.source.link().await?;
+        let (link_channel, frames) = link.open_channel();
+        let request = json!({ "op": "desktop", "channel": link_channel, "fps": 15, "quality": 60, "max_width": 1600, "tiles": true, "display": "" });
+        let reply = link.request(request, Duration::from_secs(20)).await?;
+        if reply["ok"].as_bool() != Some(true) {
+            link.close_channel(link_channel);
+            return Err(reply["error"].as_str().unwrap_or("The desktop couldn't be shown.").to_string());
+        }
+        let reply = json!({ "event": "desktop", "channel": channel, "width": reply["width"], "height": reply["height"] });
+        Ok((reply, link, link_channel, frames, Kind::Desktop))
+    }
+
+    /// One of the servers the user picked, on the machine itself.
+    async fn tcp(&self, channel: u32, port: u64) -> Result<Attached, String> {
+        let shared = self.share.options().ports.into_iter().find(|p| p.port as u64 == port).filter(|_| self.share.target.is_machine());
+        let Some(shared) = shared else {
+            return Err("That server isn't shared.".into());
+        };
+        let link = self.share.source.link().await?;
+        let (link_channel, frames) = link.open_channel();
+        let request = json!({ "op": "tcp", "channel": link_channel, "port": port, "host": shared.host });
+        let reply = link.request(request, Duration::from_secs(15)).await?;
+        if reply["ok"].as_bool() != Some(true) {
+            link.close_channel(link_channel);
+            return Err(reply["error"].as_str().unwrap_or("That server didn't answer.").to_string());
+        }
+        Ok((json!({ "event": "tcp", "channel": channel, "port": port }), link, link_channel, frames, Kind::Tcp(port as u16)))
+    }
+
+    /// Joins a guest channel to a machine channel: what the machine sends of
+    /// the kinds that belong there goes to the guest, then CLOSE.
+    fn join(&mut self, channel: u32, link: Arc<Link>, link_channel: u32, frames: mpsc::UnboundedReceiver<(u8, Vec<u8>)>, kind: Kind) {
+        self.generation += 1;
+        let generation = self.generation;
+        let (dc, ended) = (self.dc.clone(), self.ended.0.clone());
+        let desktop = kind == Kind::Desktop;
+        let passes: &'static [u8] = match kind {
+            Kind::Session { .. } => &[super::DATA, super::SIZE, super::EXIT],
+            Kind::Desktop => &[TILES, FRAME],
+            Kind::Tcp(_) => &[super::DATA],
+        };
+        let pump = tokio::spawn(async move {
+            let sent = if desktop { pump_desktop(&dc, channel, frames).await } else { pump(&dc, channel, frames, passes).await };
+            let sent = match sent {
+                Ok(()) => rtc::send(&dc, super::frame(channel, super::CLOSE, &[])).await,
+                e => e,
+            };
+            let _ = ended.send((channel, generation, sent.is_err()));
+        });
+        self.channels.insert(channel, Joined { link, link_channel, kind, generation, pump });
+    }
+
+    /// A frame on one of the guest's channels: through only as allowed.
+    fn pass(&mut self, channel: u32, kind: u8, payload: &[u8], c: &Control) {
+        if kind == super::CLOSE {
+            if let Some(j) = self.channels.remove(&channel) {
+                j.close();
+            }
+            return;
+        }
+        let Some(j) = self.channels.get(&channel) else { return };
+        let through = match (&j.kind, kind) {
+            (Kind::Session { can_type, .. }, super::DATA) => *can_type && c.can_type,
+            (Kind::Desktop, INPUT) => c.can_control && self.share.options().desktop == Desktop::Control,
+            (Kind::Tcp(_), super::DATA) => true,
+            _ => false,
+        };
+        if through {
+            j.link.send(j.link_channel, kind, payload);
+        }
+    }
+
+    /// Sessions attach again with typing on or off.
+    async fn retype(&mut self, can_type: bool) {
+        let sessions: Vec<(u32, String)> = self.channels.iter().filter_map(|(ch, j)| if let Kind::Session { name, .. } = &j.kind { Some((*ch, name.clone())) } else { None }).collect();
+        for (channel, name) in sessions {
+            if let Some(j) = self.channels.remove(&channel) {
+                j.close();
+            }
+            match self.attach(&name, can_type).await {
+                Ok((link, link_channel, frames)) => self.join(channel, link, link_channel, frames, Kind::Session { name, can_type }),
+                Err(_) => {
+                    let _ = rtc::send(&self.dc, super::frame(channel, super::CLOSE, &[])).await;
+                }
+            }
+        }
+    }
+
+    /// Closes what the share no longer allows (the desktop, servers).
+    async fn prune(&mut self) {
+        let o = self.share.options();
+        let gone: Vec<u32> = self
+            .channels
+            .iter()
+            .filter(|(_, j)| match &j.kind {
+                Kind::Desktop => o.desktop == Desktop::None,
+                Kind::Tcp(port) => !o.ports.iter().any(|p| p.port == *port),
+                Kind::Session { .. } => false,
+            })
+            .map(|(ch, _)| *ch)
+            .collect();
+        for channel in gone {
+            if let Some(j) = self.channels.remove(&channel) {
+                j.close();
+            }
+            let _ = rtc::send(&self.dc, super::frame(channel, super::CLOSE, &[])).await;
+        }
+    }
+
+    fn close_all(&mut self) {
+        for (_, j) in self.channels.drain() {
+            j.close();
+        }
+    }
+}
+
+/// A machine channel's frames of the kinds that belong, to the guest's
+/// channel, as they come (waiting while the guest catches up).
+async fn pump(dc: &Arc<dyn DataChannel>, channel: u32, mut frames: mpsc::UnboundedReceiver<(u8, Vec<u8>)>, passes: &[u8]) -> Result<(), String> {
+    while let Some((kind, bytes)) = frames.recv().await {
+        if passes.contains(&kind) {
+            rtc::send(dc, super::frame(channel, kind, &bytes)).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Bytes on their way to a guest before the desktop holds back.
+const DESKTOP_BACKLOG: usize = 512 << 10;
+
+/// The desktop to a guest. While its connection is behind, what changed
+/// waits and only the newest of each part of the screen goes once it
+/// catches up: a slow guest sees fewer frames, never an old screen or a
+/// broken one.
+async fn pump_desktop(dc: &Arc<dyn DataChannel>, channel: u32, mut frames: mpsc::UnboundedReceiver<(u8, Vec<u8>)>) -> Result<(), String> {
+    let mut waiting = Tiles::default();
+    loop {
+        let next = if waiting.is_empty() {
+            frames.recv().await
+        } else {
+            tokio::select! {
+                f = frames.recv() => f,
+                _ = tokio::time::sleep(Duration::from_millis(30)) => Some((0, Vec::new())),
+            }
+        };
+        match next {
+            None => return Ok(()),
+            Some((TILES, bytes)) => {
+                if !waiting.add(&bytes) {
+                    continue;
+                }
+            }
+            Some((FRAME, bytes)) => {
+                rtc::send(dc, super::frame(channel, FRAME, &bytes)).await?;
+                continue;
+            }
+            Some(_) => {}
+        }
+        if waiting.is_empty() || dc.outstanding_bytes().await.unwrap_or(0) > DESKTOP_BACKLOG {
+            continue;
+        }
+        rtc::send(dc, super::frame(channel, TILES, &waiting.take())).await?;
+    }
+}
+
+/// Screen patches waiting to go: `[width][height][count]` then each
+/// `[x][y][w][h][len: u32][jpeg]` (agent/src/desktop.rs). A patch replaces
+/// the ones before it that it covers.
+#[derive(Default)]
+struct Tiles {
+    size: (u16, u16),
+    patches: Vec<([u16; 4], Vec<u8>)>,
+}
+
+impl Tiles {
+    fn is_empty(&self) -> bool {
+        self.patches.is_empty()
+    }
+
+    /// Adds a TILES message's patches (false: it didn't read).
+    fn add(&mut self, msg: &[u8]) -> bool {
+        let u16_at = |o: usize| msg.get(o..o + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+        let (Some(w), Some(h), Some(count)) = (u16_at(0), u16_at(2), u16_at(4)) else { return false };
+        let mut new = Vec::with_capacity(count as usize);
+        let mut o = 6;
+        for _ in 0..count {
+            let (Some(x), Some(y), Some(pw), Some(ph)) = (u16_at(o), u16_at(o + 2), u16_at(o + 4), u16_at(o + 6)) else { return false };
+            let Some(len) = msg.get(o + 8..o + 12).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize) else { return false };
+            let Some(jpeg) = msg.get(o + 12..o + 12 + len) else { return false };
+            new.push(([x, y, pw, ph], jpeg.to_vec()));
+            o += 12 + len;
+        }
+        if self.size != (w, h) {
+            self.patches.clear();
+            self.size = (w, h);
+        }
+        let covers = |a: &[u16; 4], b: &[u16; 4]| a[0] <= b[0] && a[1] <= b[1] && a[0] as u32 + a[2] as u32 >= b[0] as u32 + b[2] as u32 && a[1] as u32 + a[3] as u32 >= b[1] as u32 + b[3] as u32;
+        self.patches.retain(|(old, _)| !new.iter().any(|(r, _)| covers(r, old)));
+        self.patches.extend(new);
+        true
+    }
+
+    /// One TILES message of everything waiting.
+    fn take(&mut self) -> Vec<u8> {
+        let patches = std::mem::take(&mut self.patches);
+        let mut msg = Vec::with_capacity(6 + patches.iter().map(|(_, j)| 12 + j.len()).sum::<usize>());
+        for v in [self.size.0, self.size.1, patches.len() as u16] {
+            msg.extend(v.to_be_bytes());
+        }
+        for (r, jpeg) in patches {
+            for v in r {
+                msg.extend(v.to_be_bytes());
+            }
+            msg.extend((jpeg.len() as u32).to_be_bytes());
+            msg.extend(jpeg);
+        }
+        msg
+    }
+}
+
+/// A machine's sessions, as a machine share's guests see them: no folders
+/// or commands, just what to pick from.
+async fn sessions(share: &Arc<Share>) -> Result<Value, String> {
     let link = share.source.link().await?;
-    if !supports_sharing(link.version()) {
-        return Err(format!("Muxin's agent on {} needs an update to share sessions.", share.target.machine_name));
-    }
-    let (link_channel, frames) = link.open_channel();
-    let request = json!({ "op": "attach", "name": share.target.name, "channel": link_channel, "watch_only": !can_type, "sizes": true });
-    let reply = link.request(request, Duration::from_secs(15)).await?;
-    if reply["ok"].as_bool() != Some(true) {
-        link.close_channel(link_channel);
-        return Err(reply["error"].as_str().unwrap_or("The session couldn't be shown.").to_string());
-    }
-    Ok(Watching { link, link_channel, guest_channel, can_type, frames })
+    let reply = link.request(json!({ "op": "list" }), Duration::from_secs(10)).await?;
+    let now = chrono::Utc::now().timestamp();
+    let list: Vec<Value> = reply["sessions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| {
+            json!({
+                "name": s["name"],
+                "title": s["title"],
+                "agent": s["agent"],
+                "status": s["status"],
+                "busy": s["last_output"].as_i64().is_some_and(|t| now - t < 6),
+            })
+        })
+        .collect();
+    Ok(Value::Array(list))
 }
 
 /// Agents from 0.2.9 attach watchers that can't type and report sizes.
@@ -681,6 +1110,32 @@ mod tests {
         assert_eq!(clean_name("  Sam \u{7}\n Lee "), "Sam Lee");
         assert_eq!(clean_name(""), "Someone");
         assert_eq!(clean_name(&"x".repeat(100)).len(), 40);
+    }
+
+    fn tiles(size: (u16, u16), patches: &[([u16; 4], &[u8])]) -> Vec<u8> {
+        let mut t = Tiles { size, patches: patches.iter().map(|(r, j)| (*r, j.to_vec())).collect() };
+        t.take()
+    }
+
+    #[test]
+    fn a_slow_guest_gets_the_newest_of_each_part() {
+        let mut waiting = Tiles::default();
+        assert!(waiting.add(&tiles((100, 50), &[([0, 0, 64, 32], b"a"), ([64, 0, 36, 32], b"b")])));
+        // A later patch over the first one replaces it; the other stays.
+        assert!(waiting.add(&tiles((100, 50), &[([0, 0, 64, 32], b"c")])));
+        // One that only overlaps keeps both, in order.
+        assert!(waiting.add(&tiles((100, 50), &[([32, 0, 40, 32], b"d")])));
+        let kept: Vec<&[u8]> = waiting.patches.iter().map(|(_, j)| j.as_slice()).collect();
+        assert_eq!(kept, [b"b".as_slice(), b"c", b"d"]);
+        let mut again = Tiles::default();
+        assert!(again.add(&waiting.take()));
+        assert_eq!(again.patches.len(), 3);
+        assert!(waiting.is_empty());
+        // A new size starts over; a cut-short message doesn't read.
+        assert!(again.add(&tiles((200, 100), &[([0, 0, 64, 32], b"e")])));
+        assert_eq!(again.patches.len(), 1);
+        let whole = tiles((200, 100), &[([0, 0, 64, 32], b"jpeg")]);
+        assert!(!again.add(&whole[..whole.len() - 1]));
     }
 
     #[test]

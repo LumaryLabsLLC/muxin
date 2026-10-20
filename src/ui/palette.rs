@@ -293,12 +293,14 @@ impl Root {
                 Command::NewVm => self.show_vm_dialog(None, window, cx),
                 Command::NewSchedule => self.show_schedule_dialog(None, window, cx),
                 Command::NewSession => self.show_new_session(None, window, cx),
-                Command::JoinShare => self.show_join(None, window, cx),
-                Command::Share => {
-                    if let Route::Session(id) = self.route.clone() {
-                        self.show_share(&id, window, cx);
-                    }
+                Command::JoinShare => {
+                    self.show_join(None, window, cx);
                 }
+                Command::Share => match self.route.clone() {
+                    Route::Session(id) => self.show_share(&id, window, cx),
+                    Route::Machine(id) => self.show_share(&format!("machine:{id}"), window, cx),
+                    _ => {}
+                },
                 Command::NewWorkspace => self.show_new_workspace(None, window, cx),
                 Command::CopyFiles => self.show_copy_files(None, None, window, cx),
                 Command::CheckMachines => self.engine.trigger_check(None),
@@ -478,6 +480,7 @@ impl Root {
         let rename = self.rename_target().map(|(_, name)| item(&format!("Rename {name}…"), "pencil", None, Run::Do(Command::Rename)));
         let share = match &self.route {
             Route::Session(id) if !self.engine.is_demo() => self.snapshot.sessions.iter().find(|x| &x.id == id && x.persistent).map(|x| item(&format!("Share {}…", x.title), "link", None, Run::Do(Command::Share))),
+            Route::Machine(id) if !self.engine.is_demo() => self.snapshot.machines.iter().find(|m| &m.id == id && !m.is_down()).map(|m| item(&format!("Share {}…", m.name), "link", None, Run::Do(Command::Share))),
             _ => None,
         };
         let all = [
@@ -488,7 +491,7 @@ impl Root {
             item("Go to Schedules", "clock", Some("schedules"), Run::Go(Route::Schedules)),
             item("New session…", "square-terminal", Some("new-session"), Run::Do(Command::NewSession)),
             item("New workspace…", "layers", None, Run::Do(Command::NewWorkspace)),
-            item("Join a shared session…", "link", None, Run::Do(Command::JoinShare)),
+            item("Join a share…", "link", None, Run::Do(Command::JoinShare)),
             item("Copy files between machines…", "folder", None, Run::Do(Command::CopyFiles)),
             item("Go to Overview", "gauge", Some("overview"), Run::Go(Route::Overview)),
             item("Go to Jobs", "workflow", Some("jobs"), Run::Go(Route::Jobs)),

@@ -27,7 +27,7 @@
 <main>
   <section id="start" class="center" hidden>
     <form id="join-form" class="card stack">
-      <h1>Join a shared session</h1>
+      <h1>Join a share</h1>
       <p class="muted">Right here in your browser. Nothing to install.</p>
       <label for="name">Your name</label>
       <input id="name" name="name" maxlength="40" autocomplete="name" placeholder="Sam" required>
@@ -41,11 +41,7 @@
     <div class="card stack">
       <h2 id="wait-title">Connecting…</h2>
       <p id="wait-sub" class="muted"></p>
-      <ul id="facts" class="facts" hidden>
-        <li id="fact-can"></li>
-        <li id="fact-ends"></li>
-        <li id="fact-name"></li>
-      </ul>
+      <ul id="facts" class="facts" hidden></ul>
       <div id="code-box" class="code-box" hidden>
         <span class="muted small">Your code</span>
         <span id="code" class="code"></span>
@@ -59,7 +55,13 @@
   </section>
 
   <section id="watch" class="watch" hidden>
+    <nav id="tabs" class="tabs" aria-label="What's shared" hidden></nav>
     <div id="term" class="term"></div>
+    <div id="screen" class="screen" hidden>
+      <canvas id="canvas" tabindex="0" aria-label="Their screen"></canvas>
+      <p id="screen-wait" class="muted">Starting their screen…</p>
+    </div>
+    <p id="empty" class="empty muted" hidden></p>
     <div class="term-bar">
       <span id="term-note">You're watching.</span>
       <span class="muted" id="term-path">Peer to peer · encrypted</span>

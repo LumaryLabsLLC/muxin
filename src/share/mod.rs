@@ -1,4 +1,4 @@
-//! Sharing a session by link, peer to peer from this computer.
+//! Sharing a session or a machine by link, peer to peer from this computer.
 //!
 //! The person sharing gets a link; whoever opens it joins from Muxin or a
 //! browser, straight to this computer over WebRTC (a data channel; an
@@ -26,13 +26,20 @@
 //!    anyone with the link watch).
 //!
 //! On the data channel each message is one frame, `[channel: u32 BE][kind:
-//! u8][payload]`, the link's kinds (`fleet::link`): JSON on channel 0, a
-//! terminal on the others (DATA, EXIT, SIZE, CLOSE).
+//! u8][payload]`, the link's kinds (`fleet::link`): JSON on channel 0; on
+//! the others what the guest opened: a terminal (DATA, EXIT, SIZE, CLOSE),
+//! the desktop (TILES and FRAME out, INPUT in) or a server (DATA, CLOSE).
 //!
 //! Guest to host: `{"op": "hello", "v": 1, "name", "client": "app" |
-//! "browser", "proof"}`, then `{"op": "watch", "channel": n}`. Host to guest:
-//! `{"event": "share", ...}` (what's shared), `"waiting"`, `"admitted"`,
-//! `"denied"`, `"typing"` (`allowed` changed), `"ended"` (`why`), `"error"`.
+//! "browser", "proof"}`; once in, `{"op": "watch", "channel", "session"}`
+//! (a machine's session; a session's share ignores the name), `{"op":
+//! "desktop", "channel"}`, `{"op": "tcp", "channel", "port"}`, `{"op":
+//! "close", "channel"}`, `{"op": "bye"}`. Host to guest: `{"event":
+//! "share", ...}` (what's shared), `"waiting"`, `"admitted"`, `"denied"`,
+//! `"sessions"` (a machine's, when they change), replies `"watching"`,
+//! `"desktop"`, `"tcp"` or `"refused"` (`channel`, `error`), `"typing"` and
+//! `"control"` (`allowed` changed), `"access"` (the desktop or servers
+//! shared changed), `"ended"` (`why`), `"error"`.
 
 pub mod guest;
 pub mod host;

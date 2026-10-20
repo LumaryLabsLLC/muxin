@@ -4,7 +4,7 @@
 //! link: a session, the desktop, a server (forwarded to a port here).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -87,10 +87,40 @@ struct Forward {
     task: tokio::task::JoinHandle<()>,
 }
 
+/// What a forwarded server sends waits while this much is on its way.
+const QUEUED_MAX: usize = 8 << 20;
+
+/// Frames to the host, in order, sent by one task. None is ever dropped
+/// (a key, a mouse button let go); only a forwarded server's bytes wait while
+/// too much is already queued.
+#[derive(Clone)]
+struct Out {
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+}
+
+impl Out {
+    fn push(&self, frame: Vec<u8>) {
+        self.queued.fetch_add(frame.len(), Ordering::Relaxed);
+        let _ = self.tx.send(frame);
+    }
+
+    /// Like `push`, once there's room (false: the connection is gone).
+    async fn push_paced(&self, frame: Vec<u8>) -> bool {
+        while self.queued.load(Ordering::Relaxed) > QUEUED_MAX {
+            if self.tx.is_closed() {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        self.push(frame);
+        !self.tx.is_closed()
+    }
+}
+
 /// A joined share: open channels on it, send on them, leave.
 pub struct Joined {
-    /// Frames to the host, sent in order by one task.
-    out: mpsc::Sender<Vec<u8>>,
+    out: Out,
     pc: Arc<dyn PeerConnection>,
     channels: Mutex<HashMap<u32, mpsc::UnboundedSender<(u8, Vec<u8>)>>>,
     /// Requests waiting for the host's answer, by channel.
@@ -102,6 +132,8 @@ pub struct Joined {
     can_control: AtomicBool,
     can_manage: AtomicBool,
     forwards: Mutex<Vec<Forward>>,
+    /// One server opened here at a time (a double click opens it once).
+    forwarding: tokio::sync::Mutex<()>,
     /// Where sending runs (keys can come from any thread, the window's included).
     runtime: tokio::runtime::Handle,
 }
@@ -128,7 +160,7 @@ impl Joined {
         let (tx, answer) = oneshot::channel();
         self.calls.lock().unwrap().insert(id, tx);
         req["req"] = json!(id);
-        let _ = self.out.send(rtc::json_frame(&req)).await;
+        self.out.push(rtc::json_frame(&req));
         let answer = tokio::time::timeout(Duration::from_secs(60), answer).await;
         self.calls.lock().unwrap().remove(&id);
         match answer {
@@ -140,7 +172,7 @@ impl Joined {
 
     /// A shared machine's sessions now (they also come when they change).
     pub fn refresh_sessions(&self) {
-        let _ = self.out.try_send(rtc::json_frame(&json!({ "op": "sessions" })));
+        self.out.push(rtc::json_frame(&json!({ "op": "sessions" })));
     }
 
     /// Asks for something on a channel of its own: `{"op": "watch",
@@ -153,8 +185,10 @@ impl Joined {
         self.channels.lock().unwrap().insert(channel, tx);
         self.replies.lock().unwrap().insert(channel, reply_tx);
         req["channel"] = json!(channel);
-        let _ = self.out.send(rtc::json_frame(&req)).await;
-        let result = match tokio::time::timeout(Duration::from_secs(30), reply).await {
+        self.out.push(rtc::json_frame(&req));
+        // The host may first update the machine's agent, then wait up to 20s
+        // for a desktop to start: give it that and more.
+        let result = match tokio::time::timeout(Duration::from_secs(90), reply).await {
             Ok(Ok(r)) => r,
             Ok(Err(_)) => Err("The share ended.".into()),
             Err(_) => Err("No answer from the computer sharing it.".into()),
@@ -172,7 +206,7 @@ impl Joined {
     /// A frame on one of our channels (the host drops what it doesn't allow:
     /// keys unless we may type, the mouse unless we may control).
     pub fn send(&self, channel: u32, kind: u8, payload: &[u8]) {
-        let _ = self.out.try_send(super::frame(channel, kind, payload));
+        self.out.push(super::frame(channel, kind, payload));
     }
 
     /// Keys for a session (dropped here too unless we may type).
@@ -191,6 +225,7 @@ impl Joined {
     /// Opens one of the shared servers on this computer: its port here (the
     /// same as there when it's free). Only this computer can reach it.
     pub async fn forward(self: &Arc<Self>, port: u16) -> Result<u16, String> {
+        let _one_at_a_time = self.forwarding.lock().await;
         if let Some(f) = self.forwards.lock().unwrap().iter().find(|f| f.port == port) {
             return Ok(f.local);
         }
@@ -229,7 +264,7 @@ impl Joined {
                 match reader.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if out.send(super::frame(channel, super::DATA, &buf[..n])).await.is_err() {
+                        if !out.push_paced(super::frame(channel, super::DATA, &buf[..n])).await {
                             break;
                         }
                     }
@@ -259,7 +294,7 @@ impl Joined {
     pub fn leave(&self) {
         let (out, pc) = (self.out.clone(), self.pc.clone());
         self.runtime.spawn(async move {
-            let _ = out.send(rtc::json_frame(&json!({ "op": "bye" }))).await;
+            out.push(rtc::json_frame(&json!({ "op": "bye" })));
             tokio::time::sleep(Duration::from_millis(200)).await;
             let _ = pc.close().await;
         });
@@ -329,11 +364,15 @@ pub async fn join(link: &str, name: &str) -> Result<(Arc<Joined>, mpsc::Unbounde
     let _ = tx.send(Update::Code(ticket.code(&my_fp)));
     let hello = json!({ "op": "hello", "v": 1, "name": name, "client": "app", "proof": ticket.proof(&host_fp, &my_fp) });
     rtc::send(&dc, rtc::json_frame(&hello)).await?;
-    let (out, mut outgoing) = mpsc::channel::<Vec<u8>>(1024);
-    let writer = dc.clone();
+    let (to_host, mut outgoing) = mpsc::unbounded_channel::<Vec<u8>>();
+    let out = Out { tx: to_host, queued: Arc::new(AtomicUsize::new(0)) };
+    let (writer, queued) = (dc.clone(), out.queued.clone());
     tokio::spawn(async move {
         while let Some(f) = outgoing.recv().await {
-            if rtc::send(&writer, f).await.is_err() {
+            let n = f.len();
+            let sent = rtc::send(&writer, f).await;
+            queued.fetch_sub(n, Ordering::Relaxed);
+            if sent.is_err() {
                 break;
             }
         }
@@ -349,6 +388,7 @@ pub async fn join(link: &str, name: &str) -> Result<(Arc<Joined>, mpsc::Unbounde
         can_control: AtomicBool::new(false),
         can_manage: AtomicBool::new(false),
         forwards: Mutex::new(Vec::new()),
+        forwarding: tokio::sync::Mutex::new(()),
         runtime: tokio::runtime::Handle::current(),
     });
     let j = joined.clone();

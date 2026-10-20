@@ -355,7 +355,7 @@ impl Root {
                 items
             }
             MenuTarget::Joined(id) | MenuTarget::JoinedSession(id, _) | MenuTarget::JoinedDesktop(id) => self
-                .joined_menu(&menu.target, cx)
+                .joined_menu(&menu.target)
                 .into_iter()
                 .map(|item| {
                     use super::share::JoinedItem;

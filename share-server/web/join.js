@@ -136,6 +136,7 @@
       : state.canType ? "You can type. Keys go to their session." : `You're watching. Only ${by} can type.`;
     if (state.term) state.term.options.disableStdin = !state.canType;
     $("canvas").classList.toggle("control", state.canControl);
+    $("kbd").hidden = !(desktop && state.canControl);
   }
 
   function makeTerminal() {
@@ -151,6 +152,19 @@
     term.onData((data) => keys(enc.encode(data)));
     term.onBinary((data) => keys(Uint8Array.from(data, (c) => c.charCodeAt(0) & 255)));
     state.term = term;
+    if (window.ResizeObserver) new ResizeObserver(fitText).observe($("term"));
+  }
+
+  // The session keeps the sharer's size: its text is sized to fit the width
+  // here (13px at most; on a phone, 9px at least, and it scrolls sideways).
+  function fitText() {
+    const term = state.term;
+    if (!term) return;
+    const box = $("term");
+    const width = box.clientWidth - 24;
+    if (width <= 0) return;
+    const size = Math.max(9, Math.min(13, Math.floor((width / (term.cols * 0.6)) * 2) / 2));
+    if (term.options.fontSize !== size) term.options.fontSize = size;
   }
 
   function send(obj) {
@@ -177,7 +191,9 @@
     state.showing = { kind: "session", name };
     state.term.reset();
     state.session = openChannel("watch", { session: name }, "session", name);
+    closeScreen();
     $("quality-wrap").hidden = true;
+    $("kbd").hidden = true;
     $("term").hidden = false;
     $("screen").hidden = true;
     $("empty").hidden = true;
@@ -202,9 +218,18 @@
     $("canvas").focus();
   }
 
+  // The screen isn't showing: its stream stops (it starts again when shown).
+  function closeScreen() {
+    letGo();
+    closeChannel(state.desktop);
+    state.desktop = 0;
+  }
+
   function showEmpty(text) {
     state.showing = null;
+    closeScreen();
     $("quality-wrap").hidden = true;
+    $("kbd").hidden = true;
     $("term").hidden = true;
     $("screen").hidden = true;
     $("empty").textContent = text;
@@ -255,36 +280,66 @@
   // ---- The screen: patches painted as they come, in order; input back.
 
   const canvas = () => $("canvas");
-  let painting = Promise.resolve();
+  // What arrived and isn't painted yet. While a paint runs, newer screens
+  // wait here; the next paint takes them all at once and skips the parts a
+  // later one covers, so a slow device shows the newest screen, never one
+  // that falls further and further behind.
+  let waiting = [];
+  let painting = false;
 
   function paint(kind, body) {
-    const copy = body.slice();
-    painting = painting.then(async () => {
-      const v = new DataView(copy.buffer);
-      const c = canvas();
-      const ctx = c.getContext("2d");
-      if (kind === TILES) {
-        const w = v.getUint16(0), h = v.getUint16(2), n = v.getUint16(4);
-        if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
-        const patches = [];
-        let o = 6;
-        for (let i = 0; i < n && o + 12 <= copy.length; i++) {
-          const x = v.getUint16(o), y = v.getUint16(o + 2), len = v.getUint32(o + 8);
-          patches.push([x, y, copy.subarray(o + 12, o + 12 + len)]);
-          o += 12 + len;
-        }
-        const images = await Promise.all(patches.map(([, , jpeg]) => createImageBitmap(new Blob([jpeg], { type: "image/jpeg" })).catch(() => null)));
-        images.forEach((img, i) => { if (img) { ctx.drawImage(img, patches[i][0], patches[i][1]); img.close(); } });
-      } else if (kind === FRAME && copy.length > 4) {
-        const img = await createImageBitmap(new Blob([copy.subarray(4)], { type: "image/jpeg" })).catch(() => null);
+    waiting.push([kind, body.slice()]);
+    if (!painting) paintWaiting();
+  }
+
+  // The patches of a TILES message: [x, y, w, h, jpeg].
+  function patchesOf(copy) {
+    const v = new DataView(copy.buffer);
+    const n = v.getUint16(4), patches = [];
+    let o = 6;
+    for (let i = 0; i < n && o + 12 <= copy.length; i++) {
+      const len = v.getUint32(o + 8);
+      patches.push([v.getUint16(o), v.getUint16(o + 2), v.getUint16(o + 4), v.getUint16(o + 6), copy.subarray(o + 12, o + 12 + len)]);
+      o += 12 + len;
+    }
+    return { w: v.getUint16(0), h: v.getUint16(2), patches };
+  }
+
+  async function paintWaiting() {
+    painting = true;
+    while (waiting.length) {
+      const batch = waiting;
+      waiting = [];
+      const c = canvas(), ctx = c.getContext("2d");
+      // A whole frame replaces everything before it.
+      const lastFrame = batch.map(([k]) => k).lastIndexOf(FRAME);
+      if (lastFrame >= 0) {
+        const copy = batch[lastFrame][1];
+        const img = copy.length > 4 ? await createImageBitmap(new Blob([copy.subarray(4)], { type: "image/jpeg" })).catch(() => null) : null;
         if (img) {
           if (c.width !== img.width || c.height !== img.height) { c.width = img.width; c.height = img.height; }
           ctx.drawImage(img, 0, 0);
           img.close();
         }
       }
+      // Then the patches after it, in order, without those a later one covers.
+      let size = null, patches = [];
+      for (const [k, copy] of batch.slice(lastFrame + 1)) {
+        if (k !== TILES) continue;
+        const t = patchesOf(copy);
+        if (!size || size.w !== t.w || size.h !== t.h) { size = t; patches = []; }
+        const covers = (a, b) => a[0] <= b[0] && a[1] <= b[1] && a[0] + a[2] >= b[0] + b[2] && a[1] + a[3] >= b[1] + b[3];
+        patches = patches.filter((old) => !t.patches.some((p) => covers(p, old)));
+        patches.push(...t.patches);
+      }
+      if (size) {
+        if (c.width !== size.w || c.height !== size.h) { c.width = size.w; c.height = size.h; }
+        const images = await Promise.all(patches.map((p) => createImageBitmap(new Blob([p[4]], { type: "image/jpeg" })).catch(() => null)));
+        images.forEach((img, i) => { if (img) { ctx.drawImage(img, patches[i][0], patches[i][1]); img.close(); } });
+      }
       $("screen-wait").hidden = true;
-    });
+    }
+    painting = false;
   }
 
   function input(event) {
@@ -378,6 +433,95 @@
     c.addEventListener("keyup", (e) => key(e, false));
     c.addEventListener("blur", letGo);
     window.addEventListener("blur", letGo);
+    wireTouch(c);
+  }
+
+  // Phones and tablets: a tap clicks, a long press right-clicks, one finger
+  // drags (the mouse held down), two fingers scroll. While watching only,
+  // touch scrolls and zooms the page as usual.
+  function wireTouch(c) {
+    let start = null, dragging = false, long = 0, twoY = null, rest = 0;
+    const point = (t) => at({ clientX: t.clientX, clientY: t.clientY });
+    const clickAt = (p, b) => {
+      input({ t: "move", x: p.x, y: p.y });
+      input({ t: "button", b, down: true, x: p.x, y: p.y });
+      input({ t: "button", b, down: false, x: p.x, y: p.y });
+    };
+    c.addEventListener("touchstart", (e) => {
+      if (!state.canControl) return;
+      e.preventDefault();
+      clearTimeout(long);
+      if (e.touches.length === 2) {
+        start = null;
+        twoY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        return;
+      }
+      const t = e.touches[0], p = point(t);
+      if (!p) return;
+      start = { x: t.clientX, y: t.clientY, p, done: false };
+      dragging = false;
+      long = setTimeout(() => {
+        if (start && !dragging) { clickAt(start.p, 3); start.done = true; }
+      }, 550);
+    }, { passive: false });
+    c.addEventListener("touchmove", (e) => {
+      if (!state.canControl) return;
+      e.preventDefault();
+      if (e.touches.length === 2 && twoY != null) {
+        const y = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        const p = point(e.touches[0]) || { x: 0, y: 0 };
+        rest += (twoY - y) / 24;
+        twoY = y;
+        const notches = Math.trunc(rest);
+        if (notches) { rest -= notches; input({ t: "scroll", dy: notches, dx: 0, x: p.x, y: p.y }); }
+        return;
+      }
+      if (!start || start.done) return;
+      const t = e.touches[0], p = point(t);
+      if (!p) return;
+      if (!dragging && Math.hypot(t.clientX - start.x, t.clientY - start.y) > 10) {
+        dragging = true;
+        clearTimeout(long);
+        input({ t: "move", x: start.p.x, y: start.p.y });
+        input({ t: "button", b: 1, down: true, x: start.p.x, y: start.p.y });
+        held.buttons.add(1);
+      }
+      if (dragging) input({ t: "move", x: p.x, y: p.y });
+    }, { passive: false });
+    const end = (e) => {
+      if (!state.canControl) return;
+      clearTimeout(long);
+      if (e.touches.length) return;
+      twoY = null;
+      if (!start) return;
+      const t = e.changedTouches[0], p = point(t) || start.p;
+      if (dragging) {
+        input({ t: "button", b: 1, down: false, x: p.x, y: p.y });
+        held.buttons.delete(1);
+      } else if (!start.done) {
+        clickAt(start.p, 1);
+      }
+      start = null;
+      dragging = false;
+    };
+    c.addEventListener("touchend", end);
+    c.addEventListener("touchcancel", end);
+
+    // A keyboard for touch screens: what's typed goes to the shared screen.
+    const field = $("kbd-input");
+    $("kbd").addEventListener("click", () => field.focus());
+    field.addEventListener("input", (e) => {
+      const text = e.data || field.value;
+      if (text && state.canControl) input({ t: "text", s: text });
+      field.value = "";
+    });
+    field.addEventListener("keydown", (e) => {
+      const sym = { Enter: 0xff0d, Backspace: 0xff08, Tab: 0xff09, Escape: 0xff1b, ArrowLeft: 0xff51, ArrowUp: 0xff52, ArrowRight: 0xff53, ArrowDown: 0xff54 }[e.key];
+      if (!sym || !state.canControl) return;
+      e.preventDefault();
+      input({ t: "key", keysym: sym, down: true });
+      input({ t: "key", keysym: sym, down: false });
+    });
   }
 
   function onChannel(channel, kind, body) {
@@ -399,6 +543,7 @@
     else if (kind === SIZE && body.length === 4) {
       const v = new DataView(body.buffer, body.byteOffset);
       state.term.resize(Math.max(10, v.getUint16(0)), Math.max(4, v.getUint16(2)));
+      fitText();
     } else if (kind === EXIT || kind === CLOSE) {
       if (kind === CLOSE) { state.channels.delete(channel); state.session = 0; }
       if (!machine) return finish("The session ended", "");

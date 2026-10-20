@@ -71,6 +71,19 @@ fn choice(theme: &Theme, id: (&'static str, usize), label: &'static str, picked:
         .child(label)
 }
 
+/// A checkbox that can't be ticked yet (it needs another option first).
+fn off_checkbox(theme: &Theme, label: &'static str) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .text_size(px(12.5))
+        .text_color(theme.text_placeholder)
+        .child(div().size(px(15.)).rounded(px(4.)).border_1().border_color(theme.border_variant))
+        .child(label)
+        .into_any_element()
+}
+
 /// A server as the user knows it: its page's title, its container, its program.
 fn server_name(p: &ListeningPort) -> String {
     p.title.clone().filter(|t| !t.trim().is_empty()).or_else(|| p.container.clone()).or_else(|| Some(p.process.clone()).filter(|x| !x.is_empty())).unwrap_or_else(|| format!("Port {}", p.port))
@@ -282,15 +295,7 @@ impl ShareDialog {
         let typing_row = if approve {
             kit::checkbox(theme, "share-type", can_type, type_label, move |on, _, _| host::set_options(&id2, true, *on)).into_any_element()
         } else {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .text_size(px(12.5))
-                .text_color(theme.text_placeholder)
-                .child(div().size(px(15.)).rounded(px(4.)).border_1().border_color(theme.border_variant))
-                .child(type_label)
-                .into_any_element()
+            off_checkbox(theme, type_label)
         };
         let intro = match (self.copied, machine) {
             (true, false) => "Link copied. Send it to anyone: it opens in their browser or in Muxin.".to_string(),
@@ -357,15 +362,7 @@ impl ShareDialog {
                         let row = if can {
                             kit::checkbox(theme, "share-manage", view.manage, "They can start and end sessions", move |on, _, _| host::set_manage(&id, *on)).into_any_element()
                         } else {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .text_size(px(12.5))
-                                .text_color(theme.text_placeholder)
-                                .child(div().size(px(15.)).rounded(px(4.)).border_1().border_color(theme.border_variant))
-                                .child("They can start and end sessions")
-                                .into_any_element()
+                            off_checkbox(theme, "They can start and end sessions")
                         };
                         d.child(
                             div()
@@ -735,7 +732,10 @@ pub struct JoinedShare {
     sessions: Vec<guest::Session>,
     open: Vec<OpenSession>,
     showing: Showing,
+    /// Its screen while it shows (closed when you look elsewhere, so it isn't
+    /// streamed for nothing), and the quality picked for it.
     desktop: Option<Entity<DesktopView>>,
+    quality: &'static str,
     /// Servers opened here: their port here, or why not.
     servers: HashMap<u16, Result<u16, String>>,
     /// Why it ended, once it has.
@@ -947,6 +947,7 @@ impl Root {
             open: Vec::new(),
             showing: if handle.info.whole_machine { Showing::Machine } else { Showing::Session(String::new()) },
             desktop: None,
+            quality: "medium",
             servers: HashMap::new(),
             ended: None,
         });
@@ -1010,6 +1011,12 @@ impl Root {
 
     /// Shows a share's machine page, one of its sessions or its desktop.
     pub(super) fn show_shared(&mut self, id: &str, showing: Showing, window: &mut Window, cx: &mut Context<Self>) {
+        // Leaving the screen stops its stream (it starts again when shown).
+        if showing != Showing::Desktop
+            && let Some(j) = self.joined_mut(id)
+        {
+            j.desktop = None;
+        }
         match showing {
             Showing::Session(name) => self.open_shared_session(id, name, window, cx),
             Showing::Desktop => self.show_shared_desktop(id, window, cx),
@@ -1094,8 +1101,8 @@ impl Root {
         let engine = self.engine.clone();
         let Some(j) = self.joined_mut(id) else { return };
         if j.desktop.is_none() {
-            let (joined, mac) = (j.joined.clone(), j.info.mac);
-            j.desktop = Some(cx.new(|cx| DesktopView::shared(engine, joined, mac, window, cx)));
+            let (joined, mac, quality) = (j.joined.clone(), j.info.mac, j.quality);
+            j.desktop = Some(cx.new(|cx| DesktopView::shared(engine, joined, mac, quality, window, cx)));
         }
         j.showing = Showing::Desktop;
         cx.notify();
@@ -1103,7 +1110,9 @@ impl Root {
 
     /// The quality of a shared desktop shown here.
     pub(super) fn set_shared_quality(&mut self, id: &str, quality: &'static str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(d) = self.joined_mut(id).and_then(|j| j.desktop.clone()) {
+        let Some(j) = self.joined_mut(id) else { return };
+        j.quality = quality;
+        if let Some(d) = j.desktop.clone() {
             d.update(cx, |d, cx| d.set_quality(quality, window, cx));
         }
     }
@@ -1611,7 +1620,7 @@ impl Root {
 
     /// A share's right-click menu: like your own machine's and sessions',
     /// with what this guest isn't let do dimmed.
-    pub(super) fn joined_menu(&self, target: &super::menu::MenuTarget, cx: &App) -> Vec<JoinedItem> {
+    pub(super) fn joined_menu(&self, target: &super::menu::MenuTarget) -> Vec<JoinedItem> {
         use super::menu::MenuTarget;
         let id = match target {
             MenuTarget::Joined(id) | MenuTarget::JoinedSession(id, _) | MenuTarget::JoinedDesktop(id) => id,
@@ -1637,7 +1646,7 @@ impl Root {
                 items.push(item("Open".into(), "monitor", JoinedAction::Show(Showing::Desktop)));
                 items.push(JoinedItem::Separator);
                 items.push(JoinedItem::Note("Quality".into()));
-                let current = j.desktop.as_ref().map_or("medium", |d| d.read(cx).quality());
+                let current = j.quality;
                 for q in host::QUALITIES {
                     items.push(JoinedItem::Do { label: quality_label(q).into(), glyph: "", action: JoinedAction::Quality(q), danger: false, picked: q == current });
                 }

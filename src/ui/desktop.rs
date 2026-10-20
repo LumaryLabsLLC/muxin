@@ -170,25 +170,25 @@ impl Focusable for DesktopView {
 
 impl DesktopView {
     pub fn new(engine: Arc<Engine>, machine_id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::make(engine, machine_id, None, window, cx)
+        Self::make(engine, machine_id, None, "medium", window, cx)
     }
 
     /// A desktop someone shared with you: input goes there only while they
     /// let you control it (`set_control`).
-    pub fn shared(engine: Arc<Engine>, joined: Arc<guest::Joined>, mac: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut view = Self::make(engine, String::new(), Some(joined), window, cx);
+    pub fn shared(engine: Arc<Engine>, joined: Arc<guest::Joined>, mac: bool, quality: &'static str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::make(engine, String::new(), Some(joined), quality, window, cx);
         view.mac = mac;
         view
     }
 
-    fn make(engine: Arc<Engine>, machine_id: String, shared: Option<Arc<guest::Joined>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn make(engine: Arc<Engine>, machine_id: String, shared: Option<Arc<guest::Joined>>, quality: &'static str, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let can_control = shared.as_ref().is_none_or(|j| j.can_control());
         let mut view = DesktopView {
             engine,
             machine: machine_id,
             shared,
             can_control,
-            quality: "medium",
+            quality,
             display: None,
             width: None,
             via: String::new(),

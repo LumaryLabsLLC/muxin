@@ -234,6 +234,8 @@ pub async fn flush(dc: &Arc<dyn DataChannel>) {
 pub struct Pieces {
     parts: HashMap<u32, Vec<u8>>,
     held: usize,
+    /// Channels whose frame was too big: its remaining parts are let go too.
+    dropping: std::collections::HashSet<u32>,
 }
 
 impl Pieces {
@@ -244,9 +246,17 @@ impl Pieces {
     /// A message off the data channel: the frame, once its last piece is in.
     pub fn add(&mut self, msg: Vec<u8>) -> Option<Vec<u8>> {
         let (channel, kind, body) = super::parse_frame(&msg)?;
+        if self.dropping.contains(&channel) {
+            // The rest of a frame that was too big, up to and with its last part.
+            if kind != super::MORE {
+                self.dropping.remove(&channel);
+            }
+            return None;
+        }
         if kind == super::MORE {
             if self.held + body.len() > Self::MAX {
                 self.held -= self.parts.remove(&channel).map_or(0, |p| p.len());
+                self.dropping.insert(channel);
                 return None;
             }
             self.held += body.len();
@@ -320,6 +330,27 @@ mod tests {
         }
         assert_eq!(whole, Some(super::super::frame(7, super::super::DATA, &big)));
         assert_eq!(pieces.held, 0);
+    }
+
+    #[test]
+    fn a_frame_too_big_is_let_go_whole() {
+        let mut pieces = Pieces::default();
+        let part = vec![1u8; PIECE - 5];
+        let more = super::super::frame(3, super::super::MORE, &part);
+        let mut parts = 0;
+        while pieces.held + part.len() <= Pieces::MAX {
+            assert_eq!(pieces.add(more.clone()), None);
+            parts += 1;
+        }
+        assert!(parts > 0);
+        // Over the limit: this part and the rest go, the last one too.
+        assert_eq!(pieces.add(more.clone()), None);
+        assert_eq!(pieces.add(more.clone()), None);
+        assert_eq!(pieces.add(super::super::frame(3, super::super::DATA, b"end")), None);
+        assert_eq!(pieces.held, 0);
+        // The next frame on that channel comes through.
+        let next = super::super::frame(3, super::super::DATA, b"next");
+        assert_eq!(pieces.add(next.clone()), Some(next));
     }
 
     #[test]

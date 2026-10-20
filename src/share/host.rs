@@ -509,23 +509,25 @@ pub fn set_options(id: &str, approve: bool, can_type: bool) {
 }
 
 /// What a machine share's guests can do with its desktop, and which of its
-/// servers they can open: guests in follow it right away (control only for
-/// guests the user lets in).
+/// servers they can open: guests in follow it right away. Using the desktop
+/// is then given to each person (set_control).
 pub fn set_access(id: &str, desktop: Desktop, ports: Vec<Port>) {
     let Some(s) = find(id) else { return };
     if !s.target.is_machine() {
         return;
     }
-    let approve = {
+    {
         let mut o = s.options.lock().unwrap();
         o.desktop = desktop;
         o.ports = ports;
-        o.approve
-    };
-    let can_control = desktop == Desktop::Control && approve;
-    for g in s.guests.lock().unwrap().values() {
-        g.control.send_modify(|c| c.can_control = can_control);
-        g.view.lock().unwrap().can_control = can_control;
+    }
+    // Using the desktop is given person by person (set_control); a desktop
+    // no longer under control takes it back from everyone.
+    if desktop != Desktop::Control {
+        for g in s.guests.lock().unwrap().values() {
+            g.control.send_modify(|c| c.can_control = false);
+            g.view.lock().unwrap().can_control = false;
+        }
     }
     s.access.send_modify(|n| *n += 1);
     changed();
@@ -675,7 +677,8 @@ async fn run_guest(share: &Arc<Share>, pc: &Arc<dyn PeerConnection>, dc: Arc<dyn
     let id = registry().next_guest.fetch_add(1, Ordering::Relaxed) + 1;
     let client = if hello["client"] == "browser" { "browser" } else { "app" };
     // Only someone the user let in types, or controls the desktop.
-    let can_control = options.desktop == Desktop::Control && options.approve;
+    // The desktop's mouse and keyboard: only for someone the user picks (set_control).
+    let can_control = false;
     let can_manage = options.manage;
     let view = GuestView {
         id,
@@ -750,10 +753,12 @@ async fn admitted(
     let now = *control.borrow();
     rtc::send(dc, rtc::json_frame(&json!({ "event": "admitted", "can_type": now.can_type, "can_control": now.can_control, "can_manage": now.can_manage }))).await.map_err(|_| "gone")?;
 
-    let mut open = Open { share: share.clone(), dc: dc.clone(), channels: HashMap::new(), ended: mpsc::unbounded_channel(), generation: 0 };
+    let mut open = Open::new(share, dc);
     let mut access = share.access.subscribe();
-    let mut sessions_tick = tokio::time::interval(SESSIONS_EVERY);
-    let mut sessions_sent = Value::Null;
+    // A machine's sessions, sent as they change, by a task of their own (the
+    // machine may be slow to answer; keys shouldn't wait for it).
+    let (refresh, refreshes) = mpsc::unbounded_channel::<()>();
+    let feed = share.target.is_machine().then(|| tokio::spawn(sessions_feed(share.clone(), dc.clone(), refreshes)));
     let mut last = now;
     let result = loop {
         tokio::select! {
@@ -767,22 +772,29 @@ async fn admitted(
                             break Ok(());
                         }
                         if req["op"] == "sessions" {
-                            sessions_sent = Value::Null;
-                            sessions_tick.reset_immediately();
+                            let _ = refresh.send(());
                             continue;
                         }
                         if matches!(req["op"].as_str(), Some("start" | "end" | "restart")) {
-                            // Its answer, and the sessions as they are now.
-                            let reply = manage(share, &req, &c).await;
-                            let _ = rtc::send(dc, rtc::json_frame(&reply)).await;
-                            sessions_tick.reset_immediately();
+                            // Answered when it's done, then the sessions as they are.
+                            let (share, dc, refresh) = (share.clone(), dc.clone(), refresh.clone());
+                            tokio::spawn(async move {
+                                let reply = manage(&share, &req, &c).await;
+                                let _ = rtc::send(&dc, rtc::json_frame(&reply)).await;
+                                let _ = refresh.send(());
+                            });
                             continue;
                         }
-                        open.request(&req, &c).await;
+                        open.request(&req, &c);
                     }
                     Some((channel, kind, payload)) => open.pass(channel, kind, payload, &c),
                     None => {}
                 }
+            }
+            o = open.opened.1.recv() => {
+                // A channel the guest asked for, opened on the machine (or not).
+                let Some(o) = o else { continue };
+                open.landed(o).await;
             }
             p = open.ended.1.recv() => {
                 // A channel ended on the machine's side, or the guest fell too
@@ -793,17 +805,6 @@ async fn admitted(
                 }
                 if open.channels.get(&channel).is_some_and(|j| j.generation == generation) {
                     open.channels.remove(&channel);
-                }
-            }
-            _ = sessions_tick.tick(), if share.target.is_machine() => {
-                // A machine's sessions as they are, when they changed.
-                if let Ok(list) = sessions(share).await
-                    && list != sessions_sent
-                {
-                    sessions_sent = list.clone();
-                    if rtc::send(dc, rtc::json_frame(&json!({ "event": "sessions", "sessions": list }))).await.is_err() {
-                        break Ok(());
-                    }
                 }
             }
             _ = access.changed() => {
@@ -822,7 +823,7 @@ async fn admitted(
                 if c.can_type != last.can_type {
                     // Typing on or off: sessions attach again the other way
                     // (the session server enforces it too).
-                    open.retype(c.can_type).await;
+                    open.retype(c.can_type);
                     let _ = rtc::send(dc, rtc::json_frame(&json!({ "event": "typing", "allowed": c.can_type }))).await;
                 }
                 if c.can_control != last.can_control {
@@ -836,8 +837,36 @@ async fn admitted(
             e = events.recv() => if gone(e) { break Ok(()) },
         }
     };
+    if let Some(feed) = feed {
+        feed.abort();
+    }
     open.close_all();
     result
+}
+
+/// A machine's sessions to a guest: now, whenever they change (checked every
+/// few seconds), and right away when asked.
+async fn sessions_feed(share: Arc<Share>, dc: Arc<dyn DataChannel>, mut refreshes: mpsc::UnboundedReceiver<()>) {
+    let mut sent = Value::Null;
+    let mut force = true;
+    loop {
+        if let Ok(list) = sessions(&share).await
+            && (force || list != sent)
+        {
+            if rtc::send(&dc, rtc::json_frame(&json!({ "event": "sessions", "sessions": list }))).await.is_err() {
+                return;
+            }
+            sent = list;
+        }
+        force = false;
+        tokio::select! {
+            _ = tokio::time::sleep(SESSIONS_EVERY) => {}
+            r = refreshes.recv() => match r {
+                Some(()) => force = true,
+                None => return,
+            },
+        }
+    }
 }
 
 /// A guest starting, ending or restarting a session: `{"op", "req", "agent"
@@ -905,112 +934,118 @@ impl Joined {
 /// channel to join.
 type Attached = (Value, Arc<Link>, u32, mpsc::UnboundedReceiver<(u8, Vec<u8>)>, Kind);
 
-/// A guest's open channels.
+/// A channel's opening, done: which request it was (`ticket`), whether the
+/// guest gets a reply (not for a session attaching again), and the result.
+struct Opened {
+    channel: u32,
+    ticket: u64,
+    reply: bool,
+    result: Result<Attached, String>,
+}
+
+/// A guest's open channels, and those being opened.
 struct Open {
     share: Arc<Share>,
     dc: Arc<dyn DataChannel>,
     channels: HashMap<u32, Joined>,
+    /// Channels being opened, by the ticket of the latest request for each:
+    /// an older one landing (or one closed meanwhile) is let go.
+    pending: HashMap<u32, u64>,
+    opened: (mpsc::UnboundedSender<Opened>, mpsc::UnboundedReceiver<Opened>),
     /// (channel, generation, the guest is gone) as pumps end.
     ended: (mpsc::UnboundedSender<(u32, u64, bool)>, mpsc::UnboundedReceiver<(u32, u64, bool)>),
     generation: u64,
 }
 
 impl Open {
-    /// A request on channel 0: `watch`, `desktop`, `tcp`, `close`.
-    async fn request(&mut self, req: &Value, c: &Control) {
+    fn new(share: &Arc<Share>, dc: &Arc<dyn DataChannel>) -> Self {
+        Open {
+            share: share.clone(),
+            dc: dc.clone(),
+            channels: HashMap::new(),
+            pending: HashMap::new(),
+            opened: mpsc::unbounded_channel(),
+            ended: mpsc::unbounded_channel(),
+            generation: 0,
+        }
+    }
+
+    /// A request on channel 0: `watch`, `desktop`, `tcp`, `close`. Opening
+    /// asks the machine, so it runs beside the guest's loop; `landed` finishes it.
+    fn request(&mut self, req: &Value, c: &Control) {
         let op = req["op"].as_str().unwrap_or("");
         let Some(channel) = req["channel"].as_u64().filter(|ch| (1..1 << 20).contains(ch)).map(|ch| ch as u32) else { return };
         if !matches!(op, "watch" | "desktop" | "tcp" | "close") {
             return;
         }
         // A channel holds one thing: asking again replaces it.
+        self.close(channel);
+        if op == "close" {
+            return;
+        }
+        if self.channels.len() + self.pending.len() >= MAX_CHANNELS {
+            let refused = json!({ "event": "refused", "channel": channel, "error": "Too much open at once. Close something first." });
+            let dc = self.dc.clone();
+            tokio::spawn(async move { rtc::send(&dc, rtc::json_frame(&refused)).await });
+            return;
+        }
+        let share = self.share.clone();
+        let (session, quality, port, can_type) = (req["session"].as_str().unwrap_or("").to_string(), req["quality"].as_str().unwrap_or("").to_string(), req["port"].as_u64().unwrap_or(0), c.can_type);
+        let op = op.to_string();
+        self.begin(channel, true, async move {
+            match op.as_str() {
+                "watch" => open_watch(&share, channel, &session, can_type).await,
+                "desktop" => open_desktop(&share, channel, &quality).await,
+                _ => open_tcp(&share, channel, port).await,
+            }
+        });
+    }
+
+    /// Opens a channel beside the loop.
+    fn begin(&mut self, channel: u32, reply: bool, opening: impl std::future::Future<Output = Result<Attached, String>> + Send + 'static) {
+        self.generation += 1;
+        let ticket = self.generation;
+        self.pending.insert(channel, ticket);
+        let done = self.opened.0.clone();
+        tokio::spawn(async move {
+            let result = opening.await;
+            let _ = done.send(Opened { channel, ticket, reply, result });
+        });
+    }
+
+    /// A channel's opening is done: the reply first, then what it carries.
+    async fn landed(&mut self, o: Opened) {
+        if self.pending.get(&o.channel) != Some(&o.ticket) {
+            // Closed or asked again meanwhile: not wanted anymore.
+            if let Ok((_, link, link_channel, _, _)) = o.result {
+                link.close_channel(link_channel);
+            }
+            return;
+        }
+        self.pending.remove(&o.channel);
+        match o.result {
+            Ok((reply, link, link_channel, frames, kind)) => {
+                if o.reply {
+                    let _ = rtc::send(&self.dc, rtc::json_frame(&reply)).await;
+                }
+                self.join(o.channel, link, link_channel, frames, kind);
+            }
+            Err(e) if o.reply => {
+                let _ = rtc::send(&self.dc, rtc::json_frame(&json!({ "event": "refused", "channel": o.channel, "error": e }))).await;
+            }
+            // A session that couldn't attach again: the guest's channel ends.
+            Err(_) => {
+                let _ = rtc::send(&self.dc, super::frame(o.channel, super::CLOSE, &[])).await;
+            }
+        }
+    }
+
+    /// Lets go of a channel, open or being opened.
+    fn close(&mut self, channel: u32) {
+        self.pending.remove(&channel);
         if let Some(j) = self.channels.remove(&channel) {
             j.close();
         }
-        let result = match op {
-            "close" => return,
-            _ if self.channels.len() >= MAX_CHANNELS => Err("Too much open at once. Close something first.".to_string()),
-            "watch" => self.watch(channel, req["session"].as_str().unwrap_or(""), c.can_type).await,
-            "desktop" => self.desktop(channel, req["quality"].as_str().unwrap_or("")).await,
-            _ => self.tcp(channel, req["port"].as_u64().unwrap_or(0)).await,
-        };
-        match result {
-            // The reply first, then what the channel carries.
-            Ok((reply, link, link_channel, frames, kind)) => {
-                let _ = rtc::send(&self.dc, rtc::json_frame(&reply)).await;
-                self.join(channel, link, link_channel, frames, kind);
-            }
-            Err(e) => {
-                let _ = rtc::send(&self.dc, rtc::json_frame(&json!({ "event": "refused", "channel": channel, "error": e }))).await;
-            }
-        }
-    }
-
-    /// A session: the shared one, or (a machine) one of its sessions.
-    async fn watch(&self, channel: u32, asked: &str, can_type: bool) -> Result<Attached, String> {
-        let name = if self.share.target.is_machine() {
-            let list = sessions(&self.share).await?;
-            let known = list.as_array().into_iter().flatten().any(|s| s["name"] == asked);
-            if asked.is_empty() || !known {
-                return Err("That session isn't there anymore.".into());
-            }
-            asked.to_string()
-        } else {
-            self.share.target.name.clone()
-        };
-        let (link, link_channel, frames) = self.attach(&name, can_type).await?;
-        let reply = json!({ "event": "watching", "channel": channel, "session": name });
-        Ok((reply, link, link_channel, frames, Kind::Session { name, can_type }))
-    }
-
-    async fn attach(&self, name: &str, can_type: bool) -> Result<(Arc<Link>, u32, mpsc::UnboundedReceiver<(u8, Vec<u8>)>), String> {
-        let link = self.share.machine().await?;
-        if !supports_sharing(link.version()) {
-            return Err(format!("Muxin's agent on {} needs an update to share sessions.", self.share.target.machine_name));
-        }
-        let (link_channel, frames) = link.open_channel();
-        let request = json!({ "op": "attach", "name": name, "channel": link_channel, "watch_only": !can_type, "sizes": true });
-        let reply = link.request(request, Duration::from_secs(15)).await?;
-        if reply["ok"].as_bool() != Some(true) {
-            link.close_channel(link_channel);
-            return Err(reply["error"].as_str().unwrap_or("The session couldn't be shown.").to_string());
-        }
-        Ok((link, link_channel, frames))
-    }
-
-    /// The machine's desktop, at one of the qualities a guest can pick.
-    async fn desktop(&self, channel: u32, quality: &str) -> Result<Attached, String> {
-        if !self.share.target.is_machine() || self.share.options().desktop == Desktop::None {
-            return Err("The desktop isn't shared.".into());
-        }
-        let link = self.share.machine().await?;
-        let (link_channel, frames) = link.open_channel();
-        let (quality, (fps, jpeg, max_width)) = desktop_quality(quality);
-        let request = json!({ "op": "desktop", "channel": link_channel, "fps": fps, "quality": jpeg, "max_width": max_width, "tiles": true, "display": "" });
-        let reply = link.request(request, Duration::from_secs(20)).await?;
-        if reply["ok"].as_bool() != Some(true) {
-            link.close_channel(link_channel);
-            return Err(reply["error"].as_str().unwrap_or("The desktop couldn't be shown.").to_string());
-        }
-        let reply = json!({ "event": "desktop", "channel": channel, "width": reply["width"], "height": reply["height"], "quality": quality });
-        Ok((reply, link, link_channel, frames, Kind::Desktop))
-    }
-
-    /// One of the servers the user picked, on the machine itself.
-    async fn tcp(&self, channel: u32, port: u64) -> Result<Attached, String> {
-        let shared = self.share.options().ports.into_iter().find(|p| p.port as u64 == port).filter(|_| self.share.target.is_machine());
-        let Some(shared) = shared else {
-            return Err("That server isn't shared.".into());
-        };
-        let link = self.share.machine().await?;
-        let (link_channel, frames) = link.open_channel();
-        let request = json!({ "op": "tcp", "channel": link_channel, "port": port, "host": shared.host });
-        let reply = link.request(request, Duration::from_secs(15)).await?;
-        if reply["ok"].as_bool() != Some(true) {
-            link.close_channel(link_channel);
-            return Err(reply["error"].as_str().unwrap_or("That server didn't answer.").to_string());
-        }
-        Ok((json!({ "event": "tcp", "channel": channel, "port": port }), link, link_channel, frames, Kind::Tcp(port as u16)))
     }
 
     /// Joins a guest channel to a machine channel: what the machine sends of
@@ -1039,9 +1074,7 @@ impl Open {
     /// A frame on one of the guest's channels: through only as allowed.
     fn pass(&mut self, channel: u32, kind: u8, payload: &[u8], c: &Control) {
         if kind == super::CLOSE {
-            if let Some(j) = self.channels.remove(&channel) {
-                j.close();
-            }
+            self.close(channel);
             return;
         }
         let Some(j) = self.channels.get(&channel) else { return };
@@ -1056,19 +1089,16 @@ impl Open {
         }
     }
 
-    /// Sessions attach again with typing on or off.
-    async fn retype(&mut self, can_type: bool) {
+    /// Sessions attach again with typing on or off (beside the loop).
+    fn retype(&mut self, can_type: bool) {
         let sessions: Vec<(u32, String)> = self.channels.iter().filter_map(|(ch, j)| if let Kind::Session { name, .. } = &j.kind { Some((*ch, name.clone())) } else { None }).collect();
         for (channel, name) in sessions {
-            if let Some(j) = self.channels.remove(&channel) {
-                j.close();
-            }
-            match self.attach(&name, can_type).await {
-                Ok((link, link_channel, frames)) => self.join(channel, link, link_channel, frames, Kind::Session { name, can_type }),
-                Err(_) => {
-                    let _ = rtc::send(&self.dc, super::frame(channel, super::CLOSE, &[])).await;
-                }
-            }
+            self.close(channel);
+            let share = self.share.clone();
+            self.begin(channel, false, async move {
+                let (link, link_channel, frames) = attach(&share, &name, can_type).await?;
+                Ok((Value::Null, link, link_channel, frames, Kind::Session { name, can_type }))
+            });
         }
     }
 
@@ -1086,18 +1116,102 @@ impl Open {
             .map(|(ch, _)| *ch)
             .collect();
         for channel in gone {
-            if let Some(j) = self.channels.remove(&channel) {
-                j.close();
-            }
+            self.close(channel);
             let _ = rtc::send(&self.dc, super::frame(channel, super::CLOSE, &[])).await;
         }
     }
 
     fn close_all(&mut self) {
+        self.pending.clear();
         for (_, j) in self.channels.drain() {
             j.close();
         }
     }
+}
+
+/// A session: the shared one, or (a machine) one of its sessions.
+async fn open_watch(share: &Arc<Share>, channel: u32, asked: &str, can_type: bool) -> Result<Attached, String> {
+    let name = if share.target.is_machine() {
+        let list = sessions(share).await?;
+        let known = list.as_array().into_iter().flatten().any(|s| s["name"] == asked);
+        if asked.is_empty() || !known {
+            return Err("That session isn't there anymore.".into());
+        }
+        asked.to_string()
+    } else {
+        share.target.name.clone()
+    };
+    let (link, link_channel, frames) = attach(share, &name, can_type).await?;
+    let reply = json!({ "event": "watching", "channel": channel, "session": name });
+    Ok((reply, link, link_channel, frames, Kind::Session { name, can_type }))
+}
+
+async fn attach(share: &Arc<Share>, name: &str, can_type: bool) -> Result<(Arc<Link>, u32, mpsc::UnboundedReceiver<(u8, Vec<u8>)>), String> {
+    let link = share.machine().await?;
+    if !supports_sharing(link.version()) {
+        return Err(format!("Muxin's agent on {} needs an update to share sessions.", share.target.machine_name));
+    }
+    let (link_channel, frames) = link.open_channel();
+    let request = json!({ "op": "attach", "name": name, "channel": link_channel, "watch_only": !can_type, "sizes": true });
+    let reply = match link.request(request, Duration::from_secs(15)).await {
+        Ok(r) => r,
+        Err(e) => {
+            link.close_channel(link_channel);
+            return Err(e);
+        }
+    };
+    if reply["ok"].as_bool() != Some(true) {
+        link.close_channel(link_channel);
+        return Err(reply["error"].as_str().unwrap_or("The session couldn't be shown.").to_string());
+    }
+    Ok((link, link_channel, frames))
+}
+
+/// The machine's desktop, at one of the qualities a guest can pick.
+async fn open_desktop(share: &Arc<Share>, channel: u32, quality: &str) -> Result<Attached, String> {
+    if !share.target.is_machine() || share.options().desktop == Desktop::None {
+        return Err("The desktop isn't shared.".into());
+    }
+    let link = share.machine().await?;
+    let (link_channel, frames) = link.open_channel();
+    let (quality, (fps, jpeg, max_width)) = desktop_quality(quality);
+    let request = json!({ "op": "desktop", "channel": link_channel, "fps": fps, "quality": jpeg, "max_width": max_width, "tiles": true, "display": "" });
+    let reply = match link.request(request, Duration::from_secs(20)).await {
+        Ok(r) => r,
+        Err(e) => {
+            link.close_channel(link_channel);
+            return Err(e);
+        }
+    };
+    if reply["ok"].as_bool() != Some(true) {
+        link.close_channel(link_channel);
+        return Err(reply["error"].as_str().unwrap_or("The desktop couldn't be shown.").to_string());
+    }
+    let reply = json!({ "event": "desktop", "channel": channel, "width": reply["width"], "height": reply["height"], "quality": quality });
+    Ok((reply, link, link_channel, frames, Kind::Desktop))
+}
+
+/// One of the servers the user picked, on the machine itself.
+async fn open_tcp(share: &Arc<Share>, channel: u32, port: u64) -> Result<Attached, String> {
+    let shared = share.options().ports.into_iter().find(|p| p.port as u64 == port).filter(|_| share.target.is_machine());
+    let Some(shared) = shared else {
+        return Err("That server isn't shared.".into());
+    };
+    let link = share.machine().await?;
+    let (link_channel, frames) = link.open_channel();
+    let request = json!({ "op": "tcp", "channel": link_channel, "port": port, "host": shared.host });
+    let reply = match link.request(request, Duration::from_secs(15)).await {
+        Ok(r) => r,
+        Err(e) => {
+            link.close_channel(link_channel);
+            return Err(e);
+        }
+    };
+    if reply["ok"].as_bool() != Some(true) {
+        link.close_channel(link_channel);
+        return Err(reply["error"].as_str().unwrap_or("That server didn't answer.").to_string());
+    }
+    Ok((json!({ "event": "tcp", "channel": channel, "port": port }), link, link_channel, frames, Kind::Tcp(port as u16)))
 }
 
 /// A machine channel's frames of the kinds that belong, to the guest's

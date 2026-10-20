@@ -40,6 +40,12 @@ ring = "0.17"
 # Bigger UDP buffers for those connections (macOS's defaults choke a copy).
 socket2 = "0.6"
 mdns-sd = "0.21"
+# Sharing a session by link (src/share): WebRTC data channels, peer to peer
+# with the guest's browser or Muxin, introduced through muxin.dev.
+webrtc = { version = "0.21", default-features = false, features = ["runtime-tokio", "crypto-ring"] }
+rtc = { version = "0.21", default-features = false, features = ["crypto-ring"] }
+async-trait = "0.1"
+bytes = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Already part of GPUI's dependency tree; used to set the Dock icon when running
@@ -67,7 +73,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 raw-window-handle = { version = "0.6", optional = true }
 
 [workspace]
-members = [".", "agent"]
+members = [".", "agent", "share-server"]
 
 [features]
 default = ["gui"]

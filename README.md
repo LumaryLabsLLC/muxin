@@ -403,6 +403,20 @@ muxin session stop beelink/claude-3f9a
 
 Build the agent for every platform with `scripts/build-agents.sh` (needs `cargo-zigbuild` and Zig for the Linux builds); `scripts/bundle-macos.sh` runs it and ships the builds inside the app.
 
+## Sharing a session
+
+Show someone a session, or let them type in it, straight from your computer. They join from Muxin or from any browser; nothing to install.
+
+- **Share.** On a session's page, click **Share**: the link is made and copied, ready to paste anywhere (`https://muxin.dev/s#1.…`). By default you let each person in, they can only watch, and it lasts an hour; change any of that in the same window, while it runs: let them type, let anyone with the link watch without asking, or make it last longer.
+- **Let people in.** When someone opens it, a card over the terminal shows their name and a 6-digit code; they see the same code. Ask them to read it out, then **Let in**. A link that leaked shows a code nobody reads to you.
+- **While you share.** The header says who's there (**Shared · Sam watching**). Click it to let someone type or stop them, remove them, copy the link, add an hour, or stop sharing. A shared session has an eye in the sidebar; a dot means someone is waiting.
+- **Joining.** The link opens a page that asks for their name, then joins right there in the browser (or in Muxin, if they have it). In Muxin, ⇧⌘P › **Join a shared session…** takes a link too. Shared sessions are listed under **Shared with you**, shown at the size the sharer's terminal is.
+- **Peer to peer.** The two computers connect directly (WebRTC): over your network or Tailscale when they share one, across the internet otherwise, and through an encrypted relay only when nothing direct works. muxin.dev only introduces them, with two short messages: the part of the link after `#` (the share's secret) never reaches it, and the guest checks that it reached the sharing computer's own certificate, so the site can't listen in or join.
+- **What a guest can do.** Watch the one session shared, and type in it only while you let them. Muxin enforces it on your computer, and the agent on the machine attaches a watcher that can't type or resize. Guests never reach the machine, its other sessions, files or a shell.
+- **It ends** when its time runs out, when you **Stop sharing**, or when you quit Muxin. The link stops working then, for good.
+
+To introduce them through a server of your own instead (`share-server/` in this repository), set `[settings.share] server = "https://share.example.com"` in `config.toml`.
+
 ## Connections and desktops
 
 Muxin first reaches a machine with `ssh`, installs its small agent there, and from then on talks to that agent over **one live connection** instead of a new ssh connection per request: requests take milliseconds instead of ~0.4 s, terminals open instantly, and the sidebar updates the moment a session changes.
@@ -601,6 +615,7 @@ cargo run -- status --demo --json
 Source layout:
 
 - `agent/`: the agent that runs on each machine (sessions, the live link, direct connections, desktops, files, clipboard).
+- `src/share`: sharing sessions by link (the host's gateway, joining, WebRTC); `share-server/`: the server that introduces the two sides and serves the browser's join page.
 - `src/fleet`: the engine and snapshot model; `link.rs` and `direct.rs` (connections), `tailscale.rs` and `engine/roaming.rs` (moving between networks), `files.rs`, `clipboard.rs`, `discover.rs` (machines on this network).
 - `src/probe`: machine checks.
 - `src/github`: the GitHub API client.

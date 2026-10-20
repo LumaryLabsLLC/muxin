@@ -21,6 +21,7 @@ icons!(
     "rotate-ccw", "scroll-text", "search", "server", "settings", "square", "terminal", "trash-2",
     "triangle-alert", "x", "zap", "arrow-left", "arrow-right", "gauge", "radio", "workflow",
     "bot", "square-terminal", "power", "plug", "unplug",
+    "eye", "link", "users", "user-x", "user-check",
     "agent-claude", "agent-codex", "agent-gemini", "agent-opencode", "agent-amp", "agent-pi", "agent-github",
     "circle-dot", "git-pull-request", "git-pull-request-draft", "git-merge", "message-square", "lock", "star",
     "arrow-down", "arrow-up", "book-open", "star-filled", "maximize", "minimize", "panel-right", "panel-left", "columns-2", "rows-2", "pause", "circle-stop",

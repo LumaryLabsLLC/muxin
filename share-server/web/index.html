@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Muxin share</title>
+<link rel="stylesheet" href="/share/vendor/xterm.css">
+<link rel="stylesheet" href="/share/join.css">
+<script src="/share/vendor/xterm.js" defer></script>
+<script src="/share/join.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <span class="brand"><span class="logo" aria-hidden="true"></span>Muxin</span>
+  <span id="session" class="session" hidden>
+    <span class="session-title" id="session-title"></span>
+    <span class="session-sub" id="session-sub"></span>
+  </span>
+  <span id="session-actions" class="session-actions" hidden>
+    <span class="pill" id="mode-pill">Watching</span>
+    <span class="muted" id="time-left"></span>
+    <button type="button" id="leave" class="secondary">Leave</button>
+  </span>
+</header>
+
+<main>
+  <section id="start" class="center" hidden>
+    <form id="join-form" class="card stack">
+      <h1>Join a shared session</h1>
+      <p class="muted">Right here in your browser. Nothing to install.</p>
+      <label for="name">Your name</label>
+      <input id="name" name="name" maxlength="40" autocomplete="name" placeholder="Sam" required>
+      <p id="name-error" class="error small" hidden>Enter your name first.</p>
+      <button type="submit" id="join-button" class="primary wide">Join</button>
+      <p class="muted small center-text">Have Muxin? <a id="open-app" href="#">Open it in Muxin</a></p>
+    </form>
+  </section>
+
+  <section id="wait" class="center" hidden>
+    <div class="card stack">
+      <h2 id="wait-title">Connecting…</h2>
+      <p id="wait-sub" class="muted"></p>
+      <ul id="facts" class="facts" hidden>
+        <li id="fact-can"></li>
+        <li id="fact-ends"></li>
+        <li id="fact-name"></li>
+      </ul>
+      <div id="code-box" class="code-box" hidden>
+        <span class="muted small">Your code</span>
+        <span id="code" class="code"></span>
+        <span id="code-help" class="muted small"></span>
+      </div>
+      <div class="row">
+        <span id="wait-status" class="status"></span>
+        <button type="button" id="cancel" class="secondary">Cancel</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="watch" class="watch" hidden>
+    <div id="term" class="term"></div>
+    <div class="term-bar">
+      <span id="term-note">You're watching.</span>
+      <span class="muted" id="term-path">Peer to peer · encrypted</span>
+    </div>
+  </section>
+
+  <section id="done" class="center" hidden>
+    <div class="stack narrow">
+      <h1 id="done-title">The share ended</h1>
+      <p id="done-sub" class="lead"></p>
+    </div>
+  </section>
+</main>
+</body>
+</html>

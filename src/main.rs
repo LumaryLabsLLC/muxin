@@ -12,6 +12,8 @@ mod ops;
 mod probe;
 #[cfg(feature = "gui")]
 mod renamed;
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+mod share;
 mod shell_command;
 mod update;
 #[cfg(feature = "gui")]
@@ -1369,7 +1371,13 @@ fn main() -> ExitCode {
         .without_time()
         .init();
 
-    let cli = Cli::parse();
+    // A share link opened with Muxin: Linux and Windows hand it over as the
+    // argument (macOS through the app, see ui::open_link).
+    let mut argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some(url) = argv.get(1).and_then(|a| a.to_str()).filter(|a| a.starts_with("muxin://join")).map(String::from) {
+        argv = vec![argv[0].clone(), "open".into(), "--view".into(), format!("join:{url}").into()];
+    }
+    let cli = Cli::parse_from(argv);
     let runtime = match tokio::runtime::Runtime::new().context("starting the async runtime") {
         Ok(rt) => rt,
         Err(e) => {

@@ -12,6 +12,9 @@ pub const DATA: u8 = 0;
 pub const RESIZE: u8 = 1;
 /// Server to client: the session was ended; `[code: i32 BE]`.
 pub const EXIT: u8 = 2;
+/// Server to client, for clients that ask (`"sizes": true`): the session's
+/// size, `[cols: u16 BE][rows: u16 BE]`, on attach and whenever it changes.
+pub const SIZE: u8 = 3;
 
 const MAX_FRAME: usize = 16 << 20;
 

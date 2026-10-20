@@ -192,9 +192,16 @@ pub(super) fn family(window: &Window) -> SharedString {
 #[allow(clippy::too_many_arguments)]
 fn prepaint(shared: &Shared, palette: &Palette, focused: bool, show_cursor: bool, m: Metrics, bounds: Bounds<Pixels>, window: &mut Window) -> Frame {
     let (cell_w, line_h) = cell_size(window, m);
-    let cols = ((f32::from(bounds.size.width) - 2. * PAD_X) / cell_w).floor().max(2.) as usize;
-    let rows = ((f32::from(bounds.size.height) - 2. * PAD_Y) / line_h).floor().max(1.) as usize;
-    shared.resize(cols, rows, cell_w, line_h);
+    let fixed = *shared.fixed.lock().unwrap();
+    let (cols, rows) = match fixed {
+        Some(size) => size,
+        None => {
+            let cols = ((f32::from(bounds.size.width) - 2. * PAD_X) / cell_w).floor().max(2.) as usize;
+            let rows = ((f32::from(bounds.size.height) - 2. * PAD_Y) / line_h).floor().max(1.) as usize;
+            shared.resize(cols, rows, cell_w, line_h);
+            (cols, rows)
+        }
+    };
     let origin = bounds.origin + point(px(PAD_X), px(PAD_Y));
     *shared.geometry.lock().unwrap() = Geometry { origin, cell_w, line_h, cols, rows };
 

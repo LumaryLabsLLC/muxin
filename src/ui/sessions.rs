@@ -604,6 +604,8 @@ impl Root {
                         .on_click(cx.listener(move |this, _, window, cx| this.toggle_split(&sid, window, cx))),
                 )
             })
+            // Others watching (or typing) by link, peer to peer.
+            .when(info.persistent && !exited && offline.is_none() && !self.engine.is_demo(), |d| d.child(self.share_button(&info, cx)))
             .child(Button::new("session-end", "End").icon("power").style(ButtonStyle::Ghost).disabled(offline.is_some()).on_click(cx.listener(move |this, _, window, cx| {
                 if let Some(s) = this.snapshot.sessions.iter().find(|x| x.id == sid2).cloned() {
                     this.confirm_end_session(&s, window, cx);
@@ -685,6 +687,15 @@ impl Root {
             }
             None => body.into_any_element(),
         };
+        // Over the terminal, not above it: the session keeps its size.
+        let knocks = self.knock_cards(&info.id, cx);
+        let body = div()
+            .relative()
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .child(body)
+            .when(!knocks.is_empty(), |d| d.child(div().absolute().top_0().left_0().right_0().flex().flex_col().children(knocks)));
         div().size_full().flex().flex_col().child(header).child(body).into_any_element()
     }
 
@@ -869,7 +880,10 @@ impl Root {
         let exited = s.status == "exited";
         let offline = self.snapshot.machines.iter().any(|m| m.id == s.machine_id && m.is_down());
         // Explicit width: GPUI 0.2 only ellipsizes text whose width it knows up front.
-        let trailing = if exited { 40. } else if s.busy || s.attention.is_some() { 20. } else { 0. };
+        let shared = self.share_of(&s.id);
+        let knocking = shared.is_some_and(|sh| sh.guests.iter().any(|g| g.state == "waiting"));
+        let watched = shared.is_some_and(|sh| sh.guests.iter().any(|g| g.state == "in"));
+        let trailing = if exited { 40. } else if s.busy || s.attention.is_some() { 20. } else { 0. } + if knocking || watched { 18. } else { 0. };
         let trailing = trailing + if exited && s.attention.is_some() { 14. } else { 0. };
         let text_w = (self.row_width() - 20. - 22. - 8. - 16. - 8. - trailing).max(40.);
         div()
@@ -895,6 +909,9 @@ impl Root {
                     .child(s.title.clone()),
             )
             .child(div().flex_1())
+            // Shared: someone's asking to join, or watching.
+            .when(watched && !knocking, |d| d.child(kit::icon("eye", 12., theme.text_accent)))
+            .when(knocking, |d| d.child(div().size(px(8.)).rounded_full().bg(theme.accent)))
             .when(s.busy && !exited, |d| d.child(spinner(SharedString::from(format!("side-s-spin-{}", s.id)), 11., theme.accent)))
             // Unread: it finished, rang the bell, or exited. Cleared by opening it.
             .when(!s.busy && !selected, |d| d.children(s.attention.as_deref().map(|kind| attention_dot(theme, kind, s.exit_code))))

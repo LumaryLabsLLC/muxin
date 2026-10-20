@@ -83,13 +83,23 @@ struct Inner {
     writer: Option<Box<dyn Write + Send>>,
     master: Option<Box<dyn MasterPty + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
-    clients: Vec<(u64, Stream)>,
+    clients: Vec<Client>,
     cols: u16,
     rows: u16,
     exit: Option<i32>,
     last_output: i64,
     /// Bumped on every (re)start so an old reader thread stops quietly.
     generation: u64,
+}
+
+/// An attached terminal.
+struct Client {
+    id: u64,
+    stream: Stream,
+    /// Only watches: what it sends is ignored (a shared session's guest).
+    watch_only: bool,
+    /// Wants SIZE frames, to draw at the session's size rather than set it.
+    sizes: bool,
 }
 
 impl Inner {
@@ -104,10 +114,17 @@ impl Inner {
         if let Some(m) = &self.master {
             let _ = m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
         }
+        let size = self.size_frame();
+        self.clients.retain_mut(|c| !c.sizes || proto::write_frame(&mut c.stream, proto::SIZE, &size).is_ok());
+    }
+
+    fn size_frame(&self) -> [u8; 4] {
+        let (c, r) = (self.cols.to_be_bytes(), self.rows.to_be_bytes());
+        [c[0], c[1], r[0], r[1]]
     }
 
     fn broadcast(&mut self, kind: u8, payload: &[u8]) {
-        self.clients.retain_mut(|(_, c)| proto::write_frame(c, kind, payload).is_ok());
+        self.clients.retain_mut(|c| proto::write_frame(&mut c.stream, kind, payload).is_ok());
     }
 }
 
@@ -374,10 +391,11 @@ fn pump(state: &State, s: &Session, mut reader: Box<dyn Read + Send>, generation
         let bells = i.listener.bells.load(Ordering::Relaxed);
         i.parser.advance(&mut i.term, bytes);
         i.last_output = now();
-        // Attached terminals answer queries themselves; without one, answer
-        // here so programs waiting on a reply don't hang.
+        // Attached terminals answer queries themselves; without one that
+        // can (watchers' answers are ignored), answer here so programs
+        // waiting on a reply don't hang.
         let replies = std::mem::take(&mut *i.listener.replies.lock().unwrap());
-        if i.clients.is_empty() {
+        if i.clients.iter().all(|c| c.watch_only) {
             if let Some(w) = i.writer.as_mut() {
                 for r in replies {
                     let _ = w.write_all(r.as_bytes());
@@ -510,7 +528,9 @@ fn read(state: &State, req: &Value) -> Result<Value, String> {
 }
 
 /// Connects a client terminal: resize to it, send the current screen, then
-/// stream both ways until it goes away.
+/// stream both ways until it goes away. `"watch_only": true` attaches one
+/// whose keys and size are ignored (it keeps the session's size), and
+/// `"sizes": true` sends it the size as it changes (SIZE frames).
 fn attach(state: &State, mut stream: Stream, req: &Value) {
     let name = str_of(req, "name");
     let Some(s) = state.find(name) else {
@@ -518,13 +538,20 @@ fn attach(state: &State, mut stream: Stream, req: &Value) {
         return;
     };
     let id = state.next_client.fetch_add(1, Ordering::Relaxed);
+    let watch_only = req["watch_only"].as_bool() == Some(true);
+    let sizes = req["sizes"].as_bool() == Some(true);
     {
         let mut i = s.inner.lock().unwrap();
         // The newest terminal sets the size, like tmux's window-size latest.
-        let cols = req["cols"].as_u64().unwrap_or(i.cols as u64) as u16;
-        let rows = req["rows"].as_u64().unwrap_or(i.rows as u64) as u16;
-        i.resize(cols, rows);
-        if proto::write_line(&mut stream, &json!({ "ok": true })).is_err() {
+        if !watch_only {
+            let cols = req["cols"].as_u64().unwrap_or(i.cols as u64) as u16;
+            let rows = req["rows"].as_u64().unwrap_or(i.rows as u64) as u16;
+            i.resize(cols, rows);
+        }
+        if proto::write_line(&mut stream, &json!({ "ok": true, "cols": i.cols, "rows": i.rows })).is_err() {
+            return;
+        }
+        if sizes && proto::write_frame(&mut stream, proto::SIZE, &i.size_frame()).is_err() {
             return;
         }
         let redraw = screen::redraw(&i.term);
@@ -533,10 +560,11 @@ fn attach(state: &State, mut stream: Stream, req: &Value) {
         }
         let Ok(out) = stream.try_clone() else { return };
         let _ = out.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
-        i.clients.push((id, out));
+        i.clients.push(Client { id, stream: out, watch_only, sizes });
     }
     loop {
         match proto::read_frame(&mut stream) {
+            Ok(_) if watch_only => {}
             Ok((proto::DATA, bytes)) => {
                 let mut i = s.inner.lock().unwrap();
                 if let Some(w) = i.writer.as_mut() {
@@ -552,7 +580,7 @@ fn attach(state: &State, mut stream: Stream, req: &Value) {
             Err(_) => break,
         }
     }
-    s.inner.lock().unwrap().clients.retain(|(c, _)| *c != id);
+    s.inner.lock().unwrap().clients.retain(|c| c.id != id);
 }
 
 #[cfg(test)]

@@ -59,6 +59,13 @@ Type: files; Name: "{app}\muxen.exe"
 Type: files; Name: "{autoprograms}\Muxen.lnk"
 Type: files; Name: "{autodesktop}\Muxen.lnk"
 
+; Share links (muxin://join...) open in Muxin.
+[Registry]
+Root: HKCU; Subkey: "Software\Classes\muxin"; ValueType: string; ValueName: ""; ValueData: "URL:Muxin share link"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\muxin"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\muxin\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\muxin.exe,0"
+Root: HKCU; Subkey: "Software\Classes\muxin\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\muxin.exe"" ""%1"""
+
 [Icons]
 Name: "{autoprograms}\Muxin"; Filename: "{app}\muxin.exe"
 Name: "{autodesktop}\Muxin"; Filename: "{app}\muxin.exe"; Tasks: desktopicon

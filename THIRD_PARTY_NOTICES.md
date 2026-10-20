@@ -18,6 +18,8 @@ must ship with every copy of Muxin.
 | Agent logos (`assets/icons/agent-*.svg`), SVGs from LobeHub Icons | MIT | <https://github.com/lobehub/lobe-icons> |
 | Pi logo (`assets/icons/agent-pi.svg`), from Pi's press kit (Earendil) | trademark of its owner | <https://pi.dev/press-kit> |
 | DigitalOcean logo (`assets/icons/brand-digitalocean.svg`), SVG from Simple Icons | CC0-1.0 (the SVG); trademark of DigitalOcean | <https://simpleicons.org> |
+| xterm.js 5.5.0 (the share server's join page, `share-server/web/vendor/`) | MIT | `share-server/web/vendor/XTERM-LICENSE` |
+| webrtc-rs (`webrtc`, `rtc`: sharing sessions peer to peer) | MIT or Apache-2.0 | <https://github.com/webrtc-rs/webrtc> |
 | Rust crates listed in `Cargo.lock` | MIT and/or Apache-2.0 (mostly), see each crate | Generate the full list before each release, e.g. with `cargo about generate` |
 
 The agent logos are trademarks of their owners (Anthropic, OpenAI, Google,

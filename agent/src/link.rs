@@ -344,7 +344,8 @@ fn run_script(req: &Value) -> Value {
     json!({ "ok": true, "status": status, "stdout": text(stdout), "stderr": text(stderr), "timed_out": timed_out })
 }
 
-/// Connects a channel to a session, as `muxen-agent attach` does for a terminal.
+/// Connects a channel to a session, as `muxen-agent attach` does for a
+/// terminal (`watch_only` and `sizes` as the session server takes them).
 fn attach(req: &Value, out: &Out, attached: &Attached) -> Value {
     let channel = req["channel"].as_u64().unwrap_or(0) as u32;
     if channel == CONTROL {
@@ -354,15 +355,15 @@ fn attach(req: &Value, out: &Out, attached: &Attached) -> Value {
         Ok(s) => s,
         Err(_) => return json!({ "ok": false, "error": "no sessions are running on this machine" }),
     };
-    let request = json!({ "op": "attach", "name": req["name"], "cols": req["cols"], "rows": req["rows"] });
+    let request = json!({ "op": "attach", "name": req["name"], "cols": req["cols"], "rows": req["rows"], "watch_only": req["watch_only"], "sizes": req["sizes"] });
     if let Err(e) = proto::write_line(&mut stream, &request) {
         return json!({ "ok": false, "error": e.to_string() });
     }
-    match proto::read_line(&mut stream) {
-        Ok(v) if v["ok"].as_bool() == Some(true) => {}
+    let size = match proto::read_line(&mut stream) {
+        Ok(v) if v["ok"].as_bool() == Some(true) => json!({ "cols": v["cols"], "rows": v["rows"] }),
         Ok(v) => return json!({ "ok": false, "error": v["error"].as_str().unwrap_or("can't attach") }),
         Err(e) => return json!({ "ok": false, "error": e.to_string() }),
-    }
+    };
     let Ok(mut reader) = stream.try_clone() else { return json!({ "ok": false, "error": "can't attach" }) };
     attached.lock().unwrap().insert(channel, Sink::Session(stream));
     // The session's output, and its end, to the app.
@@ -385,7 +386,7 @@ fn attach(req: &Value, out: &Out, attached: &Attached) -> Value {
             let _ = send(&out, channel, CLOSE, &[]);
         }
     });
-    json!({ "ok": true })
+    json!({ "ok": true, "cols": size["cols"], "rows": size["rows"] })
 }
 
 /// Starts streaming the desktop on a channel: `{"op": "desktop", "channel",

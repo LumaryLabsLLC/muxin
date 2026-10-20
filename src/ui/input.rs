@@ -8,7 +8,7 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
-    SharedString, Style, TextRun, UTF16Selection, Window, actions, div, fill, point, prelude::*, px,
+    SharedString, Style, TextRun, UTF16Selection, Window, actions, anchored, deferred, div, fill, point, prelude::*, px,
     relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -68,6 +68,8 @@ pub struct TextInput {
     secret: bool,
     /// No frame of its own (it sits in one, like the palette's).
     bare: bool,
+    /// Its right-click menu (Cut, Copy, Paste, Select All), where it opened.
+    menu: Option<Point<Pixels>>,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -88,6 +90,7 @@ impl TextInput {
             mono: false,
             secret: false,
             bare: false,
+            menu: None,
         }
     }
 
@@ -216,6 +219,78 @@ impl TextInput {
         } else {
             self.move_to(self.index_for_mouse_position(event.position), cx)
         }
+    }
+
+    /// Right-click: the edit menu, with the cursor where it was clicked
+    /// (a selection stays, to cut or copy).
+    fn on_right_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle);
+        if self.selected_range.is_empty() {
+            self.move_to(self.index_for_mouse_position(event.position), cx);
+        }
+        self.menu = Some(event.position);
+        cx.notify();
+    }
+
+    /// The edit menu: each item runs its action, then it closes.
+    fn edit_menu(&self, at: Point<Pixels>, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let selected = !self.selected_range.is_empty() && !self.secret;
+        let has_text = !self.content.is_empty();
+        let key = |k: &str| if cfg!(target_os = "macos") { format!("⌘{k}") } else { format!("Ctrl+{k}") };
+        let items: [(&str, String, bool, fn(&mut Self, &mut Window, &mut Context<Self>)); 4] = [
+            ("Cut", key("X"), selected, |this, window, cx| this.cut(&Cut, window, cx)),
+            ("Copy", key("C"), selected, |this, window, cx| this.copy(&Copy, window, cx)),
+            ("Paste", key("V"), true, |this, window, cx| this.paste(&Paste, window, cx)),
+            ("Select All", key("A"), has_text, |this, window, cx| this.select_all(&SelectAll, window, cx)),
+        ];
+        let rows = items.into_iter().enumerate().map(|(i, (label, keys, on, run))| {
+            div()
+                .id(("input-menu", i))
+                .flex()
+                .items_center()
+                .h(px(28.))
+                .mx(px(4.))
+                .px(px(10.))
+                .rounded(px(6.))
+                .text_size(px(13.))
+                .text_color(theme.text)
+                .when(!on, |d| d.opacity(0.4))
+                .when(on, |d| {
+                    d.cursor_pointer().hover(|st| st.bg(theme.element_hover)).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.menu = None;
+                            run(this, window, cx);
+                            cx.notify();
+                        }),
+                    )
+                })
+                .child(div().flex_1().child(label))
+                .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(keys))
+        });
+        deferred(
+            anchored().position(at).snap_to_window_with_margin(px(8.)).child(
+                div()
+                    .id("input-menu")
+                    .occlude()
+                    .w(px(190.))
+                    .py(px(4.))
+                    .rounded(px(9.))
+                    .bg(theme.elevated)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .font_family(ui_font())
+                    .children(rows)
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.menu = None;
+                        cx.notify();
+                    })),
+            ),
+        )
+        .with_priority(2)
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -665,6 +740,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::enter))
             .on_action(cx.listener(Self::escape))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -681,6 +757,7 @@ impl Render for TextInput {
             .line_height(px(18.))
             .overflow_hidden()
             .child(TextElement { input: cx.entity() })
+            .children(self.menu.map(|at| self.edit_menu(at, cx)))
     }
 }
 

@@ -1038,6 +1038,13 @@ impl Root {
         cx.notify();
     }
 
+    /// The quality of a shared desktop shown here.
+    fn set_shared_quality(&mut self, id: &str, quality: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(d) = self.joined_mut(id).and_then(|j| j.desktop.clone()) {
+            d.update(cx, |d, cx| d.set_quality(quality, window, cx));
+        }
+    }
+
     /// Opens one of the shared servers here, in the browser.
     fn open_shared_server(&mut self, id: &str, port: u16, cx: &mut Context<Self>) {
         let runtime = self.engine.runtime().clone();
@@ -1157,6 +1164,18 @@ impl Root {
             Showing::Desktop => {
                 let Some(d) = j.desktop.clone() else { return placeholder("The desktop isn't shared anymore.".into()) };
                 let note = if j.can_control { format!("Your mouse and keys work on {}.", j.info.title) } else { format!("You're watching. Only {} can use it.", j.info.by) };
+                // How it looks: smoother and sharper takes more of the connection.
+                let current = d.read(cx).quality();
+                let qualities = host::QUALITIES.iter().enumerate().map(|(i, q)| {
+                    let (sid, q) = (j.id.clone(), *q);
+                    let label = match q {
+                        "low" => "Low",
+                        "high" => "High",
+                        "max" => "Max",
+                        _ => "Medium",
+                    };
+                    choice(&theme, ("desktop-quality", i), label, current == q, true).on_click(cx.listener(move |this, _, window, cx| this.set_shared_quality(&sid, q, window, cx)))
+                });
                 div()
                     .flex_1()
                     .min_w(px(0.))
@@ -1165,7 +1184,7 @@ impl Root {
                     .gap(px(10.))
                     .p(px(16.))
                     .child(div().flex_1().min_h(px(0.)).rounded(px(8.)).overflow_hidden().child(d.clone()))
-                    .child(note_bar(if j.can_control { "monitor" } else { "eye" }, note, Some(d.read(cx).status())))
+                    .child(note_bar(if j.can_control { "monitor" } else { "eye" }, note, Some(d.read(cx).status())).child(div().flex().items_center().gap(px(6.)).pl(px(8.)).child("Quality").children(qualities)))
                     .into_any_element()
             }
             Showing::Session(name) => {
@@ -1266,7 +1285,7 @@ impl Root {
         side.into_any_element()
     }
 
-    /// The sidebar's "Shared with you" rows.
+    /// The sidebar's "Shared with you" rows, shaped like the machines'.
     pub(super) fn joined_rows(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         self.joined
             .iter()
@@ -1274,36 +1293,61 @@ impl Root {
                 let id = j.id.clone();
                 let selected = self.route == Route::Shared(j.id.clone());
                 let (tile, title) = if j.info.whole_machine {
-                    (kit::color_tile("monitor", 16.), j.info.title.clone())
+                    (kit::color_tile("monitor", 30.), j.info.title.clone())
                 } else {
                     let (icon_name, (from, to)) = kit::agent_look(&j.info.agent);
-                    (kit::tile(icon_name, from, to, 16.), if j.info.title.is_empty() { agent_name(&j.info.agent).to_string() } else { j.info.title.clone() })
+                    (kit::tile(icon_name, from, to, 30.), if j.info.title.is_empty() { agent_name(&j.info.agent).to_string() } else { j.info.title.clone() })
                 };
-                let text_w = (self.sidebar_width - 20. - 22. - 8. - 16. - 8. - 24.).max(40.);
+                let doing = if j.ended.is_some() {
+                    "ended"
+                } else if j.can_control && j.info.desktop == Desktop::Control {
+                    "in control"
+                } else if j.can_type {
+                    "typing"
+                } else {
+                    "watching"
+                };
+                // Row chrome: margins, padding, tile, gap.
+                let text_w = (self.row_width() - 20. - 16. - 30. - 10.).max(40.);
                 div()
                     .id(SharedString::from(format!("side-j-{}", j.id)))
                     .flex()
                     .items_center()
-                    .gap(px(8.))
-                    .h(px(30.))
+                    .gap(px(10.))
+                    .h(px(44.))
                     .mx(px(10.))
-                    .pl(px(10.))
-                    .pr(px(8.))
-                    .rounded(px(7.))
+                    .px(px(8.))
+                    .rounded(px(9.))
                     .cursor_pointer()
                     .when(selected, |d| d.bg(theme.element_selected))
                     .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-                    .child(tile)
+                    // The tile, with an eye in its corner while it's live.
+                    .child(
+                        div().relative().flex_none().child(tile).child(
+                            div()
+                                .absolute()
+                                .right(px(-4.))
+                                .bottom(px(-4.))
+                                .size(px(15.))
+                                .rounded_full()
+                                .bg(theme.sidebar)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(icon(if j.ended.is_some() { "x" } else { "eye" }, 10., if j.ended.is_some() { theme.text_placeholder } else { theme.text_accent })),
+                        ),
+                    )
                     .child(
                         div()
-                            .w(px(text_w))
                             .flex()
                             .flex_col()
-                            .child(div().w(px(text_w)).truncate().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child(title))
-                            .child(div().w(px(text_w)).truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(format!("from {}", j.info.by))),
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .gap(px(1.))
+                            .child(div().w(px(text_w)).truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child(title))
+                            .child(div().w(px(text_w)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("from {} · {doing}", j.info.by))),
                     )
-                    .child(div().flex_1())
-                    .child(icon(if j.ended.is_some() { "x" } else { "eye" }, 12., theme.text_accent))
                     .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Shared(id.clone()), window, cx)))
                     .into_any_element()
             })

@@ -176,6 +176,7 @@
     state.showing = { kind: "session", name };
     state.term.reset();
     state.session = openChannel("watch", { session: name }, "session", name);
+    $("quality-wrap").hidden = true;
     $("term").hidden = false;
     $("screen").hidden = true;
     $("empty").hidden = true;
@@ -189,8 +190,9 @@
     if (!state.desktop) {
       $("screen-wait").textContent = "Starting their screen…";
       $("screen-wait").hidden = false;
-      state.desktop = openChannel("desktop", {}, "desktop", "");
+      state.desktop = openChannel("desktop", { quality: $("quality").value }, "desktop", "");
     }
+    $("quality-wrap").hidden = false;
     $("term").hidden = true;
     $("screen").hidden = false;
     $("empty").hidden = true;
@@ -201,6 +203,7 @@
 
   function showEmpty(text) {
     state.showing = null;
+    $("quality-wrap").hidden = true;
     $("term").hidden = true;
     $("screen").hidden = true;
     $("empty").textContent = text;
@@ -324,6 +327,16 @@
   }
 
   function wireScreen() {
+    // How it looks: smoother and sharper takes more of the connection. The
+    // choice is kept for next time; a new stream starts at it.
+    try { const q = localStorage.getItem("muxin-quality"); if (q && [...$("quality").options].some((o) => o.value === q)) $("quality").value = q; } catch (_) {}
+    $("quality").addEventListener("change", () => {
+      try { localStorage.setItem("muxin-quality", $("quality").value); } catch (_) {}
+      if (!state.desktop) return;
+      closeChannel(state.desktop);
+      state.desktop = 0;
+      showDesktop();
+    });
     const c = canvas();
     let lastMove = 0, rest = 0;
     c.addEventListener("mousemove", (e) => {

@@ -106,6 +106,8 @@ pub struct DesktopView {
     /// its mouse and keyboard.
     shared: Option<Arc<guest::Joined>>,
     can_control: bool,
+    /// A shared desktop's quality ("low" to "max", see share::host).
+    quality: &'static str,
     /// One of the machine's displays (None: the whole desktop, or a Mac's main display).
     display: Option<String>,
     /// The frame width asked for (None: native on a local network, else 1080p).
@@ -186,6 +188,7 @@ impl DesktopView {
             machine: machine_id,
             shared,
             can_control,
+            quality: "medium",
             display: None,
             width: None,
             via: String::new(),
@@ -288,6 +291,22 @@ impl DesktopView {
         cx.notify();
     }
 
+    /// A shared desktop's quality.
+    pub fn quality(&self) -> &'static str {
+        self.quality
+    }
+
+    /// Asks a shared desktop for another quality: a new stream, the picture
+    /// kept until it comes.
+    pub fn set_quality(&mut self, quality: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        if quality != self.quality && self.shared.is_some() {
+            self.quality = quality;
+            self.retries = 0;
+            self.start(window, cx);
+            cx.notify();
+        }
+    }
+
     /// How the stream travels, e.g. "Direct · Local network".
     pub fn via(&self) -> &str {
         &self.via
@@ -387,9 +406,9 @@ impl DesktopView {
         let (canvas, pending) = (self.canvas.clone(), self.pending.clone());
         let rt = engine.runtime().clone();
         if let Some(joined) = self.shared.clone() {
-            let tx = tx.clone();
+            let (tx, quality) = (tx.clone(), self.quality);
             rt.spawn(async move {
-                let (channel, reply, mut frames) = match joined.open(json!({ "op": "desktop" })).await {
+                let (channel, reply, mut frames) = match joined.open(json!({ "op": "desktop", "quality": quality })).await {
                     Ok(opened) => opened,
                     Err(e) => {
                         let _ = tx.unbounded_send(Msg::Ended(e, false));

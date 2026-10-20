@@ -771,7 +771,7 @@ impl Open {
             "close" => return,
             _ if self.channels.len() >= MAX_CHANNELS => Err("Too much open at once. Close something first.".to_string()),
             "watch" => self.watch(channel, req["session"].as_str().unwrap_or(""), c.can_type).await,
-            "desktop" => self.desktop(channel).await,
+            "desktop" => self.desktop(channel, req["quality"].as_str().unwrap_or("")).await,
             _ => self.tcp(channel, req["port"].as_u64().unwrap_or(0)).await,
         };
         match result {
@@ -818,21 +818,21 @@ impl Open {
         Ok((link, link_channel, frames))
     }
 
-    /// The machine's desktop, at a size and pace a connection across the
-    /// internet keeps up with.
-    async fn desktop(&self, channel: u32) -> Result<Attached, String> {
+    /// The machine's desktop, at one of the qualities a guest can pick.
+    async fn desktop(&self, channel: u32, quality: &str) -> Result<Attached, String> {
         if !self.share.target.is_machine() || self.share.options().desktop == Desktop::None {
             return Err("The desktop isn't shared.".into());
         }
         let link = self.share.source.link().await?;
         let (link_channel, frames) = link.open_channel();
-        let request = json!({ "op": "desktop", "channel": link_channel, "fps": 15, "quality": 60, "max_width": 1600, "tiles": true, "display": "" });
+        let (quality, (fps, jpeg, max_width)) = desktop_quality(quality);
+        let request = json!({ "op": "desktop", "channel": link_channel, "fps": fps, "quality": jpeg, "max_width": max_width, "tiles": true, "display": "" });
         let reply = link.request(request, Duration::from_secs(20)).await?;
         if reply["ok"].as_bool() != Some(true) {
             link.close_channel(link_channel);
             return Err(reply["error"].as_str().unwrap_or("The desktop couldn't be shown.").to_string());
         }
-        let reply = json!({ "event": "desktop", "channel": channel, "width": reply["width"], "height": reply["height"] });
+        let reply = json!({ "event": "desktop", "channel": channel, "width": reply["width"], "height": reply["height"], "quality": quality });
         Ok((reply, link, link_channel, frames, Kind::Desktop))
     }
 
@@ -1044,6 +1044,19 @@ impl Tiles {
     }
 }
 
+/// The desktop qualities a guest can pick, as (frames a second, JPEG
+/// quality, widest frame): nothing heavier than "max". Medium unless asked.
+pub const QUALITIES: [&str; 4] = ["low", "medium", "high", "max"];
+
+fn desktop_quality(name: &str) -> (&'static str, (u32, u32, u32)) {
+    match name {
+        "low" => ("low", (10, 45, 1280)),
+        "high" => ("high", (24, 75, 1920)),
+        "max" => ("max", (30, 85, 2560)),
+        _ => ("medium", (15, 60, 1600)),
+    }
+}
+
 /// A machine's sessions, as a machine share's guests see them: no folders
 /// or commands, just what to pick from.
 async fn sessions(share: &Arc<Share>) -> Result<Value, String> {
@@ -1136,6 +1149,15 @@ mod tests {
         assert_eq!(again.patches.len(), 1);
         let whole = tiles((200, 100), &[([0, 0, 64, 32], b"jpeg")]);
         assert!(!again.add(&whole[..whole.len() - 1]));
+    }
+
+    #[test]
+    fn guests_pick_only_the_desktop_qualities_offered() {
+        for q in QUALITIES {
+            assert_eq!(desktop_quality(q).0, q);
+        }
+        assert_eq!(desktop_quality("").0, "medium");
+        assert_eq!(desktop_quality("8k").1, desktop_quality("medium").1);
     }
 
     #[test]

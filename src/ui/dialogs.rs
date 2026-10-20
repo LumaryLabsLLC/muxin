@@ -42,6 +42,8 @@ pub enum DialogEvent {
     DisplayAdded(String, String),
     /// A share joined and let in: open its session.
     JoinedShare(super::share::JoinedHandle),
+    /// Open the Join dialog instead (with a link pasted here).
+    JoinShare(Option<String>),
 }
 
 pub(super) fn frame(theme: &Theme, title: impl Into<SharedString>, intro: Option<SharedString>) -> gpui::Div {
@@ -104,6 +106,8 @@ pub struct AddMachineDialog {
     network: Option<Vec<crate::fleet::discover::NetworkHost>>,
     /// What to do before a picked machine can be added (a Mac with Remote Login off).
     note: Option<String>,
+    /// A share link pasted where a machine goes: joined instead.
+    share_link: Option<String>,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -119,6 +123,7 @@ impl AddMachineDialog {
             InputEvent::Cancel => cx.emit(DialogEvent::Dismissed),
             InputEvent::Changed => {
                 this.error = None;
+                this.share_link = [&this.name, &this.host].into_iter().map(|i| i.read(cx).text().trim().to_string()).find(|t| crate::share::ticket::Ticket::parse(t).is_ok());
                 cx.notify()
             }
         };
@@ -143,7 +148,7 @@ impl AddMachineDialog {
         })
         .detach();
         let hosts = if engine.demo_world().is_some() { Vec::new() } else { ssh_hosts() };
-        AddMachineDialog { engine, name, host, hosts, tailnet: Vec::new(), network: None, note: None, error: None, _subscriptions: subs }
+        AddMachineDialog { engine, name, host, hosts, tailnet: Vec::new(), network: None, note: None, share_link: None, error: None, _subscriptions: subs }
     }
 
     pub fn first_focus(&self, cx: &App) -> FocusHandle {
@@ -151,6 +156,10 @@ impl AddMachineDialog {
     }
 
     fn submit(&mut self, cx: &mut Context<Self>) {
+        if let Some(link) = self.share_link.clone() {
+            cx.emit(DialogEvent::JoinShare(Some(link)));
+            return;
+        }
         let machine = NewMachine { name: self.name.read(cx).text().to_string(), host: self.host.read(cx).text().to_string() };
         match self.engine.add_machine(machine) {
             Ok(id) => cx.emit(DialogEvent::MachineAdded(id)),
@@ -264,6 +273,27 @@ impl Render for AddMachineDialog {
         .children(self.note.clone().map(|n| {
             div().flex().items_start().gap(px(8.)).text_size(px(12.)).text_color(theme.text_muted).child(icon("info", 13., theme.info)).child(div().flex_1().min_w(px(0.)).child(n))
         }))
+        // Someone else's machine comes by link: a way there, or the link pasted here.
+        .child({
+            let (text, button) = match &self.share_link {
+                Some(_) => ("That's a share link: join it instead.", Button::new("am-join", "Join").style(ButtonStyle::Primary)),
+                None => ("Someone sent you a link to their machine or session?", Button::new("am-join", "Join a share…").style(ButtonStyle::Outlined)),
+            };
+            let link = self.share_link.clone();
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(12.))
+                .py(px(9.))
+                .rounded(px(9.))
+                .border_1()
+                .border_color(if link.is_some() { theme.accent } else { theme.border_variant })
+                .bg(theme.surface)
+                .child(icon("link", 14., theme.text_muted))
+                .child(div().flex_1().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(text))
+                .child(button.icon("link").on_click(cx.listener(move |_, _, _, cx| cx.emit(DialogEvent::JoinShare(link.clone())))))
+        })
         .children(error_line(&theme, &self.error))
         .child(footer(vec![
             Button::new("am-cloud", "New cloud machine…").style(ButtonStyle::Ghost).icon("cloud").on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::NewCloudMachine))).into_any_element(),

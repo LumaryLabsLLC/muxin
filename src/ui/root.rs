@@ -3269,7 +3269,7 @@ impl Root {
                 }
             },
             Route::About => self.render_about(cx),
-            Route::Shared(id) => self.render_joined(&id, window, cx),
+            Route::Shared(id) => self.render_joined(&id, cx),
             Route::Github | Route::GithubRepo(_) | Route::GithubItem(..) => self.render_github(window, cx),
             Route::Settings => match &self.settings {
                 Some(page) => page.clone().into_any_element(),

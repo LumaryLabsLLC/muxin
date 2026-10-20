@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use super::desktop::DesktopView;
 use super::dialogs::{DialogEvent, error_line, field, footer, frame};
 use super::input::{InputEvent, TextInput};
-use super::kit::{self, Button, ButtonStyle, card, icon};
+use super::kit::{self, Button, ButtonStyle, card, icon, section_title};
 use super::root::{Modal, Route, Root};
 use super::terminal::{RemoteIo, RemoteOutput, TerminalView};
 use super::theme::{ActiveTheme, Theme, mono_font};
@@ -124,7 +124,7 @@ impl ShareDialog {
         self.creating = true;
         self.error = None;
         cx.notify();
-        let options = host::Options { approve: true, can_type: false, desktop: Desktop::None, ports: Vec::new(), ttl: Duration::from_secs(3600) };
+        let options = host::Options { approve: true, can_type: false, manage: false, desktop: Desktop::None, ports: Vec::new(), ttl: Duration::from_secs(3600) };
         let source = Arc::new(host::EngineSource { engine: self.engine.clone(), machine_id: self.target.machine_id.clone() });
         let (target, server) = (self.target.clone(), self.engine.settings().share_server());
         let job = self.engine.runtime().spawn(async move { host::start(&server, target, options, source).await });
@@ -351,6 +351,35 @@ impl ShareDialog {
                                 (false, _) => "Only for people you let in.",
                             })),
                     )
+                    .when(machine, |d| {
+                        let id = view.id.clone();
+                        let can = approve && can_type;
+                        let row = if can {
+                            kit::checkbox(theme, "share-manage", view.manage, "They can start and end sessions", move |on, _, _| host::set_manage(&id, *on)).into_any_element()
+                        } else {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .text_size(px(12.5))
+                                .text_color(theme.text_placeholder)
+                                .child(div().size(px(15.)).rounded(px(4.)).border_1().border_color(theme.border_variant))
+                                .child("They can start and end sessions")
+                                .into_any_element()
+                        };
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(3.))
+                                .child(row)
+                                .child(div().pl(px(23.)).text_size(px(11.5)).text_color(if view.manage { theme.warning } else { theme.text_placeholder }).child(if can {
+                                    format!("A terminal there runs anything, on {} as you.", self.target.machine_name)
+                                } else {
+                                    "Only for people you let in who can type.".to_string()
+                                })),
+                        )
+                    })
                     .when(machine && self.has_desktop, |d| d.child(self.desktop_row(theme, &view)))
                     .when(machine, |d| d.child(self.servers_rows(theme, &view, cx)))
                     .child(
@@ -424,6 +453,7 @@ pub struct JoinedHandle {
     info: guest::Info,
     can_type: bool,
     can_control: bool,
+    can_manage: bool,
 }
 
 enum Stage {
@@ -527,12 +557,12 @@ impl JoinDialog {
                                 *waiting = true;
                             }
                         }
-                        guest::Update::Admitted { can_type, can_control } => {
+                        guest::Update::Admitted { can_type, can_control, can_manage } => {
                             let info = match &this.stage {
                                 Stage::Joined { info, .. } => info.clone().unwrap_or_default(),
                                 _ => Default::default(),
                             };
-                            done = Some((info, can_type, can_control));
+                            done = Some((info, can_type, can_control, can_manage));
                         }
                         guest::Update::Denied => {
                             this.stage = Stage::Form;
@@ -552,8 +582,8 @@ impl JoinDialog {
                     joined.leave();
                     return;
                 }
-                if let Some((info, can_type, can_control)) = done {
-                    let handle = JoinedHandle { joined: joined.clone(), updates: Arc::new(Mutex::new(Some(rx))), info, can_type, can_control };
+                if let Some((info, can_type, can_control, can_manage)) = done {
+                    let handle = JoinedHandle { joined: joined.clone(), updates: Arc::new(Mutex::new(Some(rx))), info, can_type, can_control, can_manage };
                     let _ = this.update(cx, |this, cx| {
                         this.joined = None;
                         cx.emit(DialogEvent::JoinedShare(handle))
@@ -569,7 +599,11 @@ impl JoinDialog {
     fn facts(theme: &Theme, i: &guest::Info) -> impl IntoElement {
         let mut facts = div().flex().flex_col().gap(px(8.));
         if i.whole_machine {
-            facts = facts.child(fact(theme, if i.can_type { "keyboard" } else { "square-terminal" }, if i.can_type { "Its sessions: you can watch and type" } else { "Its sessions: you can watch" }));
+            facts = facts.child(fact(theme, if i.can_type { "keyboard" } else { "square-terminal" }, match (i.can_type, i.can_manage) {
+                (_, true) => "Its sessions: you can watch, type, start and end them",
+                (true, false) => "Its sessions: you can watch and type",
+                _ => "Its sessions: you can watch",
+            }));
             match i.desktop {
                 Desktop::None => {}
                 Desktop::View => facts = facts.child(fact(theme, "monitor", "Its screen: you can watch")),
@@ -679,10 +713,11 @@ struct OpenSession {
     error: Option<String>,
 }
 
-/// What a shared machine's page shows.
-#[derive(Clone, PartialEq)]
+/// What a share's page shows: a shared machine's own page, one of its
+/// sessions (a shared session's is ""), or its desktop.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Showing {
-    Nothing,
+    Machine,
     Session(String),
     Desktop,
 }
@@ -694,6 +729,8 @@ pub struct JoinedShare {
     joined: Arc<guest::Joined>,
     pub can_type: bool,
     pub can_control: bool,
+    /// May start, end and restart its sessions.
+    pub can_manage: bool,
     /// A shared machine's sessions.
     sessions: Vec<guest::Session>,
     open: Vec<OpenSession>,
@@ -905,9 +942,10 @@ impl Root {
             joined: handle.joined.clone(),
             can_type: handle.can_type,
             can_control: handle.can_control,
+            can_manage: handle.can_manage,
             sessions: Vec::new(),
             open: Vec::new(),
-            showing: Showing::Nothing,
+            showing: if handle.info.whole_machine { Showing::Machine } else { Showing::Session(String::new()) },
             desktop: None,
             servers: HashMap::new(),
             ended: None,
@@ -918,11 +956,12 @@ impl Root {
         let sid = id.clone();
         let task = cx.spawn_in(window, async move |this, cx| {
             while let Some(u) = updates.recv().await {
-                let alive = this.update_in(cx, |this, window, cx| {
+                let alive = this.update_in(cx, |this, _window, cx| {
                     let Some(j) = this.joined_mut(&sid) else { return false };
                     match u {
                         guest::Update::Typing(allowed) => {
                             j.can_type = allowed;
+                            j.can_manage &= allowed;
                             this.notify_user(if allowed { "You can type now." } else { "Typing is off. You're watching." }, false, cx);
                         }
                         guest::Update::Control(allowed) => {
@@ -934,6 +973,10 @@ impl Root {
                                 this.notify_user(if allowed { "You can use their desktop now." } else { "You're watching their desktop." }, false, cx);
                             }
                         }
+                        guest::Update::Manage(allowed) => {
+                            j.can_manage = allowed;
+                            this.notify_user(if allowed { "You can start and end sessions now." } else { "Starting and ending sessions is off." }, false, cx);
+                        }
                         guest::Update::Access { desktop, ports } => {
                             j.info.desktop = desktop;
                             j.servers.retain(|port, _| ports.iter().any(|p| p.port == *port));
@@ -941,18 +984,11 @@ impl Root {
                             if desktop == Desktop::None {
                                 j.desktop = None;
                                 if j.showing == Showing::Desktop {
-                                    j.showing = Showing::Nothing;
+                                    j.showing = Showing::Machine;
                                 }
                             }
                         }
-                        guest::Update::Sessions(list) => {
-                            j.sessions = list;
-                            // Something to look at right away: the first session.
-                            let first = (j.showing == Showing::Nothing && j.open.is_empty()).then(|| j.sessions.iter().find(|s| s.status != "exited").map(|s| s.name.clone())).flatten();
-                            if let Some(name) = first {
-                                this.open_shared_session(&sid, name, window, cx);
-                            }
-                        }
+                        guest::Update::Sessions(list) => j.sessions = list,
                         guest::Update::Ended(why) => {
                             j.ended = Some(why);
                             cx.notify();
@@ -970,6 +1006,23 @@ impl Root {
         });
         self.track(task);
         self.navigate(Route::Shared(id), window, cx);
+    }
+
+    /// Shows a share's machine page, one of its sessions or its desktop.
+    pub(super) fn show_shared(&mut self, id: &str, showing: Showing, window: &mut Window, cx: &mut Context<Self>) {
+        match showing {
+            Showing::Session(name) => self.open_shared_session(id, name, window, cx),
+            Showing::Desktop => self.show_shared_desktop(id, window, cx),
+            Showing::Machine => {
+                if let Some(j) = self.joined_mut(id) {
+                    j.showing = Showing::Machine;
+                }
+            }
+        }
+        if self.route != Route::Shared(id.to_string()) {
+            self.navigate(Route::Shared(id.to_string()), window, cx);
+        }
+        cx.notify();
     }
 
     /// Shows one of the share's sessions, opening it when it isn't yet.
@@ -1049,14 +1102,14 @@ impl Root {
     }
 
     /// The quality of a shared desktop shown here.
-    fn set_shared_quality(&mut self, id: &str, quality: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_shared_quality(&mut self, id: &str, quality: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(d) = self.joined_mut(id).and_then(|j| j.desktop.clone()) {
             d.update(cx, |d, cx| d.set_quality(quality, window, cx));
         }
     }
 
     /// Opens one of the shared servers here, in the browser.
-    fn open_shared_server(&mut self, id: &str, port: u16, cx: &mut Context<Self>) {
+    pub(super) fn open_shared_server(&mut self, id: &str, port: u16, cx: &mut Context<Self>) {
         let runtime = self.engine.runtime().clone();
         let Some(j) = self.joined_mut(id) else { return };
         if let Some(Ok(local)) = j.servers.get(&port) {
@@ -1093,28 +1146,79 @@ impl Root {
         cx.notify();
     }
 
-    /// A share someone gave you: its session, or the machine's sessions,
-    /// desktop and servers.
-    pub(super) fn render_joined(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+
+    /// A share someone gave you, drawn like your own: a machine's page, a
+    /// session's, a desktop's.
+    pub(super) fn render_joined(&mut self, id: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let Some(j) = self.joined.iter().find(|j| j.id == id) else {
             return div().size_full().flex().items_center().justify_center().text_color(theme.text_muted).child("That share is closed.").into_any_element();
         };
+        if let Some(why) = j.ended.clone() {
+            let leave = j.id.clone();
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    card(&theme)
+                        .items_center()
+                        .gap(px(10.))
+                        .p(px(22.))
+                        .max_w(px(420.))
+                        .child(kit::color_tile("eye", 36.))
+                        .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(why))
+                        .child(Button::new("joined-close", "Close").icon("x").on_click(cx.listener(move |this, _, window, cx| this.leave_joined(&leave, window, cx)))),
+                )
+                .into_any_element();
+        }
+        match j.showing.clone() {
+            Showing::Machine => self.joined_machine_page(id, cx),
+            Showing::Session(name) => self.joined_session_page(id, &name, cx),
+            Showing::Desktop => self.joined_desktop_page(id, cx),
+        }
+    }
+
+    /// What this guest may do, in a few words ("Watching", "Typing").
+    fn joined_mode(j: &JoinedShare) -> &'static str {
+        if j.can_type { "Typing" } else { "Watching" }
+    }
+
+    /// One of a shared machine's sessions, or the session shared: like a
+    /// session of your own, its terminal filling the page.
+    fn joined_session_page(&mut self, id: &str, name: &str, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let Some(j) = self.joined.iter().find(|j| j.id == id) else { return div().into_any_element() };
+        let session = j.sessions.iter().find(|s| s.name == name).cloned();
+        let agent = session.as_ref().map(|s| s.agent.clone()).unwrap_or_else(|| j.info.agent.clone());
+        let title = match &session {
+            Some(s) if !s.title.is_empty() => s.title.clone(),
+            Some(s) => agent_name(&s.agent).to_string(),
+            None if !j.info.title.is_empty() && !j.info.whole_machine => j.info.title.clone(),
+            None => agent_name(&agent).to_string(),
+        };
+        let machine = if j.info.whole_machine { j.info.title.clone() } else { j.info.machine.clone() };
+        let (icon_name, (from, to)) = kit::agent_look(&agent);
+        let status = match &session {
+            Some(s) if s.status == "exited" => kit::pill("Exited", theme.text_placeholder).into_any_element(),
+            Some(s) if s.busy => div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(12.))
+                .text_color(theme.text_accent)
+                .child(kit::spinner("joined-busy", 12., theme.accent))
+                .child("Working")
+                .into_any_element(),
+            Some(s) => div().text_size(px(12.)).text_color(theme.text_placeholder).child(if s.agent == "shell" { "Idle" } else { "Waiting for you" }).into_any_element(),
+            None => div().into_any_element(),
+        };
+        let can_type = j.can_type;
+        let by = j.info.by.clone();
         let whole = j.info.whole_machine;
-        let title = if whole || !j.info.title.is_empty() { j.info.title.clone() } else { agent_name(&j.info.agent).to_string() };
-        let sub = if whole {
-            let n = j.sessions.len();
-            format!("{n} session{} · shared by {}", if n == 1 { "" } else { "s" }, j.info.by)
-        } else {
-            format!("{} · {} · shared by {}", agent_name(&j.info.agent), j.info.machine, j.info.by)
-        };
-        let tile = if whole {
-            kit::color_tile("monitor", 32.)
-        } else {
-            let (icon_name, (from, to)) = kit::agent_look(&j.info.agent);
-            kit::tile(icon_name, from, to, 32.)
-        };
-        let leave = j.id.clone();
+        let desktop = j.info.desktop != Desktop::None;
+        let (sid, sid2) = (j.id.clone(), j.id.clone());
         let header = div()
             .flex()
             .flex_none()
@@ -1124,243 +1228,548 @@ impl Root {
             .py(px(12.))
             .border_b_1()
             .border_color(theme.border_variant)
-            .child(tile)
-            .child(div().flex().flex_col().flex_1().min_w(px(0.)).gap(px(2.)).child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(title)).child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(sub)))
-            .when(j.ended.is_none(), |d| {
-                d.child(kit::pill(if j.can_type { "Typing" } else { "Watching" }, theme.accent)).child(div().text_size(px(12.)).text_color(theme.text_muted).child(format!("{} left", time_left(j.info.ends_at))))
+            .child(kit::tile(icon_name, from, to, 32.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .gap(px(2.))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title))
+                    .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!("{} · {machine} · shared by {by}", agent_name(&agent)))),
+            )
+            .child(status)
+            .child(
+                div()
+                    .id("joined-mode")
+                    .child(kit::pill(Self::joined_mode(j), theme.accent))
+                    .tooltip(move |window, cx| kit::Tooltip::view(if can_type { "Your keys go to their session, as them.".into() } else { format!("You're watching. Only {by} can type.").into() }, window, cx)),
+            )
+            .when(whole && desktop, |d| {
+                d.child(Button::new("joined-desktop", "Desktop").icon("monitor").style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, window, cx| this.show_shared(&sid, Showing::Desktop, window, cx))))
             })
-            .child(Button::new("joined-leave", if j.ended.is_some() { "Close" } else { "Leave" }).icon("x").style(ButtonStyle::Outlined).on_click(cx.listener(move |this, _, window, cx| this.leave_joined(&leave, window, cx))));
-        let body = match &j.ended {
-            Some(why) => div()
+            .when(whole && j.can_manage && session.is_some(), |d| {
+                let (sid, name) = (j.id.clone(), name.to_string());
+                let exited = session.as_ref().is_some_and(|s| s.status == "exited");
+                let (label, glyph, action) = if exited { ("Restart", "rotate-ccw", JoinedAction::Restart(name)) } else { ("End", "power", JoinedAction::End(name)) };
+                d.child(Button::new("joined-end", label).icon(glyph).style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, window, cx| this.run_joined(&sid, action.clone(), window, cx))))
+            })
+            .when(!whole, |d| d.child(Button::new("joined-leave", "Leave").icon("x").style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, window, cx| this.leave_joined(&sid2, window, cx)))));
+        let body = match j.open.iter().find(|o| o.name == name) {
+            Some(o) if o.error.is_some() => div()
                 .flex_1()
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(card(&theme).items_center().gap(px(10.)).p(px(22.)).max_w(px(420.)).child(kit::color_tile("eye", 36.)).child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(why.clone())))
+                .text_size(px(13.))
+                .text_color(theme.text_muted)
+                .child(o.error.clone().unwrap_or_default())
                 .into_any_element(),
-            None => {
-                let main = self.joined_main(id, window, cx);
-                if whole {
-                    div().flex_1().min_h(px(0.)).flex().child(self.joined_side(id, cx)).child(main).into_any_element()
-                } else {
-                    main
-                }
-            }
+            Some(o) => div().relative().flex_1().min_h(px(0.)).flex().child(o.terminal.clone()).into_any_element(),
+            None => div().flex_1().into_any_element(),
         };
         div().size_full().flex().flex_col().child(header).child(body).into_any_element()
     }
 
-    /// What a joined share's page shows: a session's terminal, or the desktop.
-    fn joined_main(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// A shared machine's desktop, like your own machines' Desktop page.
+    fn joined_desktop_page(&mut self, id: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let Some(j) = self.joined.iter().find(|j| j.id == id) else { return div().into_any_element() };
-        let note_bar = |glyph: &'static str, note: String, right: Option<String>| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .px(px(12.))
-                .py(px(8.))
-                .rounded(px(8.))
-                .bg(theme.surface)
-                .text_size(px(12.))
-                .text_color(theme.text_muted)
-                .child(icon(glyph, 13., theme.text_muted))
-                .child(div().flex_1().child(note))
-                .children(right)
+        let Some(d) = j.desktop.clone() else {
+            return div().size_full().flex().items_center().justify_center().text_color(theme.text_muted).child("The desktop isn't shared anymore.").into_any_element();
         };
-        let placeholder = |text: String| div().flex_1().flex().items_center().justify_center().text_size(px(13.)).text_color(theme.text_muted).child(text).into_any_element();
-        match &j.showing {
-            Showing::Desktop => {
-                let Some(d) = j.desktop.clone() else { return placeholder("The desktop isn't shared anymore.".into()) };
-                let note = if j.can_control { format!("Your mouse and keys work on {}.", j.info.title) } else { format!("You're watching. Only {} can use it.", j.info.by) };
-                // How it looks: smoother and sharper takes more of the connection.
-                let current = d.read(cx).quality();
-                let qualities = host::QUALITIES.iter().enumerate().map(|(i, q)| {
-                    let (sid, q) = (j.id.clone(), *q);
-                    let label = match q {
-                        "low" => "Low",
-                        "high" => "High",
-                        "max" => "Max",
-                        _ => "Medium",
-                    };
-                    choice(&theme, ("desktop-quality", i), label, current == q, true).on_click(cx.listener(move |this, _, window, cx| this.set_shared_quality(&sid, q, window, cx)))
-                });
+        let current = d.read(cx).quality();
+        let qualities = host::QUALITIES.iter().enumerate().map(|(i, q)| {
+            let (sid, q) = (j.id.clone(), *q);
+            choice(&theme, ("desktop-quality", i), quality_label(q), current == q, true).on_click(cx.listener(move |this, _, window, cx| this.set_shared_quality(&sid, q, window, cx)))
+        });
+        let can_control = j.can_control;
+        let by = j.info.by.clone();
+        let header = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(12.))
+            .px(px(20.))
+            .py(px(12.))
+            .border_b_1()
+            .border_color(theme.border_variant)
+            .child(kit::color_tile("monitor", 32.))
+            .child(
                 div()
-                    .flex_1()
-                    .min_w(px(0.))
                     .flex()
                     .flex_col()
-                    .gap(px(10.))
-                    .p(px(16.))
-                    .child(div().flex_1().min_h(px(0.)).rounded(px(8.)).overflow_hidden().child(d.clone()))
-                    .child(note_bar(if j.can_control { "monitor" } else { "eye" }, note, Some(d.read(cx).status())).child(div().flex().items_center().gap(px(6.)).pl(px(8.)).child("Quality").children(qualities)))
-                    .into_any_element()
-            }
-            Showing::Session(name) => {
-                let Some(o) = j.open.iter().find(|o| &o.name == name) else { return placeholder(String::new()) };
-                if let Some(e) = &o.error {
-                    return placeholder(e.clone());
-                }
-                let (cols, rows) = o.terminal.read(cx).fixed_size().unwrap_or((100, 30));
-                let (w, h) = TerminalView::pixel_size(cols, rows, window, cx);
-                let note = if j.can_type { "You can type. Keys go to their session.".to_string() } else { format!("You're watching. Only {} can type.", j.info.by) };
-                div()
                     .flex_1()
                     .min_w(px(0.))
-                    .min_h(px(0.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.))
-                    .p(px(16.))
-                    .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(div().w(px(w)).h(px(h)).rounded(px(8.)).overflow_hidden().border_1().border_color(theme.border_variant).child(o.terminal.clone())))
-                    .child(note_bar(if j.can_type { "keyboard" } else { "lock" }, note, Some(format!("Shown at {}'s size", j.info.by))))
-                    .into_any_element()
-            }
-            Showing::Nothing => placeholder(if j.sessions.is_empty() { format!("No sessions are running on {}.", j.info.title) } else { "Pick a session.".into() }),
-        }
+                    .gap(px(2.))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Desktop"))
+                    .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!("{} · shared by {} · {}", j.info.title, j.info.by, d.read(cx).status()))),
+            )
+            .child(div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child("Quality").children(qualities))
+            .child(
+                div()
+                    .id("joined-control")
+                    .child(kit::pill(if can_control { "In control" } else { "View only" }, theme.accent))
+                    .tooltip(move |window, cx| kit::Tooltip::view(if can_control { "Your mouse and keys work on their screen.".into() } else { format!("You're watching. Only {by} can use it.").into() }, window, cx)),
+            );
+        div().size_full().flex().flex_col().child(header).child(div().flex_1().min_h(px(0.)).child(d)).into_any_element()
     }
 
-    /// A shared machine's sessions, desktop and servers, to pick from.
-    fn joined_side(&self, id: &str, cx: &mut Context<Self>) -> AnyElement {
+    /// A shared machine's page, like your own machines': what's shared and
+    /// what you can do with it.
+    fn joined_machine_page(&mut self, id: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let Some(j) = self.joined.iter().find(|j| j.id == id) else { return div().into_any_element() };
-        let label = |text: &'static str| div().px(px(12.)).pt(px(14.)).pb(px(4.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_placeholder).child(text);
-        let row = |key: String, selected: bool| {
-            div()
-                .id(SharedString::from(key))
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .h(px(30.))
-                .mx(px(6.))
-                .px(px(8.))
-                .rounded(px(7.))
-                .cursor_pointer()
-                .when(selected, |d| d.bg(theme.element_selected))
-                .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-        };
-        let mut side = div().w(px(240.)).flex_none().flex().flex_col().border_r_1().border_color(theme.border_variant).child(label("SESSIONS"));
-        if j.sessions.is_empty() {
-            side = side.child(div().px(px(14.)).py(px(4.)).text_size(px(12.)).text_color(theme.text_placeholder).child("None running."));
-        }
-        for s in &j.sessions {
-            let (icon_name, (from, to)) = kit::agent_look(&s.agent);
-            let title = if s.title.is_empty() { agent_name(&s.agent).to_string() } else { s.title.clone() };
-            let selected = j.showing == Showing::Session(s.name.clone());
-            let (sid, name) = (j.id.clone(), s.name.clone());
-            side = side.child(
-                row(format!("js-{}-{}", j.id, s.name), selected)
-                    .child(kit::tile(icon_name, from, to, 16.))
-                    .child(div().w(px(160.)).truncate().text_size(px(12.5)).text_color(if s.status == "exited" { theme.text_placeholder } else if selected { theme.text } else { theme.text_muted }).child(title))
-                    .child(div().flex_1())
-                    .when(s.busy, |d| d.child(kit::dot(theme.accent, 6.)))
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_shared_session(&sid, name.clone(), window, cx))),
-            );
+        let sid = j.id.clone();
+        let mut buttons: Vec<AnyElement> = Vec::new();
+        if j.can_manage {
+            let sid = sid.clone();
+            buttons.push(Button::new("jm-terminal", "New terminal").icon("square-terminal").style(ButtonStyle::Primary).on_click(cx.listener(move |this, _, window, cx| this.run_joined(&sid, JoinedAction::Start("shell"), window, cx))).into_any_element());
         }
         if j.info.desktop != Desktop::None {
-            let sid = j.id.clone();
-            side = side.child(label("DESKTOP")).child(
-                row(format!("jd-{}", j.id), j.showing == Showing::Desktop)
-                    .child(icon("monitor", 15., theme.text_muted))
-                    .child(div().flex_1().text_size(px(12.5)).child("Screen"))
-                    .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(if j.can_control { "You can use it" } else { "View only" }))
-                    .on_click(cx.listener(move |this, _, window, cx| this.show_shared_desktop(&sid, window, cx))),
-            );
+            let sid = sid.clone();
+            buttons.push(Button::new("jm-desktop", "Show desktop").icon("monitor").style(if j.can_manage { ButtonStyle::Outlined } else { ButtonStyle::Primary }).on_click(cx.listener(move |this, _, window, cx| this.show_shared(&sid, Showing::Desktop, window, cx))).into_any_element());
         }
-        if !j.info.ports.is_empty() {
-            side = side.child(label("SERVERS"));
-            for p in &j.info.ports {
-                let (sid, port) = (j.id.clone(), p.port);
-                let state = match j.servers.get(&p.port) {
-                    Some(Ok(local)) => format!("localhost:{local}"),
-                    Some(Err(e)) => e.clone(),
-                    None => format!(":{}", p.port),
-                };
-                side = side.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .mx(px(6.))
-                        .px(px(8.))
-                        .py(px(5.))
-                        .child(icon("network", 14., theme.text_muted))
-                        .child(div().flex().flex_col().w(px(130.)).child(div().truncate().text_size(px(12.5)).child(if p.name.is_empty() { format!("Port {}", p.port) } else { p.name.clone() })).child(div().truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(state)))
-                        .child(div().flex_1())
-                        .child(Button::new(SharedString::from(format!("jp-{}-{}", j.id, p.port)), "Open").icon("external-link").style(ButtonStyle::Outlined).on_click(cx.listener(move |this, _, _, cx| this.open_shared_server(&sid, port, cx)))),
-                );
-            }
+        {
+            let sid = sid.clone();
+            buttons.push(Button::new("jm-leave", "Leave").icon("x").on_click(cx.listener(move |this, _, window, cx| this.leave_joined(&sid, window, cx))).into_any_element());
         }
-        side.into_any_element()
-    }
-
-    /// The sidebar's "Shared with you" rows, shaped like the machines'.
-    pub(super) fn joined_rows(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        self.joined
-            .iter()
-            .map(|j| {
-                let id = j.id.clone();
-                let selected = self.route == Route::Shared(j.id.clone());
-                let (tile, title) = if j.info.whole_machine {
-                    (kit::color_tile("monitor", 30.), j.info.title.clone())
-                } else {
-                    let (icon_name, (from, to)) = kit::agent_look(&j.info.agent);
-                    (kit::tile(icon_name, from, to, 30.), if j.info.title.is_empty() { agent_name(&j.info.agent).to_string() } else { j.info.title.clone() })
-                };
-                let doing = if j.ended.is_some() {
-                    "ended"
-                } else if j.can_control && j.info.desktop == Desktop::Control {
-                    "in control"
-                } else if j.can_type {
-                    "typing"
-                } else {
-                    "watching"
-                };
-                // Row chrome: margins, padding, tile, gap.
-                let text_w = (self.row_width() - 20. - 16. - 30. - 10.).max(40.);
+        let header = div()
+            .flex()
+            .flex_wrap()
+            .items_start()
+            .justify_between()
+            .gap(px(12.))
+            .child(
                 div()
-                    .id(SharedString::from(format!("side-j-{}", j.id)))
                     .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .h(px(44.))
-                    .mx(px(10.))
-                    .px(px(8.))
-                    .rounded(px(9.))
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(theme.element_selected))
-                    .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-                    // The tile, with an eye in its corner while it's live.
-                    .child(
-                        div().relative().flex_none().child(tile).child(
-                            div()
-                                .absolute()
-                                .right(px(-4.))
-                                .bottom(px(-4.))
-                                .size(px(15.))
-                                .rounded_full()
-                                .bg(theme.sidebar)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(icon(if j.ended.is_some() { "x" } else { "eye" }, 10., if j.ended.is_some() { theme.text_placeholder } else { theme.text_accent })),
-                        ),
-                    )
+                    .items_start()
+                    .gap(px(12.))
+                    .child(kit::color_tile("monitor", 40.))
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .overflow_hidden()
-                            .gap(px(1.))
-                            .child(div().w(px(text_w)).truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child(title))
-                            .child(div().w(px(text_w)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("from {} · {doing}", j.info.by))),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Shared(id.clone()), window, cx)))
+                            .gap(px(4.))
+                            .child(div().flex().items_center().gap(px(10.)).child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(j.info.title.clone())).child(kit::pill("Shared with you", theme.accent)))
+                            .child(div().text_size(px(12.)).text_color(theme.text_muted).child(format!("Shared by {} · ends in {}", j.info.by, time_left(j.info.ends_at)))),
+                    ),
+            )
+            .child(div().flex().gap(px(6.)).children(buttons));
+
+        // What you can do here, as the sharer set it.
+        let can = |glyph: &'static str, text: String| div().flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text).child(icon(glyph, 14., theme.text_muted)).child(text);
+        let mut allowed = div().flex().flex_col().gap(px(8.)).p(px(14.));
+        allowed = allowed.child(can(if j.can_type { "keyboard" } else { "eye" }, if j.can_type { "Watch and type in its sessions".into() } else { format!("Watch its sessions (only {} types)", j.info.by) }));
+        if j.can_manage {
+            allowed = allowed.child(can("square-terminal", "Start, end and restart its sessions".into()));
+        }
+        match j.info.desktop {
+            Desktop::None => {}
+            Desktop::View => allowed = allowed.child(can("monitor", "Watch its screen".into())),
+            Desktop::Control if j.can_control => allowed = allowed.child(can("monitor", "Watch and use its screen".into())),
+            Desktop::Control => allowed = allowed.child(can("monitor", format!("Watch its screen, and use it when {} lets you", j.info.by))),
+        }
+        if !j.info.ports.is_empty() {
+            let n = j.info.ports.len();
+            allowed = allowed.child(can("network", format!("Open {n} of its servers here")));
+        }
+
+        // Its sessions, like a machine's.
+        let sessions: Vec<AnyElement> = j
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(i, x)| {
+                let (icon_name, (from, to)) = kit::agent_look(&x.agent);
+                let title = if x.title.is_empty() { agent_name(&x.agent).to_string() } else { x.title.clone() };
+                let state = if x.status == "exited" {
+                    div().text_size(px(12.)).text_color(theme.text_placeholder).child("Exited").into_any_element()
+                } else if x.busy {
+                    div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_accent).child(kit::spinner(("jm-spin", i), 12., theme.accent)).child("Working").into_any_element()
+                } else {
+                    div().text_size(px(12.)).text_color(theme.text_placeholder).child(if x.agent == "shell" { "Idle" } else { "Waiting for you" }).into_any_element()
+                };
+                let (sid, name) = (sid.clone(), x.name.clone());
+                div()
+                    .id(("jm-session", i))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(14.))
+                    .py(px(10.))
+                    .when(i > 0, |d| d.border_t_1().border_color(theme.border_variant))
+                    .cursor_pointer()
+                    .hover(|st| st.bg(theme.ghost_hover))
+                    .child(kit::tile(icon_name, from, to, 26.))
+                    .child(div().flex().flex_col().flex_1().min_w(px(0.)).gap(px(1.)).child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child(title)).child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(agent_name(&x.agent))))
+                    .child(state)
+                    .on_click(cx.listener(move |this, _, window, cx| this.show_shared(&sid, Showing::Session(name.clone()), window, cx)))
                     .into_any_element()
             })
-            .collect()
+            .collect();
+        let sessions = if sessions.is_empty() {
+            card(&theme).p(px(16.)).flex_row().items_center().gap(px(12.)).child(kit::color_tile("square-terminal", 28.)).child(div().text_size(px(12.5)).text_color(theme.text_muted).child(format!("No sessions are running on {} right now. New ones show up here.", j.info.title))).into_any_element()
+        } else {
+            card(&theme).children(sessions).into_any_element()
+        };
+
+        // Its servers, to open here.
+        let servers: Vec<AnyElement> = j
+            .info
+            .ports
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let state = match j.servers.get(&p.port) {
+                    Some(Ok(local)) => format!("Open here at localhost:{local}"),
+                    Some(Err(e)) => e.clone(),
+                    None => format!("Port {} on {}", p.port, j.info.title),
+                };
+                let (sid, port) = (sid.clone(), p.port);
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(14.))
+                    .py(px(10.))
+                    .when(i > 0, |d| d.border_t_1().border_color(theme.border_variant))
+                    .child(kit::color_tile("network", 26.))
+                    .child(div().flex().flex_col().flex_1().min_w(px(0.)).gap(px(1.)).child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(if p.name.is_empty() { format!("Port {}", p.port) } else { p.name.clone() })).child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(state)))
+                    .child(Button::new(("jm-open", i), "Open").icon("external-link").on_click(cx.listener(move |this, _, _, cx| this.open_shared_server(&sid, port, cx))))
+                    .into_any_element()
+            })
+            .collect();
+
+        super::overview::page("shared-page", &self.page_scroll)
+            .child(header)
+            .child(div().flex().flex_col().gap(px(10.)).child(section_title(&theme, "What you can do", None)).child(card(&theme).child(allowed)))
+            .child(div().flex().flex_col().gap(px(10.)).child(section_title(&theme, "Agent sessions", Some(j.sessions.len()))).child(sessions))
+            .when(!servers.is_empty(), |d| d.child(div().flex().flex_col().gap(px(10.)).child(section_title(&theme, "Servers", Some(servers.len()))).child(card(&theme).children(servers))))
+            .into_any_element()
     }
+
+    /// The sidebar's "Shared with you": each share like one of your machines
+    /// (or sessions), a shared machine's sessions, desktop and servers under it.
+    pub(super) fn joined_rows(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut rows = Vec::new();
+        for j in &self.joined {
+            let here = self.route == Route::Shared(j.id.clone());
+            let key = format!("shared:{}", j.id);
+            let open = !self.collapsed.contains(&key);
+            rows.push(self.joined_row(theme, j, here && (j.showing == Showing::Machine || !j.info.whole_machine), open, cx));
+            if !j.info.whole_machine || !open || j.ended.is_some() {
+                continue;
+            }
+            for s in &j.sessions {
+                let selected = here && j.showing == Showing::Session(s.name.clone());
+                let (icon_name, (from, to)) = kit::agent_look(&s.agent);
+                let title = if s.title.is_empty() { agent_name(&s.agent).to_string() } else { s.title.clone() };
+                let exited = s.status == "exited";
+                let (sid, name) = (j.id.clone(), s.name.clone());
+                let (msid, mname) = (j.id.clone(), s.name.clone());
+                rows.push(
+                    nested_row(theme, SharedString::from(format!("side-js-{}-{}", j.id, s.name)), selected)
+                        .child(kit::tile(icon_name, from, to, 16.))
+                        .child(div().w(px((self.row_width() - 110.).max(40.))).truncate().text_size(px(12.5)).text_color(if exited { theme.text_placeholder } else if selected { theme.text } else { theme.text_muted }).child(title))
+                        .child(div().flex_1())
+                        .when(s.busy && !exited, |d| d.child(kit::spinner(SharedString::from(format!("side-js-spin-{}-{}", j.id, s.name)), 11., theme.accent)))
+                        .when(exited, |d| d.child(div().text_size(px(11.)).text_color(theme.text_placeholder).child("exited")))
+                        .on_mouse_down(gpui::MouseButton::Right, super::menu::on_right_click(move || super::menu::MenuTarget::JoinedSession(msid.clone(), mname.clone()), cx))
+                        .on_click(cx.listener(move |this, _, window, cx| this.show_shared(&sid, Showing::Session(name.clone()), window, cx)))
+                        .into_any_element(),
+                );
+            }
+            if j.info.desktop != Desktop::None {
+                let selected = here && j.showing == Showing::Desktop;
+                let (sid, msid) = (j.id.clone(), j.id.clone());
+                rows.push(
+                    nested_row(theme, SharedString::from(format!("side-jd-{}", j.id)), selected)
+                        .child(kit::color_tile("monitor", 16.))
+                        .child(div().flex_1().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child("Desktop"))
+                        .child(div().text_size(px(10.5)).text_color(theme.text_placeholder).child(if j.can_control { "control" } else { "view" }))
+                        .on_mouse_down(gpui::MouseButton::Right, super::menu::on_right_click(move || super::menu::MenuTarget::JoinedDesktop(msid.clone()), cx))
+                        .on_click(cx.listener(move |this, _, window, cx| this.show_shared(&sid, Showing::Desktop, window, cx)))
+                        .into_any_element(),
+                );
+            }
+            for p in &j.info.ports {
+                let (sid, port) = (j.id.clone(), p.port);
+                let local = j.servers.get(&p.port).and_then(|r| r.as_ref().ok()).copied();
+                rows.push(
+                    nested_row(theme, SharedString::from(format!("side-jp-{}-{}", j.id, p.port)), false)
+                        .child(icon("network", 14., theme.text_muted))
+                        .child(div().w(px((self.row_width() - 130.).max(40.))).truncate().text_size(px(12.5)).text_color(theme.text_muted).child(if p.name.is_empty() { format!("Port {}", p.port) } else { p.name.clone() }))
+                        .child(div().flex_1())
+                        .child(div().font_family(mono_font()).text_size(px(10.5)).text_color(theme.text_placeholder).child(match local {
+                            Some(l) => format!(":{l}"),
+                            None => format!(":{}", p.port),
+                        }))
+                        .tooltip(|window, cx| kit::Tooltip::view("Open it here, in your browser".into(), window, cx))
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_shared_server(&sid, port, cx)))
+                        .into_any_element(),
+                );
+            }
+        }
+        rows
+    }
+
+    /// A share in the sidebar, shaped like a machine row: its tile with an eye
+    /// in the corner, who shared it and what you can do; a machine's opens and
+    /// closes what's under it.
+    fn joined_row(&self, theme: &Theme, j: &JoinedShare, selected: bool, open: bool, cx: &mut Context<Self>) -> AnyElement {
+        let id = j.id.clone();
+        let (tile, title) = if j.info.whole_machine {
+            (kit::color_tile("monitor", 30.), j.info.title.clone())
+        } else {
+            let (icon_name, (from, to)) = kit::agent_look(&j.info.agent);
+            (kit::tile(icon_name, from, to, 30.), if j.info.title.is_empty() { agent_name(&j.info.agent).to_string() } else { j.info.title.clone() })
+        };
+        let doing = if j.ended.is_some() {
+            "ended"
+        } else if j.can_control && j.info.desktop == Desktop::Control {
+            "in control"
+        } else if j.can_type {
+            "typing"
+        } else {
+            "watching"
+        };
+        let toggle = j.info.whole_machine && j.ended.is_none();
+        // Row chrome: margins, padding, tile, gap, and the toggle.
+        let text_w = (self.row_width() - 20. - 16. - 30. - 10. - if toggle { 32. } else { 0. }).max(40.);
+        let (menu_id, key) = (j.id.clone(), format!("shared:{}", j.id));
+        div()
+            .id(SharedString::from(format!("side-j-{}", j.id)))
+            .group("joined-row")
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .h(px(44.))
+            .mx(px(10.))
+            .px(px(8.))
+            .rounded(px(9.))
+            .cursor_pointer()
+            .when(selected, |d| d.bg(theme.element_selected))
+            .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+            .child(
+                div().relative().flex_none().child(tile).child(
+                    div()
+                        .absolute()
+                        .right(px(-4.))
+                        .bottom(px(-4.))
+                        .size(px(15.))
+                        .rounded_full()
+                        .bg(theme.sidebar)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon(if j.ended.is_some() { "x" } else { "eye" }, 10., if j.ended.is_some() { theme.text_placeholder } else { theme.text_accent })),
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .gap(px(1.))
+                    .child(div().w(px(text_w)).truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child(title))
+                    .child(div().w(px(text_w)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("from {} · {doing}", j.info.by))),
+            )
+            .when(toggle, |d| {
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("side-j-toggle-{}", j.id)))
+                        .flex_none()
+                        .p(px(3.))
+                        .rounded(px(5.))
+                        .invisible()
+                        .group_hover("joined-row", |st| st.visible())
+                        .hover(|st| st.bg(theme.ghost_hover))
+                        .child(icon(if open { "chevron-down" } else { "chevron-right" }, 13., theme.text_placeholder))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if !this.collapsed.remove(&key) {
+                                this.collapsed.insert(key.clone());
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            .on_mouse_down(gpui::MouseButton::Right, super::menu::on_right_click(move || super::menu::MenuTarget::Joined(menu_id.clone()), cx))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let showing = match this.joined.iter().find(|j| j.id == id) {
+                    Some(j) if j.info.whole_machine => Showing::Machine,
+                    _ => Showing::Session(String::new()),
+                };
+                this.show_shared(&id, showing, window, cx)
+            }))
+            .into_any_element()
+    }
+
+    /// A share's right-click menu: like your own machine's and sessions',
+    /// with what this guest isn't let do dimmed.
+    pub(super) fn joined_menu(&self, target: &super::menu::MenuTarget, cx: &App) -> Vec<JoinedItem> {
+        use super::menu::MenuTarget;
+        let id = match target {
+            MenuTarget::Joined(id) | MenuTarget::JoinedSession(id, _) | MenuTarget::JoinedDesktop(id) => id,
+            _ => return Vec::new(),
+        };
+        let Some(j) = self.joined.iter().find(|j| &j.id == id) else { return Vec::new() };
+        let live = j.ended.is_none();
+        let item = |label: String, glyph: &'static str, action: JoinedAction| JoinedItem::Do { label, glyph, action, danger: false, picked: false };
+        // Starting and ending sessions: dimmed unless let.
+        let managed = |label: String, glyph: &'static str, action: JoinedAction| if j.can_manage && live { item(label, glyph, action) } else { JoinedItem::Off { label, glyph } };
+        let mut items = Vec::new();
+        match target {
+            MenuTarget::JoinedSession(_, name) => {
+                let exited = j.sessions.iter().any(|s| &s.name == name && s.status == "exited");
+                items.push(item("Open".into(), "square-terminal", JoinedAction::Show(Showing::Session(name.clone()))));
+                items.push(JoinedItem::Separator);
+                if exited {
+                    items.push(managed("Restart".into(), "rotate-ccw", JoinedAction::Restart(name.clone())));
+                }
+                items.push(managed("End session".into(), "power", JoinedAction::End(name.clone())));
+            }
+            MenuTarget::JoinedDesktop(_) => {
+                items.push(item("Open".into(), "monitor", JoinedAction::Show(Showing::Desktop)));
+                items.push(JoinedItem::Separator);
+                items.push(JoinedItem::Note("Quality".into()));
+                let current = j.desktop.as_ref().map_or("medium", |d| d.read(cx).quality());
+                for q in host::QUALITIES {
+                    items.push(JoinedItem::Do { label: quality_label(q).into(), glyph: "", action: JoinedAction::Quality(q), danger: false, picked: q == current });
+                }
+            }
+            _ if j.info.whole_machine => {
+                items.push(managed("New terminal".into(), "square-terminal", JoinedAction::Start("shell")));
+                for a in crate::fleet::sessions::AGENTS.iter().filter(|a| a.id != "shell" && j.info.agents.iter().any(|i| i == a.id)) {
+                    items.push(match managed(format!("New {} session", a.name), "", JoinedAction::Start(a.id)) {
+                        JoinedItem::Do { label, action, .. } => JoinedItem::Agent { label, agent: a.id, action: Some(action) },
+                        _ => JoinedItem::Agent { label: format!("New {} session", a.name), agent: a.id, action: None },
+                    });
+                }
+                if j.info.desktop != Desktop::None {
+                    items.push(item("Show desktop".into(), "monitor", JoinedAction::Show(Showing::Desktop)));
+                }
+                for p in &j.info.ports {
+                    let name = if p.name.is_empty() { format!("port {}", p.port) } else { p.name.clone() };
+                    items.push(item(format!("Open {name} here"), "external-link", JoinedAction::Server(p.port)));
+                }
+                items.push(JoinedItem::Separator);
+                items.push(item("Open".into(), "monitor", JoinedAction::Show(Showing::Machine)));
+                items.push(item("Refresh".into(), "refresh-cw", JoinedAction::Refresh));
+                if live && !j.can_manage {
+                    items.push(JoinedItem::Note(format!("Ask {} to let you start sessions.", j.info.by)));
+                }
+            }
+            _ => items.push(item("Open".into(), "square-terminal", JoinedAction::Show(Showing::Session(String::new())))),
+        }
+        items.push(JoinedItem::Separator);
+        items.push(JoinedItem::Do { label: if live { "Leave share".into() } else { "Close".into() }, glyph: "x", action: JoinedAction::Leave, danger: true, picked: false });
+        items
+    }
+
+    /// Asks the sharing computer to start, end or restart a session; a
+    /// session started opens.
+    fn shared_call(&mut self, id: &str, req: serde_json::Value, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(joined) = self.joined.iter().find(|j| j.id == id).map(|j| j.joined.clone()) else { return };
+        let job = self.engine.runtime().spawn(async move { joined.call(req).await });
+        let sid = id.to_string();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(name) if open => this.show_shared(&sid, Showing::Session(name), window, cx),
+                Ok(_) => {
+                    if let Some(j) = this.joined.iter().find(|j| j.id == sid) {
+                        j.joined.refresh_sessions();
+                    }
+                }
+                Err(e) => this.notify_user(e, true, cx),
+            });
+        });
+        self.track(task);
+    }
+
+    /// Runs one of a share's menu items.
+    pub(super) fn run_joined(&mut self, id: &str, action: JoinedAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            JoinedAction::Show(showing) => self.show_shared(id, showing, window, cx),
+            JoinedAction::Quality(q) => {
+                self.show_shared(id, Showing::Desktop, window, cx);
+                self.set_shared_quality(id, q, window, cx);
+            }
+            JoinedAction::Server(port) => self.open_shared_server(id, port, cx),
+            JoinedAction::Start(agent) => self.shared_call(id, json!({ "op": "start", "agent": agent }), true, window, cx),
+            JoinedAction::End(name) => {
+                // Not showing a session that's gone.
+                if let Some(j) = self.joined_mut(id)
+                    && j.showing == Showing::Session(name.clone())
+                {
+                    j.showing = Showing::Machine;
+                }
+                self.shared_call(id, json!({ "op": "end", "session": name }), false, window, cx)
+            }
+            JoinedAction::Restart(name) => self.shared_call(id, json!({ "op": "restart", "session": name }), true, window, cx),
+            JoinedAction::Refresh => {
+                if let Some(j) = self.joined.iter().find(|j| j.id == id) {
+                    j.joined.refresh_sessions();
+                }
+            }
+            JoinedAction::Leave => self.leave_joined(id, window, cx),
+        }
+    }
+}
+
+/// A line of a share's right-click menu.
+pub enum JoinedItem {
+    Do { label: String, glyph: &'static str, action: JoinedAction, danger: bool, picked: bool },
+    /// Starting one of the machine's agent CLIs (dimmed without an action).
+    Agent { label: String, agent: &'static str, action: Option<JoinedAction> },
+    /// Not let: shown dimmed.
+    Off { label: String, glyph: &'static str },
+    Note(String),
+    Separator,
+}
+
+/// What a share's menu item does.
+#[derive(Clone, Debug)]
+pub enum JoinedAction {
+    Show(Showing),
+    Quality(&'static str),
+    Server(u16),
+    /// Start a session with this agent CLI ("shell" for a terminal).
+    Start(&'static str),
+    End(String),
+    Restart(String),
+    Refresh,
+    Leave,
+}
+
+/// "Low", "Medium", "High", "Max".
+fn quality_label(q: &str) -> &'static str {
+    match q {
+        "low" => "Low",
+        "high" => "High",
+        "max" => "Max",
+        _ => "Medium",
+    }
+}
+
+/// A row under a share in the sidebar, like a machine's sessions.
+fn nested_row(theme: &Theme, id: SharedString, selected: bool) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .h(px(26.))
+        .mx(px(10.))
+        .pl(px(22.))
+        .pr(px(8.))
+        .rounded(px(7.))
+        .cursor_pointer()
+        .when(selected, |d| d.bg(theme.element_selected))
+        .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
 }

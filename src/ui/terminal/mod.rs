@@ -328,17 +328,6 @@ impl TerminalView {
         view
     }
 
-    /// The size it's drawn at when set from elsewhere.
-    pub fn fixed_size(&self) -> Option<(usize, usize)> {
-        *self.shared.fixed.lock().unwrap()
-    }
-
-    /// Pixels a grid of `cols`×`rows` takes, padding included.
-    pub fn pixel_size(cols: usize, rows: usize, window: &Window, cx: &App) -> (f32, f32) {
-        let (w, h) = render::cell_size(window, Metrics::current(cx));
-        (cols as f32 * w + 2. * PAD_X, rows as f32 * h + 2. * PAD_Y)
-    }
-
     /// A terminal showing fixed output (the demo), with no program behind it.
     pub fn replay(bytes: &[u8], window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (term, _listener, rx) = new_term(110, 34);

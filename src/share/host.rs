@@ -100,6 +100,9 @@ pub struct Options {
     pub approve: bool,
     /// Guests may type in sessions.
     pub can_type: bool,
+    /// Guests may start, end and restart a machine's sessions (only people
+    /// let in, who may type): anything runs there, as the sharer.
+    pub manage: bool,
     /// A machine's desktop.
     pub desktop: Desktop,
     /// A machine's servers.
@@ -111,6 +114,16 @@ pub struct Options {
 #[async_trait::async_trait]
 pub trait Source: Send + Sync + 'static {
     async fn link(&self) -> Result<Arc<Link>, String>;
+
+    /// Starts a session there, with `agent` ("shell", "claude", ...) in its
+    /// home folder: its name.
+    async fn start(&self, agent: &str) -> Result<String, String>;
+
+    /// Ends a session there (`restart`: starts its program again).
+    async fn stop(&self, name: &str, restart: bool) -> Result<(), String>;
+
+    /// The agent CLIs there ("claude", "codex", ...).
+    fn agents(&self) -> Vec<String>;
 }
 
 /// The machine through Muxin's engine: its agent up to date, then its link.
@@ -125,6 +138,22 @@ impl Source for EngineSource {
         let (spec, probe) = self.engine.machine(&self.machine_id).ok_or("That machine is gone.")?;
         crate::fleet::sessions::agent::ensure(&spec, probe.as_ref()).await?;
         crate::fleet::link::get(&spec).await.ok_or_else(|| format!("Can't reach {} right now.", spec.name))
+    }
+
+    async fn start(&self, agent: &str) -> Result<String, String> {
+        let req = crate::fleet::sessions::StartSession { machine_id: self.machine_id.clone(), agent: agent.into(), cwd: "~".into(), cols: 120, rows: 36, ..Default::default() };
+        let info = self.engine.start_session(req).await?;
+        Ok(info.id.split_once('/').map(|(_, n)| n.to_string()).unwrap_or(info.id))
+    }
+
+    async fn stop(&self, name: &str, restart: bool) -> Result<(), String> {
+        use crate::fleet::sessions::Control;
+        let id = format!("{}/{name}", self.machine_id);
+        self.engine.control_session(&id, if restart { Control::Restart } else { Control::Stop }).await.map(|_| ())
+    }
+
+    fn agents(&self) -> Vec<String> {
+        self.engine.current().machines.iter().find(|m| m.id == self.machine_id).map(|m| m.agents.clone()).unwrap_or_default()
     }
 }
 
@@ -141,6 +170,8 @@ pub struct GuestView {
     pub can_type: bool,
     /// Uses the desktop's mouse and keyboard.
     pub can_control: bool,
+    /// Starts and ends sessions.
+    pub can_manage: bool,
     /// "direct" or "relay", once known.
     pub path: String,
 }
@@ -153,6 +184,7 @@ pub struct ShareView {
     pub target: Target,
     pub approve: bool,
     pub can_type: bool,
+    pub manage: bool,
     pub desktop: Desktop,
     pub ports: Vec<Port>,
     /// Unix seconds.
@@ -173,6 +205,7 @@ struct Guest {
 struct Control {
     can_type: bool,
     can_control: bool,
+    can_manage: bool,
     /// Why the guest is being let go.
     end: Option<&'static str>,
 }
@@ -214,6 +247,7 @@ impl Share {
             target: self.target.clone(),
             approve: o.approve,
             can_type: o.can_type,
+            manage: o.manage,
             desktop: o.desktop,
             ports: o.ports,
             ends_at: unix(*self.ends_at.lock().unwrap()),
@@ -260,6 +294,9 @@ impl Share {
             "can_type": control.can_type,
             "desktop": o.desktop,
             "can_control": control.can_control,
+            "can_manage": control.can_manage,
+            // What can be started there (with `can_manage`).
+            "agents": if self.target.is_machine() { self.source.agents() } else { Vec::new() },
             // A Mac's ⌘ stays ⌘ on its desktop.
             "mac": self.target.platform.starts_with("darwin"),
             "ports": o.ports,
@@ -320,8 +357,10 @@ pub async fn start(server: &str, target: Target, options: Options, source: Arc<d
     // The first check-in: the server answers, and keeps the room for us.
     server.check_in(&ticket.room(), &key).await.map_err(|e| e.to_string())?;
     let ttl = options.ttl.min(MAX_TTL);
-    // Only a machine has a desktop and servers to share.
-    let options = if target.is_machine() { Options { ttl, ..options } } else { Options { ttl, desktop: Desktop::None, ports: Vec::new(), ..options } };
+    // Only a machine has a desktop, servers and sessions to start; starting
+    // them is for people let in, who may type.
+    let manage = options.manage && options.approve && options.can_type && target.is_machine();
+    let options = if target.is_machine() { Options { ttl, manage, ..options } } else { Options { ttl, manage, desktop: Desktop::None, ports: Vec::new(), ..options } };
     let share = Arc::new(Share {
         ticket,
         server,
@@ -380,10 +419,49 @@ pub fn remove(share: &str, guest_id: u64) {
 /// Lets a guest type, or not (right away).
 pub fn set_typing(share: &str, guest_id: u64, allowed: bool) {
     if let Some(g) = guest(share, guest_id) {
-        g.control.send_modify(|c| c.can_type = allowed);
-        g.view.lock().unwrap().can_type = allowed;
+        // No typing, no starting sessions either.
+        g.control.send_modify(|c| {
+            c.can_type = allowed;
+            c.can_manage &= allowed;
+        });
+        let mut v = g.view.lock().unwrap();
+        v.can_type = allowed;
+        v.can_manage &= allowed;
+        drop(v);
         changed();
     }
+}
+
+/// Lets a guest start, end and restart sessions, or not (one who may type,
+/// on a machine share).
+pub fn set_managing(share: &str, guest_id: u64, allowed: bool) {
+    let Some(s) = find(share) else { return };
+    if let Some(g) = guest(share, guest_id) {
+        let allowed = allowed && s.target.is_machine() && g.view.lock().unwrap().can_type;
+        g.control.send_modify(|c| c.can_manage = allowed);
+        g.view.lock().unwrap().can_manage = allowed;
+        changed();
+    }
+}
+
+/// Whether guests let in can start, end and restart sessions (those who may
+/// type), for a machine share already going.
+pub fn set_manage(id: &str, manage: bool) {
+    let Some(s) = find(id) else { return };
+    let manage = {
+        let mut o = s.options.lock().unwrap();
+        o.manage = manage && o.approve && o.can_type && s.target.is_machine();
+        o.manage
+    };
+    for g in s.guests.lock().unwrap().values() {
+        let mut v = g.view.lock().unwrap();
+        if v.state == "in" {
+            let allowed = manage && v.can_type;
+            v.can_manage = allowed;
+            g.control.send_modify(|c| c.can_manage = allowed);
+        }
+    }
+    changed();
 }
 
 /// Lets a guest use the desktop's mouse and keyboard, or not (only while
@@ -404,11 +482,13 @@ pub fn set_control(share: &str, guest_id: u64, allowed: bool) {
 pub fn set_options(id: &str, approve: bool, can_type: bool) {
     let Some(s) = find(id) else { return };
     let can_type = can_type && approve;
-    {
+    let manage = {
         let mut o = s.options.lock().unwrap();
         o.approve = approve;
         o.can_type = can_type;
-    }
+        o.manage &= can_type;
+        o.manage
+    };
     for g in s.guests.lock().unwrap().values() {
         let waiting = g.view.lock().unwrap().state == "waiting";
         if waiting {
@@ -417,8 +497,13 @@ pub fn set_options(id: &str, approve: bool, can_type: bool) {
             }
             continue;
         }
-        g.control.send_modify(|c| c.can_type = can_type);
-        g.view.lock().unwrap().can_type = can_type;
+        g.control.send_modify(|c| {
+            c.can_type = can_type;
+            c.can_manage = manage;
+        });
+        let mut v = g.view.lock().unwrap();
+        v.can_type = can_type;
+        v.can_manage = manage;
     }
     changed();
 }
@@ -591,6 +676,7 @@ async fn run_guest(share: &Arc<Share>, pc: &Arc<dyn PeerConnection>, dc: Arc<dyn
     let client = if hello["client"] == "browser" { "browser" } else { "app" };
     // Only someone the user let in types, or controls the desktop.
     let can_control = options.desktop == Desktop::Control && options.approve;
+    let can_manage = options.manage;
     let view = GuestView {
         id,
         name: clean_name(hello["name"].as_str().unwrap_or("")),
@@ -599,13 +685,14 @@ async fn run_guest(share: &Arc<Share>, pc: &Arc<dyn PeerConnection>, dc: Arc<dyn
         state: if options.approve { "waiting" } else { "in" }.into(),
         can_type: options.can_type,
         can_control,
+        can_manage,
         path: String::new(),
     };
     let (decide_tx, decide_rx) = oneshot::channel();
     let guest = Arc::new(Guest {
         view: Mutex::new(view),
         decide: Mutex::new(options.approve.then_some(decide_tx)),
-        control: watch::channel(Control { can_type: options.can_type, can_control, end: None }).0,
+        control: watch::channel(Control { can_type: options.can_type, can_control, can_manage, end: None }).0,
     });
     share.guests.lock().unwrap().insert(id, guest.clone());
     changed();
@@ -661,7 +748,7 @@ async fn admitted(
         changed();
     }
     let now = *control.borrow();
-    rtc::send(dc, rtc::json_frame(&json!({ "event": "admitted", "can_type": now.can_type, "can_control": now.can_control }))).await.map_err(|_| "gone")?;
+    rtc::send(dc, rtc::json_frame(&json!({ "event": "admitted", "can_type": now.can_type, "can_control": now.can_control, "can_manage": now.can_manage }))).await.map_err(|_| "gone")?;
 
     let mut open = Open { share: share.clone(), dc: dc.clone(), channels: HashMap::new(), ended: mpsc::unbounded_channel(), generation: 0 };
     let mut access = share.access.subscribe();
@@ -681,6 +768,13 @@ async fn admitted(
                         }
                         if req["op"] == "sessions" {
                             sessions_sent = Value::Null;
+                            sessions_tick.reset_immediately();
+                            continue;
+                        }
+                        if matches!(req["op"].as_str(), Some("start" | "end" | "restart")) {
+                            // Its answer, and the sessions as they are now.
+                            let reply = manage(share, &req, &c).await;
+                            let _ = rtc::send(dc, rtc::json_frame(&reply)).await;
                             sessions_tick.reset_immediately();
                             continue;
                         }
@@ -734,6 +828,9 @@ async fn admitted(
                 if c.can_control != last.can_control {
                     let _ = rtc::send(dc, rtc::json_frame(&json!({ "event": "control", "allowed": c.can_control }))).await;
                 }
+                if c.can_manage != last.can_manage {
+                    let _ = rtc::send(dc, rtc::json_frame(&json!({ "event": "manage", "allowed": c.can_manage }))).await;
+                }
                 last = c;
             }
             e = events.recv() => if gone(e) { break Ok(()) },
@@ -741,6 +838,37 @@ async fn admitted(
     };
     open.close_all();
     result
+}
+
+/// A guest starting, ending or restarting a session: `{"op", "req", "agent"
+/// | "session"}`, answered `{"event": "done", "req", "session"}` or
+/// `{"event": "failed", "req", "error"}`. Only on a machine share, for a
+/// guest let do it; only sessions that are there, agents installed there.
+async fn manage(share: &Arc<Share>, req: &Value, c: &Control) -> Value {
+    let id = req["req"].as_u64().unwrap_or(0);
+    let done = async {
+        if !share.target.is_machine() || !c.can_manage {
+            return Err(format!("Ask {} to let you start and end sessions.", share.target.by));
+        }
+        let op = req["op"].as_str().unwrap_or("");
+        if op == "start" {
+            let agent = req["agent"].as_str().unwrap_or("shell");
+            if agent != "shell" && !share.source.agents().iter().any(|a| a == agent) {
+                return Err(format!("{agent} isn't installed on {}.", share.target.machine_name));
+            }
+            return share.source.start(agent).await;
+        }
+        let name = req["session"].as_str().unwrap_or("").to_string();
+        let list = sessions(share).await?;
+        if name.is_empty() || !list.as_array().into_iter().flatten().any(|s| s["name"] == name) {
+            return Err("That session isn't there anymore.".into());
+        }
+        share.source.stop(&name, op == "restart").await.map(|()| name)
+    };
+    match done.await {
+        Ok(session) => json!({ "event": "done", "req": id, "session": session }),
+        Err(e) => json!({ "event": "failed", "req": id, "error": e }),
+    }
 }
 
 /// The peer connection failed or closed.

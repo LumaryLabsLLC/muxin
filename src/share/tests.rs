@@ -26,6 +26,28 @@ impl Source for Local {
     async fn link(&self) -> Result<Arc<Link>, String> {
         link::get(&self.0).await.ok_or_else(|| "no link".to_string())
     }
+
+    async fn start(&self, agent: &str) -> Result<String, String> {
+        let l = self.link().await?;
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0) % 100_000;
+        let name = format!("{agent}-{n}");
+        let home = std::env::var("HOME").unwrap_or_default();
+        let r = l.request(json!({ "op": "start", "name": name, "agent": agent, "title": "Started by a guest", "cwd": home, "cols": 100, "rows": 30 }), Duration::from_secs(15)).await?;
+        if r["ok"] != true {
+            return Err(r["error"].as_str().unwrap_or("didn't start").to_string());
+        }
+        Ok(name)
+    }
+
+    async fn stop(&self, name: &str, restart: bool) -> Result<(), String> {
+        let l = self.link().await?;
+        let r = l.request(json!({ "op": if restart { "restart" } else { "stop" }, "name": name }), Duration::from_secs(15)).await?;
+        if r["ok"] == true { Ok(()) } else { Err(r["error"].as_str().unwrap_or("didn't stop").to_string()) }
+    }
+
+    fn agents(&self) -> Vec<String> {
+        vec!["shell".into()]
+    }
 }
 
 /// Waits for an update that `want` accepts, skipping others.
@@ -91,7 +113,7 @@ fn target(session: &str, title: &str, agent: &str, machine_name: &str) -> Target
 }
 
 fn options(approve: bool, desktop: Desktop, ports: Vec<Port>, ttl: u64) -> Options {
-    Options { approve, can_type: false, desktop, ports, ttl: Duration::from_secs(ttl) }
+    Options { approve, can_type: false, manage: false, desktop, ports, ttl: Duration::from_secs(ttl) }
 }
 
 async fn screen(l: &Link, name: &str) -> String {
@@ -144,7 +166,7 @@ async fn a_guest_watches_then_types_when_let() {
     let sam = waiting.guests.iter().find(|g| g.name == "Sam").expect("Sam knocks");
     assert_eq!((sam.code.as_str(), sam.state.as_str(), sam.client.as_str()), (code.as_str(), "waiting", "app"));
     host::admit(&share.id, sam.id, true);
-    next(&mut rx, "admitted", |u| matches!(u, Update::Admitted { can_type: false, can_control: false })).await;
+    next(&mut rx, "admitted", |u| matches!(u, Update::Admitted { can_type: false, can_control: false, can_manage: false })).await;
     // The shared session, whatever name is asked for.
     let (channel, reply, mut frames) = joined.open(json!({ "op": "watch", "session": "other" })).await.expect("watch");
     assert_eq!(reply["session"], "shared");
@@ -283,6 +305,19 @@ async fn a_guest_uses_a_shared_machine() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     joined.send_keys(api, b"echo SAM_TYPED\r");
     assert!(output_until(&mut api_frames, "SAM_TYPED", Duration::from_secs(10)).await.1);
+
+    // Starting and ending sessions: not until let.
+    let refused = joined.call(json!({ "op": "start", "agent": "shell" })).await.err().expect("not let yet");
+    assert!(refused.contains("Ask"), "{refused}");
+    host::set_managing(&share.id, sam.id, true);
+    next(&mut rx, "starting sessions allowed", |u| matches!(u, Update::Manage(true))).await;
+    assert!(joined.can_manage());
+    let started = joined.call(json!({ "op": "start", "agent": "shell" })).await.expect("a terminal started");
+    next(&mut rx, "the session started", |u| names(u).contains(&started)).await;
+    assert!(joined.call(json!({ "op": "start", "agent": "claude" })).await.is_err(), "only agents installed there");
+    assert!(joined.call(json!({ "op": "end", "session": "made-up" })).await.is_err(), "only sessions that are there");
+    assert_eq!(joined.call(json!({ "op": "end", "session": started.clone() })).await.as_deref(), Ok(started.as_str()));
+    next(&mut rx, "the session gone", |u| matches!(u, Update::Sessions(_)) && !names(u).contains(&started)).await;
 
     // A session started later shows up.
     start_session(&l, &home, "later", "Later").await;

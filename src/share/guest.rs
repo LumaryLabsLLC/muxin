@@ -32,6 +32,10 @@ pub struct Info {
     pub can_type: bool,
     pub desktop: Desktop,
     pub can_control: bool,
+    /// May start, end and restart its sessions.
+    pub can_manage: bool,
+    /// The agent CLIs there, to start.
+    pub agents: Vec<String>,
     pub ports: Vec<Port>,
     /// The machine is a Mac (its desktop's ⌘ stays ⌘).
     pub mac: bool,
@@ -59,10 +63,12 @@ pub enum Update {
     Code(String),
     Info(Info),
     Waiting,
-    Admitted { can_type: bool, can_control: bool },
+    Admitted { can_type: bool, can_control: bool, can_manage: bool },
     Denied,
     Typing(bool),
     Control(bool),
+    /// Starting and ending sessions allowed, or not.
+    Manage(bool),
     /// The desktop or the servers shared changed.
     Access { desktop: Desktop, ports: Vec<Port> },
     /// A shared machine's sessions, when they change.
@@ -89,9 +95,12 @@ pub struct Joined {
     channels: Mutex<HashMap<u32, mpsc::UnboundedSender<(u8, Vec<u8>)>>>,
     /// Requests waiting for the host's answer, by channel.
     replies: Mutex<HashMap<u32, oneshot::Sender<Result<Value, String>>>>,
+    /// Calls (start, end, restart) waiting for theirs, by number.
+    calls: Mutex<HashMap<u64, oneshot::Sender<Result<String, String>>>>,
     next: AtomicU32,
     can_type: AtomicBool,
     can_control: AtomicBool,
+    can_manage: AtomicBool,
     forwards: Mutex<Vec<Forward>>,
     /// Where sending runs (keys can come from any thread, the window's included).
     runtime: tokio::runtime::Handle,
@@ -104,6 +113,34 @@ impl Joined {
 
     pub fn can_control(&self) -> bool {
         self.can_control.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub fn can_manage(&self) -> bool {
+        self.can_manage.load(Ordering::Relaxed)
+    }
+
+    /// Asks the host to start a session (`{"op": "start", "agent"}`), or end
+    /// or restart one (`{"op": "end" | "restart", "session"}`): the
+    /// session's name, or why not.
+    pub async fn call(&self, mut req: Value) -> Result<String, String> {
+        let id = self.next.fetch_add(1, Ordering::Relaxed) as u64;
+        let (tx, answer) = oneshot::channel();
+        self.calls.lock().unwrap().insert(id, tx);
+        req["req"] = json!(id);
+        let _ = self.out.send(rtc::json_frame(&req)).await;
+        let answer = tokio::time::timeout(Duration::from_secs(60), answer).await;
+        self.calls.lock().unwrap().remove(&id);
+        match answer {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err("The share ended.".into()),
+            Err(_) => Err("No answer from the computer sharing it.".into()),
+        }
+    }
+
+    /// A shared machine's sessions now (they also come when they change).
+    pub fn refresh_sessions(&self) {
+        let _ = self.out.try_send(rtc::json_frame(&json!({ "op": "sessions" })));
     }
 
     /// Asks for something on a channel of its own: `{"op": "watch",
@@ -306,9 +343,11 @@ pub async fn join(link: &str, name: &str) -> Result<(Arc<Joined>, mpsc::Unbounde
         pc: pc.clone(),
         channels: Mutex::new(HashMap::new()),
         replies: Mutex::new(HashMap::new()),
+        calls: Mutex::new(HashMap::new()),
         next: AtomicU32::new(1),
         can_type: AtomicBool::new(false),
         can_control: AtomicBool::new(false),
+        can_manage: AtomicBool::new(false),
         forwards: Mutex::new(Vec::new()),
         runtime: tokio::runtime::Handle::current(),
     });
@@ -318,6 +357,9 @@ pub async fn join(link: &str, name: &str) -> Result<(Arc<Joined>, mpsc::Unbounde
         // Everything open ends with it.
         j.channels.lock().unwrap().clear();
         for (_, r) in j.replies.lock().unwrap().drain() {
+            let _ = r.send(Err(why.clone()));
+        }
+        for (_, r) in j.calls.lock().unwrap().drain() {
             let _ = r.send(Err(why.clone()));
         }
         j.keep_forwards(&[]);
@@ -367,6 +409,8 @@ async fn relay(dc: &Arc<dyn DataChannel>, tx: &mpsc::UnboundedSender<Update>, jo
                     can_type: m["can_type"].as_bool().unwrap_or(false),
                     desktop: desktop(&m["desktop"]),
                     can_control: m["can_control"].as_bool().unwrap_or(false),
+                    can_manage: m["can_manage"].as_bool().unwrap_or(false),
+                    agents: m["agents"].as_array().into_iter().flatten().take(16).map(|a| text(a, 20)).filter(|a| !a.is_empty()).collect(),
                     ports: ports(&m["ports"]),
                     mac: m["mac"].as_bool().unwrap_or(false),
                     ends_at: m["ends_at"].as_i64().unwrap_or(0),
@@ -375,10 +419,25 @@ async fn relay(dc: &Arc<dyn DataChannel>, tx: &mpsc::UnboundedSender<Update>, jo
             }
             "waiting" => Update::Waiting,
             "admitted" => {
-                let (can_type, can_control) = (m["can_type"].as_bool().unwrap_or(false), m["can_control"].as_bool().unwrap_or(false));
+                let flag = |k: &str| m[k].as_bool().unwrap_or(false);
+                let (can_type, can_control, can_manage) = (flag("can_type"), flag("can_control"), flag("can_manage"));
                 joined.can_type.store(can_type, Ordering::Relaxed);
                 joined.can_control.store(can_control, Ordering::Relaxed);
-                Update::Admitted { can_type, can_control }
+                joined.can_manage.store(can_manage, Ordering::Relaxed);
+                Update::Admitted { can_type, can_control, can_manage }
+            }
+            "manage" => {
+                let allowed = m["allowed"].as_bool().unwrap_or(false);
+                joined.can_manage.store(allowed, Ordering::Relaxed);
+                Update::Manage(allowed)
+            }
+            // Answers to `call`.
+            "done" | "failed" => {
+                let id = m["req"].as_u64().unwrap_or(0);
+                if let Some(r) = joined.calls.lock().unwrap().remove(&id) {
+                    let _ = r.send(if m["event"] == "done" { Ok(text(&m["session"], 120)) } else { Err(text(&m["error"], 200)) });
+                }
+                continue;
             }
             "typing" => {
                 let allowed = m["allowed"].as_bool().unwrap_or(false);

@@ -29,6 +29,8 @@ pub enum MenuTarget {
     Display { machine: String, display: String },
     /// The editors to open a machine's folder in.
     Editors { machine: String, path: String },
+    /// A shared session's guests and link (by session id).
+    Share(String),
 }
 
 pub struct ContextMenu {
@@ -95,6 +97,14 @@ enum Action {
     RemoveDisplay(String, String),
     /// A monitor's size or scale.
     SetDisplay(String, String, Option<(u32, u32)>, Option<f64>),
+    /// A share's guest: let in (or not), let type (or not), removed.
+    ShareAdmit(String, u64, bool),
+    ShareTyping(String, u64, bool),
+    ShareRemove(String, u64),
+    ShareExtend(String),
+    ShareStop(String),
+    /// The Share dialog of a session (its link and options).
+    ShareOptions(String),
 }
 
 enum Item {
@@ -335,6 +345,34 @@ impl Root {
                 items.push(Item::Action { label: "End session…".into(), glyph: Glyph::Icon("power"), action: Action::End(id.clone()), danger: true });
                 items
             }
+            MenuTarget::Share(sid) => {
+                let Some(share) = self.share_of(sid).cloned() else { return Vec::new() };
+                let mut items = vec![Item::Note(format!("Ends in {}", super::share::time_left(share.ends_at)))];
+                if share.guests.is_empty() {
+                    items.push(Item::Note("No one has joined yet.".into()));
+                }
+                for g in &share.guests {
+                    let state = if g.state == "waiting" { "waiting" } else if g.can_type { "typing" } else { "watching" };
+                    let how = if g.client == "browser" { "browser" } else { "Muxin" };
+                    let path = if g.path.is_empty() { String::new() } else { format!(" · {}", g.path) };
+                    items.push(Item::Separator);
+                    items.push(Item::Note(format!("{} · {state} · {how}{path}", g.name)));
+                    if g.state == "waiting" {
+                        items.push(act(&format!("Let {} in (code {})", g.name, g.code), "user-check", Action::ShareAdmit(share.id.clone(), g.id, true)));
+                        items.push(Item::Action { label: format!("Deny {}", g.name), glyph: Glyph::Icon("user-x"), action: Action::ShareAdmit(share.id.clone(), g.id, false), danger: true });
+                    } else {
+                        let label = if g.can_type { format!("Stop {} typing", g.name) } else { format!("Let {} type", g.name) };
+                        items.push(act(&label, "keyboard", Action::ShareTyping(share.id.clone(), g.id, !g.can_type)));
+                        items.push(Item::Action { label: format!("Remove {}", g.name), glyph: Glyph::Icon("user-x"), action: Action::ShareRemove(share.id.clone(), g.id), danger: true });
+                    }
+                }
+                items.push(Item::Separator);
+                items.push(act("Link and options…", "sliders-horizontal", Action::ShareOptions(sid.clone())));
+                items.push(act("Copy link", "copy", Action::CopyUrl(share.link.clone())));
+                items.push(act("Add an hour", "clock", Action::ShareExtend(share.id.clone())));
+                items.push(Item::Action { label: "Stop sharing".into(), glyph: Glyph::Icon("power"), action: Action::ShareStop(share.id.clone()), danger: true });
+                items
+            }
             MenuTarget::Editors { machine, path } => {
                 let mut items = vec![Item::Note("Open it in".into())];
                 items.extend(editor_items(&self.engine.settings().editor, machine, path, false));
@@ -550,6 +588,15 @@ impl Root {
             Action::CopyUrl(url) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(url));
                 self.notify_user("Copied the link.", false, cx);
+            }
+            Action::ShareAdmit(share, guest, yes) => crate::share::host::admit(&share, guest, yes),
+            Action::ShareTyping(share, guest, allowed) => crate::share::host::set_typing(&share, guest, allowed),
+            Action::ShareRemove(share, guest) => crate::share::host::remove(&share, guest),
+            Action::ShareExtend(share) => crate::share::host::extend(&share, std::time::Duration::from_secs(3600)),
+            Action::ShareOptions(session) => self.show_share(&session, window, cx),
+            Action::ShareStop(share) => {
+                crate::share::host::stop(&share);
+                self.notify_user("Stopped sharing. The link doesn't work anymore.", false, cx);
             }
         }
         cx.notify();

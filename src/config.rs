@@ -561,6 +561,25 @@ pub struct Settings {
     /// see fleet::sessions::actions). The others use Muxin's own.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub prompts: std::collections::BTreeMap<String, String>,
+    /// Sharing sessions by link (see crate::share).
+    pub share: ShareSettings,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ShareSettings {
+    /// The share server links go through; empty for Muxin's.
+    pub server: String,
+    /// The name you join others' shares with.
+    pub name: String,
+}
+
+impl Settings {
+    /// The share server new links use.
+    pub fn share_server(&self) -> String {
+        let s = self.share.server.trim();
+        if s.is_empty() { crate::share::default_server() } else { s.to_string() }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -628,6 +647,7 @@ impl Default for Settings {
             editor: String::new(),
             cloud: CloudSettings::default(),
             prompts: Default::default(),
+            share: ShareSettings::default(),
         }
     }
 }

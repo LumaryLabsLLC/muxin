@@ -133,6 +133,8 @@ pub trait RemoteIo: Send + Sync {
 /// What arrives for a remote terminal.
 pub enum RemoteOutput {
     Bytes(Vec<u8>),
+    /// Draw at this size (cols, rows): someone else's session, shown as they size it.
+    Resize(u16, u16),
     /// The session ended (with its code), or the connection did (None).
     Ended(Option<i32>),
 }
@@ -151,6 +153,8 @@ struct Shared {
     term: Arc<FairMutex<Term<Listener>>>,
     backend: Backend,
     geometry: Mutex<Geometry>,
+    /// A size set from elsewhere (a shared session's), instead of the space it has.
+    fixed: Mutex<Option<(usize, usize)>>,
 }
 
 impl Shared {
@@ -161,6 +165,15 @@ impl Shared {
             }
             Backend::Remote(io) => io.write(&bytes.into()),
             Backend::None => {}
+        }
+    }
+
+    /// Draws at a size set from elsewhere from now on.
+    fn fix_size(&self, cols: usize, rows: usize) {
+        *self.fixed.lock().unwrap() = Some((cols, rows));
+        let mut term = self.term.lock();
+        if term.columns() != cols || term.screen_lines() != rows {
+            term.resize(TermDims { cols, rows });
         }
     }
 
@@ -204,6 +217,9 @@ pub struct TerminalView {
     shared: Arc<Shared>,
     focus: FocusHandle,
     exited: bool,
+    /// Someone else's session, joined through a share: what this terminal
+    /// would answer (queries) or take (a program's copy) stays here.
+    guest: bool,
     /// Dragging a local text selection.
     selecting: bool,
     /// The button held in mouse-reporting mode, and the last cell reported.
@@ -270,14 +286,23 @@ impl TerminalView {
                     batch.push(more);
                 }
                 let mut ended = None;
+                let mut size = None;
                 {
                     let mut t = term.lock();
                     for item in batch {
                         match item {
                             RemoteOutput::Bytes(b) => parser.advance(&mut *t, &b),
                             RemoteOutput::Ended(code) => ended = Some(code),
+                            RemoteOutput::Resize(cols, rows) => {
+                                let dims = TermDims { cols: (cols as usize).clamp(2, 1000), rows: (rows as usize).clamp(1, 500) };
+                                t.resize(dims);
+                                size = Some((dims.cols, dims.rows));
+                            }
                         }
                     }
+                }
+                if let Some((cols, rows)) = size {
+                    let _ = this.update(cx, |this, _| this.shared.fix_size(cols, rows));
                 }
                 let alive = this.update(cx, |this, cx| match ended {
                     Some(code) => this.finish(code, cx),
@@ -291,6 +316,27 @@ impl TerminalView {
         });
         view._tasks.push(feed);
         view
+    }
+
+    /// Someone else's session, joined through a share: drawn at their size
+    /// (`Resize` updates), keys to `io` (which drops them unless the host
+    /// lets this guest type).
+    pub fn guest(io: Arc<dyn RemoteIo>, output: futures::channel::mpsc::UnboundedReceiver<RemoteOutput>, (cols, rows): (u16, u16), window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::remote(io, output, (cols, rows), window, cx);
+        view.guest = true;
+        view.shared.fix_size(cols as usize, rows as usize);
+        view
+    }
+
+    /// The size it's drawn at when set from elsewhere.
+    pub fn fixed_size(&self) -> Option<(usize, usize)> {
+        *self.shared.fixed.lock().unwrap()
+    }
+
+    /// Pixels a grid of `cols`×`rows` takes, padding included.
+    pub fn pixel_size(cols: usize, rows: usize, window: &Window, cx: &App) -> (f32, f32) {
+        let (w, h) = render::cell_size(window, Metrics::current(cx));
+        (cols as f32 * w + 2. * PAD_X, rows as f32 * h + 2. * PAD_Y)
     }
 
     /// A terminal showing fixed output (the demo), with no program behind it.
@@ -351,9 +397,10 @@ impl TerminalView {
             }
         });
         TerminalView {
-            shared: Arc::new(Shared { term, backend, geometry: Mutex::new(Geometry::default()) }),
+            shared: Arc::new(Shared { term, backend, geometry: Mutex::new(Geometry::default()), fixed: Mutex::new(None) }),
             focus,
             exited: false,
+            guest: false,
             selecting: false,
             pressed: None,
             scroll_rest: 0.,
@@ -382,6 +429,9 @@ impl TerminalView {
     fn on_term_event(&mut self, event: TermEvent, window: &Window, cx: &mut Context<Self>) {
         match event {
             TermEvent::Wakeup | TermEvent::MouseCursorDirty | TermEvent::CursorBlinkingChange => cx.notify(),
+            // A guest's terminal answers nothing (the host's does) and takes
+            // nothing a program there puts on the clipboard.
+            TermEvent::PtyWrite(_) | TermEvent::ColorRequest(..) | TermEvent::TextAreaSizeRequest(_) | TermEvent::ClipboardStore(..) if self.guest => {}
             TermEvent::PtyWrite(text) => self.shared.write(text.into_bytes()),
             // A program's copy (OSC 52) only while you're in its terminal, not
             // from a session in the background; and it stays on this computer:

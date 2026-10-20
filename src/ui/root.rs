@@ -236,6 +236,8 @@ pub enum Route {
     Logs(String),
     /// A machine's services and containers.
     Services(String),
+    /// A session someone shared with you, joined here.
+    Shared(String),
     Settings,
     About,
 }
@@ -272,6 +274,8 @@ pub enum Modal {
     Rename(Entity<RenameDialog>),
     AddDisplay(Entity<AddDisplayDialog>),
     MonitorPassword(Entity<MonitorPasswordDialog>),
+    Share(Entity<super::share::ShareDialog>),
+    Join(Entity<super::share::JoinDialog>),
 }
 
 pub struct Notice {
@@ -403,6 +407,14 @@ pub struct Root {
     pub(super) ws_ui: WorkspaceUi,
     /// This computer's clipboard as last seen (see watch_clipboard).
     clipboard_seen: ClipboardSeen,
+    /// Sessions this app shares, and the guests already announced.
+    pub(super) shares: Vec<crate::share::host::ShareView>,
+    pub(super) knocks_seen: HashSet<(String, u64)>,
+    /// Sessions others shared with you, joined here.
+    pub(super) joined: Vec<super::share::JoinedSession>,
+    pub(super) joined_count: u32,
+    /// A share link opened with Muxin, for the Join dialog on the next render.
+    pending_join: Option<String>,
     _tasks: Vec<Task<()>>,
     pub(super) _subscriptions: Vec<Subscription>,
 }
@@ -572,6 +584,11 @@ impl Root {
             window_active: false,
             ws_ui: WorkspaceUi::default(),
             clipboard_seen: ClipboardSeen { count: super::pasteboard_state().map(|s| s.0).unwrap_or(0), ..Default::default() },
+            shares: Vec::new(),
+            knocks_seen: HashSet::new(),
+            joined: Vec::new(),
+            joined_count: 0,
+            pending_join: None,
             _tasks: vec![updates, ticker, clipboard_out, clipboard_in],
             _subscriptions: subscriptions,
         };
@@ -588,6 +605,29 @@ impl Root {
             }
         });
         ws._tasks.push(watch);
+        // Shares: guests knocking, coming and going.
+        let mut shares = crate::share::host::subscribe();
+        let sharing = cx.spawn(async move |this, cx| {
+            while shares.changed().await.is_ok() {
+                if this.update(cx, |this, cx| this.shares_changed(cx)).is_err() {
+                    break;
+                }
+            }
+        });
+        ws._tasks.push(sharing);
+        // Share links opened with Muxin (muxin://join...).
+        if let Some(mut links) = super::take_opened_links() {
+            let opened = cx.spawn(async move |this, cx| {
+                use futures::StreamExt;
+                while let Some(link) = links.next().await {
+                    let _ = this.update(cx, |this, cx| {
+                        this.pending_join = Some(link);
+                        cx.notify()
+                    });
+                }
+            });
+            ws._tasks.push(opened);
+        }
         ws
     }
 
@@ -972,6 +1012,10 @@ impl Root {
             }
             "activity" => self.show(Route::Activity, cx),
             "about" => self.navigate(Route::About, window, cx),
+            // A share link, in the Join dialog.
+            "join" => self.show_join((!arg.is_empty()).then(|| arg.to_string()), window, cx),
+            // The Share dialog for a session.
+            "share" => self.show_share(arg, window, cx),
             // "desktop:<machine>", or "desktop:<machine>@<display>" for one of its displays.
             "desktop" => match arg.split_once('@') {
                 Some((machine, display)) => self.show_display(machine.into(), Some(display.into()), window, cx),
@@ -1738,6 +1782,8 @@ impl Root {
             Modal::Rename(d) => d.read(cx).first_focus(cx),
             Modal::AddDisplay(d) => d.read(cx).first_focus(cx),
             Modal::MonitorPassword(d) => d.read(cx).first_focus(cx),
+            Modal::Share(d) => d.read(cx).first_focus(cx),
+            Modal::Join(d) => d.read(cx).first_focus(cx),
             Modal::Licenses(d) => d.focus_handle(cx),
         };
         window.focus(&focus);
@@ -1763,6 +1809,7 @@ impl Root {
             DialogEvent::StartInWorkspace(req, session) => self.start_in_workspace(req.clone(), session.clone(), window, cx),
             DialogEvent::StartInNewVm(vm, workspace, session) => self.start_in_new_vm(vm.clone(), workspace.clone(), session.clone(), window, cx),
             DialogEvent::DisplayAdded(machine, display) => self.show_display(machine.clone(), Some(display.clone()), window, cx),
+            DialogEvent::JoinedShare(handle) => self.open_joined(handle, window, cx),
             DialogEvent::StartSession(req) => {
                 self.start_session(req.clone(), window, cx);
                 cx.notify();
@@ -2097,6 +2144,10 @@ impl Root {
                 rows.extend(own.into_iter().map(|r| tree_row(&theme, r, indent, &rails, None, 0.)));
             }
             self.sidebar_indent.set(0.);
+        }
+        if !self.joined.is_empty() {
+            rows.push(self.section_header("Shared with you", self.joined.len(), false, cx).into_any_element());
+            rows.extend(self.joined_rows(&theme, cx));
         }
         if !unassigned.is_empty() {
             rows.push(self.section_header("On GitHub only", unassigned.len(), false, cx).into_any_element());
@@ -3192,6 +3243,7 @@ impl Root {
                 }
             },
             Route::About => self.render_about(cx),
+            Route::Shared(id) => self.render_joined(&id, window, cx),
             Route::Github | Route::GithubRepo(_) | Route::GithubItem(..) => self.render_github(window, cx),
             Route::Settings => match &self.settings {
                 Some(page) => page.clone().into_any_element(),
@@ -3206,6 +3258,9 @@ impl Root {
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(link) = self.pending_join.take() {
+            self.show_join(Some(link), window, cx);
+        }
         let theme = cx.theme();
         // A drag released outside the window never reaches `on_drop`.
         if self.sidebar_resizing && !cx.has_active_drag() {
@@ -3246,6 +3301,8 @@ impl Render for Root {
             Modal::Rename(d) => d.clone().into_any_element(),
             Modal::AddDisplay(d) => d.clone().into_any_element(),
             Modal::MonitorPassword(d) => d.clone().into_any_element(),
+            Modal::Share(d) => d.clone().into_any_element(),
+            Modal::Join(d) => d.clone().into_any_element(),
             Modal::Licenses(d) => d.clone().into_any_element(),
         });
         let notice = self.render_notice(&theme);
@@ -3394,6 +3451,7 @@ fn route_title(s: &Snapshot, route: &Route) -> (Option<&'static str>, String) {
         Route::Workspace(id) => (Some("Workspaces"), s.workspaces.iter().find(|w| &w.id == id).map(|w| w.name.clone()).unwrap_or_else(|| id.clone())),
         Route::Settings => (None, "Settings".into()),
         Route::About => (None, "About".into()),
+        Route::Shared(_) => (Some("Shared with you"), "Session".into()),
         Route::Github => (None, "GitHub".into()),
         Route::GithubRepo(name) => (Some("GitHub"), name.clone()),
         Route::GithubItem(repo, n) => (Some("GitHub"), format!("{repo} #{n}")),

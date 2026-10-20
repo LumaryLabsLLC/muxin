@@ -40,6 +40,8 @@ pub enum DialogEvent {
     StartInNewVm(crate::ops::vm::VmCreate, Option<CreateWorkspace>, StartSession),
     /// A virtual monitor was added: (machine, display) to show.
     DisplayAdded(String, String),
+    /// A share joined and let in: open its session.
+    JoinedShare(super::share::JoinedHandle),
 }
 
 pub(super) fn frame(theme: &Theme, title: impl Into<SharedString>, intro: Option<SharedString>) -> gpui::Div {

@@ -68,6 +68,11 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleURLTypes</key>
+  <array><dict>
+    <key>CFBundleURLName</key><string>Muxin share link</string>
+    <key>CFBundleURLSchemes</key><array><string>muxin</string></array>
+  </dict></array>
   <key>NSHumanReadableCopyright</key><string>© Lumary Labs LLC</string>
   <key>NSLocalNetworkUsageDescription</key><string>Muxin connects straight to your machines on your local network: faster than going through ssh or a VPN, and needed to show their desktops smoothly.</string>
 </dict>

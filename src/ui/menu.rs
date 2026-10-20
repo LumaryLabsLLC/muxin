@@ -31,6 +31,11 @@ pub enum MenuTarget {
     Editors { machine: String, path: String },
     /// A shared session's guests and link (by session id).
     Share(String),
+    /// A share someone gave you (by its id here), one of its machine's
+    /// sessions, its desktop.
+    Joined(String),
+    JoinedSession(String, String),
+    JoinedDesktop(String),
 }
 
 pub struct ContextMenu {
@@ -100,11 +105,15 @@ enum Action {
     /// A share's guest: let in (or not), let type (or not), removed.
     ShareAdmit(String, u64, bool),
     ShareTyping(String, u64, bool),
+    ShareControl(String, u64, bool),
+    ShareManage(String, u64, bool),
     ShareRemove(String, u64),
     ShareExtend(String),
     ShareStop(String),
     /// The Share dialog of a session (its link and options).
     ShareOptions(String),
+    /// Something to do with a share someone gave you.
+    Joined(String, super::share::JoinedAction),
 }
 
 enum Item {
@@ -345,14 +354,45 @@ impl Root {
                 items.push(Item::Action { label: "End session…".into(), glyph: Glyph::Icon("power"), action: Action::End(id.clone()), danger: true });
                 items
             }
+            MenuTarget::Joined(id) | MenuTarget::JoinedSession(id, _) | MenuTarget::JoinedDesktop(id) => self
+                .joined_menu(&menu.target)
+                .into_iter()
+                .map(|item| {
+                    use super::share::JoinedItem;
+                    let glyph_of = |glyph: &'static str| if glyph.is_empty() { Glyph::None } else { Glyph::Icon(glyph) };
+                    match item {
+                        JoinedItem::Do { label, glyph, action, danger, picked } => {
+                            Item::Action { label, glyph: if picked { Glyph::Selected } else { glyph_of(glyph) }, action: Action::Joined(id.clone(), action), danger }
+                        }
+                        JoinedItem::Agent { label, agent, action: Some(action) } => Item::Action { label, glyph: Glyph::Agent(agent), action: Action::Joined(id.clone(), action), danger: false },
+                        JoinedItem::Agent { label, agent, action: None } => Item::Off { label, glyph: Glyph::Agent(agent) },
+                        JoinedItem::Off { label, glyph } => Item::Off { label, glyph: glyph_of(glyph) },
+                        JoinedItem::Note(text) => Item::Note(text),
+                        JoinedItem::Separator => Item::Separator,
+                    }
+                })
+                .collect(),
             MenuTarget::Share(sid) => {
                 let Some(share) = self.share_of(sid).cloned() else { return Vec::new() };
                 let mut items = vec![Item::Note(format!("Ends in {}", super::share::time_left(share.ends_at)))];
+                if let Some(problem) = &share.problem {
+                    items.insert(0, Item::Note(format!("Guests can't reach {} right now: {problem}", share.target.machine_name)));
+                }
                 if share.guests.is_empty() {
                     items.push(Item::Note("No one has joined yet.".into()));
                 }
                 for g in &share.guests {
-                    let state = if g.state == "waiting" { "waiting" } else if g.can_type { "typing" } else { "watching" };
+                    let state = if g.state == "waiting" {
+                        "waiting"
+                    } else if g.can_manage {
+                        "can start sessions"
+                    } else if g.can_control {
+                        "using the desktop"
+                    } else if g.can_type {
+                        "typing"
+                    } else {
+                        "watching"
+                    };
                     let how = if g.client == "browser" { "browser" } else { "Muxin" };
                     let path = if g.path.is_empty() { String::new() } else { format!(" · {}", g.path) };
                     items.push(Item::Separator);
@@ -363,6 +403,14 @@ impl Root {
                     } else {
                         let label = if g.can_type { format!("Stop {} typing", g.name) } else { format!("Let {} type", g.name) };
                         items.push(act(&label, "keyboard", Action::ShareTyping(share.id.clone(), g.id, !g.can_type)));
+                        if share.target.is_machine() && g.can_type {
+                            let label = if g.can_manage { format!("Stop {} starting sessions", g.name) } else { format!("Let {} start and end sessions", g.name) };
+                            items.push(act(&label, "square-terminal", Action::ShareManage(share.id.clone(), g.id, !g.can_manage)));
+                        }
+                        if share.desktop == crate::share::host::Desktop::Control {
+                            let label = if g.can_control { format!("Stop {} using the desktop", g.name) } else { format!("Let {} use the desktop", g.name) };
+                            items.push(act(&label, "monitor", Action::ShareControl(share.id.clone(), g.id, !g.can_control)));
+                        }
                         items.push(Item::Action { label: format!("Remove {}", g.name), glyph: Glyph::Icon("user-x"), action: Action::ShareRemove(share.id.clone(), g.id), danger: true });
                     }
                 }
@@ -591,9 +639,12 @@ impl Root {
             }
             Action::ShareAdmit(share, guest, yes) => crate::share::host::admit(&share, guest, yes),
             Action::ShareTyping(share, guest, allowed) => crate::share::host::set_typing(&share, guest, allowed),
+            Action::ShareControl(share, guest, allowed) => crate::share::host::set_control(&share, guest, allowed),
+            Action::ShareManage(share, guest, allowed) => crate::share::host::set_managing(&share, guest, allowed),
             Action::ShareRemove(share, guest) => crate::share::host::remove(&share, guest),
             Action::ShareExtend(share) => crate::share::host::extend(&share, std::time::Duration::from_secs(3600)),
             Action::ShareOptions(session) => self.show_share(&session, window, cx),
+            Action::Joined(id, action) => self.run_joined(&id, action, window, cx),
             Action::ShareStop(share) => {
                 crate::share::host::stop(&share);
                 self.notify_user("Stopped sharing. The link doesn't work anymore.", false, cx);

@@ -1,6 +1,6 @@
 //! A machine's desktop, live: frames from its agent over the machine's link
-//! (see agent/src/desktop.rs), and the mouse and keyboard sent back. X11
-//! machines for now.
+//! (see agent/src/desktop.rs), and the mouse and keyboard sent back. Or a
+//! desktop someone shared with you, the same way over the share.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -20,6 +20,7 @@ use super::theme::ActiveTheme;
 use crate::fleet::Engine;
 use crate::fleet::desktop::{FRAME, INPUT, TILES, keysym};
 use crate::fleet::link::Link;
+use crate::share::guest;
 
 const CONTEXT: &str = "Desktop";
 
@@ -73,27 +74,40 @@ pub const NATIVE: u32 = 16384;
 /// Monitor sizes with a short name, offered when the monitor has them.
 const SIZES: [((u32, u32), &str); 4] = [((1280, 720), "720p"), ((1920, 1080), "1080p"), ((2560, 1440), "1440p"), ((3840, 2160), "4K")];
 
-/// The desktop's channel on the machine's link.
-struct Remote {
-    link: Arc<Link>,
-    channel: u32,
+/// The desktop's channel: on the machine's link, or on a share.
+enum Remote {
+    Link(Arc<Link>, u32),
+    Shared(Arc<guest::Joined>, u32),
 }
 
 impl Remote {
     fn input(&self, event: Value) {
-        self.link.send(self.channel, INPUT, &serde_json::to_vec(&event).unwrap_or_default());
+        let bytes = serde_json::to_vec(&event).unwrap_or_default();
+        match self {
+            Remote::Link(link, channel) => link.send(*channel, INPUT, &bytes),
+            Remote::Shared(joined, channel) => joined.send(*channel, INPUT, &bytes),
+        }
     }
 }
 
 impl Drop for Remote {
     fn drop(&mut self) {
-        self.link.close_channel(self.channel);
+        match self {
+            Remote::Link(link, channel) => link.close_channel(*channel),
+            Remote::Shared(joined, channel) => joined.close(*channel),
+        }
     }
 }
 
 pub struct DesktopView {
     engine: Arc<Engine>,
     machine: String,
+    /// Someone's shared desktop (no machine of ours), and whether we may use
+    /// its mouse and keyboard.
+    shared: Option<Arc<guest::Joined>>,
+    can_control: bool,
+    /// A shared desktop's quality ("low" to "max", see share::host).
+    quality: &'static str,
     /// One of the machine's displays (None: the whole desktop, or a Mac's main display).
     display: Option<String>,
     /// The frame width asked for (None: native on a local network, else 1080p).
@@ -156,9 +170,25 @@ impl Focusable for DesktopView {
 
 impl DesktopView {
     pub fn new(engine: Arc<Engine>, machine_id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::make(engine, machine_id, None, "medium", window, cx)
+    }
+
+    /// A desktop someone shared with you: input goes there only while they
+    /// let you control it (`set_control`).
+    pub fn shared(engine: Arc<Engine>, joined: Arc<guest::Joined>, mac: bool, quality: &'static str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::make(engine, String::new(), Some(joined), quality, window, cx);
+        view.mac = mac;
+        view
+    }
+
+    fn make(engine: Arc<Engine>, machine_id: String, shared: Option<Arc<guest::Joined>>, quality: &'static str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let can_control = shared.as_ref().is_none_or(|j| j.can_control());
         let mut view = DesktopView {
             engine,
             machine: machine_id,
+            shared,
+            can_control,
+            quality,
             display: None,
             width: None,
             via: String::new(),
@@ -196,6 +226,11 @@ impl DesktopView {
         view.platform = view.engine.current().machines.iter().find(|m| m.id == view.machine).map(|m| m.platform.clone()).unwrap_or_default();
         view.mac = view.platform.starts_with("darwin");
         view.start(window, cx);
+        if view.shared.is_some() {
+            let blur = cx.on_focus_out(&view.focus, window, |this, _, _, _| this.let_go());
+            view._subscriptions = vec![blur];
+            return view;
+        }
         // Keys and buttons held when the view loses the keyboard (another
         // app, ⌘Q, a click elsewhere): let go on the machine too.
         let blur = cx.on_focus_out(&view.focus, window, |this, _, _, _| this.let_go());
@@ -245,6 +280,31 @@ impl DesktopView {
             self.start(window, cx);
         }
         cx.notify();
+    }
+
+    /// Lets the mouse and keyboard through, or not (a shared desktop).
+    pub fn set_control(&mut self, allowed: bool, cx: &mut Context<Self>) {
+        if !allowed {
+            self.let_go();
+        }
+        self.can_control = allowed;
+        cx.notify();
+    }
+
+    /// A shared desktop's quality.
+    pub fn quality(&self) -> &'static str {
+        self.quality
+    }
+
+    /// Asks a shared desktop for another quality: a new stream, the picture
+    /// kept until it comes.
+    pub fn set_quality(&mut self, quality: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        if quality != self.quality && self.shared.is_some() {
+            self.quality = quality;
+            self.retries = 0;
+            self.start(window, cx);
+            cx.notify();
+        }
     }
 
     /// How the stream travels, e.g. "Direct · Local network".
@@ -345,75 +405,101 @@ impl DesktopView {
         let (engine, machine_id, wanted, mut display) = (self.engine.clone(), self.machine.clone(), self.width, self.display.clone().unwrap_or_default());
         let (canvas, pending) = (self.canvas.clone(), self.pending.clone());
         let rt = engine.runtime().clone();
-        rt.spawn(async move {
-            let Some((spec, _)) = engine.machine(&machine_id) else {
-                let _ = tx.unbounded_send(Msg::Ended("That machine is gone.".into(), false));
-                return;
-            };
-            if engine.is_demo() {
-                let _ = tx.unbounded_send(Msg::Ended("The demo has no desktops to show.".into(), false));
-                return;
-            }
-            // Its monitors as they are now (one may have been added, removed
-            // or resized since), for the picker; a gone one falls back to the default.
-            if let Ok(displays) = engine.displays(&machine_id).await {
-                if !display.is_empty() && display != "all" && !displays.iter().any(|d| d.id == display) {
-                    display.clear();
-                    let _ = tx.unbounded_send(Msg::Gone);
+        if let Some(joined) = self.shared.clone() {
+            let (tx, quality) = (tx.clone(), self.quality);
+            rt.spawn(async move {
+                let (channel, reply, mut frames) = match joined.open(json!({ "op": "desktop", "quality": quality })).await {
+                    Ok(opened) => opened,
+                    Err(e) => {
+                        let _ = tx.unbounded_send(Msg::Ended(e, false));
+                        return;
+                    }
+                };
+                let (w, h) = (reply["width"].as_u64().unwrap_or(0) as u32, reply["height"].as_u64().unwrap_or(0) as u32);
+                let _ = tx.unbounded_send(Msg::Ready(Arc::new(Remote::Shared(joined, channel)), w, h, "Shared".into(), None));
+                while let Some((kind, bytes)) = frames.recv().await {
+                    if kind != TILES && kind != FRAME {
+                        continue;
+                    }
+                    let canvas = canvas.clone();
+                    let changed = tokio::task::spawn_blocking(move || if kind == TILES { paint_tiles(&canvas, &bytes) } else { paint_frame(&canvas, &bytes) }).await.unwrap_or(false);
+                    if changed && !pending.swap(true, std::sync::atomic::Ordering::AcqRel) && tx.unbounded_send(Msg::Changed).is_err() {
+                        return;
+                    }
                 }
-                // The default: the main monitor (the agent's own default on
-                // Linux is the whole desktop).
-                if display.is_empty()
-                    && displays.iter().any(|d| d.id == "all")
-                    && let Some(main) = displays.iter().find(|d| d.main && d.id != "all")
-                {
-                    display = main.id.clone();
-                }
-            }
-            let Some(link) = crate::fleet::link::get(&spec).await else {
-                let _ = tx.unbounded_send(Msg::Ended(format!("Can't reach the agent on {}.", spec.name), true));
-                return;
-            };
-            let network = link.network();
-            // Full resolution on a local network; 1080p further away.
-            let width = wanted.unwrap_or(if matches!(network, Some("Local network" | "This computer")) { NATIVE } else { 1920 });
-            let via = [Some(if link.transport() == "direct" { "Direct" } else { "Over ssh" }), network].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-            let (channel, mut frames) = link.open_channel();
-            let request = json!({ "op": "desktop", "channel": channel, "fps": 30, "quality": 78, "max_width": width, "tiles": true, "display": display });
-            match link.request(request, Duration::from_secs(20)).await {
-                Ok(r) if r["ok"].as_bool() == Some(true) => {
-                    let (w, h) = (r["width"].as_u64().unwrap_or(0) as u32, r["height"].as_u64().unwrap_or(0) as u32);
-                    let note = r["note"].as_str().map(str::to_string);
-                    let _ = tx.unbounded_send(Msg::Ready(Arc::new(Remote { link: link.clone(), channel }), w, h, format!("{via}|{width}"), note));
-                }
-                Ok(r) => {
-                    link.close_channel(channel);
-                    let why = r["error"].as_str().unwrap_or("The machine can't show its desktop.").to_string();
-                    let _ = tx.unbounded_send(if r["no_session"].as_bool() == Some(true) { Msg::NoScreen(why) } else { Msg::Ended(why, false) });
+                let _ = tx.unbounded_send(Msg::Ended("They stopped sharing the desktop.".into(), false));
+            });
+        } else {
+            rt.spawn(async move {
+                let Some((spec, _)) = engine.machine(&machine_id) else {
+                    let _ = tx.unbounded_send(Msg::Ended("That machine is gone.".into(), false));
+                    return;
+                };
+                if engine.is_demo() {
+                    let _ = tx.unbounded_send(Msg::Ended("The demo has no desktops to show.".into(), false));
                     return;
                 }
-                Err(e) => {
-                    link.close_channel(channel);
-                    let _ = tx.unbounded_send(Msg::Ended(e, true));
+                // Its monitors as they are now (one may have been added, removed
+                // or resized since), for the picker; a gone one falls back to the default.
+                if let Ok(displays) = engine.displays(&machine_id).await {
+                    if !display.is_empty() && display != "all" && !displays.iter().any(|d| d.id == display) {
+                        display.clear();
+                        let _ = tx.unbounded_send(Msg::Gone);
+                    }
+                    // The default: the main monitor (the agent's own default on
+                    // Linux is the whole desktop).
+                    if display.is_empty()
+                        && displays.iter().any(|d| d.id == "all")
+                        && let Some(main) = displays.iter().find(|d| d.main && d.id != "all")
+                    {
+                        display = main.id.clone();
+                    }
+                }
+                let Some(link) = crate::fleet::link::get(&spec).await else {
+                    let _ = tx.unbounded_send(Msg::Ended(format!("Can't reach the agent on {}.", spec.name), true));
                     return;
+                };
+                let network = link.network();
+                // Full resolution on a local network; 1080p further away.
+                let width = wanted.unwrap_or(if matches!(network, Some("Local network" | "This computer")) { NATIVE } else { 1920 });
+                let via = [Some(if link.transport() == "direct" { "Direct" } else { "Over ssh" }), network].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                let (channel, mut frames) = link.open_channel();
+                let request = json!({ "op": "desktop", "channel": channel, "fps": 30, "quality": 78, "max_width": width, "tiles": true, "display": display });
+                match link.request(request, Duration::from_secs(20)).await {
+                    Ok(r) if r["ok"].as_bool() == Some(true) => {
+                        let (w, h) = (r["width"].as_u64().unwrap_or(0) as u32, r["height"].as_u64().unwrap_or(0) as u32);
+                        let note = r["note"].as_str().map(str::to_string);
+                        let _ = tx.unbounded_send(Msg::Ready(Arc::new(Remote::Link(link.clone(), channel)), w, h, format!("{via}|{width}"), note));
+                    }
+                    Ok(r) => {
+                        link.close_channel(channel);
+                        let why = r["error"].as_str().unwrap_or("The machine can't show its desktop.").to_string();
+                        let _ = tx.unbounded_send(if r["no_session"].as_bool() == Some(true) { Msg::NoScreen(why) } else { Msg::Ended(why, false) });
+                        return;
+                    }
+                    Err(e) => {
+                        link.close_channel(channel);
+                        let _ = tx.unbounded_send(Msg::Ended(e, true));
+                        return;
+                    }
                 }
-            }
-            while let Some((kind, bytes)) = frames.recv().await {
-                if kind != TILES && kind != FRAME {
-                    continue;
+                while let Some((kind, bytes)) = frames.recv().await {
+                    if kind != TILES && kind != FRAME {
+                        continue;
+                    }
+                    // Decoding is real work; keep it off the runtime's async threads.
+                    let canvas = canvas.clone();
+                    let changed = tokio::task::spawn_blocking(move || if kind == TILES { paint_tiles(&canvas, &bytes) } else { paint_frame(&canvas, &bytes) })
+                        .await
+                        .unwrap_or(false);
+                    // One draw request at a time; the view takes the newest picture.
+                    if changed && !pending.swap(true, std::sync::atomic::Ordering::AcqRel) && tx.unbounded_send(Msg::Changed).is_err() {
+                        return;
+                    }
                 }
-                // Decoding is real work; keep it off the runtime's async threads.
-                let canvas = canvas.clone();
-                let changed = tokio::task::spawn_blocking(move || if kind == TILES { paint_tiles(&canvas, &bytes) } else { paint_frame(&canvas, &bytes) })
-                    .await
-                    .unwrap_or(false);
-                // One draw request at a time; the view takes the newest picture.
-                if changed && !pending.swap(true, std::sync::atomic::Ordering::AcqRel) && tx.unbounded_send(Msg::Changed).is_err() {
-                    return;
-                }
-            }
-            let _ = tx.unbounded_send(Msg::Ended("The desktop stream stopped.".into(), true));
-        });
+                let _ = tx.unbounded_send(Msg::Ended("The desktop stream stopped.".into(), true));
+            });
+        }
 
         let feed = cx.spawn_in(window, async move |this, cx| {
             while let Some(first) = rx.next().await {
@@ -575,7 +661,7 @@ impl DesktopView {
     }
 
     fn send(&self, event: Value) {
-        if let Some(r) = &self.remote {
+        if let Some(r) = self.remote.as_ref().filter(|_| self.can_control) {
             r.input(event);
         }
     }
@@ -592,6 +678,9 @@ impl DesktopView {
     }
 
     fn mouse_button(&mut self, button: MouseButton, position: Point<Pixels>, down: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_control {
+            return;
+        }
         let b = match button {
             MouseButton::Left => 1,
             MouseButton::Middle => 2,
@@ -647,6 +736,9 @@ impl DesktopView {
     }
 
     fn key(&mut self, key: &str, down: bool, cx: &mut Context<Self>) {
+        if !self.can_control {
+            return;
+        }
         if let Some(sym) = keysym(key) {
             self.send(json!({ "t": "key", "keysym": sym, "down": down }));
             self.keys_down.retain(|x| *x != sym);

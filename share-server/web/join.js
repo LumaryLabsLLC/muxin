@@ -1,12 +1,15 @@
 // Joins a Muxin share from the browser: the link's ticket (after the #)
 // names the share, its secret and its certificate. This page connects to
 // the sharing computer over WebRTC, refuses any other certificate, proves
-// it has the link, then shows the session. See src/share in Muxin.
+// it has the link, then shows what's shared: a session, or a machine's
+// sessions and screen. See src/share in Muxin.
 "use strict";
 
 (() => {
-  const JSON_KIND = 10, DATA = 0, EXIT = 2, SIZE = 3, CLOSE = 11;
-  const SESSION = 1;
+  // MORE: part of a frame too big for one message; the rest follows on its channel.
+  const JSON_KIND = 10, DATA = 0, EXIT = 2, SIZE = 3, CLOSE = 11, MORE = 12;
+  // The screen's frames: whole ones, input back, what changed (agent/src/desktop.rs).
+  const FRAME = 20, INPUT = 21, TILES = 23;
   const $ = (id) => document.getElementById(id);
   const enc = new TextEncoder();
   const dec = new TextDecoder();
@@ -77,7 +80,13 @@
     show("done");
   }
 
-  const state = { over: false, pc: null, dc: null, term: null, canType: false, info: null, clock: 0, name: "" };
+  const state = {
+    over: false, pc: null, dc: null, term: null, canType: false, canControl: false, info: null, clock: 0, name: "",
+    // Channels open (number → {kind: "session" | "desktop", name}), and the next one.
+    channels: new Map(), next: 1,
+    // A shared machine's sessions; what's showing ({kind, name}).
+    sessions: [], showing: null, session: 0, desktop: 0,
+  };
 
   function minutesLeft(endsAt) {
     const s = endsAt - Date.now() / 1000;
@@ -92,14 +101,24 @@
   function showInfo(info) {
     state.info = info;
     const what = agents[info.agent] || "A session";
-    $("session-title").textContent = info.title || what;
-    $("session-sub").textContent = `${what} on ${info.machine} · shared by ${info.by}`;
+    const title = info.machine_share ? info.title : info.title || what;
+    const sub = info.machine_share ? `A machine · shared by ${info.by}` : `${what} on ${info.machine} · shared by ${info.by}`;
+    $("session-title").textContent = title;
+    $("session-sub").textContent = sub;
     $("session").hidden = false;
-    $("wait-title").textContent = `Join ${info.title || what}`;
-    $("wait-sub").textContent = `${what} on ${info.machine} · shared by ${info.by}`;
-    $("fact-can").textContent = info.can_type ? "You can watch and type" : "You can watch";
-    $("fact-ends").textContent = `Ends in ${minutesLeft(info.ends_at).replace(" left", "")}`;
-    $("fact-name").textContent = `Joining as ${state.name}`;
+    $("wait-title").textContent = `Join ${title}`;
+    $("wait-sub").textContent = sub;
+    const facts = [];
+    if (info.machine_share) {
+      facts.push(info.can_type ? "Its sessions: you can watch and type" : "Its sessions: you can watch");
+      if (info.desktop === "view") facts.push("Its screen: you can watch");
+      if (info.desktop === "control") facts.push(info.can_control ? "Its screen: you can watch and use it" : "Its screen: you can watch, and use it when they let you");
+      if (info.ports.length) facts.push(`${info.ports.length} server${info.ports.length === 1 ? "" : "s"}: open them in the Muxin app`);
+    } else {
+      facts.push(info.can_type ? "You can watch and type" : "You can watch");
+    }
+    facts.push(`Ends in ${minutesLeft(info.ends_at).replace(" left", "")}`, `Joining as ${state.name}`);
+    $("facts").replaceChildren(...facts.map((f) => Object.assign(document.createElement("li"), { textContent: f })));
     $("facts").hidden = false;
     $("code-help").textContent = `Read it to ${info.by} so they know it's you.`;
     clearInterval(state.clock);
@@ -107,73 +126,522 @@
     $("time-left").textContent = minutesLeft(info.ends_at);
   }
 
-  function setTyping(allowed) {
-    state.canType = allowed;
-    $("mode-pill").textContent = allowed ? "Typing" : "Watching";
+  // The bar under what's showing, and the pill: what you can do there.
+  function updateNote() {
     const by = state.info ? state.info.by : "they";
-    $("term-note").textContent = allowed ? "You can type. Keys go to their session." : `You're watching. Only ${by} can type.`;
-    if (state.term) state.term.options.disableStdin = !allowed;
+    const desktop = state.showing && state.showing.kind === "desktop";
+    $("mode-pill").textContent = desktop ? (state.canControl ? "In control" : "Watching") : state.canType ? "Typing" : "Watching";
+    $("term-note").textContent = desktop
+      ? state.canControl ? `Your mouse and keys work on ${state.info.title}.` : `You're watching. Only ${by} can use it.`
+      : state.canType ? "You can type. Keys go to their session." : `You're watching. Only ${by} can type.`;
+    if (state.term) state.term.options.disableStdin = !state.canType;
+    $("canvas").classList.toggle("control", state.canControl);
+    $("kbd").hidden = !(desktop && state.canControl);
   }
 
-  function openTerminal() {
-    show("watch");
-    $("session-actions").hidden = false;
+  function makeTerminal() {
     const term = new window.Terminal({
       cols: 80, rows: 24, scrollback: 5000, convertEol: false, cursorBlink: true, disableStdin: true,
       fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fontSize: 13,
       theme: { background: "#1a1e3c", foreground: "#eeecfb", cursor: "#eeecfb", selectionBackground: "#3d3a7a" },
     });
     term.open($("term"));
-    term.onData((data) => {
-      if (state.canType && state.dc && state.dc.readyState === "open") state.dc.send(frame(SESSION, DATA, enc.encode(data)));
-    });
-    term.onBinary((data) => {
-      if (!state.canType || !state.dc || state.dc.readyState !== "open") return;
-      state.dc.send(frame(SESSION, DATA, Uint8Array.from(data, (c) => c.charCodeAt(0) & 255)));
-    });
+    const keys = (bytes) => {
+      if (state.canType && state.session && state.dc && state.dc.readyState === "open") state.dc.send(frame(state.session, DATA, bytes));
+    };
+    term.onData((data) => keys(enc.encode(data)));
+    term.onBinary((data) => keys(Uint8Array.from(data, (c) => c.charCodeAt(0) & 255)));
     state.term = term;
-    setTyping(state.canType);
+    if (window.ResizeObserver) new ResizeObserver(fitText).observe($("term"));
+  }
+
+  // The session keeps the sharer's size: its text is sized to fit the width
+  // here (13px at most; on a phone, 9px at least, and it scrolls sideways).
+  function fitText() {
+    const term = state.term;
+    if (!term) return;
+    const box = $("term");
+    const width = box.clientWidth - 24;
+    if (width <= 0) return;
+    const size = Math.max(9, Math.min(13, Math.floor((width / (term.cols * 0.6)) * 2) / 2));
+    if (term.options.fontSize !== size) term.options.fontSize = size;
   }
 
   function send(obj) {
     if (state.dc && state.dc.readyState === "open") state.dc.send(frame(0, JSON_KIND, enc.encode(JSON.stringify(obj))));
   }
 
+  function openChannel(op, extra, kind, name) {
+    const channel = state.next++;
+    state.channels.set(channel, { kind, name });
+    send(Object.assign({ op, channel }, extra));
+    return channel;
+  }
+
+  function closeChannel(channel) {
+    if (!channel || !state.channels.has(channel)) return;
+    state.channels.delete(channel);
+    if (state.dc && state.dc.readyState === "open") state.dc.send(frame(channel, CLOSE, new Uint8Array(0)));
+  }
+
+  // What the page shows: a session (in the one terminal) or the screen.
+  function showSession(name) {
+    if (state.showing && state.showing.kind === "session" && state.showing.name === name && state.session) return;
+    closeChannel(state.session);
+    state.showing = { kind: "session", name };
+    state.term.reset();
+    state.session = openChannel("watch", { session: name }, "session", name);
+    closeScreen();
+    $("quality-wrap").hidden = true;
+    $("kbd").hidden = true;
+    $("term").hidden = false;
+    $("screen").hidden = true;
+    $("empty").hidden = true;
+    renderTabs();
+    updateNote();
+    state.term.focus();
+  }
+
+  function showDesktop() {
+    state.showing = { kind: "desktop" };
+    if (!state.desktop) {
+      $("screen-wait").textContent = "Starting their screen…";
+      $("screen-wait").hidden = false;
+      state.desktop = openChannel("desktop", { quality: $("quality").value }, "desktop", "");
+    }
+    $("quality-wrap").hidden = false;
+    $("term").hidden = true;
+    $("screen").hidden = false;
+    $("empty").hidden = true;
+    renderTabs();
+    updateNote();
+    $("canvas").focus();
+  }
+
+  // The screen isn't showing: its stream stops (it starts again when shown).
+  function closeScreen() {
+    letGo();
+    closeChannel(state.desktop);
+    state.desktop = 0;
+  }
+
+  function showEmpty(text) {
+    state.showing = null;
+    closeScreen();
+    $("quality-wrap").hidden = true;
+    $("kbd").hidden = true;
+    $("term").hidden = true;
+    $("screen").hidden = true;
+    $("empty").textContent = text;
+    $("empty").hidden = false;
+    renderTabs();
+  }
+
+  function tab(label, pressed, onClick, extra) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "tab" + (extra && extra.exited ? " exited" : "");
+    b.setAttribute("aria-pressed", pressed ? "true" : "false");
+    if (extra && extra.busy) b.append(Object.assign(document.createElement("i"), { className: "busy" }));
+    b.append(Object.assign(document.createElement("span"), { textContent: label }));
+    b.addEventListener("click", onClick);
+    return b;
+  }
+
+  function renderTabs() {
+    const info = state.info;
+    if (!info || !info.machine_share) return;
+    const items = state.sessions.map((s) => {
+      const label = s.title || agents[s.agent] || s.name;
+      const on = state.showing && state.showing.kind === "session" && state.showing.name === s.name;
+      return tab(label, on, () => showSession(s.name), { busy: s.busy, exited: s.status === "exited" });
+    });
+    if (info.desktop !== "none") items.push(tab("Screen", state.showing && state.showing.kind === "desktop", showDesktop));
+    if (info.ports.length) {
+      items.push(Object.assign(document.createElement("span"), { className: "gap" }));
+      items.push(Object.assign(document.createElement("span"), { className: "hint", textContent: `${info.ports.length} server${info.ports.length === 1 ? "" : "s"} shared: open them in the Muxin app` }));
+    }
+    $("tabs").replaceChildren(...items);
+    $("tabs").hidden = false;
+  }
+
+  function admitted() {
+    show("watch");
+    $("session-actions").hidden = false;
+    makeTerminal();
+    if (state.info && state.info.machine_share) {
+      showEmpty(`Looking at ${state.info.title}'s sessions…`);
+    } else {
+      showSession("");
+    }
+    updateNote();
+  }
+
+  // ---- The screen: patches painted as they come, in order; input back.
+
+  const canvas = () => $("canvas");
+  // What arrived and isn't painted yet. While a paint runs, newer screens
+  // wait here; the next paint takes them all at once and skips the parts a
+  // later one covers, so a slow device shows the newest screen, never one
+  // that falls further and further behind.
+  let waiting = [];
+  let painting = false;
+
+  function paint(kind, body) {
+    waiting.push([kind, body.slice()]);
+    if (!painting) paintWaiting();
+  }
+
+  // The patches of a TILES message: [x, y, w, h, jpeg].
+  function patchesOf(copy) {
+    const v = new DataView(copy.buffer);
+    const n = v.getUint16(4), patches = [];
+    let o = 6;
+    for (let i = 0; i < n && o + 12 <= copy.length; i++) {
+      const len = v.getUint32(o + 8);
+      patches.push([v.getUint16(o), v.getUint16(o + 2), v.getUint16(o + 4), v.getUint16(o + 6), copy.subarray(o + 12, o + 12 + len)]);
+      o += 12 + len;
+    }
+    return { w: v.getUint16(0), h: v.getUint16(2), patches };
+  }
+
+  async function paintWaiting() {
+    painting = true;
+    while (waiting.length) {
+      const batch = waiting;
+      waiting = [];
+      const c = canvas(), ctx = c.getContext("2d");
+      // A whole frame replaces everything before it.
+      const lastFrame = batch.map(([k]) => k).lastIndexOf(FRAME);
+      if (lastFrame >= 0) {
+        const copy = batch[lastFrame][1];
+        const img = copy.length > 4 ? await createImageBitmap(new Blob([copy.subarray(4)], { type: "image/jpeg" })).catch(() => null) : null;
+        if (img) {
+          if (c.width !== img.width || c.height !== img.height) { c.width = img.width; c.height = img.height; }
+          ctx.drawImage(img, 0, 0);
+          img.close();
+        }
+      }
+      // Then the patches after it, in order, without those a later one covers.
+      let size = null, patches = [];
+      for (const [k, copy] of batch.slice(lastFrame + 1)) {
+        if (k !== TILES) continue;
+        const t = patchesOf(copy);
+        if (!size || size.w !== t.w || size.h !== t.h) { size = t; patches = []; }
+        const covers = (a, b) => a[0] <= b[0] && a[1] <= b[1] && a[0] + a[2] >= b[0] + b[2] && a[1] + a[3] >= b[1] + b[3];
+        patches = patches.filter((old) => !t.patches.some((p) => covers(p, old)));
+        patches.push(...t.patches);
+      }
+      if (size) {
+        if (c.width !== size.w || c.height !== size.h) { c.width = size.w; c.height = size.h; }
+        const images = await Promise.all(patches.map((p) => createImageBitmap(new Blob([p[4]], { type: "image/jpeg" })).catch(() => null)));
+        images.forEach((img, i) => { if (img) { ctx.drawImage(img, patches[i][0], patches[i][1]); img.close(); } });
+      }
+      $("screen-wait").hidden = true;
+    }
+    painting = false;
+  }
+
+  function input(event) {
+    if (!state.canControl || !state.desktop || !state.dc || state.dc.readyState !== "open") return;
+    state.dc.send(frame(state.desktop, INPUT, enc.encode(JSON.stringify(event))));
+  }
+
+  // Where the pointer is, in the screen's own pixels.
+  function at(e) {
+    const c = canvas(), r = c.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    const x = ((e.clientX - r.left) / r.width) * c.width, y = ((e.clientY - r.top) / r.height) * c.height;
+    return x < 0 || y < 0 || x >= c.width || y >= c.height ? null : { x, y };
+  }
+
+  // X keysyms: the key's place for letters, digits and signs (Shift goes
+  // separately), its name for the rest.
+  const codes = { Minus: "-", Equal: "=", BracketLeft: "[", BracketRight: "]", Backslash: "\\", Semicolon: ";", Quote: "'", Comma: ",", Period: ".", Slash: "/", Backquote: "`", Space: " " };
+  const named = {
+    Enter: 0xff0d, Backspace: 0xff08, Tab: 0xff09, Escape: 0xff1b, Delete: 0xffff, Insert: 0xff63, Home: 0xff50, End: 0xff57,
+    PageUp: 0xff55, PageDown: 0xff56, ArrowLeft: 0xff51, ArrowUp: 0xff52, ArrowRight: 0xff53, ArrowDown: 0xff54,
+    Shift: 0xffe1, Control: 0xffe3, Alt: 0xffe9, CapsLock: 0xffe5,
+  };
+  function keysym(e) {
+    if (/^Key[A-Z]$/.test(e.code)) return e.code.charCodeAt(3) + 32;
+    if (/^Digit[0-9]$/.test(e.code)) return e.code.charCodeAt(5);
+    if (codes[e.code]) return codes[e.code].charCodeAt(0);
+    // ⌘ is ⌘ on a Mac; elsewhere it works as Ctrl (copy, paste, ... as on a Mac).
+    if (e.key === "Meta") return state.info && state.info.mac ? 0xffeb : 0xffe3;
+    if (/^F([1-9]|1[0-2])$/.test(e.key)) return 0xffbe + Number(e.key.slice(1)) - 1;
+    if (named[e.key]) return named[e.key];
+    return e.key.length === 1 && e.key.charCodeAt(0) <= 0xff ? e.key.charCodeAt(0) : null;
+  }
+
+  const held = { keys: new Set(), buttons: new Set() };
+  function letGo() {
+    for (const k of held.keys) input({ t: "key", keysym: k, down: false });
+    for (const b of held.buttons) input({ t: "button", b, down: false, x: 0, y: 0 });
+    held.keys.clear();
+    held.buttons.clear();
+  }
+
+  function wireScreen() {
+    // How it looks: smoother and sharper takes more of the connection. The
+    // choice is kept for next time; a new stream starts at it.
+    try { const q = localStorage.getItem("muxin-quality"); if (q && [...$("quality").options].some((o) => o.value === q)) $("quality").value = q; } catch (_) {}
+    $("quality").addEventListener("change", () => {
+      try { localStorage.setItem("muxin-quality", $("quality").value); } catch (_) {}
+      if (!state.desktop) return;
+      closeChannel(state.desktop);
+      state.desktop = 0;
+      showDesktop();
+    });
+    const c = canvas();
+    let lastMove = 0, rest = 0;
+    c.addEventListener("mousemove", (e) => {
+      const p = at(e);
+      if (!p || performance.now() - lastMove < 8) return;
+      lastMove = performance.now();
+      input({ t: "move", x: p.x, y: p.y });
+    });
+    const button = (e, down) => {
+      const b = { 0: 1, 1: 2, 2: 3 }[e.button];
+      if (!b || !state.canControl) return;
+      e.preventDefault();
+      if (down) c.focus();
+      const p = at(e) || { x: 0, y: 0 };
+      if (down) held.buttons.add(b); else held.buttons.delete(b);
+      input({ t: "button", b, down, x: p.x, y: p.y });
+    };
+    c.addEventListener("mousedown", (e) => button(e, true));
+    window.addEventListener("mouseup", (e) => { if (held.buttons.size) button(e, false); });
+    c.addEventListener("contextmenu", (e) => { if (state.canControl) e.preventDefault(); });
+    c.addEventListener("wheel", (e) => {
+      const p = at(e);
+      if (!p || !state.canControl) return;
+      e.preventDefault();
+      rest += e.deltaMode === 1 ? e.deltaY : e.deltaY / 40;
+      const notches = Math.trunc(rest);
+      if (notches) { rest -= notches; input({ t: "scroll", dy: notches, dx: 0, x: p.x, y: p.y }); }
+    }, { passive: false });
+    const key = (e, down) => {
+      if (!state.canControl) return;
+      const sym = keysym(e);
+      if (sym == null) return;
+      e.preventDefault();
+      if (down) held.keys.add(sym); else held.keys.delete(sym);
+      input({ t: "key", keysym: sym, down });
+    };
+    c.addEventListener("keydown", (e) => key(e, true));
+    c.addEventListener("keyup", (e) => key(e, false));
+    c.addEventListener("blur", letGo);
+    window.addEventListener("blur", letGo);
+    wireTouch(c);
+  }
+
+  // Phones and tablets: a tap clicks, a long press right-clicks, one finger
+  // drags (the mouse held down), two fingers scroll. While watching only,
+  // touch scrolls and zooms the page as usual.
+  function wireTouch(c) {
+    let start = null, dragging = false, long = 0, twoY = null, rest = 0;
+    const point = (t) => at({ clientX: t.clientX, clientY: t.clientY });
+    const clickAt = (p, b) => {
+      input({ t: "move", x: p.x, y: p.y });
+      input({ t: "button", b, down: true, x: p.x, y: p.y });
+      input({ t: "button", b, down: false, x: p.x, y: p.y });
+    };
+    c.addEventListener("touchstart", (e) => {
+      if (!state.canControl) return;
+      e.preventDefault();
+      clearTimeout(long);
+      if (e.touches.length === 2) {
+        start = null;
+        twoY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        return;
+      }
+      const t = e.touches[0], p = point(t);
+      if (!p) return;
+      start = { x: t.clientX, y: t.clientY, p, done: false };
+      dragging = false;
+      long = setTimeout(() => {
+        if (start && !dragging) { clickAt(start.p, 3); start.done = true; }
+      }, 550);
+    }, { passive: false });
+    c.addEventListener("touchmove", (e) => {
+      if (!state.canControl) return;
+      e.preventDefault();
+      if (e.touches.length === 2 && twoY != null) {
+        const y = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        const p = point(e.touches[0]) || { x: 0, y: 0 };
+        rest += (twoY - y) / 24;
+        twoY = y;
+        const notches = Math.trunc(rest);
+        if (notches) { rest -= notches; input({ t: "scroll", dy: notches, dx: 0, x: p.x, y: p.y }); }
+        return;
+      }
+      if (!start || start.done) return;
+      const t = e.touches[0], p = point(t);
+      if (!p) return;
+      if (!dragging && Math.hypot(t.clientX - start.x, t.clientY - start.y) > 10) {
+        dragging = true;
+        clearTimeout(long);
+        input({ t: "move", x: start.p.x, y: start.p.y });
+        input({ t: "button", b: 1, down: true, x: start.p.x, y: start.p.y });
+        held.buttons.add(1);
+      }
+      if (dragging) input({ t: "move", x: p.x, y: p.y });
+    }, { passive: false });
+    const end = (e) => {
+      if (!state.canControl) return;
+      clearTimeout(long);
+      if (e.touches.length) return;
+      twoY = null;
+      if (!start) return;
+      const t = e.changedTouches[0], p = point(t) || start.p;
+      if (dragging) {
+        input({ t: "button", b: 1, down: false, x: p.x, y: p.y });
+        held.buttons.delete(1);
+      } else if (!start.done) {
+        clickAt(start.p, 1);
+      }
+      start = null;
+      dragging = false;
+    };
+    c.addEventListener("touchend", end);
+    c.addEventListener("touchcancel", end);
+
+    // A keyboard for touch screens: what's typed goes to the shared screen.
+    const field = $("kbd-input");
+    $("kbd").addEventListener("click", () => field.focus());
+    field.addEventListener("input", (e) => {
+      const text = e.data || field.value;
+      if (text && state.canControl) input({ t: "text", s: text });
+      field.value = "";
+    });
+    field.addEventListener("keydown", (e) => {
+      const sym = { Enter: 0xff0d, Backspace: 0xff08, Tab: 0xff09, Escape: 0xff1b, ArrowLeft: 0xff51, ArrowUp: 0xff52, ArrowRight: 0xff53, ArrowDown: 0xff54 }[e.key];
+      if (!sym || !state.canControl) return;
+      e.preventDefault();
+      input({ t: "key", keysym: sym, down: true });
+      input({ t: "key", keysym: sym, down: false });
+    });
+  }
+
+  function onChannel(channel, kind, body) {
+    const ch = state.channels.get(channel);
+    if (!ch) return;
+    if (ch.kind === "desktop") {
+      if (kind === TILES || kind === FRAME) paint(kind, body);
+      else if (kind === CLOSE) {
+        state.channels.delete(channel);
+        state.desktop = 0;
+        $("screen-wait").textContent = "Their screen stopped.";
+        $("screen-wait").hidden = false;
+      }
+      return;
+    }
+    if (channel !== state.session) return;
+    const machine = state.info && state.info.machine_share;
+    if (kind === DATA) state.term.write(body);
+    else if (kind === SIZE && body.length === 4) {
+      const v = new DataView(body.buffer, body.byteOffset);
+      state.term.resize(Math.max(10, v.getUint16(0)), Math.max(4, v.getUint16(2)));
+      fitText();
+    } else if (kind === EXIT || kind === CLOSE) {
+      if (kind === CLOSE) { state.channels.delete(channel); state.session = 0; }
+      if (!machine) return finish("The session ended", "");
+      state.term.write("\r\n\x1b[2m[The session ended]\x1b[0m\r\n");
+    }
+  }
+
+  // Frames that came in parts, per channel, until their last part.
+  const pieces = new Map();
+
   function onFrame(buf) {
     const bytes = new Uint8Array(buf);
     if (bytes.length < 5) return;
     const channel = new DataView(bytes.buffer, bytes.byteOffset).getUint32(0);
     const kind = bytes[4];
-    const body = bytes.subarray(5);
-    if (channel === SESSION) {
-      if (!state.term) return;
-      if (kind === DATA) state.term.write(body);
-      else if (kind === SIZE && body.length === 4) {
-        const v = new DataView(body.buffer, body.byteOffset);
-        state.term.resize(Math.max(10, v.getUint16(0)), Math.max(4, v.getUint16(2)));
-      } else if (kind === EXIT) finish("The session ended", "");
-      else if (kind === CLOSE) finish("The session ended", "");
+    let body = bytes.subarray(5);
+    if (kind === MORE) {
+      const parts = pieces.get(channel) || [];
+      parts.push(body);
+      pieces.set(channel, parts);
       return;
     }
-    if (channel !== 0 || kind !== JSON_KIND) return;
+    const parts = pieces.get(channel);
+    if (parts) {
+      pieces.delete(channel);
+      parts.push(body);
+      const whole = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+      let at = 0;
+      for (const p of parts) { whole.set(p, at); at += p.length; }
+      body = whole;
+    }
+    if (channel !== 0) return onChannel(channel, kind, body);
+    if (kind !== JSON_KIND) return;
     let m;
     try { m = JSON.parse(dec.decode(body)); } catch (_) { return; }
     const clean = (s, n) => String(s || "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, n);
+    const ports = (list) => (Array.isArray(list) ? list.slice(0, 32) : []).map((p) => ({ port: Number(p.port) || 0, name: clean(p.name, 60) })).filter((p) => p.port > 0);
+    const desktop = (d) => (d === "view" || d === "control" ? d : "none");
     switch (m.event) {
       case "share":
-        showInfo({ title: clean(m.title, 120), agent: clean(m.agent, 40), machine: clean(m.machine, 80), by: clean(m.by, 80), can_type: !!m.can_type, ends_at: Number(m.ends_at) || 0 });
+        showInfo({
+          machine_share: m.kind === "machine", title: clean(m.title, 120), agent: clean(m.agent, 40), machine: clean(m.machine, 80), by: clean(m.by, 80),
+          can_type: !!m.can_type, desktop: desktop(m.desktop), can_control: !!m.can_control, mac: !!m.mac, ports: ports(m.ports), ends_at: Number(m.ends_at) || 0,
+        });
         break;
       case "waiting":
         $("wait-status").textContent = `Waiting for ${state.info ? state.info.by : "them"} to let you in…`;
         break;
       case "admitted":
         state.canType = !!m.can_type;
-        openTerminal();
-        send({ op: "watch", channel: SESSION });
+        state.canControl = !!m.can_control;
+        admitted();
+        break;
+      case "sessions":
+        state.sessions = (Array.isArray(m.sessions) ? m.sessions.slice(0, 200) : []).map((s) => ({
+          name: clean(s.name, 120), title: clean(s.title, 120), agent: clean(s.agent, 40), status: clean(s.status, 20), busy: !!s.busy,
+        }));
+        if (!state.showing) {
+          const first = state.sessions.find((s) => s.status !== "exited");
+          if (first) showSession(first.name);
+          else if (state.info.desktop !== "none") showDesktop();
+          else showEmpty(`No sessions are running on ${state.info.title}.`);
+        }
+        renderTabs();
         break;
       case "typing":
-        setTyping(!!m.allowed);
+        state.canType = !!m.allowed;
+        updateNote();
         break;
+      case "control":
+        state.canControl = !!m.allowed;
+        if (!state.canControl) letGo();
+        updateNote();
+        break;
+      case "access":
+        state.info.desktop = desktop(m.desktop);
+        state.info.ports = ports(m.ports);
+        state.canControl = !!m.can_control;
+        if (state.info.desktop === "none" && state.showing && state.showing.kind === "desktop") {
+          const first = state.sessions.find((s) => s.status !== "exited");
+          if (first) showSession(first.name); else showEmpty("They stopped sharing the screen.");
+        }
+        renderTabs();
+        updateNote();
+        break;
+      case "refused": {
+        const ch = state.channels.get(Number(m.channel));
+        state.channels.delete(Number(m.channel));
+        if (ch && ch.kind === "desktop") {
+          state.desktop = 0;
+          $("screen-wait").textContent = clean(m.error, 200);
+          $("screen-wait").hidden = false;
+        } else if (ch && Number(m.channel) === state.session) {
+          state.session = 0;
+          state.term.write(`\r\n\x1b[2m${clean(m.error, 200)}\x1b[0m\r\n`);
+        }
+        break;
+      }
       case "denied":
         finish("You weren't let in", "Ask them for a new link if that wasn't meant to happen.");
         break;
@@ -317,6 +785,7 @@
       try { localStorage.setItem("muxin-name", state.name); } catch (_) {}
       connect(ticket);
     });
+    wireScreen();
     $("cancel").addEventListener("click", () => { send({ op: "bye" }); finish("You left", ""); });
     $("leave").addEventListener("click", () => { send({ op: "bye" }); finish("You left", ""); });
   }

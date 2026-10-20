@@ -115,3 +115,67 @@ button:disabled { opacity: 0.6; cursor: default; }
   padding: 10px 14px; border-radius: 10px; background: var(--surface); font-size: 13px;
 }
 .term-bar > :first-child { flex: 1 1 220px; }
+
+.tabs {
+  width: 100%; max-width: 1200px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+}
+.tab {
+  min-height: 34px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border-soft);
+  background: var(--surface); font-size: 13px; display: inline-flex; align-items: center; gap: 8px; max-width: 260px;
+}
+.tab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.tab.exited { color: var(--muted); }
+.tab .busy { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.tabs .gap { flex: 1; }
+.tabs .hint { font-size: 12px; color: var(--muted); }
+
+.screen {
+  width: 100%; max-width: 1600px; flex: 1; min-height: 320px; display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border-soft); border-radius: 10px; background: #000; overflow: hidden; position: relative;
+}
+.screen canvas { max-width: 100%; max-height: 100%; display: block; outline: none; cursor: default; }
+.screen canvas.control { cursor: crosshair; }
+.screen canvas:focus-visible { outline: 2px solid var(--accent); }
+.screen p { position: absolute; margin: 0; }
+.empty { flex: 1; display: flex; align-items: center; justify-content: center; margin: 0; }
+.quality { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.quality select {
+  font: inherit; color: var(--text); background: var(--canvas); border: 1px solid var(--border);
+  border-radius: 7px; padding: 4px 8px;
+}
+
+/* The shared screen: touch drives it while you're let control it. */
+.screen canvas.control { touch-action: none; }
+.small-btn { min-height: 34px; padding: 5px 14px; font-size: 13px; }
+.kbd-input { position: fixed; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; }
+
+/* Phones: one compact header row, the rest of the screen for what's shared. */
+@media (max-width: 640px) {
+  .bar { padding: 10px 14px; gap: 8px 10px; flex-wrap: nowrap; }
+  .brand { gap: 0; font-size: 0; }
+  .logo { width: 22px; height: 22px; }
+  .session { flex: 1 1 0; padding-left: 10px; }
+  .session-title { font-size: 15px; }
+  .session-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .session-actions { gap: 8px; flex-wrap: nowrap; }
+  #time-left { display: none; }
+  .pill { padding: 3px 10px; font-size: 13px; }
+  #leave { min-height: 34px; padding: 5px 12px; font-size: 13px; }
+  .watch { padding: 10px 8px; gap: 8px; }
+  .tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .tab { flex: none; }
+  .tabs .gap, .tabs .hint { display: none; }
+  .term { padding: 8px; min-height: 260px; }
+  .screen { min-height: 200px; }
+  .term-bar { padding: 8px 12px; font-size: 12.5px; }
+  .card { padding: 20px; }
+  h1 { font-size: 26px; }
+  .code { font-size: 30px; }
+}
+
+/* Portrait phones and tablets: the box is the screen's own shape, not a tall black frame around it. */
+@media (orientation: portrait) and (max-width: 1024px) {
+  .screen { flex: none; min-height: 0; }
+  .screen canvas { width: 100%; height: auto; max-height: none; }
+}

@@ -237,3 +237,30 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod relay_check {
+    use super::*;
+
+    /// Whether this WebRTC gets a relay address from the share server's
+    /// relay (`MUXIN_TEST_SHARE_SERVER`; makes one share's credentials).
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn gets_a_relay_address() {
+        let server = super::super::signal::Server::new(&std::env::var("MUXIN_TEST_SHARE_SERVER").expect("MUXIN_TEST_SHARE_SERVER"));
+        let room = "UkVMQVlDSEVDS1JFTEFZQw";
+        let key = super::super::signal::host_key();
+        let (ice, _) = server.check_in(room, &key).await.unwrap();
+        let (pc, mut events) = peer(&ice, None).await.unwrap();
+        let _dc = pc.create_data_channel(LABEL, None).await.unwrap();
+        let offer = pc.create_offer(None).await.unwrap();
+        let t = std::time::Instant::now();
+        pc.set_local_description(offer).await.unwrap();
+        gathered(&pc, &mut events, &ice).await;
+        let sdp = pc.local_description().await.unwrap().sdp;
+        let types: Vec<&str> = sdp.lines().filter_map(|l| l.split(" typ ").nth(1)).map(|t| t.split(' ').next().unwrap_or("")).collect();
+        println!("after {:?}: candidate types {types:?}", t.elapsed());
+        server.close(room, &key).await;
+        assert!(types.contains(&"relay"), "no relay address");
+    }
+}

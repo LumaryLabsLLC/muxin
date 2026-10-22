@@ -133,6 +133,9 @@ pub struct BoxInfo {
     pub session_id: Option<String>,
     /// What it was first asked.
     pub task: String,
+    /// The checkout on its machine it was made from (a local project), if it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<String>,
     /// The checkout on the machine.
     pub path: String,
     pub idle_minutes: u32,
@@ -170,6 +173,7 @@ pub(crate) fn parse(machine_id: &str, reply: &Value) -> Vec<BoxInfo> {
                 agent,
                 state: b["state"].as_str().unwrap_or("paused").to_string(),
                 task: str_of("task"),
+                checkout: b["checkout"].as_str().filter(|c| !c.is_empty()).map(str::to_string),
                 path: str_of("path"),
                 idle_minutes: b["idle_minutes"].as_u64().map(|m| m as u32).unwrap_or(IDLE_MINUTES),
                 created_at: ts(&b["created"]),
@@ -209,6 +213,11 @@ struct Plan {
     name: String,
     agent: String,
     repo: Repo,
+    /// `repo` is a checkout on the box's machine (a local project): cloned
+    /// from there, with its uncommitted changes.
+    local: bool,
+    /// The GitHub repository it pushes to ("owner/name"): `repo`'s, or the checkout's origin's.
+    github: Option<String>,
     git_ref: String,
     branch: String,
     task: String,
@@ -253,7 +262,16 @@ impl Engine {
         };
         let branch = req.branch.map(|b| b.trim().to_string()).filter(|b| !b.is_empty()).unwrap_or_else(|| format!("box/{}", short_slug(&name)));
         workspaces::validate_git_ref(&branch)?;
+        // A folder on a machine: a checkout there (a local project), so the box goes there too.
+        let local = repo.url.starts_with('/') || repo.url.starts_with("~/");
+        if local && req.machine.as_deref().is_none_or(|m| m.trim().is_empty()) {
+            return Err(format!("Say which machine {} is on.", repo.shown));
+        }
         let spec = self.box_machine(req.machine.as_deref())?;
+        let github = match local {
+            true => self.checkouts_of(&spec.id).into_iter().find(|c| workspaces::same_folder(&c.path, &repo.url)).and_then(|c| c.repo),
+            false => repo.on_github.then(|| workspaces::github_full_name(&repo)).flatten(),
+        };
         let taken: Vec<String> = self.boxes().into_iter().map(|b| b.id).collect();
         let id = loop {
             let id = format!("box-{}", workspaces::random_id(6));
@@ -261,7 +279,7 @@ impl Engine {
                 break id;
             }
         };
-        let plan = Plan { id: id.clone(), name, agent, repo, git_ref, branch, task, cpus: req.cpus, memory_gb: req.memory_gb, idle_minutes: req.idle_minutes.unwrap_or(IDLE_MINUTES) };
+        let plan = Plan { id: id.clone(), name, agent, repo, local, github, git_ref, branch, task, cpus: req.cpus, memory_gb: req.memory_gb, idle_minutes: req.idle_minutes.unwrap_or(IDLE_MINUTES) };
         let op = self.begin_op("box", format!("Make box {} on {}", plan.name, spec.name), Some(spec.id.clone()), None);
         let me = self.clone();
         self.runtime().spawn(async move {
@@ -313,28 +331,40 @@ impl Engine {
         // GitHub: the token clones a private repo and lets the agent push and
         // open pull requests; commits are the user's, with their noreply address.
         let settings = self.settings().github;
-        let token = match plan.repo.on_github {
-            true => self.github().git_credentials(&settings).await.filter(|(host, _)| *host == plan.repo.host).map(|(_, t)| t),
-            false => None,
+        // A checkout Muxin hasn't looked at yet: where it pushes, asked of it.
+        let github = match (&plan.github, plan.local) {
+            (None, true) => checkout_github(spec, &plan.repo.url, &workspaces::github_web_host(&settings.api_url)).await,
+            (g, _) => g.clone(),
+        };
+        // The GitHub host it pushes to: its URL's, or (a checkout) GitHub's when its origin is there.
+        let gh_host = match (plan.repo.on_github, &github) {
+            (true, _) => Some(plan.repo.host.clone()),
+            (false, Some(_)) => Some(workspaces::github_web_host(&settings.api_url)),
+            (false, None) => None,
+        };
+        let token = match &gh_host {
+            Some(h) => self.github().git_credentials(&settings).await.filter(|(host, _)| host == h).map(|(_, t)| t),
+            None => None,
         };
         let identity = match self.github().viewer(&settings).await {
             Ok(v) => self.github().commit_identity(&settings, &v.login).await.ok(),
             Err(_) => None,
         };
-        if token.is_none() && plan.repo.on_github {
+        if token.is_none() && gh_host.is_some() {
             self.op_log(op, "! No GitHub token: the agent can't push or open pull requests from the box");
         }
+        let gh_host = gh_host.unwrap_or_default();
 
         let l = launch(&plan.agent).ok_or("That agent can't run in a box.")?;
         let mut env: Vec<(String, String)> = vec![("MUXIN_BOX".into(), plan.id.clone())];
         if let Some(t) = &token {
             env.push(("GH_TOKEN".into(), t.clone()));
-            if plan.repo.host != "github.com" {
-                env.push(("GH_HOST".into(), plan.repo.host.clone()));
+            if gh_host != "github.com" {
+                env.push(("GH_HOST".into(), gh_host.clone()));
                 env.push(("GH_ENTERPRISE_TOKEN".into(), t.clone()));
             }
         }
-        let files = home_files(&l, &env, identity.as_ref(), token.as_ref().map(|_| plan.repo.host.as_str()));
+        let files = home_files(&l, &env, identity.as_ref(), token.as_ref().map(|_| gh_host.as_str()));
         let encoded: Vec<String> = files.iter().map(|(path, mode, text)| format!("{path}\t{mode}\t{}", B64.encode(text))).collect();
         // Signed in as on the machine: its agent folders mounted (the box's
         // agent's made when missing, so a sign-in in the box stays), and a
@@ -344,7 +374,8 @@ impl Engine {
         let copy: Vec<String> = vec![".claude.json".into()];
         let db_dirs: Vec<String> = DB_DIRS.iter().map(|d| d.to_string()).collect();
         let db_copy: Vec<String> = DB_COPY.iter().map(|d| d.to_string()).collect();
-        let header = token.as_ref().map(|t| format!("AUTHORIZATION: basic {}", B64.encode(format!("x-access-token:{t}")))).unwrap_or_default();
+        // Only a clone from GitHub needs the token (a checkout is cloned from its folder).
+        let header = token.as_ref().filter(|_| !plan.local).map(|t| format!("AUTHORIZATION: basic {}", B64.encode(format!("x-access-token:{t}")))).unwrap_or_default();
         let image = format!("muxen-box:{:08x}", fnv(DOCKERFILE.as_bytes()) as u32);
         let container = format!("muxen-{}", plan.id);
         let hostname = short_slug(&plan.name);
@@ -360,6 +391,7 @@ impl Engine {
                 ("OR_IMAGE", Param::Str(&image)),
                 ("OR_DOCKERFILE", Param::Str(DOCKERFILE)),
                 ("OR_REPO", Param::Str(&plan.repo.url)),
+                ("OR_LOCAL", Param::Bool(plan.local)),
                 ("OR_REPO_SHOWN", Param::Str(&plan.repo.shown)),
                 ("OR_REF", Param::Str(&plan.git_ref)),
                 ("OR_BRANCH", Param::Str(&plan.branch)),
@@ -385,7 +417,8 @@ impl Engine {
         let record = json!({
             "id": plan.id,
             "name": plan.name,
-            "repo": plan.repo.shown,
+            "repo": github.clone().unwrap_or_else(|| plan.repo.shown.clone()),
+            "checkout": plan.local.then(|| plan.repo.shown.clone()),
             "branch": plan.branch,
             "agent": plan.agent,
             "task": plan.task,
@@ -465,6 +498,27 @@ impl Engine {
     }
 }
 
+/// The GitHub repository ("owner/name") a checkout on a machine pushes to: its origin's.
+async fn checkout_github(spec: &MachineSpec, path: &str, gh_host: &str) -> Option<String> {
+    let folder = match path.strip_prefix("~/") {
+        Some(rest) => format!("\"$HOME\"/{}", sh_quote(rest)),
+        None => sh_quote(path),
+    };
+    let url = remote::output(spec, Shell::Sh, format!("git -C {folder} remote get-url origin\n"), Duration::from_secs(30)).await.ok()?;
+    github_name(url.trim(), gh_host)
+}
+
+/// "owner/name" of a git URL on the GitHub host: https, or ssh (git@host:owner/name).
+fn github_name(url: &str, gh_host: &str) -> Option<String> {
+    let ssh = [format!("git@{gh_host}:"), format!("ssh://git@{gh_host}/")];
+    let https = match ssh.iter().find_map(|p| url.strip_prefix(p.as_str())) {
+        Some(path) => format!("https://{gh_host}/{path}"),
+        None => url.to_string(),
+    };
+    let repo = workspaces::normalize_repo(&https, gh_host).ok()?;
+    repo.on_github.then(|| workspaces::github_full_name(&repo)).flatten()
+}
+
 /// The files of a box's home Muxin writes: path (under /home/box), mode and contents.
 fn home_files(l: &Launch, env: &[(String, String)], identity: Option<&(String, String)>, git_host: Option<&str>) -> Vec<(String, &'static str, String)> {
     let mut files: Vec<(String, &'static str, String)> = Vec::new();
@@ -481,6 +535,8 @@ fn home_files(l: &Launch, env: &[(String, String)], identity: Option<&(String, S
     if let Some(host) = git_host {
         files.push((".muxin/git-credential".into(), "755", GIT_CREDENTIAL.into()));
         gitconfig.push_str(&format!("[credential \"https://{host}\"]\n\thelper = /home/box/.muxin/git-credential\n"));
+        // A box has no ssh keys: ssh remotes (a checkout's, say) go over https, with the token.
+        gitconfig.push_str(&format!("[url \"https://{host}/\"]\n\tinsteadOf = git@{host}:\n\tinsteadOf = ssh://git@{host}/\n"));
     }
     gitconfig.push_str("[init]\n\tdefaultBranch = main\n[push]\n\tautoSetupRemote = true\n");
     files.push((".gitconfig".into(), "644", gitconfig));
@@ -625,6 +681,15 @@ mod tests {
             assert!(!l.dirs.is_empty(), "{a}");
             assert!(l.dirs.iter().all(|d| AGENT_DIRS.contains(d)), "{a}'s folders are mounted");
         }
+    }
+
+    #[test]
+    fn a_checkouts_origin_names_its_github_repo() {
+        assert_eq!(github_name("https://github.com/acme/api.git", "github.com").as_deref(), Some("acme/api"));
+        assert_eq!(github_name("git@github.com:acme/api.git", "github.com").as_deref(), Some("acme/api"));
+        assert_eq!(github_name("ssh://git@github.com/acme/api", "github.com").as_deref(), Some("acme/api"));
+        assert_eq!(github_name("git@gitlab.com:acme/api.git", "github.com"), None);
+        assert_eq!(github_name("/srv/git/api.git", "github.com"), None);
     }
 
     #[test]

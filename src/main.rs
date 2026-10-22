@@ -1042,7 +1042,7 @@ struct BoxLsArgs {
 struct BoxNewArgs {
     #[command(flatten)]
     agent: AgentArgs,
-    /// owner/name on GitHub, or a git URL
+    /// owner/name on GitHub, a git URL, or a checkout's folder on the --on machine (with its uncommitted work)
     repo: String,
     /// What the agent is asked to do
     #[arg(num_args = 1..)]

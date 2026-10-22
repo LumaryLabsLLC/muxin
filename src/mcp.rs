@@ -640,7 +640,7 @@ pub fn tools() -> Vec<Value> {
             "name": "box_create",
             "description": "Hand a task to an agent in a new box: Muxin clones the repo onto a new branch in a container of its own on one of the user's machines (one with Docker; the first box there builds Muxin's image, a few minutes), runs the repo's .agents/setup, and starts the agent CLI there on the prompt with its permission prompts off (the container is its sandbox). It can push and open pull requests with the user's GitHub login. The box pauses by itself when its agent has been quiet for a while; box_send picks it up again. Waits until the agent has started (wait: false returns an operation_id to poll). Only when the user asked for it.",
             "inputSchema": schema(json!({
-                "repo": { "type": "string", "description": "owner/name on GitHub, or a git URL." },
+                "repo": { "type": "string", "description": "owner/name on GitHub, a git URL, or a checkout's folder on machine_id (see local_checkouts): the box starts from that checkout with its uncommitted changes." },
                 "prompt": { "type": "string", "description": "The task: what the agent is asked to do (an issue's URL and text works well)." },
                 "agent": { "type": "string", "enum": ["claude", "codex", "amp", "opencode", "gemini", "pi"], "description": "Which agent CLI. Default claude. It's signed in as it is on that machine (its ~/.claude, ~/.codex, ... are shared with the box); if it isn't signed in there, the user signs it in once from the box's terminal." },
                 "machine_id": { "type": "string", "description": "Where it runs. Default: the online machine with Docker and the most free memory." },

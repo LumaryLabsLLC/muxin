@@ -2,9 +2,12 @@
 # time), a checkout of the repository, the agent's home and a container
 # running as this user, then the repository's .agents/setup in it.
 # Prepended: OR_ID OR_CONTAINER OR_HOSTNAME OR_IMAGE OR_DOCKERFILE OR_REPO
-# OR_REPO_SHOWN OR_REF OR_BRANCH OR_AUTH OR_FILES OR_COPY OR_MOUNTS OR_ENSURE
-# OR_DB_DIRS OR_DB_COPY OR_CPUS OR_MEM. OR_AUTH is an http.extraHeader value; it only ever lives in
-# this process's environment. OR_FILES: one file of the agent's home per
+# OR_LOCAL OR_REPO_SHOWN OR_REF OR_BRANCH OR_AUTH OR_FILES OR_COPY OR_MOUNTS
+# OR_ENSURE OR_DB_DIRS OR_DB_COPY OR_CPUS OR_MEM. OR_AUTH is an
+# http.extraHeader value; it only ever lives in this process's environment.
+# OR_LOCAL: OR_REPO is a checkout here (a local project): it's cloned from
+# that folder with its uncommitted changes (and new files that aren't
+# ignored), and pushes where the checkout does. OR_FILES: one file of the agent's home per
 # line, "<path>\t<mode>\t<base64>". OR_COPY: files of this user's home copied
 # into the agent's when they're here. OR_MOUNTS: this user's agent folders
 # (~/.claude, ~/.codex, ...) mounted into the agent's home when they're here,
@@ -47,6 +50,34 @@ export GIT_TERMINAL_PROMPT=0
 if [ -n "$OR_AUTH" ]; then
   export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="$OR_AUTH"
 fi
+if [ "$OR_LOCAL" = 1 ]; then
+  src=$OR_REPO
+  case "$src" in "~") src=$HOME ;; "~/"*) src="$HOME/${src#\~/}" ;; esac
+  git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 </dev/null || fail "$OR_REPO_SHOWN isn't a git checkout on $(hostname)."
+  echo "▸ Copying the checkout $OR_REPO_SHOWN"
+  git clone --quiet "$src" . </dev/null 2>&1 || { echo "error: git clone failed" >&2; exit 4; }
+  if [ -n "$OR_REF" ]; then
+    git -c advice.detachedHead=false checkout --quiet "$OR_REF" 2>&1 || fail "Couldn't check out $OR_REF."
+  else
+    # Where the checkout is now: its uncommitted changes, and its new files.
+    git -C "$src" diff HEAD --binary > "$dir/.changes" 2>/dev/null </dev/null
+    if [ -s "$dir/.changes" ]; then
+      git apply --whitespace=nowarn "$dir/.changes" 2>&1 </dev/null || echo "! Some of its uncommitted changes didn't carry over"
+    fi
+    rm -f "$dir/.changes"
+    (cd "$src" && git ls-files --others --exclude-standard -z </dev/null | tar cf - --null -T -) | tar xf - 2>/dev/null
+    or_n=$(git status --porcelain 2>/dev/null </dev/null | wc -l | tr -d ' ')
+    [ "${or_n:-0}" -gt 0 ] && echo "✓ Brought along its $or_n uncommitted files"
+  fi
+  # It pushes where the checkout does; the checkout itself stays a remote ("checkout").
+  or_origin=$(git -C "$src" remote get-url origin 2>/dev/null </dev/null)
+  if [ -n "$or_origin" ]; then
+    git remote set-url origin "$or_origin"
+    git remote add checkout "$src"
+  else
+    git remote rename origin checkout
+  fi
+else
 echo "▸ Cloning $OR_REPO_SHOWN"
 case "$OR_REF" in
   pull/*/head)
@@ -63,6 +94,7 @@ case "$OR_REF" in
     git -c advice.detachedHead=false checkout --quiet "$OR_REF" 2>&1 || fail "Couldn't check out $OR_REF."
     ;;
 esac
+fi
 unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
 if [ -n "$OR_BRANCH" ]; then
   git checkout --quiet -b "$OR_BRANCH" 2>&1 || fail "Couldn't make the branch $OR_BRANCH."

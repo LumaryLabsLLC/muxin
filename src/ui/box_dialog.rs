@@ -1,6 +1,7 @@
 //! New box: a task for an agent that works on it by itself, in a container
 //! of its own on one of your machines, from one of your GitHub repositories
-//! or a folder on that machine (a local project).
+//! or a folder on that machine (a local project). The Code field completes
+//! both: your repositories, and the machine's folders as you type a path.
 
 use std::sync::Arc;
 
@@ -9,20 +10,28 @@ use gpui::{AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusabl
 use super::dialogs::{DialogEvent, MODAL_CHROME, error_line, field, footer, frame};
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle};
+use super::github::Load;
 use super::theme::{ActiveTheme, Theme};
 use crate::fleet::Engine;
+use crate::fleet::files::Listing;
 use crate::fleet::boxes::{BOX_AGENTS, CreateBox};
 use crate::fleet::model::{Checkout, Machine};
 use crate::github::hub;
 
-actions!(box_dialog, [PickUp, PickDown]);
+actions!(box_dialog, [PickUp, PickDown, PickComplete]);
 
 const CONTEXT: &str = "BoxDialog";
-/// Results shown under the Repository field at most.
-const SHOWN: usize = 6;
+/// Results shown under the Code field at most.
+const SHOWN: usize = 8;
+/// Checkouts listed before the home folder's folders, with nothing typed.
+const CHECKOUTS: usize = 4;
 
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("up", PickUp, Some(CONTEXT)), KeyBinding::new("down", PickDown, Some(CONTEXT))]);
+    cx.bind_keys([
+        KeyBinding::new("up", PickUp, Some(CONTEXT)),
+        KeyBinding::new("down", PickDown, Some(CONTEXT)),
+        KeyBinding::new("tab", PickComplete, Some(CONTEXT)),
+    ]);
 }
 
 /// Where the box's code comes from.
@@ -34,11 +43,14 @@ enum Source {
     Folder,
 }
 
-/// A result under the Repository field.
+/// A result under the Code field.
 #[derive(Clone)]
 enum Found {
     Repo(hub::Repo),
     Checkout(Checkout),
+    /// A folder on the machine (`path` ends in a slash, so its own list next),
+    /// and the checkout it is, when Muxin knows one.
+    Folder { name: String, path: String, checkout: Option<Checkout> },
 }
 
 pub struct BoxDialog {
@@ -53,6 +65,10 @@ pub struct BoxDialog {
     folder_machine: Option<String>,
     /// Your GitHub repositories (favorites first), once they're read.
     repos: Option<Vec<hub::Repo>>,
+    /// The folder the Code field points into: (machine, folder) asked for,
+    /// and the last listing that came back (for which machine and folder).
+    folders_asked: Option<(String, String)>,
+    folders: Option<((String, String), Load<Listing>)>,
     /// The result the arrows are on.
     highlight: usize,
     error: Option<String>,
@@ -85,7 +101,26 @@ fn folder_name(path: &str) -> &str {
 }
 
 const GITHUB_HINT: &str = "Search your repositories, or owner/name or a git URL";
-const FOLDER_HINT: &str = "Search its checkouts, or a folder like ~/code/app";
+const FOLDER_HINT: &str = "A folder, like ~/code/app (Tab completes)";
+
+/// What's typed as a folder and the name being completed in it: "~/Dev" is
+/// ("~", "Dev"), "~/code/" is ("~/code", "").
+fn folder_query(text: &str) -> (String, String) {
+    let t = text.trim();
+    if t.is_empty() || t == "~" {
+        return ("~".into(), String::new());
+    }
+    match t.rsplit_once('/') {
+        Some(("", name)) => ("/".into(), name.into()),
+        Some((dir, name)) => (dir.into(), name.into()),
+        None => ("~".into(), t.into()),
+    }
+}
+
+/// `name` inside `dir`, ending in a slash so its folders list next.
+fn folder_path(dir: &str, name: &str) -> String {
+    if dir == "/" { format!("/{name}/") } else { format!("{}/{name}/", dir.trim_end_matches('/')) }
+}
 
 impl BoxDialog {
     /// `repo` and `task`, when something opened it with them (an issue to fix).
@@ -103,6 +138,7 @@ impl BoxDialog {
                 InputEvent::Changed => {
                     this.error = None;
                     this.highlight = 0;
+                    this.list_folders(cx);
                     cx.notify()
                 }
             }),
@@ -142,10 +178,45 @@ impl BoxDialog {
             machine: None,
             folder_machine: None,
             repos: None,
+            folders_asked: None,
+            folders: None,
             highlight: 0,
             error: None,
             _subscriptions: subs,
         }
+    }
+
+    /// Lists the folder the Code field points into, on the folder's machine
+    /// (once per folder; the last listing stays up meanwhile).
+    fn list_folders(&mut self, cx: &mut Context<Self>) {
+        if self.source != Source::Folder {
+            return;
+        }
+        let Some(machine) = self.folder_machine.clone() else { return };
+        let (dir, _) = folder_query(self.repo.read(cx).text());
+        let key = (machine.clone(), dir.clone());
+        if self.folders_asked.as_ref() == Some(&key) {
+            return;
+        }
+        self.folders_asked = Some(key.clone());
+        if self.folders.is_none() {
+            self.folders = Some((key.clone(), Load::Loading));
+        }
+        let job = self.engine.runtime().spawn({
+            let engine = self.engine.clone();
+            async move { engine.list_files(&machine, &dir).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.folders_asked.as_ref() == Some(&key) {
+                    this.folders = Some((key, result.map_or_else(Load::Failed, Load::Ready)));
+                    this.highlight = 0;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn first_focus(&self, cx: &App) -> FocusHandle {
@@ -170,6 +241,7 @@ impl BoxDialog {
             i.set_placeholder(hint, cx)
         });
         window.focus(&self.repo.focus_handle(cx));
+        self.list_folders(cx);
         cx.notify();
     }
 
@@ -179,28 +251,76 @@ impl BoxDialog {
         let q = typed.to_lowercase();
         match self.source {
             Source::GitHub => {
-                // Nothing typed: the favorites show instead.
-                let repos = self.repos.iter().flatten();
-                if q.is_empty() || repos.clone().any(|r| r.full_name.eq_ignore_ascii_case(&typed)) {
+                let repos = self.repos.iter().flatten().filter(|r| !r.archived);
+                if repos.clone().any(|r| r.full_name.eq_ignore_ascii_case(&typed)) {
                     return Vec::new();
                 }
-                let mut hits: Vec<&hub::Repo> = repos.filter(|r| !r.archived && r.full_name.to_lowercase().contains(&q)).collect();
-                // Names that start with it first ("open" finds acme/openrunner before acme/reopen).
-                hits.sort_by_key(|r| !r.full_name.to_lowercase().split('/').any(|part| part.starts_with(&q)));
+                // Nothing typed: your favorites, then the ones pushed to last.
+                let mut hits: Vec<&hub::Repo> = repos.filter(|r| q.is_empty() || r.full_name.to_lowercase().contains(&q)).collect();
+                if q.is_empty() {
+                    hits.sort_by_key(|r| (!r.favorite, std::cmp::Reverse(r.pushed_at)));
+                } else {
+                    // Names that start with it first ("open" finds acme/openrunner before acme/reopen).
+                    hits.sort_by_key(|r| !r.full_name.to_lowercase().split('/').any(|part| part.starts_with(&q)));
+                }
                 hits.into_iter().take(SHOWN).cloned().map(Found::Repo).collect()
             }
             Source::Folder => {
                 let s = self.engine.current();
                 let Some(machine) = &self.folder_machine else { return Vec::new() };
-                let here: Vec<&Checkout> = s.checkouts.iter().filter(|c| &c.machine_id == machine).collect();
-                if here.iter().any(|c| c.path == typed) {
-                    return Vec::new();
+                let checkouts: Vec<&Checkout> = s.checkouts.iter().filter(|c| &c.machine_id == machine).collect();
+                let known = |path: &str| checkouts.iter().find(|c| crate::fleet::workspaces::same_folder(&c.path, path)).map(|c| (*c).clone());
+                let mut out = Vec::new();
+                // Nothing typed: its checkouts first.
+                if typed.is_empty() {
+                    let mut recent = checkouts.clone();
+                    recent.sort_by_key(|c| std::cmp::Reverse(c.last_commit_at));
+                    out.extend(recent.into_iter().take(CHECKOUTS).cloned().map(Found::Checkout));
                 }
-                let mut hits: Vec<&Checkout> =
-                    here.into_iter().filter(|c| q.is_empty() || c.path.to_lowercase().contains(&q) || c.repo.as_deref().is_some_and(|r| r.to_lowercase().contains(&q))).collect();
-                hits.sort_by_key(|c| (!folder_name(&c.path).to_lowercase().starts_with(&q), std::cmp::Reverse(c.last_commit_at)));
-                hits.into_iter().take(SHOWN).cloned().map(Found::Checkout).collect()
+                // The folders in the one it points into, starting with what's being typed.
+                let (dir, name) = folder_query(&typed);
+                if let Some(((m, d), Load::Ready(listing))) = &self.folders
+                    && m == machine
+                    && *d == dir
+                {
+                    let needle = name.to_lowercase();
+                    let mut names: Vec<&str> = listing
+                        .entries
+                        .iter()
+                        .filter(|e| e.folder && (needle.starts_with('.') || !e.name.starts_with('.')))
+                        .map(|e| e.name.as_str())
+                        .filter(|n| n.to_lowercase().contains(&needle))
+                        .collect();
+                    names.sort_by_key(|n| !n.to_lowercase().starts_with(&needle));
+                    let shown: Vec<String> = out.iter().filter_map(|f| if let Found::Checkout(c) = f { Some(c.path.clone()) } else { None }).collect();
+                    for n in names {
+                        let path = folder_path(&dir, n);
+                        let full = format!("{}/{n}", listing.path.trim_end_matches('/'));
+                        if shown.iter().any(|p| crate::fleet::workspaces::same_folder(p, &full)) {
+                            continue;
+                        }
+                        out.push(Found::Folder { name: n.to_string(), path, checkout: known(&full) });
+                        if out.len() >= SHOWN {
+                            break;
+                        }
+                    }
+                }
+                out
             }
+        }
+    }
+
+    /// Whether the folder the Code field points into is still being read.
+    fn listing(&self) -> bool {
+        let stale = self.folders.as_ref().map(|(k, _)| k) != self.folders_asked.as_ref();
+        self.source == Source::Folder && (stale || matches!(&self.folders, Some((_, Load::Loading))))
+    }
+
+    /// Why the folder it points into couldn't be read, if it couldn't.
+    fn listing_failed(&self) -> Option<String> {
+        match &self.folders {
+            Some((key, Load::Failed(e))) if Some(key) == self.folders_asked.as_ref() => Some(e.clone()),
+            _ => None,
         }
     }
 
@@ -208,13 +328,28 @@ impl BoxDialog {
         let text = match found {
             Found::Repo(r) => r.full_name,
             Found::Checkout(c) => c.path,
+            // Into the folder: its own folders list next.
+            Found::Folder { path, .. } => path,
         };
         self.repo.update(cx, |i, cx| i.set_text(text, cx));
         self.highlight = 0;
         cx.notify();
     }
 
-    fn move_highlight(&mut self, by: isize, cx: &mut Context<Self>) {
+    /// Tab: the highlighted result into the field.
+    fn complete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.repo.focus_handle(cx).is_focused(window) {
+            return;
+        }
+        if let Some(f) = self.found(cx).get(self.highlight).cloned() {
+            self.pick(f, cx);
+        }
+    }
+
+    fn move_highlight(&mut self, by: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.repo.focus_handle(cx).is_focused(window) {
+            return;
+        }
         let n = self.found(cx).len();
         if n > 0 {
             self.highlight = (self.highlight as isize + by).rem_euclid(n as isize) as usize;
@@ -223,7 +358,9 @@ impl BoxDialog {
     }
 
     fn submit(&mut self, cx: &mut Context<Self>) {
-        let repo = self.repo.read(cx).text().trim().to_string();
+        let typed = self.repo.read(cx).text().trim().to_string();
+        // A folder picked from the list ends in a slash.
+        let repo = if typed.len() > 1 { typed.trim_end_matches('/').to_string() } else { typed };
         let task = self.task.read(cx).text().trim().to_string();
         if repo.is_empty() {
             self.error = Some(match self.source {
@@ -278,7 +415,23 @@ impl BoxDialog {
                 if c.dirty > 0 {
                     detail.push(format!("{} uncommitted", c.dirty));
                 }
-                ("folder", folder_name(&c.path).to_string(), detail.join(" · "))
+                ("git-branch", folder_name(&c.path).to_string(), detail.join(" · "))
+            }
+            Found::Folder { name, checkout, .. } => {
+                let detail = match checkout {
+                    Some(c) => {
+                        let mut d = vec!["git checkout".to_string()];
+                        if !c.branch.is_empty() {
+                            d.push(c.branch.clone());
+                        }
+                        if c.dirty > 0 {
+                            d.push(format!("{} uncommitted", c.dirty));
+                        }
+                        d.join(" · ")
+                    }
+                    None => String::new(),
+                };
+                (if checkout.is_some() { "git-branch" } else { "folder" }, name.clone(), detail)
             }
         };
         let on = i == self.highlight;
@@ -349,29 +502,8 @@ impl Render for BoxDialog {
 
         let code: AnyElement = match self.source {
             Source::GitHub => {
-                // Nothing typed yet: your favorites, one click away.
-                let favorites: Vec<AnyElement> = if typed.is_empty() {
-                    self.repos
-                        .iter()
-                        .flatten()
-                        .filter(|r| r.favorite)
-                        .take(6)
-                        .map(|r| {
-                            let name = r.full_name.clone();
-                            chip(SharedString::from(format!("bx-fav-{name}")), false, true)
-                                .child(r.full_name.clone())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.repo.update(cx, |i, cx| i.set_text(name.clone(), cx));
-                                    cx.notify()
-                                }))
-                                .into_any_element()
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
                 let status = match &self.repos {
-                    None if !typed.is_empty() => Some(quiet("Reading your repositories…".into())),
+                    None => Some(quiet("Reading your repositories…".into())),
                     Some(_) if !typed.is_empty() && found.is_empty() && !self.repos.iter().flatten().any(|r| r.full_name.eq_ignore_ascii_case(&typed)) => {
                         Some(quiet("None of your repositories match; it's used as typed (owner/name or a git URL).".into()))
                     }
@@ -383,7 +515,6 @@ impl Render for BoxDialog {
                     .gap(px(8.))
                     .child(self.repo.clone())
                     .children(results)
-                    .when(!favorites.is_empty(), |d| d.child(div().flex().flex_wrap().items_center().gap(px(6.)).child(quiet("Favorites".into())).children(favorites)))
                     .children(status)
                     .into_any_element()
             }
@@ -405,22 +536,26 @@ impl Render for BoxDialog {
                                 d.on_click(cx.listener(move |this, _, _, cx| {
                                     this.folder_machine = Some(id.clone());
                                     this.highlight = 0;
+                                    this.list_folders(cx);
                                     cx.notify()
                                 }))
                             })
                             .into_any_element()
                     })
                     .collect();
-                let checkouts = self.folder_machine.as_ref().map(|m| s.checkouts.iter().filter(|c| &c.machine_id == m).count()).unwrap_or(0);
-                let picked = self.folder_machine.as_ref().and_then(|m| s.checkouts.iter().find(|c| &c.machine_id == m && c.path == typed));
+                let bare = typed.trim_end_matches('/');
+                let picked = self.folder_machine.as_ref().and_then(|m| s.checkouts.iter().find(|c| &c.machine_id == m && crate::fleet::workspaces::same_folder(&c.path, bare)));
                 let note = match (picked, &self.folder_machine) {
                     (Some(c), _) => Some(format!(
                         "The box starts from this checkout as it is now{}, on a branch of its own. Your checkout isn't touched.",
                         if c.dirty > 0 { format!(", with its {} uncommitted files", c.dirty) } else { String::new() }
                     )),
-                    (None, Some(m)) if !typed.is_empty() && found.is_empty() => Some(format!("A git checkout in this folder on {}: the box starts from it, with its uncommitted changes.", machine_name(m))),
-                    (None, Some(m)) if checkouts == 0 => Some(format!("Muxin hasn't found checkouts on {} (Settings › General › Code folders): type the folder.", machine_name(m))),
-                    _ => None,
+                    _ if self.listing() => Some("Looking…".to_string()),
+                    _ if self.listing_failed().is_some() => self.listing_failed(),
+                    (None, Some(m)) if !bare.is_empty() => {
+                        Some(format!("The box starts from {} on {} as it is now (a git checkout, with its uncommitted changes). Tab or a click goes into a folder.", tilde(bare), machine_name(m)))
+                    }
+                    _ => Some("Its checkouts, then the folders in your home. Type a path; Tab or a click goes into a folder.".to_string()),
                 };
                 div()
                     .flex()
@@ -506,8 +641,9 @@ impl Render for BoxDialog {
             .children(place.map(|p| field(&theme, "On", p, None)));
         frame(&theme, "New box", Some("An agent works on the task by itself, in a container of its own with its permission prompts off. The box pauses when it's been quiet a while and picks up again when you ask it more.".into()))
             .key_context(CONTEXT)
-            .on_action(cx.listener(|this, _: &PickUp, _, cx| this.move_highlight(-1, cx)))
-            .on_action(cx.listener(|this, _: &PickDown, _, cx| this.move_highlight(1, cx)))
+            .on_action(cx.listener(|this, _: &PickUp, window, cx| this.move_highlight(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &PickDown, window, cx| this.move_highlight(1, window, cx)))
+            .on_action(cx.listener(|this, _: &PickComplete, window, cx| this.complete(window, cx)))
             .child(div().id("bx-body").max_h(px(body_max)).overflow_y_scroll().child(fields))
             .children(error_line(&theme, &self.error))
             .child(footer(vec![

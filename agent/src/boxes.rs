@@ -26,10 +26,12 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-/// How often the watcher looks at running boxes.
-const WATCH_EVERY: Duration = Duration::from_secs(30);
-/// A box that just started has a moment to bring up its session.
-const GRACE_SECS: i64 = 90;
+/// How often the watcher looks at running boxes: a box whose agent quit
+/// pauses within moments.
+const WATCH_EVERY: Duration = Duration::from_secs(10);
+/// A box that just started has a moment to bring up its session (it's
+/// started before `resume` answers, so this only covers the overlap).
+const GRACE_SECS: i64 = 10;
 /// Quiet this long (no output, which typing makes too), a box pauses (its
 /// own `idle_minutes` wins; 0 never pauses).
 const IDLE_MINUTES: i64 = 15;
@@ -455,6 +457,11 @@ pub fn watch() -> i32 {
             running += 1;
             let id = b["id"].as_str().unwrap_or("").to_string();
             if let Some(why) = pause_reason(&b, &current, now) {
+                // Started again since this look (Resume): not this time.
+                match read(&id) {
+                    Some(fresh) if fresh["state"] == b["state"] && fresh["state_at"] == b["state_at"] => b = fresh,
+                    _ => continue,
+                }
                 match pause_box(&mut b) {
                     Ok(()) => eprintln!("{now} paused {id}: {why}"),
                     Err(e) => eprintln!("{now} couldn't pause {id} ({why}): {e}"),
@@ -536,7 +543,7 @@ mod tests {
     #[test]
     fn a_new_box_and_never_idle_ones_stay() {
         let now = 100_000;
-        assert_eq!(pause_reason(&running(now - 10, None), &[], now), None);
+        assert_eq!(pause_reason(&running(now - 5, None), &[], now), None);
         let never = running(now - 3600, Some(0));
         assert_eq!(pause_reason(&never, &[session("running", 0, now - 86_400)], now), None);
         let paused = json!({ "id": "box-ab12cd", "state": "paused", "state_at": 0 });
@@ -560,6 +567,8 @@ mod tests {
         assert_eq!(state_of(&b, &[session("running", 0, now)], now), "running");
         assert_eq!(state_of(&b, &[], now), "paused");
         assert_eq!(state_of(&running(now - 5, None), &[], now), "starting");
+        // Its agent quit (Ctrl-C, /exit): paused, not "starting".
+        assert_eq!(state_of(&running(now - 30, None), &[], now), "paused");
         assert_eq!(state_of(&json!({ "id": "box-ab12cd", "state": "paused" }), &[session("running", 0, now)], now), "paused");
     }
 }

@@ -516,8 +516,10 @@ impl Engine {
     }
 
     /// Machines whose sessions should be re-read on the timer.
+    /// (And with a box that isn't paused: it pauses on its machine, with no
+    /// session left to say so.)
     pub(crate) fn machines_with_sessions(&self) -> Vec<String> {
-        self.all_sessions().into_iter().filter(|(_, m)| !m.sessions.is_empty()).map(|(id, _)| id).collect()
+        self.all_sessions().into_iter().filter(|(_, m)| !m.sessions.is_empty() || m.boxes.iter().any(|b| b.state != "paused")).map(|(id, _)| id).collect()
     }
 }
 

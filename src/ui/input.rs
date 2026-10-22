@@ -17,7 +17,11 @@ use super::theme::{ActiveTheme, mono_font, ui_font};
 
 actions!(
     text_input,
-    [Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, Paste, Cut, Copy, Enter, Escape]
+    [
+        Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, Paste, Cut, Copy, Enter, Escape,
+        WordLeft, WordRight, SelectWordLeft, SelectWordRight, SelectHome, SelectEnd,
+        DeleteWordLeft, DeleteWordRight, DeleteToStart, DeleteToEnd
+    ]
 );
 
 const CONTEXT: &str = "TextInput";
@@ -40,7 +44,78 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-right", End, Some(CONTEXT)),
         KeyBinding::new("enter", Enter, Some(CONTEXT)),
         KeyBinding::new("escape", Escape, Some(CONTEXT)),
+        KeyBinding::new("shift-home", SelectHome, Some(CONTEXT)),
+        KeyBinding::new("shift-end", SelectEnd, Some(CONTEXT)),
     ]);
+    // By the word and to either end, the way each system's text fields do it.
+    // (Not Up and Down: lists typed into, like the palette's, use them.)
+    if cfg!(target_os = "macos") {
+        cx.bind_keys([
+            KeyBinding::new("alt-left", WordLeft, Some(CONTEXT)),
+            KeyBinding::new("alt-right", WordRight, Some(CONTEXT)),
+            KeyBinding::new("alt-shift-left", SelectWordLeft, Some(CONTEXT)),
+            KeyBinding::new("alt-shift-right", SelectWordRight, Some(CONTEXT)),
+            KeyBinding::new("cmd-shift-left", SelectHome, Some(CONTEXT)),
+            KeyBinding::new("cmd-shift-right", SelectEnd, Some(CONTEXT)),
+            KeyBinding::new("alt-backspace", DeleteWordLeft, Some(CONTEXT)),
+            KeyBinding::new("alt-delete", DeleteWordRight, Some(CONTEXT)),
+            KeyBinding::new("cmd-backspace", DeleteToStart, Some(CONTEXT)),
+            KeyBinding::new("cmd-delete", DeleteToEnd, Some(CONTEXT)),
+            KeyBinding::new("ctrl-a", Home, Some(CONTEXT)),
+            KeyBinding::new("ctrl-e", End, Some(CONTEXT)),
+            KeyBinding::new("ctrl-k", DeleteToEnd, Some(CONTEXT)),
+        ]);
+    } else {
+        cx.bind_keys([
+            // Ctrl-Left and Ctrl-Right go by the word here, not to the ends.
+            KeyBinding::new("ctrl-left", WordLeft, Some(CONTEXT)),
+            KeyBinding::new("ctrl-right", WordRight, Some(CONTEXT)),
+            KeyBinding::new("ctrl-shift-left", SelectWordLeft, Some(CONTEXT)),
+            KeyBinding::new("ctrl-shift-right", SelectWordRight, Some(CONTEXT)),
+            KeyBinding::new("ctrl-backspace", DeleteWordLeft, Some(CONTEXT)),
+            KeyBinding::new("ctrl-delete", DeleteWordRight, Some(CONTEXT)),
+        ]);
+    }
+}
+
+/// Where the word before `offset` starts: back over spaces and punctuation,
+/// then over letters and digits ("acme/api|" → "acme/|api").
+fn word_start(text: &str, offset: usize) -> usize {
+    let mut chars = text[..offset].char_indices().rev().peekable();
+    while chars.next_if(|(_, c)| !is_word(*c)).is_some() {}
+    let mut start = chars.peek().map(|(i, c)| i + c.len_utf8()).unwrap_or(0);
+    while let Some((i, _)) = chars.next_if(|(_, c)| is_word(*c)) {
+        start = i;
+    }
+    start
+}
+
+/// Where the word after `offset` ends: over spaces and punctuation, then over
+/// letters and digits.
+fn word_end(text: &str, offset: usize) -> usize {
+    let mut chars = text[offset..].char_indices().map(|(i, c)| (offset + i, c)).peekable();
+    while chars.next_if(|(_, c)| !is_word(*c)).is_some() {}
+    let mut end = chars.peek().map(|(i, _)| *i).unwrap_or(text.len());
+    while let Some((i, c)) = chars.next_if(|(_, c)| is_word(*c)) {
+        end = i + c.len_utf8();
+    }
+    end
+}
+
+/// The word at `offset` (what a double-click selects): letters and digits
+/// around it, else the run of other characters it's in.
+fn word_at(text: &str, offset: usize) -> Range<usize> {
+    let offset = offset.min(text.len());
+    let at = text[offset..].chars().next().or_else(|| text[..offset].chars().next_back());
+    let Some(c) = at else { return 0..0 };
+    let same = |x: char| is_word(x) == is_word(c) && !(x.is_whitespace() ^ c.is_whitespace());
+    let start = text[..offset].char_indices().rev().take_while(|(_, x)| same(*x)).last().map(|(i, _)| i).unwrap_or(offset);
+    let end = text[offset..].char_indices().take_while(|(_, x)| same(*x)).last().map(|(i, x)| offset + i + x.len_utf8()).unwrap_or(offset);
+    start..end.max(start)
+}
+
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,6 +256,54 @@ impl TextInput {
         self.select_to(self.content.len(), cx)
     }
 
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(word_start(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(word_end(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(word_start(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(word_end(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, cx);
+    }
+
+    fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
+    }
+
+    /// Deletes the selection, or from the cursor to `to` when there's none.
+    fn delete_to(&mut self, to: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.select_to(to, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_left(&mut self, _: &DeleteWordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_to(word_start(&self.content, self.cursor_offset()), window, cx);
+    }
+
+    fn delete_word_right(&mut self, _: &DeleteWordRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_to(word_end(&self.content, self.cursor_offset()), window, cx);
+    }
+
+    fn delete_to_start(&mut self, _: &DeleteToStart, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_to(0, window, cx);
+    }
+
+    fn delete_to_end(&mut self, _: &DeleteToEnd, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_to(self.content.len(), window, cx);
+    }
+
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
     }
@@ -213,6 +336,21 @@ impl TextInput {
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
+        // A double-click selects a word, a triple-click everything (no secrets' words).
+        if event.click_count >= 3 || (event.click_count == 2 && self.secret) {
+            self.is_selecting = false;
+            self.selection_reversed = false;
+            self.selected_range = 0..self.content.len();
+            cx.notify();
+            return;
+        }
+        if event.click_count == 2 {
+            self.is_selecting = false;
+            self.selection_reversed = false;
+            self.selected_range = word_at(&self.content, self.index_for_mouse_position(event.position));
+            cx.notify();
+            return;
+        }
         self.is_selecting = true;
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
@@ -739,6 +877,16 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::enter))
             .on_action(cx.listener(Self::escape))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
+            .on_action(cx.listener(Self::delete_to_start))
+            .on_action(cx.listener(Self::delete_to_end))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -770,6 +918,35 @@ impl Focusable for TextInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn words_end_at_slashes_and_spaces() {
+        let t = "LumaryLabsLLC/openrunner";
+        assert_eq!(word_start(t, t.len()), 14, "Option-Backspace deletes \"openrunner\"");
+        assert_eq!(word_start(t, 14), 0, "then the owner, with its slash");
+        assert_eq!(word_end(t, 0), 13);
+        assert_eq!(word_end(t, 13), t.len());
+        let s = "fix the  login bug";
+        assert_eq!(word_start(s, s.len()), 15);
+        assert_eq!(word_start(s, 9), 4, "back over the spaces, then the word");
+        assert_eq!(word_end(s, 7), 14);
+        assert_eq!(word_start("", 0), 0);
+        assert_eq!(word_end("", 0), 0);
+        // Not ASCII: by characters, never inside one.
+        let u = "héllo wörld";
+        assert_eq!(&u[word_start(u, u.len())..], "wörld");
+        assert_eq!(&u[..word_end(u, 0)], "héllo");
+    }
+
+    #[test]
+    fn a_double_click_selects_the_word_under_it() {
+        let t = "acme/api fix";
+        assert_eq!(&t[word_at(t, 2)], "acme");
+        assert_eq!(&t[word_at(t, 6)], "api");
+        assert_eq!(&t[word_at(t, 4)], "/");
+        assert_eq!(&t[word_at(t, t.len())], "fix", "after the end: the last word");
+        assert_eq!(word_at("", 0), 0..0);
+    }
 
     /// The field's text and ranges, changed the way the input method calls
     /// above change them.

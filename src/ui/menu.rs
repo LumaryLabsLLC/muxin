@@ -85,7 +85,7 @@ enum Action {
     Favorite(String, bool),
     OpenUrl(String),
     CopyUrl(String),
-    ItemToAgent(String, u64, bool),
+    ItemToAgent(String, u64, super::github::Handoff),
     UseAccount(String, Option<String>),
     WorkspaceSession(String),
     DeleteWorkspace(String),
@@ -480,14 +480,24 @@ impl Root {
                 ]
             }
             MenuTarget::Item { repo, number, pull, url } => {
-                let verb = if *pull { "Review" } else { "Fix" };
-                vec![
-                    act(&format!("{verb} with agent…"), "bot", Action::ItemToAgent(repo.clone(), *number, false)),
-                    act(&format!("{verb} in a new workspace…"), "layers", Action::ItemToAgent(repo.clone(), *number, true)),
+                use super::github::Handoff;
+                let mut items = if *pull {
+                    vec![
+                        act("Review with agent…", "bot", Action::ItemToAgent(repo.clone(), *number, Handoff::Session)),
+                        act("Review in a new workspace…", "layers", Action::ItemToAgent(repo.clone(), *number, Handoff::Workspace)),
+                    ]
+                } else {
+                    vec![
+                        act("Work on it with an agent…", "bot", Action::ItemToAgent(repo.clone(), *number, Handoff::Session)),
+                        act("Hand off in a box…", "box", Action::ItemToAgent(repo.clone(), *number, Handoff::Box)),
+                    ]
+                };
+                items.extend([
                     Item::Separator,
                     act("Open on GitHub", "external-link", Action::OpenUrl(url.clone())),
                     act("Copy link", "copy", Action::CopyUrl(url.clone())),
-                ]
+                ]);
+                items
             }
             MenuTarget::Workspace(id) => {
                 let Some(w) = s.workspaces.iter().find(|w| &w.id == id) else { return Vec::new() };
@@ -625,7 +635,7 @@ impl Root {
                 }
                 window.dispatch_action(Box::new(super::root::SignInGitHub), cx)
             }
-            Action::ItemToAgent(repo, number, workspace) => self.gh_item_to_agent(repo, number, workspace, window, cx),
+            Action::ItemToAgent(repo, number, how) => self.gh_item_to_agent(repo, number, how, window, cx),
             Action::OpenUrl(url) => cx.open_url(&url),
             Action::WorkspaceSession(id) => {
                 if let Some(w) = self.snapshot.workspaces.iter().find(|w| w.id == id).cloned() {

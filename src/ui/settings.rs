@@ -412,7 +412,7 @@ impl SettingsPage {
                     )
                     .children(self.code_note.as_ref().map(|(ok, text)| note(theme, if *ok { "circle-check" } else { "circle-alert" }, if *ok { theme.success } else { theme.error }, text.clone())))
                     .child(div().w_full().min_w(px(0.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(
-                        "Muxin's agent on each machine looks for git checkouts in these folders, a few levels deep. Fix with agent and Review with agent then work in a new worktree of a checkout found there, on its own branch, instead of a fresh clone.",
+                        "Muxin's agent on each machine looks for git checkouts in these folders, a few levels deep. Work on it with an agent and Review with agent then work in a new worktree of a checkout found there, on its own branch, instead of a fresh clone.",
                     )),
             )
     }

@@ -54,7 +54,7 @@ impl Root {
                         Button::new("box-new", "New box")
                             .icon("plus")
                             .style(ButtonStyle::Primary)
-                            .on_click(cx.listener(|this, _, window, cx| this.show_box_dialog(None, None, window, cx))),
+                            .on_click(cx.listener(|this, _, window, cx| this.show_box_dialog(Default::default(), window, cx))),
                     ),
             )
             .child(
@@ -66,6 +66,7 @@ impl Root {
                     .children(cards)
                     .when(s.boxes.is_empty(), |d| d.child(card(&theme).child(kit::empty_state(&theme, "box", "No boxes yet. Start one, or ask an agent to.")))),
             )
+            .child(self.boxes_page_workspaces(&theme, &s, cx))
     }
 
     fn box_card(&self, theme: &Theme, b: &BoxInfo, cx: &mut Context<Self>) -> AnyElement {
@@ -227,9 +228,9 @@ impl Root {
     }
 
     /// New box, with a repository and task when something opened it with them.
-    pub(super) fn show_box_dialog(&mut self, repo: Option<String>, task: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn show_box_dialog(&mut self, prefill: super::box_dialog::BoxPrefill, window: &mut Window, cx: &mut Context<Self>) {
         let engine = self.engine.clone();
-        let dialog = cx.new(|cx| super::box_dialog::BoxDialog::new(engine, repo, task, window, cx));
+        let dialog = cx.new(|cx| super::box_dialog::BoxDialog::new(engine, prefill, window, cx));
         self.show_modal(Modal::NewBox(dialog.clone()), window, cx);
         self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
     }

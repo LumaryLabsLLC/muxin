@@ -33,6 +33,7 @@ actions!(
         ShowOverview,
         ShowJobs,
         ShowWorkspaces,
+        ShowBoxes,
         ShowGithub,
         ShowUsage,
         ShowRun,
@@ -162,6 +163,7 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("Overview", ShowOverview),
                 MenuItem::action("Jobs", ShowJobs),
+                MenuItem::action("Boxes", ShowBoxes),
                 MenuItem::action("Workspaces", ShowWorkspaces),
                 MenuItem::action("GitHub", ShowGithub),
                 MenuItem::action("Usage", ShowUsage),
@@ -888,7 +890,7 @@ impl Root {
             }
             "workspaces" => self.navigate(Route::Workspaces, window, cx),
             "boxes" => self.navigate(Route::Boxes, window, cx),
-            "new-box" => self.show_box_dialog(None, None, window, cx),
+            "new-box" => self.show_box_dialog(Default::default(), window, cx),
             "workspace" => self.navigate(Route::Workspace(arg.into()), window, cx),
             "new-workspace" => {
                 self.show_new_workspace(None, window, cx);
@@ -910,10 +912,16 @@ impl Root {
                 Some((m, folder)) => self.show_new_session_prefilled(Some(m.to_string()), Some(folder.to_string()), Default::default(), window, cx),
                 None => self.show_new_session(Some(arg.to_string()).filter(|a| !a.is_empty()), window, cx),
             },
-            // An issue or pull request handed to an agent: "fix:owner/name#12", or in a new workspace "fix-ws:...".
-            "fix" | "fix-ws" => {
+            // An issue or pull request handed to an agent: "fix:owner/name#12", in a new
+            // workspace "fix-ws:...", or an issue in a box "fix-box:...".
+            "fix" | "fix-ws" | "fix-box" => {
                 if let Some((repo, n)) = arg.split_once('#') {
-                    self.gh_item_to_agent(repo.to_string(), n.parse().unwrap_or(0), kind == "fix-ws", window, cx);
+                    let how = match kind {
+                        "fix-ws" => super::github::Handoff::Workspace,
+                        "fix-box" => super::github::Handoff::Box,
+                        _ => super::github::Handoff::Session,
+                    };
+                    self.gh_item_to_agent(repo.to_string(), n.parse().unwrap_or(0), how, window, cx);
                 }
             }
             "sidebar" if arg == "hidden" => {
@@ -2240,7 +2248,6 @@ impl Root {
                     .pt(px(6.))
                     .child(self.nav_item("nav-overview", "gauge", kit::tiles::OVERVIEW, "Overview", None, Route::Overview, "overview", cx))
                     .child(self.nav_item("nav-jobs", "workflow", kit::tiles::JOBS, "Jobs", Some(s.counts.queued + s.counts.running), Route::Jobs, "jobs", cx))
-                    .child(self.nav_item("nav-workspaces", "terminal", kit::tiles::WORKSPACES, "Workspaces", Some(s.workspaces.len()), Route::Workspaces, "workspaces", cx))
                     .child(self.nav_item("nav-boxes", "box", super::boxes::TILE, "Boxes", Some(s.boxes.iter().filter(|b| b.state != "paused").count()), Route::Boxes, "boxes", cx))
                     .child(self.nav_item("nav-github", "agent-github", super::github::TILE, "GitHub", self.gh.waiting(), Route::Github, "github", cx))
                     .child(self.nav_item("nav-usage", "gauge", kit::tiles::USAGE, "Usage", None, Route::Usage, "usage", cx))
@@ -2302,9 +2309,9 @@ impl Root {
         // While ⌘ is held the count gives way to the shortcut.
         let keys = self.show_keys.then(|| super::shortcuts::label_for(cx, shortcut)).filter(|k| !k.is_empty());
         let count = count.filter(|_| keys.is_none());
-        // A workspace page keeps "Workspaces" highlighted.
+        // Agents' workspaces are listed on the Boxes page, so their pages keep "Boxes" highlighted.
         let active = self.route == route
-            || (route == Route::Workspaces && matches!(self.route, Route::Workspace(_)))
+            || (route == Route::Boxes && matches!(self.route, Route::Workspaces | Route::Workspace(_)))
             || (route == Route::Github && matches!(self.route, Route::GithubRepo(_) | Route::GithubItem(..)));
         div()
             .id(id)
@@ -3374,6 +3381,7 @@ impl Render for Root {
             .on_action(cx.listener(Self::show_overview))
             .on_action(cx.listener(Self::show_jobs))
             .on_action(cx.listener(|this, _: &ShowWorkspaces, window, cx| this.navigate(Route::Workspaces, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowBoxes, window, cx| this.navigate(Route::Boxes, window, cx)))
             .on_action(cx.listener(|this, _: &ShowGithub, window, cx| this.navigate(Route::Github, window, cx)))
             .on_action(cx.listener(|this, _: &ShowUsage, window, cx| this.navigate(Route::Usage, window, cx)))
             .on_action(cx.listener(|this, _: &ShowRun, window, cx| this.navigate(Route::Run, window, cx)))
@@ -3503,13 +3511,13 @@ fn route_title(s: &Snapshot, route: &Route) -> (Option<&'static str>, String) {
     match route {
         Route::Overview => (None, "Overview".into()),
         Route::Jobs => (None, "Jobs".into()),
-        Route::Workspaces => (None, "Workspaces".into()),
+        Route::Workspaces => (Some("Boxes"), "Agents' workspaces".into()),
         Route::Boxes => (None, "Boxes".into()),
         Route::Activity => (None, "Activity".into()),
         Route::Usage => (None, "Usage".into()),
         Route::Run => (None, "Run".into()),
         Route::Schedules => (None, "Schedules".into()),
-        Route::Workspace(id) => (Some("Workspaces"), s.workspaces.iter().find(|w| &w.id == id).map(|w| w.name.clone()).unwrap_or_else(|| id.clone())),
+        Route::Workspace(id) => (Some("Agents' workspaces"), s.workspaces.iter().find(|w| &w.id == id).map(|w| w.name.clone()).unwrap_or_else(|| id.clone())),
         Route::Settings => (None, "Settings".into()),
         Route::About => (None, "About".into()),
         Route::Shared(_) => (Some("Shared with you"), "Session".into()),

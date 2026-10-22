@@ -71,8 +71,23 @@ pub struct BoxDialog {
     folders: Option<((String, String), Load<Listing>)>,
     /// The result the arrows are on.
     highlight: usize,
+    /// From a prefill: more for the agent after the task, and the box's name and branch.
+    details: Option<String>,
+    name: Option<String>,
+    branch: Option<String>,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// What a New box dialog starts with: an issue handed off, say.
+#[derive(Default)]
+pub struct BoxPrefill {
+    pub repo: Option<String>,
+    pub task: Option<String>,
+    /// Sent to the agent after the task, not shown (an issue's title and description).
+    pub details: Option<String>,
+    pub name: Option<String>,
+    pub branch: Option<String>,
 }
 
 impl EventEmitter<DialogEvent> for BoxDialog {}
@@ -123,8 +138,9 @@ fn folder_path(dir: &str, name: &str) -> String {
 }
 
 impl BoxDialog {
-    /// `repo` and `task`, when something opened it with them (an issue to fix).
-    pub fn new(engine: Arc<Engine>, repo: Option<String>, task: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `prefill`: what something opened it with (an issue to fix).
+    pub fn new(engine: Arc<Engine>, prefill: BoxPrefill, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let BoxPrefill { repo, task, details, name, branch } = prefill;
         let repo = cx.new(|cx| TextInput::new(cx, GITHUB_HINT).mono().with_text(repo.unwrap_or_default()));
         let task = cx.new(|cx| TextInput::new(cx, "Fix the login redirect loop, add a test, and open a pull request").with_text(task.unwrap_or_default()));
         let subs = vec![
@@ -181,6 +197,9 @@ impl BoxDialog {
             folders_asked: None,
             folders: None,
             highlight: 0,
+            details,
+            name,
+            branch,
             error: None,
             _subscriptions: subs,
         }
@@ -384,7 +403,11 @@ impl BoxDialog {
             cx.notify();
             return;
         }
-        let req = CreateBox { repo, prompt: task, agent: self.agent.clone(), machine, ..Default::default() };
+        let prompt = match &self.details {
+            Some(d) => format!("{task}\n\n{d}"),
+            None => task,
+        };
+        let req = CreateBox { repo, prompt, agent: self.agent.clone(), machine, name: self.name.clone(), branch: self.branch.clone(), ..Default::default() };
         match self.engine.box_create(req) {
             Ok((op, _)) => cx.emit(DialogEvent::BoxStarted(op)),
             Err(e) => {
@@ -636,7 +659,16 @@ impl Render for BoxDialog {
             .flex_col()
             .gap(px(14.))
             .child(field(&theme, "Code", div().flex().flex_col().gap(px(10.)).child(sources).child(code), None))
-            .child(field(&theme, "Task", self.task.clone(), Some("What the agent works on. It can push its branch and open a pull request.")))
+            .child(field(
+                &theme,
+                "Task",
+                self.task.clone(),
+                Some(if self.details.is_some() {
+                    "The issue's title and description go along. It works on a branch named for the issue, and can push it and open a pull request."
+                } else {
+                    "What the agent works on. It can push its branch and open a pull request."
+                }),
+            ))
             .child(field(&theme, "Agent", agent, None))
             .children(place.map(|p| field(&theme, "On", p, None)));
         frame(&theme, "New box", Some("An agent works on the task by itself, in a container of its own with its permission prompts off. The box pauses when it's been quiet a while and picks up again when you ask it more.".into()))

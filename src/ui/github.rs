@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{AnyElement, ClipboardItem, Context, Entity, FontWeight, Hsla, MouseButton, SharedString, Window, div, prelude::*, px};
 
+use super::box_dialog::BoxPrefill;
 use super::dialogs::{Prefill, WorkspacePlan};
 use super::format;
 use super::input::{InputEvent, TextInput};
@@ -89,6 +90,17 @@ fn label(theme: &Theme, l: &crate::github::hub::Label) -> AnyElement {
         .child(kit::dot(label_color(&l.color), 7.))
         .child(l.name.clone())
         .into_any_element()
+}
+
+/// Who works on an issue or pull request handed to an agent, and where.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Handoff {
+    /// A session with an agent, in a checkout (or a new workspace when there's none).
+    Session,
+    /// A session in a new workspace with a fresh clone.
+    Workspace,
+    /// A box: an agent that works on it by itself (issues).
+    Box,
 }
 
 impl Root {
@@ -253,10 +265,15 @@ impl Root {
     }
 
     /// Hands an issue (fix it) or a pull request (review it) to an agent: in a
-    /// checkout of its repository, or in a new workspace with a fresh clone
-    /// (chosen up front with `workspace`, or when there's no checkout).
-    fn gh_to_agent(&mut self, d: &Detail, workspace: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// session in a checkout of its repository, or in a new workspace with a
+    /// fresh clone (chosen up front, or when there's no checkout); or an issue
+    /// to an agent in a box, that works on it by itself.
+    fn gh_to_agent(&mut self, d: &Detail, how: Handoff, window: &mut Window, cx: &mut Context<Self>) {
         let it = &d.item;
+        if how == Handoff::Box {
+            return self.gh_to_box(d, window, cx);
+        }
+        let workspace = how == Handoff::Workspace;
         let local: Vec<&Checkout> = self.snapshot.checkouts.iter().filter(|c| c.repo.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(&it.repo))).collect();
         // The machine whose GitHub login is in use (else this computer) first,
         // then a clean checkout, then any.
@@ -309,11 +326,31 @@ impl Root {
         self.show_new_session_prefilled(machine, cwd, prefill, window, cx);
     }
 
+    /// New box, filled in for an issue: its repository, a task that says to fix
+    /// it (the issue's description goes along), and a branch named for it.
+    fn gh_to_box(&mut self, d: &Detail, window: &mut Window, cx: &mut Context<Self>) {
+        let it = &d.item;
+        let body: String = d.body.trim().chars().take(3000).collect();
+        let mut details = format!("#{} {}", it.number, it.title);
+        if !body.is_empty() {
+            details.push_str(&format!("\n\n{body}"));
+        }
+        let short_repo = it.repo.rsplit('/').next().unwrap_or(&it.repo);
+        let prefill = BoxPrefill {
+            repo: Some(it.repo.clone()),
+            task: Some(format!("Fix this GitHub issue and open a pull request that closes it: {}", it.html_url)),
+            details: Some(details),
+            name: Some(format!("{short_repo} #{}", it.number)),
+            branch: Some(issue_branch(it.number, &it.title)),
+        };
+        self.show_box_dialog(prefill, window, cx);
+    }
+
     /// `gh_to_agent` for an issue or pull request in a list: loads it first if needed.
-    pub(super) fn gh_item_to_agent(&mut self, repo: String, number: u64, workspace: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn gh_item_to_agent(&mut self, repo: String, number: u64, how: Handoff, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Load::Ready(d)) = self.gh.items.get(&(repo.clone(), number)) {
             let d = d.clone();
-            return self.gh_to_agent(&d, workspace, window, cx);
+            return self.gh_to_agent(&d, how, window, cx);
         }
         let (engine, reference) = (self.engine.clone(), format!("{repo}#{number}"));
         let job = engine.runtime().spawn({
@@ -325,7 +362,7 @@ impl Root {
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(d) => {
                     this.gh.items.insert((repo, number), Load::Ready(d.clone()));
-                    this.gh_to_agent(&d, workspace, window, cx)
+                    this.gh_to_agent(&d, how, window, cx)
                 }
                 Err(e) => this.notify_user(e.message, true, cx),
             });
@@ -976,17 +1013,26 @@ impl Root {
         };
         let repo_name = it.repo.clone();
         let (url, url2) = (it.html_url.clone(), it.html_url.clone());
-        let detail = d.clone();
+        let (detail, detail2) = (d.clone(), d.clone());
         let actions = div()
             .flex()
             .flex_wrap()
             .gap(px(8.))
             .child(
-                Button::new("gh-agent", if it.pull_request { "Review with agent" } else { "Fix with agent" })
+                Button::new("gh-agent", if it.pull_request { "Review with agent" } else { "Work on it with an agent" })
                     .icon("bot")
                     .style(ButtonStyle::Primary)
-                    .on_click(cx.listener(move |this, _, window, cx| this.gh_to_agent(&detail, false, window, cx))),
+                    .tooltip("A session with an agent in a checkout of the repository, to work on it together")
+                    .on_click(cx.listener(move |this, _, window, cx| this.gh_to_agent(&detail, Handoff::Session, window, cx))),
             )
+            .when(!it.pull_request, |d| {
+                d.child(
+                    Button::new("gh-box", "Hand off in a box")
+                        .icon("box")
+                        .tooltip("An agent works on it by itself, in a container on one of your machines, and opens a pull request")
+                        .on_click(cx.listener(move |this, _, window, cx| this.gh_to_agent(&detail2, Handoff::Box, window, cx))),
+                )
+            })
             .child(Button::new("gh-open", "Open on GitHub").icon("external-link").on_click(move |_, _, cx| cx.open_url(&url)))
             .child(Button::new("gh-copy", "Copy link").icon("copy").style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(url2.clone()));

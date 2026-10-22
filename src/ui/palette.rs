@@ -496,6 +496,7 @@ impl Root {
             item("Go to Overview", "gauge", Some("overview"), Run::Go(Route::Overview)),
             item("Go to Jobs", "workflow", Some("jobs"), Run::Go(Route::Jobs)),
             item("Go to Workspaces", "layers", Some("workspaces"), Run::Go(Route::Workspaces)),
+            item("Go to Boxes", "box", Some("boxes"), Run::Go(Route::Boxes)),
             item("Go to GitHub", "agent-github", Some("github"), Run::Go(Route::Github)),
             item("Go to Usage", "gauge", Some("usage"), Run::Go(Route::Usage)),
             item("Run a command on machines…", "zap", Some("run"), Run::Go(Route::Run)),

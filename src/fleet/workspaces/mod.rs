@@ -1,6 +1,7 @@
 //! Agent workspaces: a folder on a fleet machine (optionally a git checkout)
-//! that an AI agent checks out as its work environment — runs commands, reads
-//! and writes files, syncs a local tree — like Amp's Orbs, on your own hardware.
+//! that an AI agent working elsewhere checks out as its work environment —
+//! runs commands, reads and writes files, syncs a local tree. An agent that
+//! lives in its environment and works by itself is a box (fleet::boxes).
 //!
 //! Workspaces persist until destroyed; nothing is cleaned up automatically.
 //! They live in `<config dir>/workspaces.json` so the window and every agent
@@ -1190,7 +1191,7 @@ fn validate_env(name: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_git_ref(r: &str) -> Result<(), String> {
+pub(crate) fn validate_git_ref(r: &str) -> Result<(), String> {
     let bad = r.len() > 200
         || r.starts_with('-')
         || r.contains("..")
@@ -1201,20 +1202,20 @@ fn validate_git_ref(r: &str) -> Result<(), String> {
 }
 
 /// A repository to clone.
-struct Repo {
+pub(crate) struct Repo {
     /// What git clones.
-    url: String,
+    pub url: String,
     /// Shown in the UI and logs (no credentials).
-    shown: String,
+    pub shown: String,
     /// "api" for acme/api.
-    short_name: String,
-    host: String,
+    pub short_name: String,
+    pub host: String,
     /// https on the GitHub host Muxin has a token for.
-    on_github: bool,
+    pub on_github: bool,
 }
 
 /// "owner/name" of a repository on the GitHub host, from "owner/name" or its https URL.
-fn github_full_name(r: &Repo) -> Option<String> {
+pub(crate) fn github_full_name(r: &Repo) -> Option<String> {
     let path = match r.shown.split_once("://") {
         Some((_, rest)) => rest.split_once('/')?.1,
         None => r.shown.as_str(),
@@ -1231,7 +1232,7 @@ pub(crate) fn github_web_host(api_url: &str) -> String {
 }
 
 /// "owner/repo" means GitHub; anything else must look like a git URL or a path on the machine.
-fn normalize_repo(raw: &str, gh_host: &str) -> Result<Repo, String> {
+pub(crate) fn normalize_repo(raw: &str, gh_host: &str) -> Result<Repo, String> {
     let raw = raw.trim();
     if raw.starts_with('-') || raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(format!("\"{raw}\" isn't a repository Muxin can clone."));

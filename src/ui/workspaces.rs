@@ -29,6 +29,8 @@ impl Root {
         let rows: Vec<AnyElement> = s.workspaces.iter().map(|w| self.workspace_card(&theme, w, cx)).collect();
         let allowed = s.machines.iter().filter(|m| m.workspaces_allowed).count();
 
+        // Wrapped text needs its width known before layout (GPUI 0.2): what the button leaves.
+        let intro_width = (self.content_width - 150.).clamp(240., 760.);
         page("workspaces-page", &self.page_scroll)
             .child(
                 div()
@@ -37,9 +39,9 @@ impl Root {
                     .justify_between()
                     .gap(px(20.))
                     .child(
-                        div().flex().flex_col().flex_1().min_w(px(0.)).max_w(px(760.)).gap(px(4.)).child(
+                        div().flex().flex_col().flex_none().w(px(intro_width)).gap(px(4.)).child(
                             div().text_size(px(12.5)).text_color(theme.text_muted).child(
-                                "A workspace is a folder on one of your machines, optionally a git checkout, that an agent uses as its work environment: it runs commands, edits files and syncs code there. Workspaces persist until destroyed.",
+                                "A place on your machines for an agent you're using elsewhere (Claude Code on your laptop, say) to work in: it runs commands, edits files and syncs code there through Muxin. Nothing works there on its own; to hand a task to an agent that does, start a box. Workspaces stay until deleted.",
                             ),
                         ).child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!(
                             "{allowed} of {} machines accept workspaces. Agents create them with the workspace_create MCP tool or `muxin workspace create`.",

@@ -15,6 +15,7 @@
 Point it at the machines you own (a Mac Studio under the desk, a NUC, a Linux box, a few MacBooks, a Windows laptop) and Muxin becomes the hub for all of them:
 
 - **Agent sessions:** Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell on any machine, in a real terminal, still running after you close the app.
+- **Boxes:** hand a task to an agent that works on it by itself, in a container of its own on one of your machines. A box pauses when it's quiet and picks up where it left off when you ask it more.
 - **Desktops:** see a Linux machine's screen live and use it, beside an agent's terminal or in its own window.
 - **Files and clipboard:** copy files and folders between any two machines, and copy on your Mac to paste on a machine (and back).
 - **GitHub:** your inbox, repositories, issues and pull requests, with one click to hand an issue to an agent on the machine you pick.
@@ -303,7 +304,7 @@ The window, the CLI and MCP servers can all run at once. They share the files in
 
 ## Agent workspaces
 
-Think of [Amp's Orbs](https://ampcode.com/news/agents-in-orbs), but on your own hardware. An agent asks for a workspace and gets a persistent folder on one of your machines, optionally with a repo cloned at a branch or ref. It then works there like it would on a remote dev box:
+A place on your machines for an agent you're using elsewhere (Claude Code on your laptop, say). The agent asks for a workspace and gets a persistent folder on one of your machines, optionally with a repo cloned at a branch or ref. It then works there like it would on a remote dev box. Nothing works there on its own: to hand a task to an agent that works by itself, use a [box](#boxes).
 
 - **Run commands** with your login environment (Homebrew, nvm, asdf and the rest of your `PATH`). Long-running things such as dev servers go in the background, with their output in a log file inside the workspace.
 - **Read, write and list files.**
@@ -402,6 +403,30 @@ muxin session stop beelink/claude-3f9a
 ```
 
 Build the agent for every platform with `scripts/build-agents.sh` (needs `cargo-zigbuild` and Zig for the Linux builds); `scripts/bundle-macos.sh` runs it and ships the builds inside the app.
+
+## Boxes
+
+Hand a task to an agent and let it work on it by itself, on your own hardware. A box is one task: a fresh checkout of a repository on a new branch, in a Docker container of its own on one of your machines, with an agent CLI working in it.
+
+- **Start one.** **Boxes › New box**: the repository, the task, the agent (Claude Code, Codex, Amp, OpenCode, Gemini CLI or Pi) and where it runs (the online machine with Docker and the most free memory, or one you pick). Muxin clones the repository, runs its `.agents/setup` if it has one, and starts the agent on the task. The first box on a machine builds Muxin's image there (Debian, Node.js, git, the GitHub CLI and the agent CLIs), which takes a few minutes; later boxes start in seconds.
+- **On its own.** The container is the agent's sandbox, so it runs with its permission prompts off (`--dangerously-skip-permissions` and the like). It works as you, with your GitHub login, so it can push its branch and open a pull request. It sees its own checkout and home and the machine's agent folders (below), not the machine's other files, and Docker isn't shared with it. Its network isn't closed off.
+- **Pauses by itself.** When its agent has printed nothing for 15 minutes (an open terminal nobody types in doesn't keep it going), or has quit, Muxin's agent on the machine stops the container. That works whether or not the app is open. Its files, branch and conversation stay. Ask it something more (or **Resume**) and it starts again: the agent continues its last conversation, after the repository's `.agents/resume` if it has one. Dev servers and shells it ran don't survive a pause.
+- **Watch it.** **Open** shows its agent's terminal, like any session. The Boxes page shows each box working, waiting for you, idle or paused, with its branch, what it changed and its pull request with checks.
+- **Signed in as on the machine.** A box shares the machine's agent folders (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.pi`, and Amp's and OpenCode's), so the agent is signed in, with your settings, skills and MCP servers, wherever it is on that machine. Keys like `ANTHROPIC_API_KEY` set in the machine's shell come along too. If it isn't signed in there, sign it in once from a box's terminal (`/login`); every box on that machine has it from then on. On a Mac, where Docker runs in a VM, two things differ: Claude Code keeps its login in the Keychain, which a container can't read, so boxes there need that one `/login`; and Codex's and OpenCode's folders hold databases that can't be shared across the VM, so each box gets a copy of their sign-in instead.
+- **Where it lives.** On the machine, a box is `~/muxen/boxes/<id>/`: its checkout (`repo/`, at the same path inside the box, so each box's agent continues its own conversation), the agent's home (`home/`, at `/home/box`) and its record. **Delete** removes the container and that folder, with any work that wasn't pushed. Its branch on GitHub stays.
+- **Machines.** Linux, and Macs with Docker Desktop, OrbStack or Colima. Windows machines can't run boxes yet.
+
+```sh
+muxin box new acme/api "Add rate limit headers to every response, with tests, and open a pull request"
+muxin box new acme/api "Fix the flaky webhook test" --agent codex --on beelink
+muxin box ls                                  # every box: working, waiting, idle or paused, and its git
+muxin box send box-7k2m9q "Also update the API docs"   # starts it again if it's paused
+muxin box attach box-7k2m9q                   # its agent, in this terminal
+muxin box pause box-7k2m9q
+muxin box rm box-7k2m9q
+```
+
+Agents use `box_create`, `box_list`, `box_send`, `box_pause` and `box_destroy`; `session_read` works on a running box's session.
 
 ## Sharing a session or a machine
 

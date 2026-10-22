@@ -1,3 +1,4 @@
+pub mod boxes;
 pub mod build;
 pub mod clipboard;
 pub mod code;

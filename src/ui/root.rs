@@ -218,6 +218,8 @@ pub enum Route {
     Jobs,
     Workspaces,
     Workspace(String),
+    /// Tasks agents work on in containers of their own.
+    Boxes,
     /// What needs you on GitHub.
     Github,
     GithubRepo(String),
@@ -274,6 +276,7 @@ pub enum Modal {
     Cloud(Entity<super::cloud_dialog::CloudDialog>),
     Vm(Entity<super::vm_dialog::VmDialog>),
     Schedule(Entity<super::schedule_dialog::ScheduleDialog>),
+    NewBox(Entity<super::box_dialog::BoxDialog>),
     Rename(Entity<RenameDialog>),
     AddDisplay(Entity<AddDisplayDialog>),
     MonitorPassword(Entity<MonitorPasswordDialog>),
@@ -408,6 +411,7 @@ pub struct Root {
     last_notice: Option<u64>,
     window_active: bool,
     pub(super) ws_ui: WorkspaceUi,
+    pub(super) box_ui: super::boxes::BoxUi,
     /// This computer's clipboard as last seen (see watch_clipboard).
     clipboard_seen: ClipboardSeen,
     /// Sessions this app shares, and the guests already announced.
@@ -586,6 +590,7 @@ impl Root {
             palette: None,
             window_active: false,
             ws_ui: WorkspaceUi::default(),
+            box_ui: super::boxes::BoxUi::default(),
             clipboard_seen: ClipboardSeen { count: super::pasteboard_state().map(|s| s.0).unwrap_or(0), ..Default::default() },
             shares: Vec::new(),
             knocks_seen: HashSet::new(),
@@ -650,15 +655,23 @@ impl Root {
         for s in self.snapshot.sessions.iter().filter(|s| !snapshot.sessions.iter().any(|n| n.id == s.id)) {
             self.machine_git.remove(&s.machine_id);
         }
-        // Looking at a session that just closed: back to its machine.
+        // Looking at a session that just closed: back to its machine (a box's: the boxes).
         if let Route::Session(id) = self.route.clone() {
             let gone = !snapshot.sessions.iter().any(|s| s.id == id) && self.snapshot.sessions.iter().any(|s| s.id == id);
             if gone {
                 // In a split: the pane next to it.
                 let next = self.panes.iter().find(|p| p.contains(&id)).and_then(|p| p.ids().into_iter().find(|x| *x != id && snapshot.sessions.iter().any(|s| s.id == *x)).map(str::to_string));
-                match next {
-                    Some(next) => self.route = Route::Session(next),
-                    None => self.show(Route::Machine(id.split('/').next().unwrap_or_default().to_string()), cx),
+                let of_box = self.snapshot.sessions.iter().find(|s| s.id == id).and_then(|s| s.box_id.clone());
+                match (next, of_box) {
+                    (Some(next), _) => self.route = Route::Session(next),
+                    (None, Some(b)) => {
+                        self.show(Route::Boxes, cx);
+                        // Still there: it paused (quiet, or its agent quit).
+                        if let Some(b) = snapshot.boxes.iter().find(|x| x.id == b) {
+                            self.notify_user(format!("{} paused. Resume it to pick up where it left off.", b.name), false, cx);
+                        }
+                    }
+                    (None, None) => self.show(Route::Machine(id.split('/').next().unwrap_or_default().to_string()), cx),
                 }
                 self.refocus = true;
             }
@@ -870,6 +883,8 @@ impl Root {
                 }
             }
             "workspaces" => self.navigate(Route::Workspaces, window, cx),
+            "boxes" => self.navigate(Route::Boxes, window, cx),
+            "new-box" => self.show_box_dialog(None, None, window, cx),
             "workspace" => self.navigate(Route::Workspace(arg.into()), window, cx),
             "new-workspace" => {
                 self.show_new_workspace(None, window, cx);
@@ -1789,6 +1804,7 @@ impl Root {
             Modal::Cloud(d) => d.read(cx).first_focus(cx),
             Modal::Vm(d) => d.read(cx).first_focus(cx),
             Modal::Schedule(d) => d.read(cx).first_focus(cx),
+            Modal::NewBox(d) => d.read(cx).first_focus(cx),
             Modal::Rename(d) => d.read(cx).first_focus(cx),
             Modal::AddDisplay(d) => d.read(cx).first_focus(cx),
             Modal::MonitorPassword(d) => d.read(cx).first_focus(cx),
@@ -1817,6 +1833,10 @@ impl Root {
             DialogEvent::ScheduleSaved => {
                 self.notify_user("Scheduled".to_string(), false, cx);
                 self.navigate(Route::Schedules, window, cx);
+            }
+            DialogEvent::BoxStarted(op) => {
+                self.show_operation(*op, cx);
+                self.navigate(Route::Boxes, window, cx);
             }
             DialogEvent::CreateWorkspace(req, iso) => self.create_workspace(req.clone(), iso.clone(), window, cx),
             DialogEvent::StartInWorkspace(req, session) => self.start_in_workspace(req.clone(), session.clone(), window, cx),
@@ -2086,7 +2106,8 @@ impl Root {
             let sessions: Vec<&crate::fleet::sessions::SessionInfo> = s
                 .sessions
                 .iter()
-                .filter(|x| x.machine_id == m.id && (machine_match || x.title.to_lowercase().contains(&q) || x.agent_name.to_lowercase().contains(&q)))
+                // A box's agent shows under Boxes.
+                .filter(|x| x.machine_id == m.id && x.box_id.is_none() && (machine_match || x.title.to_lowercase().contains(&q) || x.agent_name.to_lowercase().contains(&q)))
                 .collect();
             if !machine_match && visible.is_empty() && sessions.is_empty() {
                 continue;
@@ -2216,6 +2237,7 @@ impl Root {
                     .child(self.nav_item("nav-overview", "gauge", kit::tiles::OVERVIEW, "Overview", None, Route::Overview, "overview", cx))
                     .child(self.nav_item("nav-jobs", "workflow", kit::tiles::JOBS, "Jobs", Some(s.counts.queued + s.counts.running), Route::Jobs, "jobs", cx))
                     .child(self.nav_item("nav-workspaces", "terminal", kit::tiles::WORKSPACES, "Workspaces", Some(s.workspaces.len()), Route::Workspaces, "workspaces", cx))
+                    .child(self.nav_item("nav-boxes", "box", super::boxes::TILE, "Boxes", Some(s.boxes.iter().filter(|b| b.state != "paused").count()), Route::Boxes, "boxes", cx))
                     .child(self.nav_item("nav-github", "agent-github", super::github::TILE, "GitHub", self.gh.waiting(), Route::Github, "github", cx))
                     .child(self.nav_item("nav-usage", "gauge", kit::tiles::USAGE, "Usage", None, Route::Usage, "usage", cx))
                     .child(self.nav_item("nav-run", "zap", kit::tiles::RUN, "Run", None, Route::Run, "run", cx))
@@ -3245,6 +3267,7 @@ impl Root {
             Route::Overview => self.render_overview(window, cx).into_any_element(),
             Route::Jobs => self.render_jobs(cx).into_any_element(),
             Route::Workspaces => self.render_workspaces(cx).into_any_element(),
+            Route::Boxes => self.render_boxes(cx).into_any_element(),
             Route::Workspace(id) => self.render_workspace(&id, cx),
             Route::Activity => self.render_activity(cx).into_any_element(),
             Route::Usage => self.render_usage(cx),
@@ -3326,6 +3349,7 @@ impl Render for Root {
             Modal::Cloud(d) => d.clone().into_any_element(),
             Modal::Vm(d) => d.clone().into_any_element(),
             Modal::Schedule(d) => d.clone().into_any_element(),
+            Modal::NewBox(d) => d.clone().into_any_element(),
             Modal::Rename(d) => d.clone().into_any_element(),
             Modal::AddDisplay(d) => d.clone().into_any_element(),
             Modal::MonitorPassword(d) => d.clone().into_any_element(),
@@ -3487,6 +3511,7 @@ fn route_title(s: &Snapshot, route: &Route) -> (Option<&'static str>, String) {
         Route::Overview => (None, "Overview".into()),
         Route::Jobs => (None, "Jobs".into()),
         Route::Workspaces => (None, "Workspaces".into()),
+        Route::Boxes => (None, "Boxes".into()),
         Route::Activity => (None, "Activity".into()),
         Route::Usage => (None, "Usage".into()),
         Route::Run => (None, "Run".into()),
@@ -3499,7 +3524,11 @@ fn route_title(s: &Snapshot, route: &Route) -> (Option<&'static str>, String) {
         Route::GithubRepo(name) => (Some("GitHub"), name.clone()),
         Route::GithubItem(repo, n) => (Some("GitHub"), format!("{repo} #{n}")),
         Route::Machine(id) => (Some("Machines"), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
-        Route::Session(id) => (Some("Sessions"), s.sessions.iter().find(|x| &x.id == id).map(|x| x.title.clone()).unwrap_or_else(|| id.clone())),
+        Route::Session(id) => {
+            let x = s.sessions.iter().find(|x| &x.id == id);
+            let section = if x.is_some_and(|x| x.box_id.is_some()) { "Boxes" } else { "Sessions" };
+            (Some(section), x.map(|x| x.title.clone()).unwrap_or_else(|| id.clone()))
+        }
         Route::Desktop(id) => (Some("Desktop"), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
         Route::Logs(id) => (Some("Logs"), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
         Route::Services(id) => (Some("Services"), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),

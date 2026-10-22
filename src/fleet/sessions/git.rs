@@ -116,7 +116,7 @@ impl Engine {
         let quieted = now.sessions.iter().any(|s| !s.busy && was(&s.id).is_some_and(|p| p.busy));
         let started = now.sessions.iter().any(|s| was(&s.id).is_none());
         let stale = self.git_looked_at(machine_id).is_none_or(|t| t.elapsed() > LOOK_EVERY);
-        if !(quieted || started || stale) || now.sessions.is_empty() {
+        if !(quieted || started || stale) || (now.sessions.is_empty() && now.boxes.is_empty()) {
             return;
         }
         if !looking().lock().unwrap().insert(machine_id.to_string()) {
@@ -139,7 +139,8 @@ impl Engine {
         let sessions = self.sessions_of(&spec.id).map(|f| f.sessions).unwrap_or_default();
         let snapshot = self.current();
         let workspaces = snapshot.workspaces.iter().filter(|w| w.machine_id == spec.id && w.status == "ready");
-        for f in sessions.iter().filter(|s| s.status == "running").map(|s| s.cwd.clone()).chain(workspaces.map(|w| w.path.clone())) {
+        let boxes = self.sessions_of(&spec.id).map(|f| f.boxes).unwrap_or_default();
+        for f in sessions.iter().filter(|s| s.status == "running").map(|s| s.cwd.clone()).chain(workspaces.map(|w| w.path.clone())).chain(boxes.into_iter().map(|b| b.path)) {
             if !f.is_empty() && !folders.contains(&f) {
                 folders.push(f);
             }

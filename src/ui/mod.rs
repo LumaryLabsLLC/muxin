@@ -1,6 +1,8 @@
 //! The native window, built with GPUI (Zed's UI framework).
 
 mod about;
+mod box_dialog;
+mod boxes;
 mod activity;
 mod cloud_dialog;
 mod assets;

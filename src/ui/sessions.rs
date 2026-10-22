@@ -455,6 +455,10 @@ impl Root {
                 }
                 return looking(&theme);
             }
+            // A box's agent isn't running while the box is paused.
+            if let Some(b) = s.boxes.iter().find(|b| id == format!("{}/{}", b.machine_id, b.id)).cloned() {
+                return self.paused_box(&theme, &b, cx);
+            }
             return ended(&theme, id, cx);
         };
         // Attaching to a machine that's offline only waits for ssh to give up.
@@ -919,7 +923,8 @@ impl Root {
 impl Root {
     /// The machine page's list of agent sessions, with a way to start one.
     pub(super) fn machine_sessions(&self, theme: &Theme, s: &Snapshot, m: &Machine, cx: &mut Context<Self>) -> AnyElement {
-        let sessions: Vec<&SessionInfo> = s.sessions.iter().filter(|x| x.machine_id == m.id).collect();
+        // Boxes' agents are on the Boxes page.
+        let sessions: Vec<&SessionInfo> = s.sessions.iter().filter(|x| x.machine_id == m.id && x.box_id.is_none()).collect();
         let installed: Vec<&str> = AGENTS.iter().filter(|a| m.agents.iter().any(|i| i == a.id)).map(|a| a.name).collect();
         let mid = m.id.clone();
         let title = div()

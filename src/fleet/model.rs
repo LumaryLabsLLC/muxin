@@ -27,6 +27,8 @@ pub struct Snapshot {
     pub workspaces: Vec<WorkspaceInfo>,
     /// Agent sessions (terminals running Claude Code, Codex, ...), by machine, newest first.
     pub sessions: Vec<super::sessions::SessionInfo>,
+    /// Boxes: tasks an agent works on in a container of its own, newest first.
+    pub boxes: Vec<super::boxes::BoxInfo>,
     /// What sessions asked for your attention, newest first.
     pub notifications: Vec<super::sessions::SessionNotice>,
     /// Git checkouts found on the machines, by repository then machine.

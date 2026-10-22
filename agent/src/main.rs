@@ -14,6 +14,7 @@
 //! muxen-agent serve           the session server (started on demand)
 //! ```
 
+mod boxes;
 mod client;
 mod clipboard;
 mod crash;
@@ -80,6 +81,7 @@ fn main() {
         Some("display-mode") => displays::run_mode(&args[1..]),
         Some("clip") => clipboard::run(),
         Some("schedule-run") => schedules::run(args.get(1).map(String::as_str).unwrap_or("")),
+        Some("box-watch") => boxes::watch(),
         Some("attach") => match args.get(1) {
             Some(name) => client::attach(name),
             None => usage(),

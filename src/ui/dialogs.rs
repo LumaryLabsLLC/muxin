@@ -29,6 +29,8 @@ pub enum DialogEvent {
     NewVm,
     /// A schedule was saved: show the schedules again.
     ScheduleSaved,
+    /// A box is being made (its operation): show the boxes.
+    BoxStarted(u64),
     OpenCloudSettings,
     /// The root view runs it, so it can open the workspace when it's ready.
     CreateWorkspace(CreateWorkspace, WorkspaceIsolation),

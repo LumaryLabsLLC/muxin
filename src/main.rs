@@ -139,6 +139,9 @@ enum Command {
     /// Agent sessions: Claude Code, Codex, OpenCode, ... kept running on your machines
     #[command(alias = "sessions", subcommand)]
     Session(SessionCommand),
+    /// Boxes: hand a task to an agent that works on it in a container of its own
+    #[command(name = "box", alias = "boxes", subcommand)]
+    Boxes(BoxCommand),
     /// Run the MCP server on stdio for AI agents (Claude Code, Codex, ...)
     Mcp(McpArgs),
     /// Check every machine once and print a report
@@ -1004,6 +1007,90 @@ enum SessionCommand {
     Stop(SessionIdArgs),
 }
 
+#[derive(Subcommand)]
+enum BoxCommand {
+    /// List boxes: running or paused, and what each one changed
+    #[command(alias = "list")]
+    Ls(BoxLsArgs),
+    /// Hand a task to an agent in a new box: `muxin box new acme/api "Fix the login redirect"`
+    New(BoxNewArgs),
+    /// Ask a box's agent something more (starting the box again when it's paused)
+    Send(BoxSendArgs),
+    /// Start a paused box again
+    Resume(BoxIdArgs),
+    /// Pause a box: its agent ends and its container stops; its files stay
+    Pause(BoxIdArgs),
+    /// Open a box's agent in this terminal (starting the box when it's paused)
+    Attach(BoxIdArgs),
+    /// Delete a box with any work in it that wasn't pushed (its branch on GitHub stays)
+    #[command(alias = "destroy")]
+    Rm(BoxIdArgs),
+}
+
+#[derive(Args)]
+struct BoxLsArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Only this machine
+    #[arg(long, value_name = "MACHINE")]
+    on: Option<String>,
+}
+
+#[derive(Args)]
+struct BoxNewArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// owner/name on GitHub, or a git URL
+    repo: String,
+    /// What the agent is asked to do
+    #[arg(num_args = 1..)]
+    prompt: Vec<String>,
+    /// claude (default), codex, amp, opencode, gemini or pi
+    #[arg(long = "agent", value_name = "AGENT")]
+    cli: Option<String>,
+    /// The machine it runs on (default: the one with Docker and the most free memory)
+    #[arg(long, value_name = "MACHINE")]
+    on: Option<String>,
+    #[arg(long)]
+    name: Option<String>,
+    /// The branch it works on (default box/<name>)
+    #[arg(long)]
+    branch: Option<String>,
+    /// What it starts from: a branch, tag, commit or pull/<n>/head (default: the default branch)
+    #[arg(long = "ref", value_name = "REF")]
+    git_ref: Option<String>,
+    /// Pause after this many minutes without output from its agent (default 15; 0 never)
+    #[arg(long, value_name = "MINUTES")]
+    idle: Option<u32>,
+    #[arg(long)]
+    cpus: Option<u32>,
+    /// Memory limit in GB
+    #[arg(long, value_name = "GB")]
+    memory: Option<u32>,
+    /// Don't wait for it to start
+    #[arg(long)]
+    no_wait: bool,
+}
+
+#[derive(Args)]
+struct BoxSendArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// A box id from `muxin box ls` (box-ab12cd)
+    box_id: String,
+    /// What to ask its agent
+    #[arg(num_args = 1..)]
+    text: Vec<String>,
+}
+
+#[derive(Args)]
+struct BoxIdArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// A box id from `muxin box ls` (box-ab12cd)
+    box_id: String,
+}
+
 #[derive(Args)]
 struct SessionLsArgs {
     #[command(flatten)]
@@ -1506,6 +1593,7 @@ fn main() -> ExitCode {
         }),
         Some(Command::Workspace(cmd)) => workspace(cmd, &runtime),
         Some(Command::Session(cmd)) => session(cmd, &runtime),
+        Some(Command::Boxes(cmd)) => boxes(cmd, &runtime),
         Some(Command::Github(cmd)) => github(cmd, &runtime),
         Some(Command::Checkouts(a)) => checkouts(a, &runtime),
         Some(Command::Git(cmd)) => git(cmd, &runtime),
@@ -2403,6 +2491,61 @@ fn session(cmd: SessionCommand, runtime: &tokio::runtime::Runtime) -> u8 {
     }
 }
 
+fn boxes(cmd: BoxCommand, runtime: &tokio::runtime::Runtime) -> u8 {
+    match cmd {
+        BoxCommand::Ls(a) => {
+            let req = api::BoxListRequest { machine_id: a.on };
+            run(runtime, &a.agent, async move |e| api::box_list(&e, req).await, cli::boxes)
+        }
+        BoxCommand::New(a) => {
+            let req = api::BoxCreateRequest {
+                repo: a.repo,
+                prompt: a.prompt.join(" "),
+                agent: a.cli,
+                machine_id: a.on,
+                name: a.name,
+                branch: a.branch,
+                git_ref: a.git_ref,
+                cpus: a.cpus,
+                memory_gb: a.memory,
+                idle_minutes: a.idle,
+                wait: !a.no_wait,
+                timeout_secs: Some(60 * 60),
+            };
+            run(runtime, &a.agent, async move |e| api::box_create(&e, req, api::Surface::Cli, stream_line).await, cli::box_created)
+        }
+        BoxCommand::Send(a) => {
+            let req = api::BoxSendRequest { box_id: a.box_id, text: Some(a.text.join(" ")) };
+            run(runtime, &a.agent, async move |e| api::box_send(&e, req).await, cli::box_one)
+        }
+        BoxCommand::Resume(a) => {
+            let req = api::BoxSendRequest { box_id: a.box_id, text: None };
+            run(runtime, &a.agent, async move |e| api::box_send(&e, req).await, cli::box_one)
+        }
+        BoxCommand::Pause(a) => {
+            let req = api::BoxRequest { box_id: a.box_id };
+            run(runtime, &a.agent, async move |e| api::box_pause(&e, req).await, cli::box_one)
+        }
+        BoxCommand::Rm(a) => {
+            let req = api::BoxRequest { box_id: a.box_id };
+            run(runtime, &a.agent, async move |e| api::box_destroy(&e, req).await, |b| format!("✓ Deleted {} ({})\n", b.id, b.name))
+        }
+        BoxCommand::Attach(a) => box_attach(a, runtime),
+    }
+}
+
+/// Replaces this process with ssh (or the local agent) attached to a box's agent.
+fn box_attach(a: BoxIdArgs, runtime: &tokio::runtime::Runtime) -> u8 {
+    let _guard = runtime.enter();
+    let engine = Engine::new(a.agent.common.paths(), a.agent.demo);
+    let req = api::BoxRequest { box_id: a.box_id };
+    let cmd = match runtime.block_on(api::box_attach(&engine, req)) {
+        Ok(c) => c,
+        Err(e) => return report_error(&a.agent, &e),
+    };
+    exec_attach(cmd)
+}
+
 /// Replaces this process with ssh (or the local agent) attached to the session.
 fn session_attach(a: SessionIdArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     let _guard = runtime.enter();
@@ -2416,6 +2559,11 @@ fn session_attach(a: SessionIdArgs, runtime: &tokio::runtime::Runtime) -> u8 {
         eprintln!("demo: would run: {} {}", cmd.program, cmd.args.join(" "));
         return 0;
     }
+    exec_attach(cmd)
+}
+
+/// Runs an attach command in place of this process (Windows: until it ends).
+fn exec_attach(cmd: fleet::sessions::AttachCommand) -> u8 {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

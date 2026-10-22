@@ -295,6 +295,7 @@ pub fn build(input: &Inputs) -> Snapshot {
         operations: Vec::new(),
         workspaces: Vec::new(),
         sessions: Vec::new(),
+        boxes: Vec::new(),
         notifications: Vec::new(),
         checkouts: Vec::new(),
         tailscale: input.tailscale.cloned(),

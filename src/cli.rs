@@ -585,6 +585,54 @@ pub fn sessions(r: &crate::api::SessionsOut) -> String {
     out
 }
 
+pub fn boxes(r: &crate::api::BoxesOut) -> String {
+    let mut out = String::new();
+    if r.boxes.is_empty() {
+        out.push_str("No boxes. Hand a task to an agent with `muxin box new <owner/repo> \"<what to do>\"`.\n");
+    } else {
+        let rows: Vec<Vec<String>> = r
+            .boxes
+            .iter()
+            .map(|b| {
+                let state = match (b.state.as_str(), b.busy, b.attention.as_deref()) {
+                    ("running", _, Some("waiting")) => "waiting".to_string(),
+                    ("running", true, _) => "working".into(),
+                    ("running", false, _) => "idle".into(),
+                    (other, _, _) => other.to_string(),
+                };
+                let git = b.git.as_ref().map(|g| g.short()).unwrap_or_else(|| b.branch.clone());
+                vec![b.id.clone(), b.name.clone(), b.agent_name.clone(), state, b.machine_id.clone(), b.repo.clone(), git, b.created_at.map(ago).unwrap_or_else(|| "—".into())]
+            })
+            .collect();
+        out.push_str(&table(&["BOX", "NAME", "AGENT", "STATE", "MACHINE", "REPO", "GIT", "MADE"], &rows));
+    }
+    for e in &r.errors {
+        out.push_str(&format!("{}: {}\n", e.machine_id, e.error.clone().unwrap_or_default()));
+    }
+    out
+}
+
+pub fn box_one(b: &crate::fleet::boxes::BoxInfo) -> String {
+    let state = match (b.state.as_str(), b.busy) {
+        ("running", true) => "working",
+        (s, _) => s,
+    };
+    format!("{} ({}) on {}: {state}, branch {}\n", b.id, b.name, b.machine_id, b.branch)
+}
+
+pub fn box_created(r: &crate::api::BoxCreatedOut) -> String {
+    let o = &r.operation;
+    let mut out = match o.status.as_str() {
+        "succeeded" => format!("✓ {} is working on it\n", r.box_id),
+        "running" => format!("… {} is still being made (operation {})\n", r.box_id, o.id),
+        _ => format!("✖ {} failed: {}\n", o.title, o.error.clone().unwrap_or_default()),
+    };
+    if let Some(n) = &r.next {
+        out.push_str(&format!("{n}\n"));
+    }
+    out
+}
+
 pub fn session_started(s: &crate::fleet::sessions::SessionInfo) -> String {
     format!(
         "Started {} ({}) in {}.\nWatch it in the Muxin app, or attach here: {}\n",

@@ -102,6 +102,19 @@ The user runs AI agent CLIs (Claude Code, Codex, OpenCode, Gemini CLI, Amp) or s
 
 The CLI equivalents are `muxin session ls|start|read|question|answer|send|do|attach|restart|rename|stop`.
 
+## Boxes: tasks an agent works on by itself
+
+A box is one task handed to an agent CLI: a fresh checkout of a repo on a new branch, in a Docker container of its own on one of the user's machines, with the agent running in it with its permission prompts off (the container is its sandbox). Ids look like `box-7k2m9q`.
+
+- `box_create(repo, prompt, agent?, machine_id?)` makes one and starts its agent on the task (default agent `claude`; default machine: the online one with Docker and the most free memory). The first box on a machine builds Muxin's image there, a few minutes. It runs the repo's `.agents/setup` first. The agent can push its branch and open pull requests with the user's GitHub login. Only when the user asked.
+- `box_list` shows them: `state` (`running`, `starting`, `paused`), `busy`, `attention` (waiting for an answer), `session_id` while it runs, its `task`, and `git` (what it changed, its pull request).
+- `box_send(box_id, text)` asks its agent more. A paused box starts again and its agent continues the conversation with `text` as the next message; no `text` just starts it. `session_read` and `session_question` work on its `session_id`.
+- A box pauses by itself after 15 minutes without output from its agent (an open terminal doesn't keep it going), or when its agent quits; `box_pause` pauses it now. Its files and the conversation stay; processes it started (dev servers) end.
+- `box_destroy` deletes the container and the checkout, with unpushed work. Check `git` and confirm with the user first unless they asked for it.
+- A box's agent is signed in as it is on that machine (its `~/.claude`, `~/.codex`, ... are shared with the box). If it says it isn't signed in, tell the user to sign it in once from the box's terminal (`/login`); don't ask for tokens.
+
+The CLI equivalents are `muxin box new|ls|send|resume|pause|attach|rm`.
+
 ## Usage and cost
 
 - `agent_usage(days?, machine_id?)` says what Claude Code and Codex used over the last N days (default 7), from their own logs on each machine: tokens (input, output, cache reads and writes) and requests by model and machine, and the cost at Anthropic's and OpenAI's API list prices (`null` for a model whose price isn't known). With a Claude or ChatGPT plan the user doesn't pay per token: say it's what the same use would cost through the API. Read-only.

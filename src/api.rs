@@ -2844,6 +2844,198 @@ pub async fn session_attach(engine: &Arc<Engine>, req: SessionRequest) -> ApiRes
 }
 
 // ---------------------------------------------------------------------------
+// Boxes: a task an agent works on in a container of its own
+
+use crate::fleet::boxes::{BoxInfo, CreateBox};
+
+fn box_error(message: String) -> ApiError {
+    let m = message.to_ascii_lowercase();
+    let code = if m.contains("no box called") || m.contains("no machine called") || m.contains("isn't in muxin") || m.contains("there's no box") {
+        "not_found"
+    } else if m.contains("unreachable") || m.contains("timed out") || m.contains("connection refused") || m.contains("no route to host") {
+        "unreachable"
+    } else if m.contains("can't run") || m.contains("isn't a repository") || m.contains("isn't a valid git") || m.contains("doesn't make boxes") {
+        "invalid"
+    } else {
+        "operation_failed"
+    };
+    ApiError::new(code, message)
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BoxListRequest {
+    /// Only this machine's boxes.
+    pub machine_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BoxesOut {
+    pub boxes: Vec<BoxInfo>,
+    /// Machines that couldn't be asked, and why.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<SessionHostOut>,
+}
+
+/// Lists boxes, asking the machines first.
+pub async fn box_list(engine: &Arc<Engine>, req: BoxListRequest) -> ApiResult<BoxesOut> {
+    let machines = session_machines(engine, req.machine_id.as_deref())?;
+    let found = futures::future::join_all(machines.iter().map(|m| engine.refresh_sessions(&m.id))).await;
+    look_at_stale_git(engine, machines.iter().zip(&found).filter(|(_, f)| f.as_ref().is_ok_and(|f| !f.boxes.is_empty())).map(|(m, _)| m.id.as_str())).await;
+    let errors = machines
+        .iter()
+        .zip(&found)
+        .filter_map(|(m, f)| {
+            let error = match f {
+                Ok(f) => f.error.clone()?,
+                Err(e) => e.clone(),
+            };
+            Some(SessionHostOut { machine_id: m.id.clone(), machine: m.name.clone(), agent: None, agents: Vec::new(), error: Some(error) })
+        })
+        .collect();
+    let ids: Vec<&str> = machines.iter().map(|m| m.id.as_str()).collect();
+    let boxes = engine.boxes().into_iter().filter(|b| ids.contains(&b.machine_id.as_str())).collect();
+    Ok(BoxesOut { boxes, errors })
+}
+
+/// A box by id, asking the machines when this process hasn't seen it yet.
+async fn resolve_box(engine: &Arc<Engine>, id: &str) -> ApiResult<BoxInfo> {
+    if let Ok(b) = engine.find_box(id) {
+        return Ok(b);
+    }
+    box_list(engine, BoxListRequest::default()).await?;
+    engine.find_box(id).map_err(|e| box_error(e).with_hint("List boxes with box_list (`muxin box ls`)."))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoxCreateRequest {
+    /// "owner/name" on GitHub, or a git URL.
+    pub repo: String,
+    /// What the agent is asked to do.
+    #[serde(default)]
+    pub prompt: String,
+    /// claude (default), codex, amp, opencode, gemini or pi.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Where it runs; default: the online machine with Docker and the most free memory.
+    #[serde(default)]
+    pub machine_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The branch it works on; default "box/<name>".
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// What it starts from: a branch, tag, commit or "pull/<n>/head"; default the default branch.
+    #[serde(default, rename = "ref")]
+    pub git_ref: Option<String>,
+    #[serde(default)]
+    pub cpus: Option<u32>,
+    #[serde(default)]
+    pub memory_gb: Option<u32>,
+    /// Pause after this many minutes without output from its agent (default 15; 0 never).
+    #[serde(default)]
+    pub idle_minutes: Option<u32>,
+    #[serde(default = "yes")]
+    pub wait: bool,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BoxCreatedOut {
+    pub box_id: String,
+    /// The box once it's made.
+    #[serde(rename = "box", skip_serializing_if = "Option::is_none")]
+    pub info: Option<BoxInfo>,
+    pub operation: OperationOut,
+    pub finished: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+}
+
+/// Makes a box and starts its agent on the task.
+pub async fn box_create(engine: &Arc<Engine>, req: BoxCreateRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<BoxCreatedOut> {
+    let s = freshen(engine).await;
+    // A machine named here must be known; the engine checks the rest.
+    let machine = match req.machine_id.as_deref().filter(|m| !m.trim().is_empty()) {
+        Some(m) => Some(find_machine(&s, m)?.id.clone()),
+        None => None,
+    };
+    // Whether a machine is online and has Docker takes a check.
+    let unchecked = s.machines.iter().any(|m| m.probe.is_none() && machine.as_ref().is_none_or(|id| *id == m.id));
+    if unchecked {
+        engine.run_check(machine.clone().map(|id| vec![id])).await;
+    }
+    let create = CreateBox {
+        repo: req.repo,
+        prompt: req.prompt,
+        agent: req.agent.unwrap_or_default(),
+        machine,
+        name: req.name,
+        branch: req.branch,
+        git_ref: req.git_ref,
+        cpus: req.cpus,
+        memory_gb: req.memory_gb,
+        idle_minutes: req.idle_minutes,
+    };
+    let (op, id) = engine.box_create(create).map_err(box_error)?;
+    let done = finish_action(engine, op, req.wait, req.timeout_secs.unwrap_or(900), DEFAULT_TAIL, None, Vec::new(), surface, on_line).await?;
+    let next = done.next.or_else(|| {
+        done.finished.then(|| {
+            surface.say(
+                format!("Its agent is working. Follow it with session_read(session_id) or box_list; ask it more with box_send(\"{id}\", text)."),
+                format!("Its agent is working. Watch it with `muxin box attach {id}`; ask it more with `muxin box send {id} \"...\"`."),
+            )
+        })
+    });
+    Ok(BoxCreatedOut { info: engine.find_box(&id).ok(), box_id: id, operation: done.operation, finished: done.finished, next })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoxRequest {
+    /// "box-ab12cd".
+    pub box_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoxSendRequest {
+    pub box_id: String,
+    /// What to ask its agent. Empty: just start it again.
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+/// Asks a box's agent something, starting the box again when it's paused.
+pub async fn box_send(engine: &Arc<Engine>, req: BoxSendRequest) -> ApiResult<BoxInfo> {
+    let b = resolve_box(engine, &req.box_id).await?;
+    engine.box_send(&b.id, req.text.as_deref()).await.map_err(box_error)
+}
+
+pub async fn box_pause(engine: &Arc<Engine>, req: BoxRequest) -> ApiResult<BoxInfo> {
+    let b = resolve_box(engine, &req.box_id).await?;
+    engine.box_pause(&b.id).await.map_err(box_error)
+}
+
+pub async fn box_destroy(engine: &Arc<Engine>, req: BoxRequest) -> ApiResult<BoxInfo> {
+    let b = resolve_box(engine, &req.box_id).await?;
+    engine.box_destroy(&b.id).await.map_err(box_error)
+}
+
+/// The program and arguments that attach this terminal to a box's agent
+/// (starting the box first when it's paused).
+pub async fn box_attach(engine: &Arc<Engine>, req: BoxRequest) -> ApiResult<sessions::AttachCommand> {
+    let mut b = resolve_box(engine, &req.box_id).await?;
+    if b.session_id.is_none() {
+        b = engine.box_send(&b.id, None).await.map_err(box_error)?;
+    }
+    let session = b.session_id.ok_or_else(|| ApiError::new("operation_failed", format!("{}'s agent didn't start.", b.id)))?;
+    engine.attach_command(&session).map_err(session_error)
+}
+
+// ---------------------------------------------------------------------------
 // GitHub: your repositories, issues and pull requests; code on your machines
 
 use crate::fleet::model::Checkout;

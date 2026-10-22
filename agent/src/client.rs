@@ -120,6 +120,9 @@ pub fn handle(req: &Value) -> Value {
         "box_shell" => crate::boxes::shell(&req),
         "box_switch" => crate::boxes::switch(&req),
         "handoff" => crate::handoff::note(&req),
+        "carry_pack" => crate::carry::pack(&req),
+        "carry_unpack" => crate::carry::unpack(&req),
+        "carry_drop" => crate::carry::drop(&req),
         _ => request(&req, false),
     }
 }

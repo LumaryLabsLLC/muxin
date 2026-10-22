@@ -2601,6 +2601,10 @@ pub struct SessionHandoffRequest {
     /// Keep the old session running too. Default false: it ends.
     #[serde(default)]
     pub keep: bool,
+    /// Another machine to move the work to (its commits, uncommitted changes
+    /// and new files) and continue there. Default: the session's own.
+    #[serde(default)]
+    pub machine_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2856,7 +2860,7 @@ pub async fn session_handoff(engine: &Arc<Engine>, req: SessionHandoffRequest) -
         Ok(b) => b.id,
         Err(_) => resolve_session(engine, &req.session_id).await?.id,
     };
-    engine.handoff_session(&id, &req.agent, req.keep).await.map_err(session_error)
+    engine.handoff_session(&id, &req.agent, req.keep, req.machine_id.as_deref()).await.map_err(session_error)
 }
 
 /// The program and arguments that attach this terminal to a session.

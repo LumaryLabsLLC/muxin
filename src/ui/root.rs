@@ -279,6 +279,7 @@ pub enum Modal {
     Vm(Entity<super::vm_dialog::VmDialog>),
     Schedule(Entity<super::schedule_dialog::ScheduleDialog>),
     NewBox(Entity<super::box_dialog::BoxDialog>),
+    Move(Entity<super::move_dialog::MoveDialog>),
     Rename(Entity<RenameDialog>),
     AddDisplay(Entity<AddDisplayDialog>),
     MonitorPassword(Entity<MonitorPasswordDialog>),
@@ -1820,6 +1821,7 @@ impl Root {
             Modal::Vm(d) => d.read(cx).first_focus(cx),
             Modal::Schedule(d) => d.read(cx).first_focus(cx),
             Modal::NewBox(d) => d.read(cx).first_focus(cx),
+            Modal::Move(d) => d.read(cx).first_focus(cx),
             Modal::Rename(d) => d.read(cx).first_focus(cx),
             Modal::AddDisplay(d) => d.read(cx).first_focus(cx),
             Modal::MonitorPassword(d) => d.read(cx).first_focus(cx),
@@ -1852,6 +1854,11 @@ impl Root {
             DialogEvent::BoxStarted(op) => {
                 self.show_operation(*op, cx);
                 self.navigate(Route::Boxes, window, cx);
+            }
+            DialogEvent::Handoff { session, agent, machine, keep } => {
+                if let Some(a) = crate::fleet::sessions::agent(agent) {
+                    self.handoff_session(session, a.id, machine.clone(), *keep, window, cx);
+                }
             }
             DialogEvent::CreateWorkspace(req, iso) => self.create_workspace(req.clone(), iso.clone(), window, cx),
             DialogEvent::StartInWorkspace(req, session) => self.start_in_workspace(req.clone(), session.clone(), window, cx),
@@ -3364,6 +3371,7 @@ impl Render for Root {
             Modal::Vm(d) => d.clone().into_any_element(),
             Modal::Schedule(d) => d.clone().into_any_element(),
             Modal::NewBox(d) => d.clone().into_any_element(),
+            Modal::Move(d) => d.clone().into_any_element(),
             Modal::Rename(d) => d.clone().into_any_element(),
             Modal::AddDisplay(d) => d.clone().into_any_element(),
             Modal::MonitorPassword(d) => d.clone().into_any_element(),

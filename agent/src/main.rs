@@ -15,6 +15,7 @@
 //! ```
 
 mod boxes;
+mod carry;
 mod client;
 mod clipboard;
 mod crash;

@@ -954,11 +954,12 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "session_handoff",
-            "description": "Hand a session's work to another agent (Claude Code to Codex, say), or a box's to another agent in the box: Muxin writes .muxin/handoff.md in its folder (where the git work stands, the agent's to-do list, and the conversation so far from the agent's own transcript: Claude Code, Codex, Gemini CLI and Pi; else what its terminal showed), starts the new agent there asked to read it first, and ends the old session unless keep. Returns the new session, the note's path and what it was made from (`source`). Only when the user asked.",
+            "description": "Hand a session's work to another agent (Claude Code to Codex, say), or a box's to another agent in the box: Muxin writes .muxin/handoff.md in its folder (where the git work stands, the agent's to-do list, and the conversation so far from the agent's own transcript: Claude Code, Codex, Gemini CLI and Pi; else what its terminal showed), starts the new agent there asked to read it first, and ends the old session unless keep. With machine_id the work moves to that machine first (git checkouts only; the folder it left stays as it was). Returns the new session, the note's path and what it was made from (`source`). Only when the user asked.",
             "inputSchema": schema(json!({
                 "session_id": { "type": "string", "description": "A session id, or a box id (box-7k2m9q)." },
                 "agent": { "type": "string", "description": "The agent to hand it to: claude, codex, opencode, gemini, amp or pi." },
-                "keep": { "type": "boolean", "description": "Keep the old session running too. Default false." }
+                "keep": { "type": "boolean", "description": "Keep the old session running too. Default false." },
+                "machine_id": { "type": "string", "description": "Move the work to this machine and continue there: its commits that aren't on origin, uncommitted changes and new files go into a workspace there (a worktree of a checkout of the repository, else a clone). Default: the session's own machine. Not for boxes." }
             }), &["session_id", "agent"]),
             "annotations": annotations("Hand off a session", false, true, false, false),
         }),

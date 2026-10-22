@@ -17,6 +17,7 @@ mod input;
 mod kit;
 mod logs;
 mod menu;
+mod move_dialog;
 mod overview;
 mod palette;
 mod panes;

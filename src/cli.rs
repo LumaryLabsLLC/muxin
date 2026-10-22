@@ -647,6 +647,12 @@ pub fn handed_off(h: &crate::fleet::sessions::handoff::HandedOff) -> String {
         _ => "the git state only (no conversation found)",
     };
     let mut out = format!("Handed off to {} ({}) in {}.\nThe note, from {from}: {}\n", s_id(h), h.session.agent_name, h.session.cwd, h.note);
+    for w in &h.warnings {
+        out.push_str(&format!("! {w}\n"));
+    }
+    if let Some(ws) = &h.workspace {
+        out.push_str(&format!("The work moved to workspace {ws} there; the folder it left is as it was.\n"));
+    }
     if let Some(k) = &h.kept {
         out.push_str(&format!("{k} is still running.\n"));
     }

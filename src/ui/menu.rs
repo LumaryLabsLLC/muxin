@@ -98,6 +98,8 @@ enum Action {
     SessionAction(String, &'static str),
     /// A session's work, to this agent.
     Handoff(String, &'static str),
+    /// A session's work, to another machine (the Move dialog).
+    MoveTo(String, String),
     /// Settings, where the actions' prompts are.
     EditPrompts,
     AddDisplay(String),
@@ -353,6 +355,20 @@ impl Root {
                     items.push(Item::Separator);
                     items.push(Item::Action { label: format!("A fresh {} session", a.name), glyph: Glyph::Agent(a.id), action: Action::Handoff(id.clone(), a.id), danger: false });
                 }
+                // The work to another machine (not a box's: it stays in its box).
+                let others: Vec<&crate::fleet::model::Machine> =
+                    s.machines.iter().filter(|m| m.id != x.machine_id && !m.platform.starts_with("windows") && !m.host.is_empty()).collect();
+                if !in_box && !others.is_empty() {
+                    items.push(Item::Separator);
+                    items.push(Item::Note("On another machine, with its work".into()));
+                    for m in others {
+                        let label = format!("Move to {}…", m.name);
+                        items.push(match m.is_down() {
+                            true => Item::Off { label, glyph: Glyph::Icon("server") },
+                            false => Item::Action { label, glyph: Glyph::Icon(if m.local { "laptop" } else { "server" }), action: Action::MoveTo(id.clone(), m.id.clone()), danger: false },
+                        });
+                    }
+                }
                 items
             }
             MenuTarget::Session(id) => {
@@ -604,7 +620,8 @@ impl Root {
             Action::RenameMachine(id) => self.show_rename(super::dialogs::RenameTarget::Machine(id), window, cx),
             Action::RenameSession(id) => self.show_rename(super::dialogs::RenameTarget::Session(id), window, cx),
             Action::SessionAction(id, action) => self.run_session_action(&id, action, cx),
-            Action::Handoff(id, agent) => self.handoff_session(&id, agent, window, cx),
+            Action::Handoff(id, agent) => self.handoff_session(&id, agent, None, false, window, cx),
+            Action::MoveTo(id, machine) => self.show_move_dialog(&id, machine, window, cx),
             Action::EditPrompts => self.open_settings_tab(super::settings::SettingsTab::Prompts, window, cx),
             Action::CloudPower(id, on) => self.cloud_power(&id, on, cx),
             Action::MachinePower(id, on) => self.machine_power(&id, on, cx),

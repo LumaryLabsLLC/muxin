@@ -515,7 +515,7 @@ async fn checkout_github(spec: &MachineSpec, path: &str, gh_host: &str) -> Optio
 }
 
 /// "owner/name" of a git URL on the GitHub host: https, or ssh (git@host:owner/name).
-fn github_name(url: &str, gh_host: &str) -> Option<String> {
+pub(crate) fn github_name(url: &str, gh_host: &str) -> Option<String> {
     let ssh = [format!("git@{gh_host}:"), format!("ssh://git@{gh_host}/")];
     let https = match ssh.iter().find_map(|p| url.strip_prefix(p.as_str())) {
         Some(path) => format!("https://{gh_host}/{path}"),

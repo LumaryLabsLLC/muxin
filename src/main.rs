@@ -1002,7 +1002,7 @@ enum SessionCommand {
     Restart(SessionIdArgs),
     /// Give a session a new title ("" goes back to the one it started with)
     Rename(SessionRenameArgs),
-    /// Hand a session's work (or a box's) to another agent: `muxin session handoff beelink/claude-3f9a codex`
+    /// Hand a session's work (or a box's) to another agent, here or on another machine: `muxin session handoff this-mac/claude-3f9a codex --on beelink`
     Handoff(SessionHandoffArgs),
     /// End a session
     #[command(alias = "rm")]
@@ -1162,6 +1162,9 @@ struct SessionHandoffArgs {
     /// Keep the old session running too
     #[arg(long)]
     keep: bool,
+    /// Move the work to this machine and continue there
+    #[arg(long)]
+    on: Option<String>,
 }
 
 #[derive(Args)]
@@ -2501,7 +2504,7 @@ fn session(cmd: SessionCommand, runtime: &tokio::runtime::Runtime) -> u8 {
             run(runtime, &a.agent, async move |e| api::session_rename(&e, req).await, |s| format!("{} is now \"{}\".\n", s.id, s.title))
         }
         SessionCommand::Handoff(a) => {
-            let req = api::SessionHandoffRequest { session_id: a.session_id, agent: a.to, keep: a.keep };
+            let req = api::SessionHandoffRequest { session_id: a.session_id, agent: a.to, keep: a.keep, machine_id: a.on };
             run(runtime, &a.agent, async move |e| api::session_handoff(&e, req).await, cli::handed_off)
         }
         SessionCommand::Stop(a) => {

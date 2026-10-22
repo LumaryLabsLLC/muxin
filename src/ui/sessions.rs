@@ -1746,18 +1746,31 @@ fn demo_screen(agent: &str) -> Vec<u8> {
 impl Root {
     /// Asks a session's agent to do one of the session actions (commit, open
     /// a pull request, ...): its prompt is typed in.
+    /// The Move dialog: a session's work to another machine.
+    pub(super) fn show_move_dialog(&mut self, id: &str, machine: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self.snapshot.sessions.iter().find(|s| s.id == id).cloned() else { return };
+        let engine = self.engine.clone();
+        let dialog = cx.new(|cx| super::move_dialog::MoveDialog::new(engine, s, machine, cx));
+        self.show_modal(super::root::Modal::Move(dialog.clone()), window, cx);
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+    }
+
     /// Hands a session's work to another agent (see fleet::sessions::handoff),
-    /// then shows the new agent's session.
-    pub(super) fn handoff_session(&mut self, id: &str, to: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    /// on another machine with `machine`, then shows the new agent's session.
+    pub(super) fn handoff_session(&mut self, id: &str, to: &'static str, machine: Option<String>, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.handing_off.insert(id.to_string()) {
             return;
+        }
+        if let Some(m) = &machine {
+            let name = self.snapshot.machines.iter().find(|x| &x.id == m).map(|x| x.name.clone()).unwrap_or_else(|| m.clone());
+            self.notify_user(format!("Moving it to {name}. Activity shows each step."), false, cx);
         }
         cx.notify();
         let (engine, id) = (self.engine.clone(), id.to_string());
         let name = crate::fleet::sessions::agent(to).map(|k| k.name).unwrap_or(to);
         let job = engine.runtime().spawn({
             let (engine, id) = (engine.clone(), id.clone());
-            async move { engine.handoff_session(&id, to, false).await }
+            async move { engine.handoff_session(&id, to, keep, machine.as_deref()).await }
         });
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
@@ -1771,7 +1784,8 @@ impl Root {
                             _ => "where the code stands (Muxin found no conversation)",
                         };
                         this.navigate(Route::Session(h.session.id.clone()), window, cx);
-                        this.notify_user(format!("{name} took over, with a note of {from}: {}", crate::fleet::sessions::handoff::NOTE), false, cx);
+                        let warn = h.warnings.first().map(|w| format!(" {w}")).unwrap_or_default();
+                        this.notify_user(format!("{name} took over, with a note of {from}: {}{warn}", crate::fleet::sessions::handoff::NOTE), !h.warnings.is_empty(), cx);
                     }
                     Err(e) => this.notify_user(e, true, cx),
                 }

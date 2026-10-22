@@ -46,6 +46,8 @@ pub enum DialogEvent {
     JoinedShare(super::share::JoinedHandle),
     /// Open the Join dialog instead (with a link pasted here).
     JoinShare(Option<String>),
+    /// Hand a session's work to an agent, on another machine when `machine` says so.
+    Handoff { session: String, agent: String, machine: Option<String>, keep: bool },
 }
 
 pub(super) fn frame(theme: &Theme, title: impl Into<SharedString>, intro: Option<SharedString>) -> gpui::Div {

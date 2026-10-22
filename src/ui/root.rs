@@ -3459,21 +3459,10 @@ impl Render for Root {
                         .flex()
                         .justify_center()
                         .pt(px(modal_top))
+                        // Blocks the page; a click beside the dialog doesn't close it
+                        // (and lose what was typed): Cancel, Escape or finishing it do.
                         .occlude()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.modal = None;
-                            window.focus(&this.focus);
-                            cx.notify()
-                        }))
-                        .child(
-                            div()
-                                .id("modal")
-                                .max_h(px(modal_max_height))
-                                .overflow_y_scroll()
-                                .rounded(px(10.))
-                                .on_click(|_, _, cx| cx.stop_propagation())
-                                .child(modal),
-                        ),
+                        .child(div().id("modal").max_h(px(modal_max_height)).overflow_y_scroll().rounded(px(10.)).child(modal)),
                 )
             })
             // Over everything, dialogs too: the edges to resize the window from.

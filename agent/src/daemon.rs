@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -28,6 +29,9 @@ const MAX_EVENTS: usize = 200;
 const SCROLLBACK: usize = 10_000;
 /// A stalled client is dropped rather than holding up the session.
 const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Input waiting for the program (chunks as they came): typing faster than it
+/// reads waits here, with the session free (see `feed`).
+const INPUT_QUEUE: usize = 256;
 
 #[derive(Clone, Default)]
 struct Listener {
@@ -80,7 +84,8 @@ struct Inner {
     term: Term<Listener>,
     parser: Processor,
     listener: Listener,
-    writer: Option<Box<dyn Write + Send>>,
+    /// Input for the program, written to its terminal by `feed`.
+    writer: Option<SyncSender<Vec<u8>>>,
     master: Option<Box<dyn MasterPty + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
     clients: Vec<Client>,
@@ -335,10 +340,12 @@ fn launch(state: &Arc<State>, s: &Arc<Session>) -> anyhow::Result<()> {
     drop(pair.slave);
     let reader = pair.master.try_clone_reader()?;
     let writer = pair.master.take_writer()?;
+    let (input, queued) = sync_channel(INPUT_QUEUE);
+    thread::spawn(move || feed(writer, queued));
     let generation = {
         let mut i = s.inner.lock().unwrap();
         i.generation += 1;
-        i.writer = Some(writer);
+        i.writer = Some(input);
         i.master = Some(pair.master);
         i.child = Some(child);
         i.exit = None;
@@ -395,11 +402,12 @@ fn pump(state: &State, s: &Session, mut reader: Box<dyn Read + Send>, generation
         // can (watchers' answers are ignored), answer here so programs
         // waiting on a reply don't hang.
         let replies = std::mem::take(&mut *i.listener.replies.lock().unwrap());
-        if i.clients.iter().all(|c| c.watch_only) {
-            if let Some(w) = i.writer.as_mut() {
-                for r in replies {
-                    let _ = w.write_all(r.as_bytes());
-                }
+        // Never waiting here: this thread reads the program's output.
+        if i.clients.iter().all(|c| c.watch_only)
+            && let Some(w) = i.writer.as_ref()
+        {
+            for r in replies {
+                let _ = w.try_send(r.into_bytes());
             }
         }
         i.broadcast(proto::DATA, bytes);
@@ -443,6 +451,29 @@ fn pump(state: &State, s: &Session, mut reader: Box<dyn Read + Send>, generation
     i.broadcast(proto::DATA, note.as_bytes());
     drop(i);
     state.event("exited", &s.name, code.to_string());
+}
+
+/// Writes a session's input to its program's terminal, in order, on a thread
+/// of its own. A program that isn't reading its input then holds up only this
+/// and whoever is typing, never the session: its output is still read (so it
+/// can get on), and listing, reading and the other clients carry on. Ends when
+/// the program does (the session drops its sender, or the write fails).
+fn feed(mut terminal: Box<dyn Write + Send>, input: Receiver<Vec<u8>>) {
+    for bytes in input {
+        if terminal.write_all(&bytes).is_err() {
+            break;
+        }
+    }
+}
+
+impl Session {
+    /// Hands input to the program (see `feed`); waits only while its queue is
+    /// full, with the session unlocked.
+    fn input(&self, bytes: &[u8]) -> Result<(), String> {
+        let gone = || format!("{} has exited", self.name);
+        let writer = self.inner.lock().unwrap().writer.clone().ok_or_else(gone)?;
+        writer.send(bytes.to_vec()).map_err(|_| gone())
+    }
 }
 
 fn wait_briefly(child: &mut Box<dyn Child + Send + Sync>) -> i32 {
@@ -500,11 +531,7 @@ fn send(state: &State, req: &Value) -> Result<Value, String> {
     let s = state.find(name).ok_or_else(|| format!("no session called {name}"))?;
     let text = str_of(req, "text");
     let enter = req["enter"].as_bool().unwrap_or(true);
-    {
-        let mut i = s.inner.lock().unwrap();
-        let w = i.writer.as_mut().ok_or_else(|| format!("{name} has exited"))?;
-        w.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
-    }
+    s.input(text.as_bytes())?;
     if enter {
         // Enter on its own, a moment later: typed together, agents' input
         // boxes (Claude Code's) take it as part of a paste, a new line
@@ -512,9 +539,7 @@ fn send(state: &State, req: &Value) -> Result<Value, String> {
         if !text.is_empty() {
             std::thread::sleep(std::time::Duration::from_millis(150));
         }
-        let mut i = s.inner.lock().unwrap();
-        let w = i.writer.as_mut().ok_or_else(|| format!("{name} has exited"))?;
-        w.write_all(b"\r").map_err(|e| e.to_string())?;
+        s.input(b"\r")?;
     }
     Ok(json!({}))
 }
@@ -566,10 +591,7 @@ fn attach(state: &State, mut stream: Stream, req: &Value) {
         match proto::read_frame(&mut stream) {
             Ok(_) if watch_only => {}
             Ok((proto::DATA, bytes)) => {
-                let mut i = s.inner.lock().unwrap();
-                if let Some(w) = i.writer.as_mut() {
-                    let _ = w.write_all(&bytes);
-                }
+                let _ = s.input(&bytes);
             }
             Ok((proto::RESIZE, p)) if p.len() == 4 => {
                 let cols = u16::from_be_bytes([p[0], p[1]]);
@@ -586,6 +608,63 @@ fn attach(state: &State, mut stream: Stream, req: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_state() -> Arc<State> {
+        Arc::new(State {
+            sessions: Mutex::new(Vec::new()),
+            events: Mutex::new(VecDeque::new()),
+            connections: AtomicUsize::new(0),
+            next_client: AtomicU64::new(1),
+            last_activity: Mutex::new(Instant::now()),
+        })
+    }
+
+    /// Asks `f` on another thread; whether it answered within `wait`.
+    fn answers_within(wait: Duration, f: impl FnOnce() + Send + 'static) -> bool {
+        let (done, answered) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            f();
+            let _ = done.send(());
+        });
+        answered.recv_timeout(wait).is_ok()
+    }
+
+    /// A program that never reads its input, flooded with typing (a huge paste,
+    /// say): the typing waits, but the session's lock is never held for it,
+    /// so listing and reading it (and the other clients) carry on.
+    #[cfg(unix)]
+    #[test]
+    fn typing_into_a_program_that_doesnt_read_never_locks_the_session() {
+        let state = test_state();
+        // Raw mode, like an agent's TUI: on Linux input then piles up instead
+        // of being dropped (a Mac's terminal drops what it can't hold, so the
+        // typing never waits there).
+        let req = json!({ "name": "flood", "cwd": std::env::temp_dir().display().to_string(), "run": "stty raw -echo; echo ready; sleep 30" });
+        start(&state, &req).expect("the session starts");
+        let s = state.find("flood").unwrap();
+        let ready = Instant::now();
+        while !screen::text(&s.inner.lock().unwrap().term, 5).contains("ready") {
+            assert!(ready.elapsed() < Duration::from_secs(20), "the session didn't start");
+            thread::sleep(Duration::from_millis(50));
+        }
+        let typist = s.clone();
+        thread::spawn(move || {
+            let chunk = vec![b'x'; 4096];
+            // Far more than a terminal's input buffer and the queue hold.
+            for _ in 0..4096 {
+                if typist.input(&chunk).is_err() {
+                    break;
+                }
+            }
+        });
+        thread::sleep(Duration::from_millis(500));
+        let st = state.clone();
+        assert!(answers_within(Duration::from_secs(3), move || drop(list(&st))), "listing sessions hangs");
+        let st = state.clone();
+        assert!(answers_within(Duration::from_secs(3), move || drop(read(&st, &json!({ "name": "flood", "lines": 5 })))), "reading the session hangs");
+        let st = state.clone();
+        assert!(answers_within(Duration::from_secs(3), move || drop(stop(&st, &json!({ "name": "flood" })))), "stopping the session hangs");
+    }
 
     /// A session's command with only these of the locale variables.
     fn with_locale(vars: &[(&str, &str)]) -> CommandBuilder {

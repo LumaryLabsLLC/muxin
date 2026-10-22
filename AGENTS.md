@@ -109,11 +109,13 @@ A box is one task handed to an agent CLI: a fresh checkout of a repo on a new br
 - `box_create(repo, prompt, agent?, machine_id?)` makes one and starts its agent on the task (default agent `claude`; default machine: the online one with Docker and the most free memory). The first box on a machine builds Muxin's image there, a few minutes. It runs the repo's `.agents/setup` first. The agent can push its branch and open pull requests with the user's GitHub login. Only when the user asked.
 - `box_list` shows them: `state` (`running`, `starting`, `paused`), `busy`, `attention` (waiting for an answer), `session_id` while it runs, its `task`, and `git` (what it changed, its pull request).
 - `box_send(box_id, text)` asks its agent more. A paused box starts again and its agent continues the conversation with `text` as the next message; no `text` just starts it. `session_read` and `session_question` work on its `session_id`.
-- A box pauses by itself after 15 minutes without output from its agent (an open terminal doesn't keep it going), or when its agent quits; `box_pause` pauses it now. Its files and the conversation stay; processes it started (dev servers) end.
+- A box pauses by itself after 15 minutes without output from its agent or a shell in it (an open terminal doesn't keep it going), or when its agent quits; `box_pause` pauses it now. Its files and the conversation stay; processes it started (dev servers) end.
 - `box_destroy` deletes the container and the checkout, with unpushed work. Check `git` and confirm with the user first unless they asked for it.
 - A box's agent is signed in as it is on that machine (its `~/.claude`, `~/.codex`, ... are shared with the box). If it says it isn't signed in, tell the user to sign it in once from the box's terminal (`/login`); don't ask for tokens.
 
-The CLI equivalents are `muxin box new|ls|send|resume|pause|attach|rm`.
+The user can open shells in a box beside its agent (`muxin box shell`, or splitting its page in the app); they're sessions named `<box id>-sh-<n>`, and pausing the box ends them.
+
+The CLI equivalents are `muxin box new|ls|send|resume|pause|attach|shell|rm`.
 
 ## Usage and cost
 

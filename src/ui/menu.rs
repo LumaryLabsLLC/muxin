@@ -351,7 +351,11 @@ impl Root {
                     items.push(act("Restart", "rotate-ccw", Action::Restart(id.clone())));
                 }
                 items.push(Item::Separator);
-                items.push(Item::Action { label: "End session…".into(), glyph: Glyph::Icon("power"), action: Action::End(id.clone()), danger: true });
+                // A box's agent: ending it pauses the box (see confirm_end_session).
+                items.push(match &x.box_id {
+                    Some(b) if *b == x.name => act("Pause box", "pause", Action::End(id.clone())),
+                    _ => Item::Action { label: "End session…".into(), glyph: Glyph::Icon("power"), action: Action::End(id.clone()), danger: true },
+                });
                 items
             }
             MenuTarget::Joined(id) | MenuTarget::JoinedSession(id, _) | MenuTarget::JoinedDesktop(id) => self

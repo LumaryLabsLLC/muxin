@@ -664,13 +664,17 @@ impl Root {
                 let of_box = self.snapshot.sessions.iter().find(|s| s.id == id).and_then(|s| s.box_id.clone());
                 match (next, of_box) {
                     (Some(next), _) => self.route = Route::Session(next),
-                    (None, Some(b)) => {
-                        self.show(Route::Boxes, cx);
-                        // Still there: it paused (quiet, or its agent quit).
-                        if let Some(b) = snapshot.boxes.iter().find(|x| x.id == b) {
-                            self.notify_user(format!("{} paused. Resume it to pick up where it left off.", b.name), false, cx);
+                    (None, Some(b)) => match snapshot.boxes.iter().find(|x| x.id == b) {
+                        // A shell in a box that's still running: back to its agent.
+                        Some(b) if b.state != "paused" && b.session_id.as_ref().is_some_and(|s| *s != id) => self.route = Route::Session(b.session_id.clone().unwrap_or_default()),
+                        // It paused (quiet, or its agent quit).
+                        Some(b) if b.state == "paused" => {
+                            let name = b.name.clone();
+                            self.show(Route::Boxes, cx);
+                            self.notify_user(format!("{name} paused. Resume it to pick up where it left off."), false, cx);
                         }
-                    }
+                        _ => self.show(Route::Boxes, cx),
+                    },
                     (None, None) => self.show(Route::Machine(id.split('/').next().unwrap_or_default().to_string()), cx),
                 }
                 self.refocus = true;

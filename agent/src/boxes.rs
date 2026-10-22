@@ -129,6 +129,32 @@ fn session_of<'a>(id: &str, sessions: &'a [Value]) -> Option<&'a Value> {
     sessions.iter().find(|s| s["name"].as_str() == Some(id))
 }
 
+/// A box's shells are "<box id>-sh-<n>" (its agent's session has the box's id).
+fn is_shell_of(id: &str, name: &str) -> bool {
+    name.strip_prefix(id).and_then(|r| r.strip_prefix("-sh-")).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// A box's sessions: its agent's and its shells'.
+fn box_sessions<'a>(id: &'a str, sessions: &'a [Value]) -> impl Iterator<Item = &'a Value> + 'a {
+    sessions.iter().filter(move |s| s["name"].as_str().is_some_and(|n| n == id || is_shell_of(id, n)))
+}
+
+fn stop_sessions(id: &str) {
+    for s in box_sessions(id, &sessions()) {
+        let _ = crate::client::handle(&json!({ "op": "stop", "name": s["name"] }));
+    }
+}
+
+/// A shell's command: bash in the box's container and checkout, with the
+/// sign-ins the machine's shell has (like its agent).
+fn shell_line(b: &Value) -> String {
+    let (d, c) = (sh_quote(&docker(b)), b["container"].as_str().unwrap_or(""));
+    let repo = folder(b["id"].as_str().unwrap_or("")).join("repo");
+    let env: String = ["TERM", "COLORTERM"].iter().chain(SIGN_IN_VARS).map(|v| format!(" -e {v}")).collect();
+    // Not a login shell: Debian's /etc/profile would drop the agent CLIs' folder from the PATH.
+    format!("exec {d} exec -it{env} -w {} {c} bash -i", sh_quote(&repo.display().to_string()))
+}
+
 /// What a box is doing: "running" while its agent's session is, "starting"
 /// just after it was started, else "paused" (stopped on purpose, idle, or
 /// its machine restarted).
@@ -258,6 +284,33 @@ pub fn resume(req: &Value) -> Value {
     json!({ "ok": true, "box": b })
 }
 
+/// Opens a shell in a running box, beside its agent: bash in its container
+/// and checkout. Its name is "<box id>-sh-<n>"; pausing the box ends it.
+pub fn shell(req: &Value) -> Value {
+    let id = req["box_id"].as_str().unwrap_or("");
+    let Some(b) = valid_id(id).then(|| read(id)).flatten() else { return err(format!("there's no box {id} here")) };
+    let current = sessions();
+    if state_of(&b, &current, crate::now()) != "running" {
+        return err(format!("{id} is paused: resume it first"));
+    }
+    let Some(name) = (1..1000).map(|n| format!("{id}-sh-{n}")).find(|n| session_of(n, &current).is_none()) else { return err("it has too many shells") };
+    let start = json!({
+        "op": "start",
+        "name": name,
+        "agent": "shell",
+        "title": format!("Shell · {}", b["name"].as_str().unwrap_or(id)),
+        "cwd": folder(id).join("repo").display().to_string(),
+        "run": shell_line(&b),
+        "cols": req["cols"].as_u64().unwrap_or(120),
+        "rows": req["rows"].as_u64().unwrap_or(40),
+    });
+    let reply = crate::client::handle(&start);
+    if reply["ok"].as_bool() != Some(true) {
+        return err(format!("the shell didn't start: {}", reply["error"].as_str().unwrap_or("no reason given")));
+    }
+    json!({ "ok": true, "session": name })
+}
+
 fn send(id: &str, text: &str) {
     let _ = crate::client::handle(&json!({ "op": "send", "name": id, "text": text, "enter": true }));
 }
@@ -271,10 +324,11 @@ pub fn pause(req: &Value) -> Value {
     }
 }
 
-/// Ends the box's session and stops its container; its files stay.
+/// Ends the box's sessions (its agent and its shells) and stops its
+/// container; its files stay.
 fn pause_box(b: &mut Value) -> Result<(), String> {
     let id = b["id"].as_str().unwrap_or("").to_string();
-    let _ = crate::client::handle(&json!({ "op": "stop", "name": id }));
+    stop_sessions(&id);
     let container = b["container"].as_str().unwrap_or("").to_string();
     if let Err(e) = run_docker(b, &["stop", "-t", "10", &container]) {
         // Gone already is stopped enough.
@@ -300,7 +354,7 @@ pub fn delete(req: &Value) -> Value {
         return err(format!("{} isn't a box's folder", path.display()));
     }
     let b = read(id).unwrap_or_else(|| json!({ "id": id, "container": format!("muxen-{id}") }));
-    let _ = crate::client::handle(&json!({ "op": "stop", "name": id }));
+    stop_sessions(id);
     let container = b["container"].as_str().unwrap_or("").to_string();
     if let Err(e) = run_docker(&b, &["rm", "-f", &container])
         && !e.contains("No such container")
@@ -321,19 +375,20 @@ pub fn delete(req: &Value) -> Value {
 }
 
 /// Why a running box should pause now, if it should.
-fn pause_reason(b: &Value, session: Option<&Value>, now: i64) -> Option<&'static str> {
+fn pause_reason(b: &Value, sessions: &[Value], now: i64) -> Option<&'static str> {
     if b["state"].as_str() != Some("running") || now - b["state_at"].as_i64().unwrap_or(0) < GRACE_SECS {
         return None;
     }
-    let Some(s) = session else { return Some("its agent ended") };
+    let id = b["id"].as_str().unwrap_or("");
+    let Some(s) = session_of(id, sessions) else { return Some("its agent ended") };
     if s["status"].as_str() != Some("running") {
         return Some("its agent exited");
     }
     // Quiet is quiet whether or not a terminal is open on it: typing makes the
-    // agent redraw, so someone using it keeps it going.
+    // agent (or a shell in the box) redraw, so someone using it keeps it going.
     let idle = b["idle_minutes"].as_i64().unwrap_or(IDLE_MINUTES);
-    let quiet = now - s["last_output"].as_i64().unwrap_or(now);
-    (idle > 0 && quiet >= idle * 60).then_some("it was idle")
+    let last = box_sessions(id, sessions).filter_map(|s| s["last_output"].as_i64()).max().unwrap_or(now);
+    (idle > 0 && now - last >= idle * 60).then_some("it was idle")
 }
 
 fn watch_pid_path() -> PathBuf {
@@ -399,7 +454,7 @@ pub fn watch() -> i32 {
         for mut b in all().into_iter().filter(|b| b["state"].as_str() == Some("running")) {
             running += 1;
             let id = b["id"].as_str().unwrap_or("").to_string();
-            if let Some(why) = pause_reason(&b, session_of(&id, &current), now) {
+            if let Some(why) = pause_reason(&b, &current, now) {
                 match pause_box(&mut b) {
                     Ok(()) => eprintln!("{now} paused {id}: {why}"),
                     Err(e) => eprintln!("{now} couldn't pause {id} ({why}): {e}"),
@@ -453,24 +508,49 @@ mod tests {
     fn pauses_when_quiet_or_ended() {
         let now = 100_000;
         let b = running(now - 3600, None);
+        let one = |s: Value| vec![s];
         // Working (recent output, which typing makes too): it stays.
-        assert_eq!(pause_reason(&b, Some(&session("running", 0, now - 60)), now), None);
-        assert_eq!(pause_reason(&b, Some(&session("running", 1, now - 60)), now), None);
+        assert_eq!(pause_reason(&b, &one(session("running", 0, now - 60)), now), None);
+        assert_eq!(pause_reason(&b, &one(session("running", 1, now - 60)), now), None);
         // Quiet for longer than 15 minutes, a terminal open on it or not.
-        assert_eq!(pause_reason(&b, Some(&session("running", 0, now - 16 * 60)), now), Some("it was idle"));
-        assert_eq!(pause_reason(&b, Some(&session("running", 2, now - 16 * 60)), now), Some("it was idle"));
-        assert_eq!(pause_reason(&b, Some(&session("exited", 0, now)), now), Some("its agent exited"));
-        assert_eq!(pause_reason(&b, None, now), Some("its agent ended"));
+        assert_eq!(pause_reason(&b, &one(session("running", 0, now - 16 * 60)), now), Some("it was idle"));
+        assert_eq!(pause_reason(&b, &one(session("running", 2, now - 16 * 60)), now), Some("it was idle"));
+        assert_eq!(pause_reason(&b, &one(session("exited", 0, now)), now), Some("its agent exited"));
+        assert_eq!(pause_reason(&b, &[], now), Some("its agent ended"));
+    }
+
+    #[test]
+    fn a_shell_in_use_keeps_the_box_going() {
+        let now = 100_000;
+        let b = running(now - 3600, None);
+        let agent = session("running", 0, now - 3600);
+        let shell = json!({ "name": "box-ab12cd-sh-1", "status": "running", "clients": 1, "last_output": now - 30 });
+        let other = json!({ "name": "claude-3f9a", "status": "running", "clients": 0, "last_output": now });
+        assert_eq!(pause_reason(&b, &[agent.clone(), shell], now), None);
+        // Another session's output doesn't count, and a shell alone isn't its agent.
+        assert_eq!(pause_reason(&b, &[agent, other.clone()], now), Some("it was idle"));
+        let only_shell = json!({ "name": "box-ab12cd-sh-1", "status": "running", "clients": 1, "last_output": now });
+        assert_eq!(pause_reason(&b, &[only_shell, other], now), Some("its agent ended"));
     }
 
     #[test]
     fn a_new_box_and_never_idle_ones_stay() {
         let now = 100_000;
-        assert_eq!(pause_reason(&running(now - 10, None), None, now), None);
+        assert_eq!(pause_reason(&running(now - 10, None), &[], now), None);
         let never = running(now - 3600, Some(0));
-        assert_eq!(pause_reason(&never, Some(&session("running", 0, now - 86_400)), now), None);
+        assert_eq!(pause_reason(&never, &[session("running", 0, now - 86_400)], now), None);
         let paused = json!({ "id": "box-ab12cd", "state": "paused", "state_at": 0 });
-        assert_eq!(pause_reason(&paused, None, now), None);
+        assert_eq!(pause_reason(&paused, &[], now), None);
+    }
+
+    #[test]
+    fn shells_belong_to_their_box() {
+        assert!(is_shell_of("box-ab12cd", "box-ab12cd-sh-1"));
+        assert!(is_shell_of("box-ab12cd", "box-ab12cd-sh-12"));
+        assert!(!is_shell_of("box-ab12cd", "box-ab12cd"));
+        assert!(!is_shell_of("box-ab12cd", "box-ab12cd-sh-"));
+        assert!(!is_shell_of("box-ab12cd", "box-ab12cdx-sh-1"));
+        assert!(!is_shell_of("box-ab", "box-ab12cd-sh-1"));
     }
 
     #[test]

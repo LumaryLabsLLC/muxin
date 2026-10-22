@@ -708,7 +708,7 @@ pub(crate) fn parse_discovery(spec: &MachineSpec, reply: &Value) -> MachineSessi
             attach_command: user_attach_command(spec, &name),
             persistent: true,
             git: None,
-            box_id: found.boxes.iter().any(|b| b.id == name).then(|| name.clone()),
+            box_id: crate::fleet::boxes::box_of_session(&name, &found.boxes).map(|b| b.id.clone()),
             name,
         });
     }

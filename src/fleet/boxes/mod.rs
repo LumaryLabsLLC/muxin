@@ -144,6 +144,12 @@ pub struct BoxInfo {
     pub git: Option<GitStatus>,
 }
 
+/// The box a session belongs to: its agent's (named as the box) or one of
+/// its shells ("<box id>-sh-<n>").
+pub(crate) fn box_of_session<'a>(name: &str, boxes: &'a [BoxInfo]) -> Option<&'a BoxInfo> {
+    boxes.iter().find(|b| name == b.id || name.strip_prefix(b.id.as_str()).and_then(|r| r.strip_prefix("-sh-")).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())))
+}
+
 /// The boxes in a machine agent's `discover` reply (agents before 0.3 have none).
 pub(crate) fn parse(machine_id: &str, reply: &Value) -> Vec<BoxInfo> {
     let ts = |v: &Value| v.as_i64().filter(|t| *t > 0).and_then(|t| Utc.timestamp_opt(t, 0).single());
@@ -413,6 +419,24 @@ impl Engine {
         self.find_box(&b.id)
     }
 
+    /// Opens a shell in a box, beside its agent: bash in its container and
+    /// checkout (a paused box starts again first). Pausing the box ends it.
+    pub async fn box_shell(self: &Arc<Self>, id: &str, cols: u16, rows: u16) -> Result<super::sessions::SessionInfo, String> {
+        let mut b = self.find_box(id)?;
+        if self.demo_world().is_some() {
+            return Err("The demo's boxes are only for show.".into());
+        }
+        if b.state != "running" {
+            b = self.box_send(&b.id, None).await?;
+        }
+        let (spec, probe) = self.machine(&b.machine_id).ok_or_else(|| format!("{} isn't in Muxin anymore.", b.machine_id))?;
+        agent_cli::ensure(&spec, probe.as_ref()).await?;
+        let reply = agent_cli::ctl(&spec, &json!({ "op": "box_shell", "box_id": b.id, "cols": cols, "rows": rows })).await?;
+        let name = reply["session"].as_str().ok_or("The machine's agent didn't name the shell.")?.to_string();
+        let found = self.refresh_sessions(&spec.id).await?;
+        found.sessions.into_iter().find(|s| s.name == name).ok_or_else(|| format!("The shell in {} ended right away.", b.id))
+    }
+
     /// Pauses a box: its agent ends and its container stops; its files stay.
     pub async fn box_pause(self: &Arc<Self>, id: &str) -> Result<BoxInfo, String> {
         let b = self.find_box(id)?;
@@ -490,8 +514,9 @@ exec {new}
     )
 }
 
-const BASHRC: &str = r#"# A Muxin box: its GitHub token, for shells too.
+const BASHRC: &str = r#"# A Muxin box: its GitHub token, and the agent CLIs on the PATH, for shells too.
 if [ -f "$HOME/.muxin/env" ]; then set -a; . "$HOME/.muxin/env"; set +a; fi
+case ":$PATH:" in *:/opt/agents/bin:*) ;; *) PATH="/opt/agents/bin:$PATH" ;; esac
 PS1='\u@\h:\w\$ '
 "#;
 
@@ -600,6 +625,15 @@ mod tests {
             assert!(!l.dirs.is_empty(), "{a}");
             assert!(l.dirs.iter().all(|d| AGENT_DIRS.contains(d)), "{a}'s folders are mounted");
         }
+    }
+
+    #[test]
+    fn sessions_belong_to_their_box() {
+        let boxes = vec![BoxInfo { id: "box-ab12cd".into(), ..Default::default() }];
+        assert_eq!(box_of_session("box-ab12cd", &boxes).map(|b| b.id.as_str()), Some("box-ab12cd"));
+        assert_eq!(box_of_session("box-ab12cd-sh-2", &boxes).map(|b| b.id.as_str()), Some("box-ab12cd"));
+        assert!(box_of_session("box-ab12cd-sh-", &boxes).is_none());
+        assert!(box_of_session("claude-3f9a", &boxes).is_none());
     }
 
     #[test]

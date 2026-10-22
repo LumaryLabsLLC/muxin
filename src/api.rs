@@ -3024,6 +3024,14 @@ pub async fn box_destroy(engine: &Arc<Engine>, req: BoxRequest) -> ApiResult<Box
     engine.box_destroy(&b.id).await.map_err(box_error)
 }
 
+/// The program and arguments that open a shell in a box in this terminal
+/// (starting the box first when it's paused).
+pub async fn box_shell(engine: &Arc<Engine>, req: BoxRequest) -> ApiResult<sessions::AttachCommand> {
+    let b = resolve_box(engine, &req.box_id).await?;
+    let s = engine.box_shell(&b.id, HEADLESS_COLS, HEADLESS_ROWS).await.map_err(box_error)?;
+    engine.attach_command(&s.id).map_err(session_error)
+}
+
 /// The program and arguments that attach this terminal to a box's agent
 /// (starting the box first when it's paused).
 pub async fn box_attach(engine: &Arc<Engine>, req: BoxRequest) -> ApiResult<sessions::AttachCommand> {

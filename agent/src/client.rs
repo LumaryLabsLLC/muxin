@@ -117,6 +117,7 @@ pub fn handle(req: &Value) -> Value {
         "box_resume" => crate::boxes::resume(&req),
         "box_pause" => crate::boxes::pause(&req),
         "box_delete" => crate::boxes::delete(&req),
+        "box_shell" => crate::boxes::shell(&req),
         _ => request(&req, false),
     }
 }

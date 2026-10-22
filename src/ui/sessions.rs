@@ -250,9 +250,16 @@ impl Root {
         let (cols, rows) = self.fit_share(&id, share, window, cx);
         let req = StartSession { machine_id: info.machine_id.clone(), agent: "shell".into(), cwd: info.cwd.clone(), cols, rows, ..Default::default() };
         let engine = self.engine.clone();
+        // Beside a box's agent (or shell): a shell in the box.
+        let in_box = info.box_id.clone();
         let job = engine.runtime().spawn({
             let engine = engine.clone();
-            async move { engine.start_session(req).await }
+            async move {
+                match in_box {
+                    Some(b) => engine.box_shell(&b, cols, rows).await,
+                    None => engine.start_session(req).await,
+                }
+            }
         });
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
@@ -408,6 +415,12 @@ impl Root {
     }
 
     pub(super) fn confirm_end_session(&mut self, s: &SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        // A box's agent: ending it pauses the box, which Resume undoes (a
+        // shell in the box just ends).
+        if let Some(b) = s.box_id.clone().filter(|b| *b == s.name) {
+            self.pause_box(&b, cx);
+            return;
+        }
         let sid = s.id.clone();
         let detail = if s.agent == "shell" || s.agent.is_empty() {
             "The shell and anything still running in it stop.".to_string()
@@ -479,6 +492,10 @@ impl Root {
         let split = self.page_split(&info.id).is_some();
         let (icon_name, (from, to)) = kit::agent_look(&info.agent);
         let exited = info.status == "exited";
+        // A box's agent and shells run in the box's container (its checkout at
+        // the same path there); ending its agent pauses the box.
+        let in_box = info.box_id.is_some();
+        let box_agent = info.box_id.as_deref() == Some(info.name.as_str());
 
         let status = if exited {
             kit::pill(format!("Exited{}", info.exit_code.map(|c| format!(" ({c})")).unwrap_or_default()), theme.text_placeholder).into_any_element()
@@ -518,7 +535,33 @@ impl Root {
                     .flex_1()
                     .min_w(px(0.))
                     .gap(px(2.))
-                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(info.title.clone()))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(info.title.clone()))
+                            .when(in_box, |d| {
+                                d.child(
+                                    div()
+                                        .id("session-box-link")
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .px(px(6.))
+                                        .h(px(18.))
+                                        .rounded(px(4.))
+                                        .bg(theme.accent.opacity(0.12))
+                                        .text_size(px(11.))
+                                        .text_color(theme.text_accent)
+                                        .cursor_pointer()
+                                        .hover(|st| st.bg(theme.accent.opacity(0.2)))
+                                        .child(kit::icon("box", 11., theme.text_accent))
+                                        .child("Box")
+                                        .on_click(cx.listener(|this, _, window, cx| this.navigate(Route::Boxes, window, cx))),
+                                )
+                            }),
+                    )
                     // A folder too long to fit goes onto its own line (and wraps at
                     // its slashes) instead of running under the buttons.
                     .child(
@@ -532,7 +575,7 @@ impl Root {
                             .text_color(theme.text_placeholder)
                             .child(info.agent_name.clone())
                             .child("·")
-                            .child(machine)
+                            .child(if in_box { format!("in a container on {machine}") } else { machine })
                             .when(!info.cwd.is_empty(), |d| {
                                 d.child(
                                     div()
@@ -579,14 +622,15 @@ impl Root {
             })
             // Another shell beside it or below it, like splitting a terminal.
             .when(info.persistent && offline.is_none() && !self.engine.is_demo(), |d| {
+                let (right, down) = if in_box { ("Split right (⌘D): a shell in the box", "Split down (⇧⌘D): a shell in the box") } else { ("Split right (⌘D)", "Split down (⇧⌘D)") };
                 d.child(
                     Button::icon_only("session-split-right", "columns-2")
-                        .tooltip("Split right (⌘D)")
+                        .tooltip(right)
                         .on_click(cx.listener(|this, _, window, cx| this.split_session(false, window, cx))),
                 )
                 .child(
                     Button::icon_only("session-split-down", "rows-2")
-                        .tooltip("Split down (⇧⌘D)")
+                        .tooltip(down)
                         .on_click(cx.listener(|this, _, window, cx| this.split_session(true, window, cx))),
                 )
             })
@@ -610,11 +654,18 @@ impl Root {
             })
             // Others watching (or typing) by link, peer to peer.
             .when(info.persistent && !exited && offline.is_none() && !self.engine.is_demo(), |d| d.child(self.share_button(&info, cx)))
-            .child(Button::new("session-end", "End").icon("power").style(ButtonStyle::Ghost).disabled(offline.is_some()).on_click(cx.listener(move |this, _, window, cx| {
-                if let Some(s) = this.snapshot.sessions.iter().find(|x| x.id == sid2).cloned() {
-                    this.confirm_end_session(&s, window, cx);
-                }
-            })));
+            .child(
+                Button::new("session-end", if box_agent { "Pause" } else { "End" })
+                    .icon(if box_agent { "pause" } else { "power" })
+                    .style(ButtonStyle::Ghost)
+                    .disabled(offline.is_some())
+                    .when(box_agent, |b| b.tooltip("Pause the box: its agent and container stop, its files and conversation stay. Resume picks it up again."))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(s) = this.snapshot.sessions.iter().find(|x| x.id == sid2).cloned() {
+                            this.confirm_end_session(&s, window, cx);
+                        }
+                    })),
+            );
 
         // The terminal, or the panes of its split.
         let body = match self.pane_layout(id).cloned() {

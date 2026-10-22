@@ -1022,6 +1022,8 @@ enum BoxCommand {
     Pause(BoxIdArgs),
     /// Open a box's agent in this terminal (starting the box when it's paused)
     Attach(BoxIdArgs),
+    /// Open a shell in a box, beside its agent: in its container and checkout
+    Shell(BoxIdArgs),
     /// Delete a box with any work in it that wasn't pushed (its branch on GitHub stays)
     #[command(alias = "destroy")]
     Rm(BoxIdArgs),
@@ -2530,16 +2532,19 @@ fn boxes(cmd: BoxCommand, runtime: &tokio::runtime::Runtime) -> u8 {
             let req = api::BoxRequest { box_id: a.box_id };
             run(runtime, &a.agent, async move |e| api::box_destroy(&e, req).await, |b| format!("✓ Deleted {} ({})\n", b.id, b.name))
         }
-        BoxCommand::Attach(a) => box_attach(a, runtime),
+        BoxCommand::Attach(a) => box_attach(a, runtime, false),
+        BoxCommand::Shell(a) => box_attach(a, runtime, true),
     }
 }
 
-/// Replaces this process with ssh (or the local agent) attached to a box's agent.
-fn box_attach(a: BoxIdArgs, runtime: &tokio::runtime::Runtime) -> u8 {
+/// Replaces this process with ssh (or the local agent) attached to a box's
+/// agent, or to a new shell in the box.
+fn box_attach(a: BoxIdArgs, runtime: &tokio::runtime::Runtime, shell: bool) -> u8 {
     let _guard = runtime.enter();
     let engine = Engine::new(a.agent.common.paths(), a.agent.demo);
     let req = api::BoxRequest { box_id: a.box_id };
-    let cmd = match runtime.block_on(api::box_attach(&engine, req)) {
+    let attach = async { if shell { api::box_shell(&engine, req).await } else { api::box_attach(&engine, req).await } };
+    let cmd = match runtime.block_on(attach) {
         Ok(c) => c,
         Err(e) => return report_error(&a.agent, &e),
     };

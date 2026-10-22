@@ -64,6 +64,7 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
         cx.set_global(appearance.resolve(cx.window_appearance()));
         cx.set_global(appearance);
         input::bind_keys(cx);
+        box_dialog::bind_keys(cx);
         terminal::bind_keys(cx);
         desktop::bind_keys(cx);
         root::bind_keys(cx);

@@ -176,6 +176,7 @@ pub fn ctrl_keys(cx: &App) -> Vec<String> {
 pub fn apply(cx: &mut App) {
     cx.clear_key_bindings();
     super::input::bind_keys(cx);
+    super::box_dialog::bind_keys(cx);
     super::terminal::bind_keys(cx);
     super::desktop::bind_keys(cx);
     super::root::bind_keys(cx);

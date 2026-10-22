@@ -387,7 +387,8 @@ Start an AI agent on one of your machines and come back to it whenever you like,
 - **Your environment.** The agent starts in your login shell, in the folder you pick, so nvm/fnm/asdf and the CLI's own login work as they do in your terminal. Muxin finds which agent CLIs each machine has: `claude`, `codex`, `opencode`, `gemini`, `amp`.
 - **What it changed.** Each session shows its branch, the lines and files it changed since the default branch, its commits and uncommitted files, and the branch's pull request with its checks (click it to open it on GitHub). Muxin looks when a session stops working, and at least every minute while sessions run.
 - **Actions.** A session's **Actions** button (or its right-click menu) asks its agent to commit, commit and push, open or update the pull request, review the changes, fix the review comments, resolve conflicts or write a recap. Each one types a prompt into the agent; change any of them in **Settings › Prompts** (`[settings.prompts]` in `config.toml`), where `{branch}`, `{base}` and `{pull}` are filled in.
-- **Agents can drive agents.** `session_start`, `session_read` (the screen as text), `session_question` and `session_answer` (what it asks, and an answer), `session_send` (type into it), `session_action` and `session_stop` are MCP tools and CLI commands too.
+- **Hand off to another agent.** Started with Claude Code and want Codex to finish (or Claude Code ran out of usage)? **Hand off** on a session's page picks the agent. Muxin writes a note in the session's folder, `.muxin/handoff.md`. It has where the git work stands, the agent's to-do list, and the conversation so far: what you asked, what the agent said, and one line per tool call. Muxin reads that from the agent's own transcript (Claude Code, Codex, Gemini CLI and Pi keep one on the machine; for OpenCode and Amp the note has what the terminal showed instead). Then the new agent starts in the same folder, asked to read the note first, and the old session ends. The note stays out of git (`.muxin/` goes in the checkout's `info/exclude`). **A fresh … session** does the same with the same agent, for a conversation that's grown too long. A box changes agents the same way, in the box.
+- **Agents can drive agents.** `session_start`, `session_read` (the screen as text), `session_question` and `session_answer` (what it asks, and an answer), `session_send` (type into it), `session_action`, `session_handoff` and `session_stop` are MCP tools and CLI commands too.
 
 ```sh
 muxin session ls                                   # every session, and which agents each machine has
@@ -400,6 +401,8 @@ muxin session answer beelink/claude-3f9a 1         # pick one
 muxin session attach beelink/claude-3f9a           # open it in this terminal; detach with Ctrl-] then d
 muxin session restart beelink/claude-3f9a
 muxin session rename beelink/claude-3f9a "API server"   # "" goes back to the original title
+muxin session handoff beelink/claude-3f9a codex    # Codex takes over, with a note of the work so far (--keep keeps the old one)
+muxin session handoff box-7k2m9q gemini            # a box changes agents
 muxin session stop beelink/claude-3f9a
 ```
 

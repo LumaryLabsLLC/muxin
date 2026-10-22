@@ -97,6 +97,12 @@ fn launch(agent: &str) -> Option<Launch> {
     })
 }
 
+/// A box's launcher (`~/.muxin/start`) for `agent`, and whether its prompt is
+/// typed in: for a box changing agents (see sessions::handoff).
+pub(crate) fn launcher(agent: &str) -> Option<(String, bool)> {
+    launch(agent).map(|l| (start_script(&l), l.typed))
+}
+
 /// The agent CLIs a box can run (ids from `sessions::AGENTS`).
 pub const BOX_AGENTS: &[&str] = &["claude", "codex", "amp", "opencode", "gemini", "pi"];
 

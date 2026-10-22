@@ -118,6 +118,8 @@ pub fn handle(req: &Value) -> Value {
         "box_pause" => crate::boxes::pause(&req),
         "box_delete" => crate::boxes::delete(&req),
         "box_shell" => crate::boxes::shell(&req),
+        "box_switch" => crate::boxes::switch(&req),
+        "handoff" => crate::handoff::note(&req),
         _ => request(&req, false),
     }
 }

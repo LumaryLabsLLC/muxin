@@ -601,6 +601,18 @@ impl Root {
                         .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.open_menu(super::menu::MenuTarget::SessionActions(sid.clone()), e.position(), cx))),
                 )
             })
+            // Another agent takes over (an exited one's work too: it may have run out of usage).
+            .when(info.agent != "shell" && !info.agent.is_empty() && info.persistent && offline.is_none() && (!in_box || box_agent), |d| {
+                let sid = info.id.clone();
+                let handing = self.handing_off.contains(&info.id);
+                d.child(
+                    Button::new("session-handoff", "Hand off")
+                        .icon("arrow-right-left")
+                        .loading(handing)
+                        .tooltip("Another agent takes over, with a note of the conversation so far and where the code stands")
+                        .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.open_menu(super::menu::MenuTarget::Handoff(sid.clone()), e.position(), cx))),
+                )
+            })
             .when(info.persistent, |d| {
                 d.child(
                     Button::icon_only("session-copy-attach", "copy")
@@ -1734,6 +1746,41 @@ fn demo_screen(agent: &str) -> Vec<u8> {
 impl Root {
     /// Asks a session's agent to do one of the session actions (commit, open
     /// a pull request, ...): its prompt is typed in.
+    /// Hands a session's work to another agent (see fleet::sessions::handoff),
+    /// then shows the new agent's session.
+    pub(super) fn handoff_session(&mut self, id: &str, to: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.handing_off.insert(id.to_string()) {
+            return;
+        }
+        cx.notify();
+        let (engine, id) = (self.engine.clone(), id.to_string());
+        let name = crate::fleet::sessions::agent(to).map(|k| k.name).unwrap_or(to);
+        let job = engine.runtime().spawn({
+            let (engine, id) = (engine.clone(), id.clone());
+            async move { engine.handoff_session(&id, to, false).await }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.handing_off.remove(&id);
+                match result {
+                    Ok(h) => {
+                        let from = match h.source.as_str() {
+                            "transcript" => "the conversation so far",
+                            "terminal" => "what the terminal showed (Muxin can't read this agent's transcript)",
+                            _ => "where the code stands (Muxin found no conversation)",
+                        };
+                        this.navigate(Route::Session(h.session.id.clone()), window, cx);
+                        this.notify_user(format!("{name} took over, with a note of {from}: {}", crate::fleet::sessions::handoff::NOTE), false, cx);
+                    }
+                    Err(e) => this.notify_user(e, true, cx),
+                }
+                cx.notify();
+            });
+        });
+        self.track(task);
+    }
+
     pub(super) fn run_session_action(&mut self, id: &str, action: &'static str, cx: &mut Context<Self>) {
         let (engine, id) = (self.engine.clone(), id.to_string());
         let label = crate::fleet::sessions::actions::action(action).map(|a| a.label).unwrap_or(action);

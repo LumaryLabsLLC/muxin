@@ -98,9 +98,10 @@ The user runs AI agent CLIs (Claude Code, Codex, OpenCode, Gemini CLI, Amp) or s
 - `session_read` returns the screen and recent scrollback as text: use it to see what an agent is doing or asking.
 - `session_question` says what a waiting session asks: the question and its `options`, each with a `key` (and the `selected` one), or, when it's simply done, the end of what it said (`options` empty). `session_answer(id, key)` picks an option: it approves or refuses what that agent asked, so only when the user told you to, and say which option.
 - `session_send` types text and presses Enter. `session_start` starts one (optionally with a `prompt`); `session_stop` ends it. `session_rename` changes its title (the agent on the machine keeps it; an empty title goes back to the original).
+- `session_handoff(id, agent, keep?)` hands a session's work to another agent (or a box's, with a box id): Muxin writes `.muxin/handoff.md` in its folder (the git state, the agent's to-do list, the conversation from its own transcript), starts `agent` there asked to read it, and ends the old session unless `keep`. `source` says what the note came from: `transcript`, `terminal` (an agent whose transcript Muxin can't read) or `none`. The same agent works too: a fresh conversation for one that grew too long. Only when the user asked.
 - These are the user's sessions. Start, type into or stop one only when they asked; reading is fine.
 
-The CLI equivalents are `muxin session ls|start|read|question|answer|send|do|attach|restart|rename|stop`.
+The CLI equivalents are `muxin session ls|start|read|question|answer|send|do|handoff|attach|restart|rename|stop`.
 
 ## Boxes: tasks an agent works on by itself
 

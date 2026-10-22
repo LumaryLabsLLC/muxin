@@ -229,7 +229,7 @@ pub fn act(path: &str, action: &str) -> Result<String, String> {
     if out.0 { Ok(text) } else { Err(if text.is_empty() { format!("git {action} failed") } else { text }) }
 }
 
-fn run_with_timeout(cmd: &mut Command, limit: Duration) -> Result<(bool, String, String), String> {
+pub(crate) fn run_with_timeout(cmd: &mut Command, limit: Duration) -> Result<(bool, String, String), String> {
     let child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
     let started = Instant::now();
     let id = child.id();

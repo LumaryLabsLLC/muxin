@@ -17,6 +17,8 @@ pub enum MenuTarget {
     Session(String),
     /// The things to ask a session's agent (commit, open a pull request, ...).
     SessionActions(String),
+    /// The agents a session's work can be handed to.
+    Handoff(String),
     /// A GitHub repository, "owner/name".
     Repo(String),
     /// An issue or pull request.
@@ -94,6 +96,8 @@ enum Action {
     RenameSession(String),
     /// One of the session actions (sessions::actions), for a session.
     SessionAction(String, &'static str),
+    /// A session's work, to this agent.
+    Handoff(String, &'static str),
     /// Settings, where the actions' prompts are.
     EditPrompts,
     AddDisplay(String),
@@ -331,6 +335,25 @@ impl Root {
             MenuTarget::SessionActions(id) => {
                 let Some(x) = s.sessions.iter().find(|x| &x.id == id) else { return Vec::new() };
                 session_actions(x)
+            }
+            MenuTarget::Handoff(id) => {
+                let Some(x) = s.sessions.iter().find(|x| &x.id == id) else { return Vec::new() };
+                // A box's image has every agent a box runs; a machine, the ones found on it.
+                let in_box = x.box_id.as_deref() == Some(x.name.as_str());
+                let installed = |a: &str| match in_box {
+                    true => crate::fleet::boxes::BOX_AGENTS.contains(&a),
+                    false => s.machines.iter().find(|m| m.id == x.machine_id).is_some_and(|m| m.agents.iter().any(|i| i == a)),
+                };
+                let mut items = vec![Item::Note(if in_box { "Another agent takes over in the box, with a note of the work so far".into() } else { "Another agent takes over here, with a note of the work so far. This session ends".into() })];
+                for a in AGENTS.iter().filter(|a| !a.command.is_empty() && a.id != x.agent && installed(a.id)) {
+                    items.push(Item::Action { label: format!("Hand off to {}", a.name), glyph: Glyph::Agent(a.id), action: Action::Handoff(id.clone(), a.id), danger: false });
+                }
+                // The same agent, fresh: for a conversation that's grown too long.
+                if let Some(a) = AGENTS.iter().find(|a| a.id == x.agent && !a.command.is_empty()) {
+                    items.push(Item::Separator);
+                    items.push(Item::Action { label: format!("A fresh {} session", a.name), glyph: Glyph::Agent(a.id), action: Action::Handoff(id.clone(), a.id), danger: false });
+                }
+                items
             }
             MenuTarget::Session(id) => {
                 let Some(x) = s.sessions.iter().find(|x| &x.id == id) else { return Vec::new() };
@@ -581,6 +604,7 @@ impl Root {
             Action::RenameMachine(id) => self.show_rename(super::dialogs::RenameTarget::Machine(id), window, cx),
             Action::RenameSession(id) => self.show_rename(super::dialogs::RenameTarget::Session(id), window, cx),
             Action::SessionAction(id, action) => self.run_session_action(&id, action, cx),
+            Action::Handoff(id, agent) => self.handoff_session(&id, agent, window, cx),
             Action::EditPrompts => self.open_settings_tab(super::settings::SettingsTab::Prompts, window, cx),
             Action::CloudPower(id, on) => self.cloud_power(&id, on, cx),
             Action::MachinePower(id, on) => self.machine_power(&id, on, cx),

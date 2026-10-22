@@ -122,7 +122,7 @@ pub fn usage(req: &Value) -> Value {
 }
 
 /// `.jsonl` files under `dir` (down to `depth` folders) changed since `since`.
-fn jsonl_files(dir: &Path, depth: usize, since: SystemTime) -> Vec<PathBuf> {
+pub(crate) fn jsonl_files(dir: &Path, depth: usize, since: SystemTime) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else { return out };
     for e in entries.flatten() {

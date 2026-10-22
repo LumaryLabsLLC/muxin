@@ -640,6 +640,27 @@ pub fn session_started(s: &crate::fleet::sessions::SessionInfo) -> String {
     )
 }
 
+pub fn handed_off(h: &crate::fleet::sessions::handoff::HandedOff) -> String {
+    let from = match h.source.as_str() {
+        "transcript" => "the conversation so far",
+        "terminal" => "what its terminal showed (no transcript Muxin can read)",
+        _ => "the git state only (no conversation found)",
+    };
+    let mut out = format!("Handed off to {} ({}) in {}.\nThe note, from {from}: {}\n", s_id(h), h.session.agent_name, h.session.cwd, h.note);
+    if let Some(k) = &h.kept {
+        out.push_str(&format!("{k} is still running.\n"));
+    }
+    out.push_str(&format!("Watch it in the Muxin app, or attach here: {}\n", h.session.attach_command));
+    out
+}
+
+fn s_id(h: &crate::fleet::sessions::handoff::HandedOff) -> String {
+    match &h.box_id {
+        Some(b) => format!("{} in {b}", h.session.id),
+        None => h.session.id.clone(),
+    }
+}
+
 fn item_rows(items: &[crate::github::hub::Item]) -> Vec<Vec<String>> {
     items
         .iter()

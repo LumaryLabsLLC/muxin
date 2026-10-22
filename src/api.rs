@@ -2593,6 +2593,18 @@ pub struct SessionRenameRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SessionHandoffRequest {
+    /// A session ("<machine-id>/<name>", or a unique name) or a box ("box-7k2m9q").
+    pub session_id: String,
+    /// The agent to hand the work to: claude, codex, opencode, gemini, amp or pi.
+    pub agent: String,
+    /// Keep the old session running too. Default false: it ends.
+    #[serde(default)]
+    pub keep: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionSendRequest {
     pub session_id: String,
     /// Text to type into the session.
@@ -2835,6 +2847,16 @@ pub async fn session_restart(engine: &Arc<Engine>, req: SessionRequest) -> ApiRe
 pub async fn session_rename(engine: &Arc<Engine>, req: SessionRenameRequest) -> ApiResult<SessionInfo> {
     let s = resolve_session(engine, &req.session_id).await?;
     engine.rename_session(&s.id, &req.title).await.map_err(session_error)
+}
+
+/// Hands a session's work (or a box's) to another agent: a note in its folder
+/// from the conversation so far, and the new agent started there on it.
+pub async fn session_handoff(engine: &Arc<Engine>, req: SessionHandoffRequest) -> ApiResult<sessions::handoff::HandedOff> {
+    let id = match engine.find_box(&req.session_id) {
+        Ok(b) => b.id,
+        Err(_) => resolve_session(engine, &req.session_id).await?.id,
+    };
+    engine.handoff_session(&id, &req.agent, req.keep).await.map_err(session_error)
 }
 
 /// The program and arguments that attach this terminal to a session.

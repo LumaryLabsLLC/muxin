@@ -354,6 +354,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "session_stop" => ok(api::session_stop(engine, args(a)?).await?),
         "session_restart" => ok(api::session_restart(engine, args(a)?).await?),
         "session_rename" => ok(api::session_rename(engine, args(a)?).await?),
+        "session_handoff" => ok(api::session_handoff(engine, args(a)?).await?),
         "github_inbox" => ok(api::github_inbox(engine).await?),
         "github_repos" => ok(json!({ "repos": api::github_repos(engine).await? })),
         "github_favorite" => ok(api::github_favorite(engine, args(a)?)?),
@@ -952,6 +953,16 @@ pub fn tools() -> Vec<Value> {
             "annotations": annotations("Rename session", false, false, true, false),
         }),
         json!({
+            "name": "session_handoff",
+            "description": "Hand a session's work to another agent (Claude Code to Codex, say), or a box's to another agent in the box: Muxin writes .muxin/handoff.md in its folder (where the git work stands, the agent's to-do list, and the conversation so far from the agent's own transcript: Claude Code, Codex, Gemini CLI and Pi; else what its terminal showed), starts the new agent there asked to read it first, and ends the old session unless keep. Returns the new session, the note's path and what it was made from (`source`). Only when the user asked.",
+            "inputSchema": schema(json!({
+                "session_id": { "type": "string", "description": "A session id, or a box id (box-7k2m9q)." },
+                "agent": { "type": "string", "description": "The agent to hand it to: claude, codex, opencode, gemini, amp or pi." },
+                "keep": { "type": "boolean", "description": "Keep the old session running too. Default false." }
+            }), &["session_id", "agent"]),
+            "annotations": annotations("Hand off a session", false, true, false, false),
+        }),
+        json!({
             "name": "github_inbox",
             "description": "What needs the user on GitHub: pull requests waiting for their review, open issues and PRs assigned to them, and their own open pull requests (repo, number, title, labels, updated time, URL). Uses their GitHub login.",
             "inputSchema": schema(json!({}), &[]),
@@ -1274,7 +1285,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 94);
+        assert_eq!(tools.len(), 95);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

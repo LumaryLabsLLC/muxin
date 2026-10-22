@@ -11,6 +11,7 @@
 pub mod actions;
 pub(crate) mod agent;
 pub mod git;
+pub mod handoff;
 pub mod question;
 
 use std::sync::Arc;

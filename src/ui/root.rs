@@ -414,6 +414,8 @@ pub struct Root {
     window_active: bool,
     pub(super) ws_ui: WorkspaceUi,
     pub(super) box_ui: super::boxes::BoxUi,
+    /// Sessions being handed to another agent.
+    pub(super) handing_off: std::collections::HashSet<String>,
     /// This computer's clipboard as last seen (see watch_clipboard).
     clipboard_seen: ClipboardSeen,
     /// Sessions this app shares, and the guests already announced.
@@ -593,6 +595,7 @@ impl Root {
             window_active: false,
             ws_ui: WorkspaceUi::default(),
             box_ui: super::boxes::BoxUi::default(),
+            handing_off: Default::default(),
             clipboard_seen: ClipboardSeen { count: super::pasteboard_state().map(|s| s.0).unwrap_or(0), ..Default::default() },
             shares: Vec::new(),
             knocks_seen: HashSet::new(),

@@ -20,6 +20,7 @@ mod clipboard;
 mod crash;
 mod daemon;
 mod detect;
+mod handoff;
 mod desktop;
 #[cfg(unix)]
 mod displays;

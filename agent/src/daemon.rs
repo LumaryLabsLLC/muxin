@@ -336,6 +336,14 @@ fn launch(state: &Arc<State>, s: &Arc<Session>) -> anyhow::Result<()> {
     cmd.env("COLORTERM", "truecolor");
     cmd.env("MUXEN_SESSION", &s.name);
     cmd.env_remove("TMUX");
+    // Started from inside an agent (Muxin's CLI run by Claude Code, say), the
+    // server has that agent's session in its environment: a session here isn't
+    // its child (Claude Code wouldn't save its transcript).
+    for (name, _) in std::env::vars_os() {
+        if inherited_agent_var(&name.to_string_lossy()) {
+            cmd.env_remove(name);
+        }
+    }
     let child = pair.slave.spawn_command(cmd)?;
     drop(pair.slave);
     let reader = pair.master.try_clone_reader()?;
@@ -605,6 +613,13 @@ fn attach(state: &State, mut stream: Stream, req: &Value) {
     s.inner.lock().unwrap().clients.retain(|c| c.id != id);
 }
 
+/// An agent's own marks of the session it runs in (Claude Code's, Codex's
+/// sandbox), not the user's settings for it (CLAUDE_CONFIG_DIR, API keys).
+fn inherited_agent_var(name: &str) -> bool {
+    matches!(name, "CLAUDECODE" | "CLAUDE_PID" | "CLAUDE_EFFORT")
+        || ["CLAUDE_CODE_", "CLAUDE_AGENT_SDK_", "CODEX_SANDBOX"].iter().any(|p| name.starts_with(p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,6 +679,16 @@ mod tests {
         assert!(answers_within(Duration::from_secs(3), move || drop(read(&st, &json!({ "name": "flood", "lines": 5 })))), "reading the session hangs");
         let st = state.clone();
         assert!(answers_within(Duration::from_secs(3), move || drop(stop(&st, &json!({ "name": "flood" })))), "stopping the session hangs");
+    }
+
+    #[test]
+    fn an_outer_agents_session_doesnt_reach_sessions() {
+        for v in ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_PID", "CODEX_SANDBOX_NETWORK_DISABLED"] {
+            assert!(inherited_agent_var(v), "{v}");
+        }
+        for v in ["CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CODEX_HOME", "PATH"] {
+            assert!(!inherited_agent_var(v), "{v}");
+        }
     }
 
     /// A session's command with only these of the locale variables.

@@ -326,6 +326,40 @@ pub fn pause(req: &Value) -> Value {
     }
 }
 
+/// `{"op": "box_switch", "box_id", "agent", "start", "type_prompt"}`: the box
+/// changes agents (a handoff): its agent's session ends, `start` becomes its
+/// launcher (~/.muxin/start), and the new agent starts fresh, not continuing
+/// the last one's conversation, when the box starts again (box_resume).
+pub fn switch(req: &Value) -> Value {
+    let id = req["box_id"].as_str().unwrap_or("");
+    let Some(mut b) = valid_id(id).then(|| read(id)).flatten() else { return err(format!("there's no box {id} here")) };
+    let agent = req["agent"].as_str().unwrap_or("");
+    let start = req["start"].as_str().unwrap_or("");
+    if agent.is_empty() || !agent.chars().all(|c| c.is_ascii_lowercase()) || start.is_empty() {
+        return err("which agent, and how it starts?");
+    }
+    let _ = crate::client::handle(&json!({ "op": "stop", "name": id }));
+    let muxin = folder(id).join("home").join(".muxin");
+    let launcher = muxin.join("start");
+    if let Err(e) = std::fs::write(&launcher, start) {
+        return err(format!("couldn't write its launcher: {e}"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755));
+    }
+    let _ = std::fs::remove_file(muxin.join("started"));
+    b["agent"] = json!(agent);
+    b["type_prompt"] = json!(req["type_prompt"].as_bool() == Some(true));
+    // Just now, so the watcher gives the new agent its grace before it looks.
+    b["state_at"] = json!(crate::now());
+    match write(&b) {
+        Ok(()) => json!({ "ok": true, "box": b }),
+        Err(e) => err(e),
+    }
+}
+
 /// Ends the box's sessions (its agent and its shells) and stops its
 /// container; its files stay.
 fn pause_box(b: &mut Value) -> Result<(), String> {

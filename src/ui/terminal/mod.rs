@@ -279,6 +279,8 @@ impl TerminalView {
         let mut view = Self::with_term(term.clone(), Backend::Remote(io), rx, window, cx);
         let feed = cx.spawn(async move |this, cx| {
             let mut parser: Processor = Processor::new();
+            // The end of the last output, for a query split across two pieces.
+            let mut tail: Vec<u8> = Vec::new();
             while let Some(first) = output.next().await {
                 // Take everything queued, then draw once.
                 let mut batch = vec![first];
@@ -287,11 +289,16 @@ impl TerminalView {
                 }
                 let mut ended = None;
                 let mut size = None;
+                let mut asked_version = false;
                 {
                     let mut t = term.lock();
                     for item in batch {
                         match item {
-                            RemoteOutput::Bytes(b) => parser.advance(&mut *t, &b),
+                            RemoteOutput::Bytes(b) => {
+                                asked_version |= asks_version(&tail, &b);
+                                tail = b[b.len().saturating_sub(4)..].to_vec();
+                                parser.advance(&mut *t, &b)
+                            }
                             RemoteOutput::Ended(code) => ended = Some(code),
                             RemoteOutput::Resize(cols, rows) => {
                                 let dims = TermDims { cols: (cols as usize).clamp(2, 1000), rows: (rows as usize).clamp(1, 500) };
@@ -303,6 +310,14 @@ impl TerminalView {
                 }
                 if let Some((cols, rows)) = size {
                     let _ = this.update(cx, |this, _| this.shared.fix_size(cols, rows));
+                }
+                // XTVERSION, which the terminal's parser leaves unanswered (a guest's answers nothing).
+                if asked_version {
+                    let _ = this.update(cx, |this, _| {
+                        if !this.guest {
+                            this.shared.write(format!("\x1bP>|Muxin {}\x1b\\", env!("CARGO_PKG_VERSION")).into_bytes());
+                        }
+                    });
                 }
                 let alive = this.update(cx, |this, cx| match ended {
                     Some(code) => this.finish(code, cx),
@@ -696,4 +711,10 @@ impl Render for TerminalView {
             .on_action(cx.listener(|_, _: &ResetFontSize, _, cx| theme_mod::update_terminal(cx, |a| a.terminal_font_size = theme_mod::TERMINAL_FONT_SIZE)))
             .child(render::grid(cx.entity(), palette, focused, self.cursor_on || !focused, Metrics::current(cx)))
     }
+}
+
+/// XTVERSION (`CSI > q` or `CSI > 0 q`) in this output, or across its start.
+fn asks_version(tail: &[u8], bytes: &[u8]) -> bool {
+    let seen: Vec<u8> = tail.iter().chain(bytes.iter().take(5)).copied().collect();
+    [&b"\x1b[>q"[..], &b"\x1b[>0q"[..]].iter().any(|q| bytes.windows(q.len()).any(|w| w == *q) || seen.windows(q.len()).any(|w| w == *q))
 }

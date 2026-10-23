@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{Processor, Rgb};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde_json::{Value, json};
 
@@ -33,11 +33,16 @@ const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// reads waits here, with the session free (see `feed`).
 const INPUT_QUEUE: usize = 256;
 
+/// A color query's answer, once its color is known (see `answers`).
+type ColorReply = Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>;
+
 #[derive(Clone, Default)]
 struct Listener {
     bells: Arc<AtomicUsize>,
-    /// The terminal's answers to queries (cursor position, colors, ...).
+    /// The terminal's answers to queries (cursor position, device attributes, ...).
     replies: Arc<Mutex<Vec<String>>>,
+    /// Color queries (OSC 10, 11, 4): which color, and how to write the answer.
+    colors: Arc<Mutex<Vec<(usize, ColorReply)>>>,
 }
 
 impl EventListener for Listener {
@@ -47,6 +52,7 @@ impl EventListener for Listener {
                 self.bells.fetch_add(1, Ordering::Relaxed);
             }
             Event::PtyWrite(s) => self.replies.lock().unwrap().push(s),
+            Event::ColorRequest(index, format) => self.colors.lock().unwrap().push((index, format)),
             _ => {}
         }
     }
@@ -84,6 +90,8 @@ struct Inner {
     term: Term<Listener>,
     parser: Processor,
     listener: Listener,
+    /// The end of the last output, for a query split across two reads.
+    tail: Vec<u8>,
     /// Input for the program, written to its terminal by `feed`.
     writer: Option<SyncSender<Vec<u8>>>,
     master: Option<Box<dyn MasterPty + Send>>,
@@ -282,6 +290,7 @@ fn start(state: &Arc<State>, req: &Value) -> Result<Value, String> {
         inner: Mutex::new(Inner {
             term: Term::new(config, &Dims { cols: cols as usize, rows: rows as usize }, listener.clone()),
             parser: Processor::new(),
+            tail: Vec::new(),
             listener,
             writer: None,
             master: None,
@@ -409,14 +418,14 @@ fn pump(state: &State, s: &Session, mut reader: Box<dyn Read + Send>, generation
         // Attached terminals answer queries themselves; without one that
         // can (watchers' answers are ignored), answer here so programs
         // waiting on a reply don't hang.
-        let replies = std::mem::take(&mut *i.listener.replies.lock().unwrap());
+        let replies = answers(&i.term, &i.listener, &i.tail, bytes);
+        i.tail = bytes[bytes.len().saturating_sub(4)..].to_vec();
         // Never waiting here: this thread reads the program's output.
-        if i.clients.iter().all(|c| c.watch_only)
+        if !replies.is_empty()
+            && i.clients.iter().all(|c| c.watch_only)
             && let Some(w) = i.writer.as_ref()
         {
-            for r in replies {
-                let _ = w.try_send(r.into_bytes());
-            }
+            let _ = w.try_send(replies.into_bytes());
         }
         i.broadcast(proto::DATA, bytes);
         let rang = i.listener.bells.load(Ordering::Relaxed) != bells;
@@ -613,6 +622,58 @@ fn attach(state: &State, mut stream: Stream, req: &Value) {
     s.inner.lock().unwrap().clients.retain(|c| c.id != id);
 }
 
+/// What the terminal says back to what the program just printed, in one
+/// piece: the colors it asked for (OSC 10, 11, 4: the program's own if it set
+/// them, else a dark terminal's), its name and version (XTVERSION, which the
+/// terminal's parser leaves unanswered), then the parser's own answers (cursor
+/// position, keyboard mode, device attributes). Device attributes come last:
+/// programs (Gemini CLI, Neovim) ask for them last and take their answer as
+/// "that's everything".
+fn answers(term: &Term<Listener>, listener: &Listener, tail: &[u8], bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for (index, format) in std::mem::take(&mut *listener.colors.lock().unwrap()) {
+        out.push_str(&format(term.colors()[index].unwrap_or_else(|| default_color(index))));
+    }
+    if asks_version(tail, bytes) {
+        out.push_str(&format!("\x1bP>|Muxin {}\x1b\\", env!("CARGO_PKG_VERSION")));
+    }
+    for r in std::mem::take(&mut *listener.replies.lock().unwrap()) {
+        out.push_str(&r);
+    }
+    out
+}
+
+/// XTVERSION (`CSI > q` or `CSI > 0 q`), in this output or across its start.
+fn asks_version(tail: &[u8], bytes: &[u8]) -> bool {
+    let seen: Vec<u8> = tail.iter().chain(bytes.iter().take(5)).copied().collect();
+    [&b"\x1b[>q"[..], &b"\x1b[>0q"[..]].iter().any(|q| bytes.windows(q.len()).any(|w| w == *q) || seen.windows(q.len()).any(|w| w == *q))
+}
+
+/// A dark terminal's colors, for a program that asks before setting any:
+/// xterm's 256 (the 16 named, the 6×6×6 cube, the grays), then the
+/// foreground, background and cursor (256, 257, 258; dim and bright ones after).
+fn default_color(index: usize) -> Rgb {
+    const NAMED: [(u8, u8, u8); 16] = [
+        (0, 0, 0), (205, 0, 0), (0, 205, 0), (205, 205, 0), (0, 0, 238), (205, 0, 205), (0, 205, 205), (229, 229, 229),
+        (127, 127, 127), (255, 0, 0), (0, 255, 0), (255, 255, 0), (92, 92, 255), (255, 0, 255), (0, 255, 255), (255, 255, 255),
+    ];
+    let (r, g, b) = match index {
+        0..=15 => NAMED[index],
+        16..=231 => {
+            let level = |n: usize| if n == 0 { 0 } else { (55 + n * 40) as u8 };
+            let n = index - 16;
+            (level(n / 36), level(n / 6 % 6), level(n % 6))
+        }
+        232..=255 => {
+            let v = (8 + (index - 232) * 10) as u8;
+            (v, v, v)
+        }
+        257 => (0x15, 0x16, 0x1a),
+        _ => (0xec, 0xec, 0xf1),
+    };
+    Rgb { r, g, b }
+}
+
 /// An agent's own marks of the session it runs in (Claude Code's, Codex's
 /// sandbox), not the user's settings for it (CLAUDE_CONFIG_DIR, API keys).
 fn inherited_agent_var(name: &str) -> bool {
@@ -679,6 +740,42 @@ mod tests {
         assert!(answers_within(Duration::from_secs(3), move || drop(read(&st, &json!({ "name": "flood", "lines": 5 })))), "reading the session hangs");
         let st = state.clone();
         assert!(answers_within(Duration::from_secs(3), move || drop(stop(&st, &json!({ "name": "flood" })))), "stopping the session hangs");
+    }
+
+    /// What the terminal answers to `printed`, as a session with no window would.
+    fn answer(printed: &[u8]) -> String {
+        let listener = Listener::default();
+        let mut term = Term::new(Config::default(), &Dims { cols: 80, rows: 24 }, listener.clone());
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, printed);
+        answers(&term, &listener, &[], printed)
+    }
+
+    #[test]
+    fn gemini_clis_questions_are_all_answered_device_attributes_last() {
+        // What Gemini CLI asks at start: keyboard mode, background color, name, device attributes.
+        let got = answer(b"\x1b[?u\x1b]11;?\x1b\\\x1b[>q\x1b[c");
+        assert!(got.starts_with("\x1b]11;rgb:1515/1616/1a1a"), "{got:?}");
+        assert!(got.contains("\x1bP>|Muxin "), "{got:?}");
+        // The kitty keyboard protocol is off in sessions, so that one has no answer, as in a terminal without it.
+        assert!(!got.contains("u\x1b"), "{got:?}");
+        assert!(got.ends_with("\x1b[?6c"), "{got:?}");
+    }
+
+    #[test]
+    fn a_color_the_program_set_is_the_one_answered() {
+        let got = answer(b"\x1b]11;#ffffff\x1b\\\x1b]11;?\x07");
+        assert!(got.starts_with("\x1b]11;rgb:ffff/ffff/ffff"), "{got:?}");
+        let fg = answer(b"\x1b]10;?\x07");
+        assert!(fg.starts_with("\x1b]10;rgb:ecec/ecec/f1f1"), "{fg:?}");
+    }
+
+    #[test]
+    fn a_version_query_split_across_reads_is_still_seen() {
+        assert!(asks_version(b"xx\x1b[", b">qmore"));
+        assert!(asks_version(b"", b"a\x1b[>0qb"));
+        assert!(!asks_version(b"", b"\x1b[>c"));
+        assert_eq!(answer(b"plain text\r\n"), "");
     }
 
     #[test]

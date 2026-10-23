@@ -286,6 +286,11 @@ mod tests {
         run(dir, &["commit", "-qm", message]);
     }
 
+    /// A file's text with Unix line endings: git on Windows checks files out with CRLF.
+    fn text(path: &Path) -> String {
+        std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
+    }
+
     /// A pack's copy, as Muxin makes it on the other machine.
     fn copy_pack(id: &str, to: &str) {
         let (from, dest) = (folder(id), folder(to));
@@ -327,7 +332,7 @@ mod tests {
         let u = unpack(&json!({ "pack_id": "t-clone-b", "dir": there.to_string_lossy(), "branch": "feature", "base": base, "note": "# Handoff" }));
         assert_eq!(u["ok"], true, "{u}");
         assert_eq!(u["branch"], "feature");
-        assert_eq!(std::fs::read_to_string(there.join("a.txt")).unwrap(), "three\n");
+        assert_eq!(text(&there.join("a.txt")), "three\n");
         assert!(there.join("src/new.rs").is_file());
         assert_eq!(std::fs::read_to_string(there.join(".muxin/handoff.md")).unwrap(), "# Handoff");
         let log = Command::new("git").arg("-C").arg(&there).args(["log", "--format=%s"]).output().unwrap();
@@ -354,7 +359,7 @@ mod tests {
         let u = unpack(&json!({ "pack_id": "t-local-b", "dir": there.to_string_lossy(), "branch": "main" }));
         assert_eq!(u["ok"], true, "{u}");
         assert_eq!(u["branch"], "main");
-        assert_eq!(std::fs::read_to_string(there.join("a.txt")).unwrap(), "two\n");
+        assert_eq!(text(&there.join("a.txt")), "two\n");
         let _ = drop(&json!({ "pack_id": "t-local-a" }));
         let _ = std::fs::remove_dir_all(t);
     }

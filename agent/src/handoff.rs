@@ -73,7 +73,8 @@ pub fn note(req: &Value) -> Value {
         let mut by_depth: Vec<&PathBuf> = homes.iter().collect();
         by_depth.sort_by_key(|h| std::cmp::Reverse(h.components().count()));
         t.shown = match by_depth.into_iter().find_map(|h| t.path.strip_prefix(h).ok()) {
-            Some(rest) => format!("~/{}", rest.display()),
+            // One kind of slash after "~/", on Windows too.
+            Some(rest) => format!("~/{}", rest.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")),
             None => t.path.display().to_string(),
         };
     }

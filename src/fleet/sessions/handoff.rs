@@ -153,7 +153,10 @@ impl Engine {
         if m.is_down() {
             return Err(format!("{} isn't reachable right now.", m.name));
         }
-        // The agent's CLI there (once Muxin has looked).
+        // The agent's CLI there (looked up first when Muxin hasn't yet), before anything's copied.
+        if self.sessions_of(&m.id).is_none_or(|f| f.agents_checked_at.is_none()) {
+            let _ = self.refresh_tools(&m.id).await;
+        }
         if self.sessions_of(&m.id).and_then(|f| f.agents_checked_at.map(|_| f.agents)).is_some_and(|a| !a.iter().any(|x| x == kind.id)) {
             return Err(format!("{} isn't installed on {} (or isn't on its PATH there).", kind.name, m.name));
         }

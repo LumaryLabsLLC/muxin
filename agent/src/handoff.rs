@@ -69,7 +69,10 @@ pub fn note(req: &Value) -> Value {
 
     let mut found = find(agent, &cwd.to_string_lossy(), &homes, since);
     if let Some(t) = found.as_mut() {
-        t.shown = match homes.iter().find_map(|h| t.path.strip_prefix(h).ok()) {
+        // The closest home it's in: a box's is inside the user's, and inside the box it's "~".
+        let mut by_depth: Vec<&PathBuf> = homes.iter().collect();
+        by_depth.sort_by_key(|h| std::cmp::Reverse(h.components().count()));
+        t.shown = match by_depth.into_iter().find_map(|h| t.path.strip_prefix(h).ok()) {
             Some(rest) => format!("~/{}", rest.display()),
             None => t.path.display().to_string(),
         };
@@ -905,6 +908,98 @@ mod tests {
         let both = r#"text(await tools.apply_patch("*** Begin Patch\n*** Update File: /w/calc.py\n@@\n-a\n+b\n*** Add File: /w/test_calc.py\n+x\n*** End Patch"));
 text(await tools.exec_command({cmd:"python3 test_calc.py"}));"#;
         assert_eq!(script_line(both), "edited /w/calc.py, /w/test_calc.py, then ran `python3 test_calc.py`");
+    }
+
+    #[test]
+    fn gemini_reads_its_chat_for_the_folder() {
+        let home = tmp("gemini");
+        let cwd = "/work/notes";
+        let digest = ring::digest::digest(&ring::digest::SHA256, cwd.as_bytes());
+        let hash: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        let dir = home.join(".gemini/tmp").join(&hash).join("chats");
+        std::fs::create_dir_all(&dir).unwrap();
+        // As Gemini CLI's chatRecordingService writes it: a user message's content as
+        // a string or as parts, its replies with their tool calls.
+        let chat = json!({
+            "sessionId": "abc", "projectHash": hash, "startTime": "2026-10-22T10:00:00Z",
+            "messages": [
+                { "id": "1", "type": "user", "content": "Fix the failing test" },
+                { "id": "2", "type": "gemini", "content": "Looking at it.", "thoughts": [{ "subject": "x" }],
+                  "toolCalls": [{ "id": "t1", "name": "run_shell_command", "args": { "command": "npm test" } },
+                                { "id": "t2", "name": "replace", "args": { "file_path": "src/a.ts" } },
+                                { "id": "t3", "name": "write_todos", "args": { "todos": [{ "description": "Fix it", "status": "completed" }, { "description": "Add a test", "status": "pending" }] } }] },
+                { "id": "3", "type": "info", "content": "Request cancelled." },
+                { "id": "4", "type": "user", "content": [{ "text": "And update the docs" }] },
+                { "id": "5", "type": "gemini", "content": "Done." }
+            ]
+        });
+        std::fs::write(dir.join("session-2026-10-22T10-00-abc.json"), chat.to_string()).unwrap();
+        // Another folder's chat isn't this one's.
+        let t = find("gemini", cwd, &[home.clone()], UNIX_EPOCH).unwrap();
+        assert_eq!(
+            t.turns,
+            vec![
+                Turn::User("Fix the failing test".into()),
+                Turn::Agent("Looking at it.".into()),
+                Turn::Tool("ran `npm test`".into()),
+                Turn::Tool("edited src/a.ts".into()),
+                Turn::User("And update the docs".into()),
+                Turn::Agent("Done.".into()),
+            ]
+        );
+        assert_eq!(t.todos, vec![(true, "Fix it".into()), (false, "Add a test".into())]);
+        assert!(find("gemini", "/work/other", &[home.clone()], UNIX_EPOCH).is_none());
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn pi_reads_its_session_from_its_last_compaction() {
+        let home = tmp("pi");
+        let dir = home.join(".pi/agent/sessions/--work-app--");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lines = [
+            json!({ "type": "session", "version": 3, "id": "s1", "cwd": "/work/app" }),
+            json!({ "type": "message", "message": { "role": "user", "content": [{ "type": "text", "text": "old" }] } }),
+            json!({ "type": "compaction", "summary": "We set up the project." }),
+            json!({ "type": "message", "message": { "role": "user", "content": "Add a login page" } }),
+            json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "text", "text": "On it." }, { "type": "toolCall", "id": "c1", "name": "bash", "arguments": { "command": "ls" } }, { "type": "toolCall", "id": "c2", "name": "write", "arguments": { "path": "login.html" } }] } }),
+            json!({ "type": "message", "message": { "role": "toolResult", "content": [{ "type": "text", "text": "a b" }] } }),
+        ];
+        std::fs::write(dir.join("2026-10-22_s1.jsonl"), lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
+        let other = json!({ "type": "session", "cwd": "/elsewhere" });
+        std::fs::write(dir.join("2026-10-22_s2.jsonl"), other.to_string()).unwrap();
+        let t = find("pi", "/work/app", &[home.clone()], UNIX_EPOCH).unwrap();
+        assert_eq!(
+            t.turns,
+            vec![
+                Turn::Summary("We set up the project.".into()),
+                Turn::User("Add a login page".into()),
+                Turn::Agent("On it.".into()),
+                Turn::Tool("ran `ls`".into()),
+                Turn::Tool("wrote login.html".into()),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_box_transcript_is_shown_under_the_box_home() {
+        let user = tmp("boxhome");
+        let cwd = user.join("muxen/boxes/box-1/repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let box_home = user.join("muxen/boxes/box-1/home");
+        let dir = box_home.join(".codex/sessions/2026/10/23");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lines = [
+            json!({ "type": "session_meta", "payload": { "cwd": cwd.to_string_lossy() } }),
+            json!({ "type": "response_item", "payload": { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "Hi" }] } }),
+        ];
+        std::fs::write(dir.join("rollout-a.jsonl"), lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
+        // The user's home listed first, then the box's (inside it), as a box's handoff has them.
+        let r = note(&json!({ "agent": "codex", "cwd": cwd.to_string_lossy(), "homes": [user.to_string_lossy(), box_home.to_string_lossy()], "write": false }));
+        let text = r["text"].as_str().unwrap();
+        assert!(text.contains("(`~/.codex/sessions/2026/10/23/rollout-a.jsonl`)"), "{text}");
+        let _ = std::fs::remove_dir_all(user);
     }
 
     #[test]

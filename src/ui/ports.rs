@@ -346,7 +346,7 @@ impl Root {
             .gap(px(8.))
             .h(px(26.))
             .mx(px(10.))
-            .pl(px(22.))
+            .pl(px(super::root::CHILD_PAD))
             .pr(px(8.))
             .rounded(px(7.))
             .cursor_pointer()

@@ -2142,21 +2142,21 @@ impl Root {
             let alert = (!open).then(|| sessions.iter().find_map(|x| x.attention.clone().map(|k| (k, x.exit_code)))).flatten();
             let has_desktop = pinned_desktops.contains(&m.id);
             let has_forwards = forwards.iter().any(|f| f.machine_id == m.id);
-            let indent = TREE_INDENT * pos.depth as f32;
+            // A machine on another one is a row like the rest under it; its line starts under its icon.
+            let indent = if pos.depth > 0 { child_indent(pos.depth - 1) } else { 0. };
             self.sidebar_indent.set(indent);
-            let row = self
-                .machine_row(&theme, m, open, pos.has_kids || !sessions.is_empty() || has_desktop || has_forwards || self.logs.contains_key(&m.id) || self.service_pages.contains_key(&m.id), alert, selected_machine.as_deref() == Some(&m.id), hint, pos.depth > 0, cx)
-                .into_any_element();
-            let mut row = tree_row(&theme, row, indent, &pos.rails, (pos.depth > 0).then(|| (pos.depth - 1, pos.last)), NESTED_ROW_H);
-            // Machines run on it, shown below: its line starts under its tile.
-            if pos.has_kids && open {
-                let (h, tile) = if pos.depth > 0 { (NESTED_ROW_H, 26.) } else { (44., 30.) };
-                let from = (h + tile) / 2.;
-                row = div().relative().child(row).child(div().absolute().left(px(tree_x(pos.depth))).top(px(from)).bottom_0().w(px(1.)).bg(tree_color(&theme))).into_any_element();
-            }
-            rows.push(row);
+            let has_rows = pos.has_kids || !sessions.is_empty() || has_desktop || has_forwards || self.logs.contains_key(&m.id) || self.service_pages.contains_key(&m.id);
+            let machine_row = if pos.depth > 0 {
+                self.nested_machine_row(&theme, m, open, has_rows || !runners.is_empty(), alert, selected_machine.as_deref() == Some(&m.id), hint, cx).into_any_element()
+            } else {
+                self.machine_row(&theme, m, open, has_rows, alert, selected_machine.as_deref() == Some(&m.id), hint, cx).into_any_element()
+            };
+            let machine_row = tree_row(&theme, machine_row, indent, &pos.rails, (pos.depth > 0).then(|| (pos.depth - 1, pos.last)), CHILD_H);
+            let at = rows.len();
+            rows.push(machine_row);
             // Its own rows: the lines of what's above go on past them.
             let first_child_row = rows.len();
+            self.sidebar_indent.set(child_indent(pos.depth));
             if open {
                 // Agent sessions first: they're what you come back to.
                 for x in sessions {
@@ -2201,16 +2201,21 @@ impl Root {
                     }
                 }
             }
-            if pos.depth > 0 || (pos.has_kids && open) {
-                let mut rails = pos.rails.clone();
-                if pos.depth > 0 && !pos.last {
-                    rails.push(pos.depth - 1);
-                }
-                if pos.has_kids && open {
-                    rails.push(pos.depth);
-                }
-                let own: Vec<AnyElement> = rows.drain(first_child_row..).collect();
-                rows.extend(own.into_iter().map(|r| tree_row(&theme, r, indent, &rails, None, 0.)));
+            // Each of its rows branches off its line, which goes on to the machines on it.
+            let own: Vec<AnyElement> = rows.drain(first_child_row..).collect();
+            let kids_below = pos.has_kids && open && q.is_empty();
+            let mut rails = pos.rails.clone();
+            if pos.depth > 0 && !pos.last {
+                rails.push(pos.depth - 1);
+            }
+            let n_own = own.len();
+            rows.extend(own.into_iter().enumerate().map(|(i, r)| tree_row(&theme, r, child_indent(pos.depth), &rails, Some((pos.depth, i + 1 == n_own && !kids_below)), CHILD_H)));
+            // The machine's line, from under its icon, when something hangs off it.
+            if n_own > 0 || kids_below {
+                let (h, icon) = if pos.depth > 0 { (CHILD_H, 16.) } else { (44., 30.) };
+                let from = (h + icon) / 2. + 2.;
+                let row = std::mem::replace(&mut rows[at], div().into_any_element());
+                rows[at] = div().relative().child(row).child(div().absolute().left(px(tree_x(pos.depth))).top(px(from)).bottom_0().w(px(1.)).bg(tree_color(&theme))).into_any_element();
             }
             self.sidebar_indent.set(0.);
         }
@@ -2223,7 +2228,8 @@ impl Root {
         if !unassigned.is_empty() {
             rows.push(self.section_header("On GitHub only", Some(unassigned.len()), None, cx).into_any_element());
             for r in unassigned {
-                rows.push(self.runner_row(&theme, &s, r, selected_runner.as_deref() == Some(&r.id), cx).into_any_element());
+                let row = self.runner_row(&theme, &s, r, selected_runner.as_deref() == Some(&r.id), cx).into_any_element();
+                rows.push(div().pl(px(22. - CHILD_PAD)).child(row).into_any_element());
             }
         }
         if s.machines.is_empty() {
@@ -2427,7 +2433,6 @@ impl Root {
         alert: Option<(String, Option<i32>)>,
         selected: bool,
         hint: Option<String>,
-        nested: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let id = m.id.clone();
@@ -2435,8 +2440,8 @@ impl Root {
         // The shortcut takes the place of the toggle.
         let has_children = hint.is_none() && (has_sessions || !m.runner_ids.is_empty());
         let (tile_from, tile_to) = format::machine_tile(m);
-        let (subtitle, tone) = format::machine_subtitle_in(m, nested);
-        let tile = if nested { 26. } else { 30. };
+        let (subtitle, tone) = format::machine_subtitle_in(m, false);
+        let tile = 30.;
         // The text column gets an explicit width: GPUI 0.2 only ellipsizes text
         // whose width is known before layout. Row chrome: margins, padding, tile, gaps.
         let favorite = Self::is_favorite(cx, &m.id);
@@ -2456,7 +2461,7 @@ impl Root {
             .flex()
             .items_center()
             .gap(px(10.))
-            .h(px(if nested { NESTED_ROW_H } else { 44. }))
+            .h(px(44.))
             .mx(px(10.))
             .px(px(8.))
             .rounded(px(9.))
@@ -2551,6 +2556,106 @@ impl Root {
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(id.clone()), window, cx)))
     }
 
+    /// A machine that runs on another one (a VM, a container), under it: a row
+    /// like the others there, with its status on its icon and what it is (or
+    /// why it's down) on the right. Its own rows hang off it like any machine's.
+    #[allow(clippy::too_many_arguments)]
+    fn nested_machine_row(
+        &self,
+        theme: &Theme,
+        m: &Machine,
+        open: bool,
+        has_children: bool,
+        alert: Option<(String, Option<i32>)>,
+        selected: bool,
+        hint: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (id, toggle_id) = (m.id.clone(), m.id.clone());
+        let (from, to) = format::machine_tile(m);
+        let down = m.status != "online";
+        let meta = if down {
+            format::machine_subtitle_in(m, true).0
+        } else {
+            match m.parent.as_ref().map(|p| p.relation.as_str()) {
+                Some("vm") => "VM".to_string(),
+                Some("container") => "Container".to_string(),
+                _ => String::new(),
+            }
+        };
+        let favorite = Self::is_favorite(cx, &m.id);
+        div()
+            .id(SharedString::from(format!("side-m-{}", m.id)))
+            .group("nested-row")
+            .when(!m.host.is_empty(), |d| {
+                let (mid, accent) = (m.id.clone(), theme.accent);
+                d.drag_over::<gpui::ExternalPaths>(move |st, _, _, _| st.bg(accent.opacity(0.18)))
+                    .on_drop(cx.listener(move |this, paths: &gpui::ExternalPaths, window, cx| this.copy_dropped(&mid, paths.paths(), window, cx)))
+            })
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(CHILD_H))
+            .mx(px(10.))
+            .pl(px(CHILD_PAD))
+            .pr(px(8.))
+            .rounded(px(7.))
+            .cursor_pointer()
+            .when(selected, |d| d.bg(theme.element_selected))
+            .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+            .child(
+                div().relative().flex_none().child(kit::tile(format::machine_icon(m), from, to, 16.)).child(
+                    div()
+                        .absolute()
+                        .right(px(-3.))
+                        .bottom(px(-3.))
+                        .size(px(9.))
+                        .rounded_full()
+                        .bg(theme.sidebar)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(if m.checking {
+                            spinner(SharedString::from(format!("side-spin-{}", m.id)), 8., theme.text_muted).into_any_element()
+                        } else {
+                            kit::dot(theme.machine_status(m), 6.).into_any_element()
+                        }),
+                ),
+            )
+            .child(div().flex_1().min_w(px(0.)).overflow_hidden().whitespace_nowrap().text_size(px(12.5)).text_color(theme.text).child(m.name.clone()))
+            .children(alert.map(|(kind, code)| super::sessions::attention_dot(theme, &kind, code)))
+            .when(favorite, |d| d.child(icon("star-filled", 11., theme.warning)))
+            .children(hint.clone().map(|k| kit::kbd(theme, k)))
+            .when(hint.is_none() && !meta.is_empty(), |d| {
+                d.child(div().flex_none().text_size(px(11.)).text_color(theme.text_placeholder).when(has_children, |d| d.group_hover("nested-row", |st| st.invisible())).child(meta))
+            })
+            // The expand/collapse toggle, on hover (in the status's place).
+            .when(has_children && hint.is_none(), |d| {
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("side-t-{}", m.id)))
+                        .absolute()
+                        .right(px(8.))
+                        .invisible()
+                        .group_hover("nested-row", |st| st.visible())
+                        .child(icon(if open { "chevron-down" } else { "chevron-right" }, 12., theme.text_muted))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if !this.collapsed.remove(&toggle_id) {
+                                this.collapsed.insert(toggle_id.clone());
+                            }
+                            cx.notify()
+                        })),
+                )
+            })
+            .on_mouse_down(MouseButton::Right, {
+                let mid = m.id.clone();
+                super::menu::on_right_click(move || super::menu::MenuTarget::Machine(mid.clone()), cx)
+            })
+            .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(id.clone()), window, cx)))
+    }
+
     /// A machine's runners as one line ("3 runners · 2 busy"). A click opens
     /// the runner when there's one, else lists them below it (or folds them).
     fn runners_row(&self, theme: &Theme, m: &Machine, runners: &[&Runner], selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2574,7 +2679,7 @@ impl Root {
             .gap(px(8.))
             .h(px(26.))
             .mx(px(10.))
-            .pl(px(22.))
+            .pl(px(CHILD_PAD))
             .pr(px(8.))
             .rounded(px(7.))
             .cursor_pointer()
@@ -2613,7 +2718,7 @@ impl Root {
             .gap(px(8.))
             .h(px(26.))
             .mx(px(10.))
-            .pl(px(22.))
+            .pl(px(CHILD_PAD))
             .pr(px(8.))
             .rounded(px(7.))
             .cursor_pointer()
@@ -3111,7 +3216,7 @@ impl Root {
             .gap(px(8.))
             .h(px(26.))
             .mx(px(10.))
-            .pl(px(22.))
+            .pl(px(CHILD_PAD))
             .pr(px(8.))
             .rounded(px(7.))
             .cursor_pointer()
@@ -3159,7 +3264,7 @@ impl Root {
             .gap(px(8.))
             .h(px(26.))
             .mx(px(10.))
-            .pl(px(22.))
+            .pl(px(CHILD_PAD))
             .pr(px(8.))
             .rounded(px(7.))
             .cursor_pointer()
@@ -3230,7 +3335,7 @@ impl Root {
             .gap(px(8.))
             .h(px(26.))
             .mx(px(10.))
-            .pl(px(22.))
+            .pl(px(CHILD_PAD))
             .pr(px(8.))
             .rounded(px(7.))
             .cursor_pointer()
@@ -3583,19 +3688,33 @@ fn tip(text: &str, keys: &str) -> String {
     if keys.is_empty() { text.to_string() } else { format!("{text}  {keys}") }
 }
 
-/// How far each level of the sidebar's tree is indented, and how tall a
-/// machine row under another one is.
-const TREE_INDENT: f32 = 18.;
-const NESTED_ROW_H: f32 = 40.;
+/// The sidebar's tree: each machine's line runs down from the middle of its
+/// icon, and every row under it (its sessions, desktop, runners, the machines
+/// on it) branches off that line. A top-level machine's icon is centred at
+/// `RAIL_0` (margin 10 + padding 8 + half its 30px tile); the rows under it
+/// start `BRANCH` past its line, so their icons (16px, after `CHILD_PAD`)
+/// centre one `LEVEL` further right, where their own lines run.
+const RAIL_0: f32 = 33.;
+const LEVEL: f32 = 26.;
+const BRANCH: f32 = 12.;
+/// The left padding of a row under a machine, and its height.
+pub(super) const CHILD_PAD: f32 = 6.;
+const CHILD_H: f32 = 26.;
 
 /// The tree's lines: quieter than text, plainer than a border.
 fn tree_color(theme: &Theme) -> gpui::Hsla {
     theme.text_placeholder.opacity(0.45)
 }
 
-/// Where the tree's line for a level runs: under the left of that level's tiles.
+/// Where the line of a machine at `level` runs: down the middle of its icon.
 fn tree_x(level: usize) -> f32 {
-    23. + TREE_INDENT * level as f32
+    RAIL_0 + LEVEL * level as f32
+}
+
+/// How far the rows under a machine at `level` are moved right (their own
+/// margin is 10), so they start just past its line's branches.
+fn child_indent(level: usize) -> f32 {
+    tree_x(level) + BRANCH - 10.
 }
 
 /// Where a machine sits in the sidebar's tree.
@@ -3637,8 +3756,8 @@ fn sidebar_tree(s: &Snapshot, order: &[&Machine]) -> HashMap<String, TreePos> {
 }
 
 /// A sidebar row in the tree: indented, with the lines of the machines
-/// above passing by on its left, and (for a machine under another) the
-/// elbow from its host's line into it.
+/// above passing by on its left, and the branch from its machine's line
+/// into it (`elbow`: that line's level, and whether it's the last row there).
 fn tree_row(theme: &Theme, row: AnyElement, indent: f32, rails: &[usize], elbow: Option<(usize, bool)>, height: f32) -> AnyElement {
     if indent == 0. && rails.is_empty() && elbow.is_none() {
         return row;
@@ -3658,11 +3777,11 @@ fn tree_row(theme: &Theme, row: AnyElement, indent: f32, rails: &[usize], elbow:
                 .absolute()
                 .top_0()
                 .left(px(x(level)))
-                .w(px(TREE_INDENT - 6.))
+                .w(px(BRANCH - 2.))
                 .h(px(mid))
                 .border_l_1()
                 .border_b_1()
-                .rounded_bl(px(6.))
+                .rounded_bl(px(5.))
                 .border_color(color)
                 // Not the last: the line goes on down past it.
                 .when(!last, |d| d.child(div().absolute().left(px(-1.)).top(px(mid)).w(px(1.)).h(px(height - mid)).bg(color)))

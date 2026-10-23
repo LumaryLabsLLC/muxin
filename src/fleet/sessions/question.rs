@@ -29,11 +29,12 @@ pub fn keys_for(key: &str, selected: Option<&str>, confirm: bool) -> (String, bo
     }
 }
 
-/// The menu says a number needs Enter after it ("Press enter to continue").
+/// The menu says a number needs Enter after it ("Press enter to continue",
+/// Codex's newer "enter continue · esc back").
 fn asks_for_enter(lines: &[&str]) -> bool {
     lines.iter().rev().take(6).any(|l| {
         let l = l.to_lowercase();
-        l.contains("press enter to") || l.contains("enter to confirm")
+        ["press enter to", "enter to confirm", "enter to continue", "enter continue", "enter confirm"].iter().any(|p| l.contains(p))
     })
 }
 
@@ -407,5 +408,11 @@ mod tests {
         assert!(q.confirm);
         let claude = "Do you want to proceed?\n❯ 1. Yes\n  2. No\n";
         assert!(!read(claude).confirm);
+        // Codex 0.163's folder screen.
+        let newer = "  Folder access\n  /tmp/app\n  Trust this folder? Codex can read, edit, and run files here, subject to your permission settings.\n› 1. Trust and continue\n  2. Back to Agent Command Center\n  enter continue · esc back\n";
+        let q = read(newer);
+        assert_eq!(q.options.iter().map(|o| o.key.as_str()).collect::<Vec<_>>(), ["1", "2"]);
+        assert!(q.confirm);
+        assert_eq!(keys_for("1", q.selected.as_deref(), q.confirm), ("1".to_string(), true));
     }
 }

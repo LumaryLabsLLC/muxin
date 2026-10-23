@@ -321,6 +321,8 @@ pub struct Root {
     forward: Vec<Route>,
     pub(super) filter: Entity<TextInput>,
     pub(super) collapsed: HashSet<String>,
+    /// Machines whose runners the sidebar lists one by one (their line clicked).
+    pub(super) runners_open: HashSet<String>,
     /// The Schedules page: every machine's schedules, the one open, and its runs.
     pub(super) schedules: super::github::Load<Vec<crate::fleet::schedules::MachineSchedules>>,
     pub(super) schedules_loading: bool,
@@ -538,6 +540,7 @@ impl Root {
             forward: Vec::new(),
             filter,
             collapsed: HashSet::new(),
+            runners_open: HashSet::new(),
             schedules: super::github::Load::Loading,
             schedules_loading: false,
             schedule_open: None,
@@ -2188,8 +2191,14 @@ impl Root {
                         rows.push(self.runner_row(&theme, &s, r, selected_runner.as_deref() == Some(&r.id), cx).into_any_element());
                     }
                 } else if !runners.is_empty() {
-                    let here = selected_runner.as_deref().is_some_and(|r| r.starts_with(&format!("{}/", m.id)));
-                    rows.push(self.runners_row(&theme, m, here, cx).into_any_element());
+                    let listed = self.runners_open.contains(&m.id) && runners.len() > 1;
+                    let here = !listed && selected_runner.as_deref().is_some_and(|r| r.starts_with(&format!("{}/", m.id)));
+                    rows.push(self.runners_row(&theme, m, &runners, here, cx).into_any_element());
+                    if listed {
+                        for r in &runners {
+                            rows.push(self.runner_row(&theme, &s, r, selected_runner.as_deref() == Some(&r.id), cx).into_any_element());
+                        }
+                    }
                 }
             }
             if pos.depth > 0 || (pos.has_kids && open) {
@@ -2542,9 +2551,12 @@ impl Root {
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(id.clone()), window, cx)))
     }
 
-    /// A machine's runners as one line ("3 runners · 2 busy"); opens the machine.
-    fn runners_row(&self, theme: &Theme, m: &Machine, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A machine's runners as one line ("3 runners · 2 busy"). A click opens
+    /// the runner when there's one, else lists them below it (or folds them).
+    fn runners_row(&self, theme: &Theme, m: &Machine, runners: &[&Runner], selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let id = m.id.clone();
+        let only = (runners.len() == 1).then(|| runners[0].id.clone());
+        let open = runners.len() > 1 && self.runners_open.contains(&m.id);
         let sum = &m.summary;
         let label = if sum.total == 1 { "1 runner".to_string() } else { format!("{} runners", sum.total) };
         let (state, color) = if sum.working > 0 {
@@ -2571,7 +2583,16 @@ impl Root {
             .child(kit::tile("workflow", from, to, 16.))
             .child(div().flex_1().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child(label))
             .child(div().flex_none().text_size(px(11.)).text_color(color).child(state))
-            .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(id.clone()), window, cx)))
+            .when(only.is_none(), |d| d.child(icon(if open { "chevron-down" } else { "chevron-right" }, 12., theme.text_placeholder)))
+            .on_click(cx.listener(move |this, _, window, cx| match &only {
+                Some(r) => this.navigate(Route::Runner(r.clone()), window, cx),
+                None => {
+                    if !this.runners_open.remove(&id) {
+                        this.runners_open.insert(id.clone());
+                    }
+                    cx.notify()
+                }
+            }))
     }
 
     fn runner_row(&self, theme: &Theme, s: &Snapshot, r: &Runner, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {

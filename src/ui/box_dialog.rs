@@ -142,7 +142,8 @@ impl BoxDialog {
     pub fn new(engine: Arc<Engine>, prefill: BoxPrefill, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let BoxPrefill { repo, task, details, name, branch } = prefill;
         let repo = cx.new(|cx| TextInput::new(cx, GITHUB_HINT).mono().with_text(repo.unwrap_or_default()));
-        let task = cx.new(|cx| TextInput::new(cx, "Fix the login redirect loop, add a test, and open a pull request").with_text(task.unwrap_or_default()));
+        // A task filled in (an issue's) shows from its start.
+        let task = cx.new(|cx| TextInput::new(cx, "Fix the login redirect loop, add a test, and open a pull request").with_text(task.unwrap_or_default()).at_start());
         let subs = vec![
             cx.subscribe_in(&repo, window, |this: &mut Self, _, e: &InputEvent, _, cx| match e {
                 // Enter on a result picks it; on what's picked, starts the box.
@@ -403,10 +404,7 @@ impl BoxDialog {
             cx.notify();
             return;
         }
-        let prompt = match &self.details {
-            Some(d) => format!("{task}\n\n{d}"),
-            None => task,
-        };
+        let prompt = prompt_for(task, self.details.as_deref());
         let req = CreateBox { repo, prompt, agent: self.agent.clone(), machine, name: self.name.clone(), branch: self.branch.clone(), ..Default::default() };
         match self.engine.box_create(req) {
             Ok((op, _)) => cx.emit(DialogEvent::BoxStarted(op)),
@@ -683,6 +681,14 @@ impl Render for BoxDialog {
                 Button::new("bx-start", "Start").style(ButtonStyle::Primary).icon("box").disabled(!any).on_click(cx.listener(|this, _, _, cx| this.submit(cx))).into_any_element(),
             ]))
             .font_weight(FontWeight::NORMAL)
+    }
+}
+
+/// What the box's agent is asked: the task, then what a prefill sends along (an issue).
+pub(super) fn prompt_for(task: String, details: Option<&str>) -> String {
+    match details {
+        Some(d) => format!("{task}\n\n{d}"),
+        None => task,
     }
 }
 

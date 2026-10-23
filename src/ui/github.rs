@@ -329,21 +329,7 @@ impl Root {
     /// New box, filled in for an issue: its repository, a task that says to fix
     /// it (the issue's description goes along), and a branch named for it.
     fn gh_to_box(&mut self, d: &Detail, window: &mut Window, cx: &mut Context<Self>) {
-        let it = &d.item;
-        let body: String = d.body.trim().chars().take(3000).collect();
-        let mut details = format!("#{} {}", it.number, it.title);
-        if !body.is_empty() {
-            details.push_str(&format!("\n\n{body}"));
-        }
-        let short_repo = it.repo.rsplit('/').next().unwrap_or(&it.repo);
-        let prefill = BoxPrefill {
-            repo: Some(it.repo.clone()),
-            task: Some(format!("Fix this GitHub issue and open a pull request that closes it: {}", it.html_url)),
-            details: Some(details),
-            name: Some(format!("{short_repo} #{}", it.number)),
-            branch: Some(issue_branch(it.number, &it.title)),
-        };
-        self.show_box_dialog(prefill, window, cx);
+        self.show_box_dialog(box_prefill(d), window, cx);
     }
 
     /// `gh_to_agent` for an issue or pull request in a list: loads it first if needed.
@@ -1431,9 +1417,58 @@ fn inline(text: &str) -> String {
     out
 }
 
+/// New box for an issue: its repository, a task to fix it and open a pull
+/// request that closes it (its title and description go along to the agent,
+/// unseen), a branch named for it, and a name like "api #12".
+pub(super) fn box_prefill(d: &Detail) -> BoxPrefill {
+    let it = &d.item;
+    let body: String = d.body.trim().chars().take(3000).collect();
+    let mut details = format!("#{} {}", it.number, it.title);
+    if !body.is_empty() {
+        details.push_str(&format!("\n\n{body}"));
+    }
+    let short_repo = it.repo.rsplit('/').next().unwrap_or(&it.repo);
+    BoxPrefill {
+        repo: Some(it.repo.clone()),
+        task: Some(format!("Fix this GitHub issue and open a pull request that closes it: {}", it.html_url)),
+        details: Some(details),
+        name: Some(format!("{short_repo} #{}", it.number)),
+        branch: Some(issue_branch(it.number, &it.title)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_issue_fills_in_new_box() {
+        let item = Item {
+            repo: "adibhanna/muxin-handoff-test".into(),
+            number: 1,
+            title: "average() is off by one".into(),
+            pull_request: false,
+            draft: false,
+            state: "open".into(),
+            author: "adibhanna".into(),
+            assignees: Vec::new(),
+            labels: Vec::new(),
+            comments: 0,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            html_url: "https://github.com/adibhanna/muxin-handoff-test/issues/1".into(),
+        };
+        let d = Detail { item, body: "average([2, 4]) returns 4 instead of 3.\n".into(), comments: Vec::new(), pull: None };
+        let p = box_prefill(&d);
+        assert_eq!(p.repo.as_deref(), Some("adibhanna/muxin-handoff-test"));
+        assert_eq!(p.task.as_deref(), Some("Fix this GitHub issue and open a pull request that closes it: https://github.com/adibhanna/muxin-handoff-test/issues/1"));
+        assert_eq!(p.details.as_deref(), Some("#1 average() is off by one\n\naverage([2, 4]) returns 4 instead of 3."));
+        assert_eq!(p.name.as_deref(), Some("muxin-handoff-test #1"));
+        assert_eq!(p.branch.as_deref(), Some("issue-1-average-off-by-one"));
+        // What the box's agent is asked: the task, then the issue.
+        let prompt = super::super::box_dialog::prompt_for(p.task.clone().unwrap(), p.details.as_deref());
+        assert_eq!(prompt, format!("{}\n\n{}", p.task.unwrap(), p.details.unwrap()));
+    }
 
     #[test]
     fn shortens_titles_at_words() {

@@ -99,8 +99,9 @@ impl Render for MoveDialog {
             .child(div().flex().flex_wrap().gap(px(6.)).children(agents))
             .when(none, |d| d.child(quiet(format!("Muxin hasn't found an agent CLI on {there} yet: install one there (Claude Code, Codex, …).")))) ;
 
-        // What goes along, and where it lands.
-        let git = self.session.git.as_ref();
+        // What goes along, and where it lands: the session as it is now (its git may come in after the dialog opens).
+        let current = s.sessions.iter().find(|x| x.id == self.session.id);
+        let git = current.and_then(|x| x.git.as_ref()).or(self.session.git.as_ref());
         let what = match git {
             Some(g) => {
                 let mut parts = vec![if g.branch.is_empty() { "its commits".to_string() } else { format!("branch {}", g.branch) }];

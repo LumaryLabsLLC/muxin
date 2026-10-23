@@ -419,6 +419,8 @@ pub struct Root {
     pub(super) box_ui: super::boxes::BoxUi,
     /// Sessions being handed to another agent.
     pub(super) handing_off: std::collections::HashSet<String>,
+    /// The demo's badge by the name (`badge:off` hides it, for screenshots).
+    demo_badge: bool,
     /// This computer's clipboard as last seen (see watch_clipboard).
     clipboard_seen: ClipboardSeen,
     /// Sessions this app shares, and the guests already announced.
@@ -600,6 +602,7 @@ impl Root {
             ws_ui: WorkspaceUi::default(),
             box_ui: super::boxes::BoxUi::default(),
             handing_off: Default::default(),
+            demo_badge: true,
             clipboard_seen: ClipboardSeen { count: super::pasteboard_state().map(|s| s.0).unwrap_or(0), ..Default::default() },
             shares: Vec::new(),
             knocks_seen: HashSet::new(),
@@ -1007,6 +1010,15 @@ impl Root {
             "menu" => self.open_menu(super::menu::MenuTarget::Machine(arg.into()), gpui::point(px(260.), px(160.)), cx),
             // A session's Actions menu, under its header's button (for screenshots).
             "session-actions" => self.open_menu(super::menu::MenuTarget::SessionActions(arg.into()), gpui::point(px(1080.), px(120.)), cx),
+            // Without the demo's badge (for screenshots).
+            "badge" if arg == "off" => self.demo_badge = false,
+            // A session's Hand off menu, under its button; "move:<session>@<machine>" the Move dialog (for screenshots).
+            "handoff" => self.open_menu(super::menu::MenuTarget::Handoff(arg.into()), gpui::point(px(1190.), px(120.)), cx),
+            "move" => {
+                if let Some((session, machine)) = arg.split_once('@') {
+                    self.show_move_dialog(session, machine.to_string(), window, cx);
+                }
+            }
             "runner-menu" => self.open_menu(super::menu::MenuTarget::Runner(arg.into()), gpui::point(px(200.), px(560.)), cx),
             "favorite" => self.set_favorite_machine(arg, true, cx),
             // The palette with this text typed: "palette:" (places), "palette:>set" (commands).
@@ -2295,7 +2307,7 @@ impl Root {
 
     fn brand(&self, theme: &Theme, s: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
         // GPUI 0.2 only ellipsizes text whose width is known before layout.
-        let text_w = self.sidebar_width - 74. - if s.demo { 48. } else { 0. };
+        let text_w = self.sidebar_width - 74. - if s.demo && self.demo_badge { 48. } else { 0. };
         div()
             .id("brand")
             .flex()
@@ -2314,7 +2326,7 @@ impl Root {
                     .min_w(px(0.))
                     .child(div().w(px(text_w)).truncate().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Muxin")),
             )
-            .when(s.demo, |d| d.child(div().flex_1()).child(kit::pill("demo", theme.warning)))
+            .when(s.demo && self.demo_badge, |d| d.child(div().flex_1()).child(kit::pill("demo", theme.warning)))
     }
 
     #[allow(clippy::too_many_arguments)]

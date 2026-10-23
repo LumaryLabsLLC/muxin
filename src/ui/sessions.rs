@@ -602,7 +602,7 @@ impl Root {
                 )
             })
             // Another agent takes over (an exited one's work too: it may have run out of usage).
-            .when(info.agent != "shell" && !info.agent.is_empty() && info.persistent && offline.is_none() && (!in_box || box_agent) && !self.engine.is_demo(), |d| {
+            .when(info.agent != "shell" && !info.agent.is_empty() && info.persistent && offline.is_none() && (!in_box || box_agent), |d| {
                 let sid = info.id.clone();
                 let handing = self.handing_off.contains(&info.id);
                 d.child(

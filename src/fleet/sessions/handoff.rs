@@ -58,13 +58,13 @@ impl Engine {
     /// session unless `keep`. A box's agent changes in the box. With
     /// `machine` (another one), the work moves there first.
     pub async fn handoff_session(self: &Arc<Self>, id: &str, to: &str, keep: bool, machine: Option<&str>) -> Result<HandedOff, String> {
-        if self.demo_world().is_some() {
-            return Err("The demo's sessions are only for show.".into());
-        }
         let kind = super::agent(to).filter(|k| !k.command.is_empty()).ok_or_else(|| {
             let ids: Vec<&str> = super::AGENTS.iter().filter(|a| !a.command.is_empty()).map(|a| a.id).collect();
             format!("Hand off to which agent? Use one of: {}.", ids.join(", "))
         })?;
+        if self.demo_world().is_some() {
+            return self.demo_handoff(id, kind, keep, machine).await;
+        }
         let snap = self.current();
         let s = snap.sessions.iter().find(|s| s.id == id).cloned();
         let here = self.find_box(id).map(|b| b.machine_id).ok().or_else(|| s.as_ref().map(|s| s.machine_id.clone()));
@@ -141,6 +141,33 @@ impl Engine {
             }
         }
         Ok(HandedOff { session, note: note_path(&note), source: source(&note), kept: keep.then(|| s.id.clone()), box_id: None, workspace: None, warnings: Vec::new() })
+    }
+
+    /// The demo's handoff: the new agent's session starts (in a workspace on
+    /// the other machine for a move) and the old one ends, with no note to write.
+    async fn demo_handoff(self: &Arc<Self>, id: &str, kind: &'static AgentKind, keep: bool, machine: Option<&str>) -> Result<HandedOff, String> {
+        let snap = self.current();
+        let s = snap.sessions.iter().find(|s| s.id == id).cloned().ok_or_else(|| format!("No session called {id}."))?;
+        if s.box_id.is_some() {
+            return Err("The demo's boxes are only for show.".into());
+        }
+        let from = super::agent(&s.agent).filter(|k| !k.command.is_empty()).ok_or_else(|| format!("{} is a shell: only an agent's work can be handed off.", s.title))?;
+        let target = match machine.map(str::trim).filter(|m| !m.is_empty()) {
+            Some(m) => snap.machines.iter().find(|x| x.id == m || x.name.eq_ignore_ascii_case(m)).map(|x| x.id.clone()).ok_or_else(|| format!("No machine called {m}."))?,
+            None => s.machine_id.clone(),
+        };
+        let moved = target != s.machine_id;
+        let workspace = moved.then(|| format!("ws-{}", super::super::workspaces::random_id(6)));
+        let cwd = match &workspace {
+            Some(ws) => format!("~/muxen/workspaces/{ws}"),
+            None => s.cwd.clone(),
+        };
+        let title = if s.title == default_title(from, &s.cwd) { default_title(kind, &s.cwd) } else { s.title.clone() };
+        let session = self.start_session(StartSession { machine_id: target, agent: kind.id.into(), cwd: cwd.clone(), title: Some(title), ..Default::default() }).await?;
+        if !keep {
+            self.control_session(&s.id, Control::Stop).await?;
+        }
+        Ok(HandedOff { session, note: format!("{cwd}/{NOTE}"), source: "transcript".into(), kept: keep.then(|| s.id.clone()), box_id: None, workspace, warnings: Vec::new() })
     }
 
     /// Moves session `s`'s work to machine `target` and hands it to `kind`

@@ -204,6 +204,12 @@ impl TextInput {
         self
     }
 
+    /// Starts with the cursor at the start: a long text filled in shows its beginning.
+    pub fn at_start(mut self) -> Self {
+        self.selected_range = 0..0;
+        self
+    }
+
     /// Starts with all of its text selected, so typing replaces it.
     pub fn selected(mut self) -> Self {
         self.selected_range = 0..self.content.len();

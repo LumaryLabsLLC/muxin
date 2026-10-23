@@ -104,11 +104,13 @@ pub struct Look {
     text: Hsla,
     muted: Hsla,
     dark: bool,
+    /// The theme looks like a TUI (see `square`).
+    square: bool,
 }
 
 impl Look {
     pub fn new(style: IconStyle, theme: &Theme) -> Look {
-        Look { style, text: theme.text, muted: theme.text_muted, dark: theme.canvas.l < 0.5 }
+        Look { style, text: theme.text, muted: theme.text_muted, dark: theme.canvas.l < 0.5, square: theme.tui }
     }
 }
 
@@ -128,7 +130,19 @@ fn look() -> Look {
         text: gpui::white(),
         muted: gpui::hsla(0., 0., 0.62, 1.),
         dark: true,
+        square: false,
     })
+}
+
+/// The theme looks like a TUI in a terminal: square corners, no shadows or
+/// gradients, `[ Buttons ]`, `── Headings ──` (and the monospace font, theme::apply).
+pub fn square() -> bool {
+    look().square
+}
+
+/// A corner's radius: `r`, or none in a TUI look.
+pub fn corner(r: f32) -> gpui::Pixels {
+    if square() { px(0.) } else { px(r) }
 }
 
 pub fn icon_style() -> IconStyle {
@@ -292,7 +306,7 @@ pub fn dot(color: Hsla, size: f32) -> Div {
 
 /// A runner as a small square: filled when connected, dashed outline when not.
 pub fn runner_glyph(theme: &Theme, state: &str, size: f32) -> Div {
-    let base = div().flex_none().size(px(size)).rounded(px(2.5));
+    let base = div().flex_none().size(px(size)).rounded(corner(2.5));
     match state {
         "working" | "idle" => base.bg(theme.state(state)),
         _ => base.border_1().border_dashed().border_color(theme.text_placeholder),
@@ -306,7 +320,7 @@ pub fn pill(text: impl Into<SharedString>, color: Hsla) -> Div {
         .h(px(18.))
         .flex()
         .items_center()
-        .rounded(px(4.))
+        .rounded(corner(4.))
         .bg(color.opacity(0.14))
         .text_color(color)
         .text_size(px(11.))
@@ -321,7 +335,7 @@ pub fn chip(theme: &Theme, text: impl Into<SharedString>) -> Div {
         .h(px(18.))
         .flex()
         .items_center()
-        .rounded(px(4.))
+        .rounded(corner(4.))
         .border_1()
         .border_color(theme.border_variant)
         .bg(theme.element)
@@ -347,7 +361,7 @@ pub fn kbd(theme: &Theme, text: impl Into<SharedString>) -> Div {
         .h(px(16.))
         .flex()
         .items_center()
-        .rounded(px(3.))
+        .rounded(corner(3.))
         .border_1()
         .border_color(theme.border_variant)
         .text_color(theme.text_placeholder)
@@ -369,10 +383,11 @@ pub fn meter(theme: &Theme, fraction: f32, color: Hsla) -> Div {
 
 /// A bordered surface, the basic container for page sections.
 pub fn card(theme: &Theme) -> Div {
-    div().flex().flex_col().rounded(px(8.)).border_1().border_color(theme.border_variant).bg(theme.surface)
+    div().flex().flex_col().rounded(corner(8.)).border_1().border_color(theme.border_variant).bg(theme.surface)
 }
 
 pub fn section_title(theme: &Theme, title: impl Into<SharedString>, count: Option<usize>) -> Div {
+    let tui = square();
     div()
         .flex()
         .items_center()
@@ -380,8 +395,16 @@ pub fn section_title(theme: &Theme, title: impl Into<SharedString>, count: Optio
         .text_size(px(13.))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.text)
+        // A TUI look: "── Title 3 ────────", the line running to the end of the row.
+        .when(tui, |d| d.child(div().flex_none().text_color(theme.text_placeholder).font_weight(FontWeight::NORMAL).child("──")))
         .child(title.into())
         .children(count.map(|n| div().font_family(mono_font()).text_color(theme.text_placeholder).font_weight(FontWeight::NORMAL).child(n.to_string())))
+        .when(tui, |d| d.child(rule_line(theme)))
+}
+
+/// The rest of a TUI heading's row: a line, like "────".
+fn rule_line(theme: &Theme) -> Div {
+    div().flex_1().min_w(px(8.)).h(px(1.)).bg(theme.border)
 }
 
 pub fn label(theme: &Theme, text: impl Into<SharedString>) -> Div {
@@ -503,15 +526,21 @@ impl RenderOnce for Button {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let icon_only = self.label.is_none();
-        let (bg, hover, fg, border) = match self.style {
-            ButtonStyle::Primary => (theme.accent, theme.accent.opacity(0.85), theme.accent_text, None),
-            ButtonStyle::Outlined => (theme.element, theme.element_hover, theme.text, Some(theme.border_variant)),
-            ButtonStyle::Ghost => (gpui::transparent_black(), theme.ghost_hover, theme.text_muted, None),
-            ButtonStyle::Danger => (gpui::transparent_black(), theme.error.opacity(0.14), theme.error, None),
+        // A TUI look: "[ Label ]" in the button's color, nothing behind it.
+        let tui = square();
+        let (bg, hover, fg, border) = match (self.style, tui) {
+            (ButtonStyle::Primary, false) => (theme.accent, theme.accent.opacity(0.85), theme.accent_text, None),
+            (ButtonStyle::Outlined, false) => (theme.element, theme.element_hover, theme.text, Some(theme.border_variant)),
+            (ButtonStyle::Ghost, false) => (gpui::transparent_black(), theme.ghost_hover, theme.text_muted, None),
+            (ButtonStyle::Danger, false) => (gpui::transparent_black(), theme.error.opacity(0.14), theme.error, None),
+            (ButtonStyle::Primary, true) => (gpui::transparent_black(), theme.accent.opacity(0.16), theme.accent, None),
+            (ButtonStyle::Outlined, true) => (gpui::transparent_black(), theme.ghost_hover, theme.text, None),
+            (ButtonStyle::Ghost, true) => (gpui::transparent_black(), theme.ghost_hover, theme.text_muted, None),
+            (ButtonStyle::Danger, true) => (gpui::transparent_black(), theme.error.opacity(0.14), theme.error, None),
         };
         let disabled = self.disabled || self.loading;
         // A theme with two brand colors fills primary buttons with both, as the icon does.
-        let gradient = (self.style == ButtonStyle::Primary && theme.accent2 != theme.accent).then_some((theme.accent, theme.accent2));
+        let gradient = (!tui && self.style == ButtonStyle::Primary && theme.accent2 != theme.accent).then_some((theme.accent, theme.accent2));
         let mut el = div()
             .id(self.id.clone())
             .flex()
@@ -521,8 +550,8 @@ impl RenderOnce for Button {
             .gap(px(5.))
             .h(px(26.))
             .when(icon_only, |d| d.w(px(26.)))
-            .when(!icon_only, |d| d.px(px(9.)))
-            .rounded(px(6.))
+            .when(!icon_only, |d| d.px(px(if tui { 3. } else { 9. })))
+            .rounded(corner(6.))
             .bg(bg)
             .text_color(fg)
             .text_size(px(12.5))
@@ -540,7 +569,7 @@ impl RenderOnce for Button {
         }
         if self.loading {
             el = el.child(spinner(ElementId::Name(format!("{}-spin", self.id).into()), 13., fg));
-        } else if let Some(i) = self.icon {
+        } else if let Some(i) = self.icon.filter(|_| icon_only || !tui) {
             // Icons carry their own color, except on filled and danger buttons.
             let color = match self.style {
                 ButtonStyle::Outlined | ButtonStyle::Ghost => tint(&theme, i).unwrap_or(fg),
@@ -549,7 +578,7 @@ impl RenderOnce for Button {
             el = el.child(icon(i, if icon_only { 15. } else { 13. }, color));
         }
         if let Some(label) = self.label {
-            el = el.child(label);
+            el = el.child(if tui { SharedString::from(format!("[ {label} ]")) } else { label });
         }
         if let Some(hint) = self.key_hint {
             el = el.child(
@@ -596,11 +625,11 @@ impl Render for Tooltip {
                 div()
                     .px(px(8.))
                     .py(px(4.))
-                    .rounded(px(6.))
+                    .rounded(corner(6.))
                     .bg(theme.elevated)
                     .border_1()
                     .border_color(theme.border)
-                    .shadow_md()
+                    .when(!square(), |d| d.shadow_md())
                     .text_size(px(12.))
                     .text_color(theme.text)
                     .child(self.text.clone()),
@@ -630,7 +659,7 @@ pub fn checkbox(
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(4.))
+                .rounded(corner(4.))
                 .border_1()
                 .border_color(if checked { theme.accent } else { theme.border })
                 .bg(if checked { theme.accent } else { theme.canvas })

@@ -115,10 +115,10 @@ muxin status
 - **Boxes (⌃3):** tasks you hand to an agent that works on them by itself, each in a container on one of your machines (see [Boxes](#boxes)). Below them, **Agents' workspaces**: folders that AI tools you use elsewhere work in through Muxin. Open one to see every command it ran, with its exit code and output, review its git changes, copy a shell command to step in, or destroy it.
 - **Jobs:** queued and running self-hosted jobs, and which queued jobs no online runner can take.
 - **Appearance:** follow the system, or pin light or dark, each with its own theme. Built-in themes:
-  - dark: Muxin Graphite, macOS Dark, Gruvbox Dark, Catppuccin Mocha / Macchiato / Frappé, Tokyo Night, Nord, Rosé Pine, Solarized Dark, Dracula, Everforest Dark, Kanagawa Wave, GitHub Dark;
-  - light: Muxin Paper, macOS Light, Gruvbox Light, Catppuccin Latte, Tokyo Night Day, Nord Light, Rosé Pine Dawn, Solarized Light, Everforest Light, Kanagawa Lotus, GitHub Light.
+  - dark: Muxin Graphite, macOS Dark, Gruvbox Dark, Catppuccin Mocha / Macchiato / Frappé, Tokyo Night, Nord, Rosé Pine, Solarized Dark, Dracula, Everforest Dark, Kanagawa Wave, GitHub Dark, Terminal, Terminal Midnight;
+  - light: Muxin Paper, macOS Light, Gruvbox Light, Catppuccin Latte, Tokyo Night Day, Nord Light, Rosé Pine Dawn, Solarized Light, Everforest Light, Kanagawa Lotus, GitHub Light, Terminal Paper.
 
-  The macOS themes also switch to the system fonts (SF Pro, and SF Mono when it's installed). The choice is saved in `config.toml` (`[ui]`).
+  The macOS themes also switch to the system fonts (SF Pro, and SF Mono when it's installed). The Terminal themes make Muxin look like a TUI in a terminal: one monospace font, square corners, `[ Buttons ]` and `── Headings ──`. The choice is saved in `config.toml` (`[ui]`).
 
 Keyboard: ⌘P goes to any machine, session or desktop by name, and ⇧⌘P (or ⌘P then `>`) runs any command, including **Theme: Choose…**, which previews each theme as you move through the list · ⌘1…⌘9 go to your machines · ⌃1…⌃7 overview, jobs, boxes, GitHub, usage, run, schedules (Alt on Linux and Windows) · ⌘J activity · ⌘R check machines · ⇧⌘R sync GitHub · ⌘N add machine · ⌘T new session · ⌘F or `/` search your machines and sessions · ⌘B sidebar · ⌘[ / ⌘] back / forward · ⌘, settings. Hold ⌘ to see them in the app, and change them in Settings › Keyboard. On Linux and Windows, use Ctrl instead of ⌘.
 

@@ -328,7 +328,7 @@ pub fn diagram(g: &ComposeGraph, usage: &Usage, theme: &Theme, width: Rc<Cell<f3
             .flex()
             .items_center()
             .gap(px(9.))
-            .rounded(px(9.))
+            .rounded(crate::ui::kit::corner(9.))
             .border_1()
             .border_dashed()
             .border_color(theme.info.opacity(0.55))
@@ -352,7 +352,7 @@ pub fn diagram(g: &ComposeGraph, usage: &Usage, theme: &Theme, width: Rc<Cell<f3
             .h(px(16.))
             .flex()
             .items_center()
-            .rounded(px(4.))
+            .rounded(crate::ui::kit::corner(4.))
             .bg(theme.canvas)
             .text_size(px(10.5))
             .text_color(color)
@@ -468,7 +468,7 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, inline: bool, usage: &U
                 .flex()
                 .items_center()
                 .gap(px(4.))
-                .rounded(px(5.))
+                .rounded(crate::ui::kit::corner(5.))
                 .bg(theme.accent.opacity(0.13))
                 .text_size(px(11.5))
                 .text_color(theme.text_accent)
@@ -489,7 +489,7 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, inline: bool, usage: &U
             .h(px(20.))
             .children(s.networks.iter().map(|name| {
                 let color = nets.get(name).copied().unwrap_or(theme.text_muted);
-                div().flex_none().flex().items_center().gap(px(5.)).px(px(6.)).h(px(20.)).rounded(px(5.)).bg(color.opacity(0.13)).text_size(px(11.)).text_color(color).child(kit::dot(color, 6.)).child(name.clone())
+                div().flex_none().flex().items_center().gap(px(5.)).px(px(6.)).h(px(20.)).rounded(crate::ui::kit::corner(5.)).bg(color.opacity(0.13)).text_size(px(11.)).text_color(color).child(kit::dot(color, 6.)).child(name.clone())
             }))
             .into_any_element()
     });
@@ -533,11 +533,11 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, inline: bool, usage: &U
         .flex_col()
         .gap(px(6.))
         .overflow_hidden()
-        .rounded(px(10.))
+        .rounded(crate::ui::kit::corner(10.))
         .border_1()
         .border_color(if failed { theme.error.opacity(0.6) } else { theme.border })
         .bg(theme.surface)
-        .shadow_sm()
+        .when(!crate::ui::kit::square(), |d| d.shadow_sm())
         .child(
             div()
                 .h(px(22.))
@@ -603,7 +603,7 @@ pub fn legend(g: &ComposeGraph, theme: &Theme) -> AnyElement {
         .border_color(theme.border_variant)
         .child(item(line(theme.text_placeholder), "waits for"))
         .child(item(line(theme.success), "waits until healthy"))
-        .child(item(div().w(px(16.)).h(px(10.)).rounded(px(3.)).border_1().border_dashed().border_color(theme.info).into_any_element(), "volume"))
+        .child(item(div().w(px(16.)).h(px(10.)).rounded(crate::ui::kit::corner(3.)).border_1().border_dashed().border_color(theme.info).into_any_element(), "volume"))
         .child(item(icon("plug", 11., theme.text_accent).into_any_element(), "port on the machine"))
         .when(shows && !nets.is_empty(), |d| {
             d.child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Networks"))

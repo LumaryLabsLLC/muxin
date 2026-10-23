@@ -545,7 +545,7 @@ impl Render for LogsView {
             Tab::Docker => sources.docker.len(),
             Tab::Services => sources.services.len(),
         };
-        let tabs = div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(
+        let tabs = div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(
             [(Tab::System, "System"), (Tab::Files, "Files"), (Tab::Docker, "Docker"), (Tab::Services, "Services")].into_iter().map(|(tab, label)| {
                 let on = self.tab == tab;
                 let n = count(tab);
@@ -556,7 +556,7 @@ impl Render for LogsView {
                     .flex()
                     .items_center()
                     .gap(px(5.))
-                    .rounded(px(5.))
+                    .rounded(crate::ui::kit::corner(5.))
                     .cursor_pointer()
                     .text_size(px(12.))
                     .text_color(if on { theme.text } else { theme.text_placeholder })
@@ -582,7 +582,7 @@ impl Render for LogsView {
             let mut all: Vec<(Option<String>, String)> = vec![(None, "All".to_string())];
             all.extend(self.services.iter().map(|s| (Some(s.clone()), s.clone())));
             let services = self.services.clone();
-            div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(all.into_iter().map(|(svc, label)| {
+            div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(all.into_iter().map(|(svc, label)| {
                 let on = self.only == svc;
                 let color = svc.as_deref().map(|s| service_color(s, &services));
                 div()
@@ -592,7 +592,7 @@ impl Render for LogsView {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .rounded(px(5.))
+                    .rounded(crate::ui::kit::corner(5.))
                     .cursor_pointer()
                     .text_size(px(12.))
                     .text_color(if on { theme.text } else { theme.text_placeholder })
@@ -715,7 +715,7 @@ impl Render for LogsView {
                     .when(nested, |d| d.border_l_1().border_color(theme.border_variant).rounded_l_none())
                     .px(px(8.))
                     .py(px(5.))
-                    .rounded(px(6.))
+                    .rounded(crate::ui::kit::corner(6.))
                     .cursor_pointer()
                     .when(on, |d| d.bg(theme.element_selected))
                     .when(!on, |d| d.hover(|st| st.bg(theme.ghost_hover)))

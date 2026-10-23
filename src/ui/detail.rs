@@ -751,7 +751,7 @@ fn copyable(theme: &Theme, i: usize, text: String) -> impl IntoElement {
             div()
                 .text_size(px(12.))
                 .text_color(theme.text_muted)
-                .when(looks_like_command, |d| d.font_family(mono_font()).px(px(6.)).py(px(2.)).rounded(px(4.)).bg(theme.element))
+                .when(looks_like_command, |d| d.font_family(mono_font()).px(px(6.)).py(px(2.)).rounded(crate::ui::kit::corner(4.)).bg(theme.element))
                 .child(text),
         )
         .when(looks_like_command, |d| {
@@ -884,7 +884,7 @@ impl Root {
                         d.child(
                             div()
                                 .p(px(8.))
-                                .rounded(px(6.))
+                                .rounded(crate::ui::kit::corner(6.))
                                 .bg(theme.element)
                                 .font_family(mono_font())
                                 .text_size(px(11.5))

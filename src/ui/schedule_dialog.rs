@@ -169,7 +169,7 @@ impl Render for ScheduleDialog {
                 .flex()
                 .items_center()
                 .gap(px(6.))
-                .rounded(px(6.))
+                .rounded(crate::ui::kit::corner(6.))
                 .border_1()
                 .cursor_pointer()
                 .text_size(px(12.5))

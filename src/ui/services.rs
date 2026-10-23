@@ -611,7 +611,7 @@ fn chip(theme: &Theme, id: String, label: impl Into<SharedString>, on: bool) -> 
         .flex()
         .items_center()
         .gap(px(5.))
-        .rounded(px(5.))
+        .rounded(crate::ui::kit::corner(5.))
         .cursor_pointer()
         .text_size(px(12.))
         .text_color(if on { theme.text } else { theme.text_placeholder })
@@ -652,7 +652,7 @@ impl Render for ServicesView {
             tab_list.extend([(Tab::Compose, "Compose", data.compose.len()), (Tab::Images, "Images", data.images.len())]);
         }
         tab_list.push((Tab::Processes, "Processes", self.procs.as_ref().and_then(|p| p.as_ref().ok()).map(|p| p.total).unwrap_or(0)));
-        let tabs = div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(tab_list.into_iter().map(|(tab, label, n)| {
+        let tabs = div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(tab_list.into_iter().map(|(tab, label, n)| {
             chip(&theme, format!("svc-tab-{label}"), label, self.tab == tab)
                 .when(n > 0, |d| d.child(div().text_size(px(10.5)).text_color(theme.text_placeholder).child(n.to_string())))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -826,7 +826,7 @@ impl Render for ServicesView {
         let run_form = self.run.as_ref().filter(|_| self.tab == Tab::Containers).map(|f| {
             let field = |label: &'static str, input: &Entity<TextInput>, w: f32| div().flex().flex_col().gap(px(4.)).child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(label)).child(div().w(px(w)).child(input.clone()));
             let restarts = div().flex().flex_col().gap(px(4.)).child(div().text_size(px(11.)).text_color(theme.text_placeholder).child("Restart")).child(
-                div().flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children([("no", "Never"), ("always", "Always"), ("unless-stopped", "Unless stopped"), ("on-failure", "On failure")].into_iter().map(|(value, label)| {
+                div().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children([("no", "Never"), ("always", "Always"), ("unless-stopped", "Unless stopped"), ("on-failure", "On failure")].into_iter().map(|(value, label)| {
                     chip(&theme, format!("svc-restart-{value}"), label, f.restart == value).on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(f) = &mut this.run {
                             f.restart = value;
@@ -1292,7 +1292,7 @@ impl ServicesView {
                             .h(px(20.))
                             .flex()
                             .items_center()
-                            .rounded(px(5.))
+                            .rounded(crate::ui::kit::corner(5.))
                             .cursor_pointer()
                             .text_size(px(11.))
                             .border_1()
@@ -1435,7 +1435,7 @@ impl ServicesView {
             .child(kit::dot(if running { theme.success } else { theme.text_placeholder }, 8.))
             .child(div().flex_none().text_size(px(14.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme.text).child(name.clone()))
             .child(div().flex_none().text_size(px(12.)).text_color(theme.text_muted).child(project.status.clone()))
-            .child(div().flex_none().ml(px(6.)).flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(
+            .child(div().flex_none().ml(px(6.)).flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(
                 [(ProjectMode::Picture, "Picture", "workflow"), (ProjectMode::List, "List", "list"), (ProjectMode::Logs, "Logs", "scroll-text")].into_iter().map(|(mode, label, glyph)| {
                     let on = self.project_mode == mode;
                     div()
@@ -1445,7 +1445,7 @@ impl ServicesView {
                         .flex()
                         .items_center()
                         .gap(px(6.))
-                        .rounded(px(5.))
+                        .rounded(crate::ui::kit::corner(5.))
                         .cursor_pointer()
                         .text_size(px(12.))
                         .text_color(if on { theme.text } else { theme.text_placeholder })
@@ -2047,7 +2047,7 @@ fn gpu_strip(gpus: &[Gpu], theme: &Theme) -> AnyElement {
                 .gap(px(10.))
                 .px(px(12.))
                 .py(px(8.))
-                .rounded(px(8.))
+                .rounded(crate::ui::kit::corner(8.))
                 .border_1()
                 .border_color(theme.border_variant)
                 .bg(theme.surface)

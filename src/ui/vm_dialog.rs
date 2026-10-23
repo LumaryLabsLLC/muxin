@@ -141,7 +141,7 @@ impl Render for VmDialog {
                 .px(px(9.))
                 .flex()
                 .items_center()
-                .rounded(px(6.))
+                .rounded(crate::ui::kit::corner(6.))
                 .border_1()
                 .text_size(px(12.5))
                 .when(enabled, |d| d.cursor_pointer())

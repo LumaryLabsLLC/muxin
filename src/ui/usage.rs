@@ -97,7 +97,7 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(div().flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(PERIODS.iter().map(|&(label, days)| {
+                    .child(div().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(PERIODS.iter().map(|&(label, days)| {
                         let on = self.usage_days == days;
                         div()
                             .id(SharedString::from(format!("usage-{days}")))
@@ -105,7 +105,7 @@ impl Root {
                             .h(px(24.))
                             .flex()
                             .items_center()
-                            .rounded(px(5.))
+                            .rounded(crate::ui::kit::corner(5.))
                             .cursor_pointer()
                             .text_size(px(12.))
                             .text_color(if on { theme.text } else { theme.text_placeholder })
@@ -226,11 +226,11 @@ impl Root {
                 .flex_col()
                 .justify_end()
                 .tooltip(move |window, cx| kit::Tooltip::view(tip.clone().into(), window, cx))
-                .child(div().w_full().h(relative((x / peak) as f32)).bg(codex_color).rounded_t(px(2.)))
-                .child(div().w_full().h(relative((c / peak) as f32)).bg(claude_color).when(x == 0., |d| d.rounded_t(px(2.))))
-                .when(c + x == 0., |d| d.child(div().w_full().h(px(2.)).rounded(px(1.)).bg(theme.track)))
+                .child(div().w_full().h(relative((x / peak) as f32)).bg(codex_color).rounded_t(crate::ui::kit::corner(2.)))
+                .child(div().w_full().h(relative((c / peak) as f32)).bg(claude_color).when(x == 0., |d| d.rounded_t(crate::ui::kit::corner(2.))))
+                .when(c + x == 0., |d| d.child(div().w_full().h(px(2.)).rounded(crate::ui::kit::corner(1.)).bg(theme.track)))
         }));
-        let legend = |color: gpui::Rgba, text: &'static str| div().flex().items_center().gap(px(6.)).child(div().size(px(8.)).rounded(px(2.)).bg(color)).child(text);
+        let legend = |color: gpui::Rgba, text: &'static str| div().flex().items_center().gap(px(6.)).child(div().size(px(8.)).rounded(crate::ui::kit::corner(2.)).bg(color)).child(text);
         body = body.child(
             card(&theme)
                 .p(px(16.))

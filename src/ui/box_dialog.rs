@@ -464,7 +464,7 @@ impl BoxDialog {
             .gap(px(8.))
             .h(px(30.))
             .px(px(8.))
-            .rounded(px(6.))
+            .rounded(crate::ui::kit::corner(6.))
             .cursor_pointer()
             .when(on, |d| d.bg(theme.element_selected))
             .when(!on, |d| d.hover(|st| st.bg(theme.ghost_hover)))
@@ -493,7 +493,7 @@ impl Render for BoxDialog {
                 .flex()
                 .items_center()
                 .gap(px(6.))
-                .rounded(px(6.))
+                .rounded(crate::ui::kit::corner(6.))
                 .border_1()
                 .text_size(px(12.5))
                 .border_color(if selected { theme.accent } else { theme.border_variant })
@@ -519,7 +519,7 @@ impl Render for BoxDialog {
 
         let found = self.found(cx);
         let rows: Vec<AnyElement> = found.iter().enumerate().map(|(i, f)| self.result_row(&theme, i, f, cx)).collect();
-        let results = (!rows.is_empty()).then(|| div().flex().flex_col().p(px(4.)).rounded(px(8.)).border_1().border_color(theme.border_variant).bg(theme.surface).children(rows));
+        let results = (!rows.is_empty()).then(|| div().flex().flex_col().p(px(4.)).rounded(crate::ui::kit::corner(8.)).border_1().border_color(theme.border_variant).bg(theme.surface).children(rows));
 
         let code: AnyElement = match self.source {
             Source::GitHub => {

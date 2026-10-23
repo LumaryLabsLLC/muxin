@@ -31,6 +31,8 @@ pub struct Theme {
     pub id: &'static str,
     /// Use the platform's own UI and monospace fonts (the macOS themes).
     pub system_fonts: bool,
+    /// Looks like a TUI: the monospace font for everything, square, flat (see kit::square).
+    pub tui: bool,
     /// The sidebar, which runs the full height of the window.
     pub sidebar: Hsla,
     /// The main content background.
@@ -229,6 +231,8 @@ pub fn apply(window: &Window, cx: &mut App) {
             ["SF Mono", "Menlo"].into_iter().find(|f| names.iter().any(|n| n == f)).unwrap_or(MONO_FONT)
         });
         (".SystemUIFont", mono)
+    } else if theme.tui {
+        (MONO_FONT, MONO_FONT)
     } else {
         (UI_FONT, MONO_FONT)
     };

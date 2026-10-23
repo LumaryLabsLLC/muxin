@@ -30,6 +30,11 @@ pub struct Palette {
     pub warning: u32,
     pub error: u32,
     pub info: u32,
+    /// Looks like a TUI in a terminal: one monospace font, square corners, no
+    /// shadows or gradients, `[ Buttons ]` and `── Headings ──` (see kit::square).
+    pub tui: bool,
+    /// A selected row's color, a solid bar (0: the accent, faintly, as usual).
+    pub bar: u32,
 }
 
 macro_rules! palette {
@@ -58,6 +63,27 @@ macro_rules! palette {
             warning: $warning,
             error: $error,
             info: $info,
+            tui: false,
+            bar: 0,
+        }
+    };
+}
+
+/// A TUI look's palette: its selection bar a solid color, one accent, no gradient.
+macro_rules! tui {
+    ($id:literal, $name:literal, $dark:literal, bar $bar:literal,
+     sidebar $sidebar:literal, canvas $canvas:literal, surface $surface:literal, elevated $elevated:literal,
+     border $border:literal, $border_variant:literal,
+     text $text:literal, $muted:literal, $placeholder:literal,
+     accent $accent:literal, success $success:literal, warning $warning:literal, error $error:literal, info $info:literal) => {
+        Palette {
+            tui: true,
+            bar: $bar,
+            ..palette!($id, $name, $dark,
+                sidebar $sidebar, canvas $canvas, surface $surface, elevated $elevated,
+                border $border, $border_variant,
+                text $text, $muted, $placeholder,
+                accent $accent, success $success, warning $warning, error $error, info $info)
         }
     };
 }
@@ -102,6 +128,8 @@ pub static PALETTES: &[Palette] = &[
         warning: 0xff9f0a,
         error: 0xff453a,
         info: 0x40c8e0,
+        tui: false,
+        bar: 0,
     },
     palette!("gruvbox-dark", "Gruvbox Dark", true,
         sidebar 0x1d2021, canvas 0x282828, surface 0x32302f, elevated 0x3c3836, border 0x504945, 0x3c3836,
@@ -147,6 +175,17 @@ pub static PALETTES: &[Palette] = &[
         sidebar 0x16161d, canvas 0x1f1f28, surface 0x2a2a37, elevated 0x363646, border 0x54546d, 0x363646,
         text 0xdcd7ba, 0xc8c093, 0x727169,
         accent 0x7e9cd8, success 0x98bb6c, warning 0xe6c384, error 0xe46876, info 0x7fb4ca),
+    // Muxin as a TUI: a black terminal with a green accent and a deep blue
+    // selection bar, and Midnight Commander's navy with cyan lines. A bar is
+    // a deep tone, so a selected row's icons and grey text still read on it.
+    tui!("terminal", "Terminal", true, bar 0x1e3a52,
+        sidebar 0x111111, canvas 0x0c0c0c, surface 0x141414, elevated 0x1a1a1a, border 0x3a3a3a, 0x262626,
+        text 0xd0d0d0, 0x9a9a9a, 0x707070,
+        accent 0x5fd75f, success 0x00af87, warning 0xd7af5f, error 0xff5f5f, info 0x5fafd7),
+    tui!("terminal-midnight", "Terminal Midnight", true, bar 0x123f5e,
+        sidebar 0x0a1630, canvas 0x0b1a36, surface 0x0e2042, elevated 0x12274e, border 0x2f6fa8, 0x1d3f6e,
+        text 0xdfe7f5, 0x9fb3d4, 0x647aa0,
+        accent 0xffd75f, success 0x5fd787, warning 0xffaf5f, error 0xff6f6f, info 0x5fd7ff),
     palette!("github-dark", "GitHub Dark", true,
         sidebar 0x010409, canvas 0x0d1117, surface 0x161b22, elevated 0x1c2128, border 0x30363d, 0x21262d,
         text 0xe6edf3, 0x9198a1, 0x6e7681,
@@ -186,6 +225,8 @@ pub static PALETTES: &[Palette] = &[
         warning: 0xff9500,
         error: 0xff3b30,
         info: 0x30b0c7,
+        tui: false,
+        bar: 0,
     },
     palette!("gruvbox-light", "Gruvbox Light", false,
         sidebar 0xf2e5bc, canvas 0xfbf1c7, surface 0xf9f5d7, elevated 0xf9f5d7, border 0xd5c4a1, 0xebdbb2,
@@ -223,6 +264,11 @@ pub static PALETTES: &[Palette] = &[
         sidebar 0xf6f8fa, canvas 0xffffff, surface 0xffffff, elevated 0xffffff, border 0xd0d7de, 0xd8dee4,
         text 0x1f2328, 0x59636e, 0x818b98,
         accent 0x0969da, success 0x1a7f37, warning 0x9a6700, error 0xd1242f, info 0x0969da),
+    // Muxin as a TUI in a light terminal: black on off-white, a yellow selection bar.
+    tui!("terminal-paper", "Terminal Paper", false, bar 0xffd75f,
+        sidebar 0xefeee5, canvas 0xf7f6ef, surface 0xfbfaf4, elevated 0xffffff, border 0xb9b8ad, 0xd6d5ca,
+        text 0x1c1c1c, 0x55554d, 0x8e8e84,
+        accent 0x005fd7, success 0x2e7d32, warning 0x9a6700, error 0xc62828, info 0x005f87),
 ];
 
 pub fn find(id: &str) -> Option<&'static Palette> {
@@ -249,6 +295,7 @@ impl Palette {
         Theme {
             id: self.id,
             system_fonts: self.system_fonts,
+            tui: self.tui,
             sidebar: color(self.sidebar),
             canvas: color(self.canvas),
             surface: color(self.surface),
@@ -258,7 +305,7 @@ impl Palette {
             border_focused: accent,
             element: text.opacity(if dark { 0.05 } else { 0.035 }),
             element_hover: text.opacity(if dark { 0.09 } else { 0.065 }),
-            element_selected: accent.opacity(if dark { 0.18 } else { 0.13 }),
+            element_selected: if self.bar != 0 { color(self.bar) } else { accent.opacity(if dark { 0.18 } else { 0.13 }) },
             ghost_hover: text.opacity(if dark { 0.06 } else { 0.05 }),
             text,
             text_muted: color(self.text_muted),
@@ -281,6 +328,30 @@ impl Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WCAG's contrast ratio between two colors.
+    fn contrast(a: u32, b: u32) -> f32 {
+        let (la, lb) = (luminance_wcag(a), luminance_wcag(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    fn luminance_wcag(hex: u32) -> f32 {
+        let f = |c: u32| {
+            let c = c as f32 / 255.;
+            if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * f(hex >> 16 & 0xff) + 0.7152 * f(hex >> 8 & 0xff) + 0.0722 * f(hex & 0xff)
+    }
+
+    #[test]
+    fn a_selection_bar_leaves_a_rows_text_and_icons_readable() {
+        for p in PALETTES.iter().filter(|p| p.bar != 0) {
+            assert!(contrast(p.text, p.bar) >= 4.5, "{}: text on its bar", p.id);
+            // Icons and secondary text are drawn muted; the faintest grey stays visible.
+            assert!(contrast(p.text_muted, p.bar) >= 4.0, "{}: muted on its bar", p.id);
+            assert!(contrast(p.text_placeholder, p.bar) >= 2.2, "{}: faint text on its bar", p.id);
+        }
+    }
 
     #[test]
     fn ids_are_unique_and_defaults_exist() {

@@ -606,7 +606,7 @@ impl DesktopView {
                     .gap(px(5.))
                     .h(px(24.))
                     .px(px(9.))
-                    .rounded(px(7.))
+                    .rounded(crate::ui::kit::corner(7.))
                     .bg(gpui::black().opacity(0.62))
                     .border_1()
                     .border_color(gpui::white().opacity(0.18))
@@ -960,7 +960,7 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
     let default = displays.iter().find(|d| d.main && d.id != "all").or_else(|| displays.iter().find(|d| d.id != "all")).map(|d| d.id.clone());
     let showing = shown.or(default);
     let monitors = (displays.len() > 1).then(|| {
-        div().flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(displays.iter().map(|d| {
+        div().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(displays.iter().map(|d| {
             let (on, id, view) = (showing.as_deref() == Some(d.id.as_str()), d.id.clone(), view.clone());
             let right_click = menu.clone().filter(|_| d.id != "all").map(|menu| {
                 let (machine, display) = (machine.clone(), d.id.clone());
@@ -974,7 +974,7 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
                 .flex()
                 .items_center()
                 .gap(px(5.))
-                .rounded(px(5.))
+                .rounded(crate::ui::kit::corner(5.))
                 .cursor_pointer()
                 .text_size(px(11.5))
                 .text_color(if on { theme.text } else { theme.text_placeholder })
@@ -996,7 +996,7 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
             .h(px(22.))
             .flex()
             .items_center()
-            .rounded(px(5.))
+            .rounded(crate::ui::kit::corner(5.))
             .cursor_pointer()
             .text_size(px(11.5))
             .text_color(if on { theme.text } else { theme.text_placeholder })
@@ -1005,7 +1005,7 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
             .tooltip(move |window, cx| kit::Tooltip::view(tip.into(), window, cx))
             .child(label)
     };
-    let group = |chips: Vec<gpui::Stateful<gpui::Div>>| div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(chips);
+    let group = |chips: Vec<gpui::Stateful<gpui::Div>>| div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(chips);
     let sizes = screen.and_then(|d| {
         let current = (d.width.round() as u32, d.height.round() as u32);
         let mut choices: Vec<((u32, u32), String)> = SIZES.iter().filter(|(size, _)| d.any_size || d.modes.contains(size)).map(|(size, label)| (*size, label.to_string())).collect();

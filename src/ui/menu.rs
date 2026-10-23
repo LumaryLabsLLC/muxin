@@ -761,7 +761,7 @@ impl Root {
                         .h(px(28.))
                         .mx(px(4.))
                         .px(px(8.))
-                        .rounded(px(6.))
+                        .rounded(crate::ui::kit::corner(6.))
                         .cursor_pointer()
                         .hover(|st| st.bg(theme.element_hover))
                         .text_size(px(13.))
@@ -779,11 +779,11 @@ impl Root {
             .occlude()
             .w(px(width))
             .py(px(4.))
-            .rounded(px(9.))
+            .rounded(crate::ui::kit::corner(9.))
             .bg(theme.elevated)
             .border_1()
             .border_color(theme.border)
-            .shadow_lg()
+            .when(!crate::ui::kit::square(), |d| d.shadow_lg())
             .font_weight(FontWeight::NORMAL)
             .children(rows);
         Some(

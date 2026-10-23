@@ -360,7 +360,7 @@ impl SettingsPage {
                     .h(px(26.))
                     .pl(px(8.))
                     .pr(px(2.))
-                    .rounded(px(5.))
+                    .rounded(crate::ui::kit::corner(5.))
                     .border_1()
                     .border_color(theme.border_variant)
                     .bg(theme.element)
@@ -539,7 +539,7 @@ impl SettingsPage {
                 .items_center()
                 .gap(px(12.))
                 .p(px(12.))
-                .rounded(px(8.))
+                .rounded(crate::ui::kit::corner(8.))
                 .bg(theme.warning.opacity(0.10))
                 .child(icon("triangle-alert", 15., theme.warning))
                 .child(
@@ -570,7 +570,7 @@ impl SettingsPage {
                 .gap(px(5.))
                 .h(px(24.))
                 .px(px(8.))
-                .rounded(px(5.))
+                .rounded(crate::ui::kit::corner(5.))
                 .border_1()
                 .border_color(theme.border_variant)
                 .bg(theme.element)
@@ -726,7 +726,7 @@ impl SettingsPage {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .rounded(px(6.))
+                    .rounded(crate::ui::kit::corner(6.))
                     .border_1()
                     .cursor_pointer()
                     .border_color(if selected { theme.accent } else { theme.border_variant })
@@ -758,7 +758,7 @@ impl SettingsPage {
                 .px(px(9.))
                 .flex()
                 .items_center()
-                .rounded(px(6.))
+                .rounded(crate::ui::kit::corner(6.))
                 .cursor_pointer()
                 .text_size(px(12.))
                 .text_color(if selected { theme.text } else { theme.text_muted })
@@ -806,7 +806,7 @@ impl SettingsPage {
         let preview = div()
             .mt(px(4.))
             .p(px(12.))
-            .rounded(px(8.))
+            .rounded(crate::ui::kit::corner(8.))
             .bg(theme.canvas)
             .border_1()
             .border_color(theme.border_variant)
@@ -861,11 +861,11 @@ impl SettingsPage {
                 .gap(px(6.))
                 .h(px(28.))
                 .px(px(12.))
-                .rounded(px(7.))
+                .rounded(crate::ui::kit::corner(7.))
                 .cursor_pointer()
                 .text_size(px(12.5))
                 .text_color(if selected { theme.text } else { theme.text_muted })
-                .when(selected, |d| d.bg(theme.surface).border_1().border_color(theme.border).shadow_sm())
+                .when(selected, |d| d.bg(theme.surface).border_1().border_color(theme.border).when(!crate::ui::kit::square(), |d| d.shadow_sm()))
                 .when(!selected, |d| d.hover(|st| st.text_color(theme.text)))
                 .child(kit::color_icon(theme, icon_name, 13., if selected { theme.text_accent } else { theme.text_placeholder }))
                 .child(label)
@@ -905,7 +905,7 @@ impl SettingsPage {
                             .flex()
                             .gap(px(2.))
                             .p(px(3.))
-                            .rounded(px(9.))
+                            .rounded(crate::ui::kit::corner(9.))
                             .bg(theme.element)
                             .border_1()
                             .border_color(theme.border_variant)
@@ -936,7 +936,7 @@ impl SettingsPage {
                     .flex_col()
                     .gap(px(8.))
                     .p(px(10.))
-                    .rounded(px(9.))
+                    .rounded(crate::ui::kit::corner(9.))
                     .border_1()
                     .cursor_pointer()
                     .border_color(if selected { theme.accent } else { theme.border_variant })
@@ -1099,7 +1099,7 @@ impl SettingsPage {
                     .py(px(12.))
                     .gap(px(8.))
                     // As wide as its choices (a row keeps it from stretching).
-                    .child(div().flex().child(div().flex().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(theme.element).children(options.into_iter().map(|(id, name)| {
+                    .child(div().flex().child(div().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(options.into_iter().map(|(id, name)| {
                         let on = chosen == id;
                         let engine = self.engine.clone();
                         div()
@@ -1108,7 +1108,7 @@ impl SettingsPage {
                             .h(px(24.))
                             .flex()
                             .items_center()
-                            .rounded(px(5.))
+                            .rounded(crate::ui::kit::corner(5.))
                             .cursor_pointer()
                             .text_size(px(12.))
                             .text_color(if on { theme.text } else { theme.text_placeholder })
@@ -1173,11 +1173,11 @@ impl Render for SettingsPage {
                     .gap(px(7.))
                     .h(px(30.))
                     .px(px(12.))
-                    .rounded(px(7.))
+                    .rounded(crate::ui::kit::corner(7.))
                     .cursor_pointer()
                     .text_size(px(13.))
                     .text_color(if selected { theme.text } else { theme.text_muted })
-                    .when(selected, |d| d.bg(theme.surface).border_1().border_color(theme.border).shadow_sm())
+                    .when(selected, |d| d.bg(theme.surface).border_1().border_color(theme.border).when(!crate::ui::kit::square(), |d| d.shadow_sm()))
                     .when(!selected, |d| d.hover(|st| st.text_color(theme.text)))
                     .child(icon(tab.icon(), 14., if selected { theme.text } else { theme.text_placeholder }))
                     .child(tab.label())
@@ -1186,7 +1186,7 @@ impl Render for SettingsPage {
             })
             .collect();
         let bar = div().flex_none().px(px(28.)).pt(px(18.)).pb(px(14.)).border_b_1().border_color(theme.border_variant).child(
-            div().flex().w_full().max_w(px(760.)).gap(px(2.)).p(px(3.)).rounded(px(9.)).bg(theme.element).border_1().border_color(theme.border_variant).children(tabs),
+            div().flex().w_full().max_w(px(760.)).gap(px(2.)).p(px(3.)).rounded(crate::ui::kit::corner(9.)).bg(theme.element).border_1().border_color(theme.border_variant).children(tabs),
         );
         let body = div().w_full().max_w(px(760.)).flex().flex_col().gap(px(28.));
         let body = match self.tab {
@@ -1236,7 +1236,7 @@ impl SettingsPage {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(5.))
+                    .rounded(crate::ui::kit::corner(5.))
                     .border_1()
                     .border_color(if on { theme.accent } else { theme.border_variant })
                     .bg(if on { theme.accent.opacity(0.12) } else { theme.element })
@@ -1270,7 +1270,7 @@ impl SettingsPage {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(5.))
+                    .rounded(crate::ui::kit::corner(5.))
                     .border_1()
                     .cursor_pointer()
                     .font_family(mono_font())
@@ -1457,7 +1457,7 @@ fn hint_line(theme: &Theme, i: usize, hint: String) -> impl IntoElement {
         .items_center()
         .gap(px(6.))
         .pl(px(24.))
-        .child(mono(hint).text_size(px(12.)).px(px(6.)).py(px(2.)).rounded(px(4.)).bg(theme.element).text_color(theme.text_muted))
+        .child(mono(hint).text_size(px(12.)).px(px(6.)).py(px(2.)).rounded(crate::ui::kit::corner(4.)).bg(theme.element).text_color(theme.text_muted))
         .child(Button::icon_only(("hint-copy", i), "copy").tooltip("Copy").on_click(move |_, _, cx| {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))
         }))
@@ -1487,7 +1487,7 @@ fn swatch(theme: &Theme, p: &Palette, chosen: bool, showing: bool) -> gpui::Stat
             div()
                 .h(px(78.))
                 .flex()
-                .rounded(px(10.))
+                .rounded(crate::ui::kit::corner(10.))
                 .overflow_hidden()
                 .border_2()
                 .border_color(if chosen { theme.accent } else { theme.border_variant })
@@ -1502,7 +1502,7 @@ fn swatch(theme: &Theme, p: &Palette, chosen: bool, showing: bool) -> gpui::Stat
                         .gap(px(5.))
                         .px(px(6.))
                         .pt(px(10.))
-                        .child(div().size(px(10.)).rounded(px(3.)).bg(t.accent))
+                        .child(div().size(px(10.)).rounded(crate::ui::kit::corner(3.)).bg(t.accent))
                         .child(bar(20., t.text_placeholder.opacity(0.7)))
                         .child(bar(16., t.text_placeholder.opacity(0.5)))
                         .child(bar(18., t.text_placeholder.opacity(0.5))),
@@ -1519,7 +1519,7 @@ fn swatch(theme: &Theme, p: &Palette, chosen: bool, showing: bool) -> gpui::Stat
                         .child(
                             div()
                                 .h(px(30.))
-                                .rounded(px(6.))
+                                .rounded(crate::ui::kit::corner(6.))
                                 .bg(t.surface)
                                 .border_1()
                                 .border_color(t.border_variant)
@@ -1529,7 +1529,7 @@ fn swatch(theme: &Theme, p: &Palette, chosen: bool, showing: bool) -> gpui::Stat
                                 .gap(px(4.))
                                 .px(px(7.))
                                 .child(bar(46., t.text.opacity(0.85)))
-                                .child(div().flex().gap(px(3.)).child(div().size(px(6.)).rounded(px(1.5)).bg(t.accent)).child(div().size(px(6.)).rounded(px(1.5)).bg(t.success)).child(div().size(px(6.)).rounded(px(1.5)).bg(t.success)).child(div().size(px(6.)).rounded(px(1.5)).border_1().border_color(t.text_placeholder))),
+                                .child(div().flex().gap(px(3.)).child(div().size(px(6.)).rounded(crate::ui::kit::corner(1.5)).bg(t.accent)).child(div().size(px(6.)).rounded(crate::ui::kit::corner(1.5)).bg(t.success)).child(div().size(px(6.)).rounded(crate::ui::kit::corner(1.5)).bg(t.success)).child(div().size(px(6.)).rounded(crate::ui::kit::corner(1.5)).border_1().border_color(t.text_placeholder))),
                         )
                         .child(
                             div()
@@ -1540,7 +1540,7 @@ fn swatch(theme: &Theme, p: &Palette, chosen: bool, showing: bool) -> gpui::Stat
                                 .child(div().size(px(6.)).rounded_full().bg(t.error))
                                 .child(div().size(px(6.)).rounded_full().bg(t.info))
                                 .child(div().flex_1())
-                                .child(div().w(px(24.)).h(px(9.)).rounded(px(3.)).bg(t.accent)),
+                                .child(div().w(px(24.)).h(px(9.)).rounded(crate::ui::kit::corner(3.)).bg(t.accent)),
                         ),
                 ),
         )

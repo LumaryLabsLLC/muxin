@@ -66,7 +66,7 @@ impl Render for MoveDialog {
                 .flex()
                 .items_center()
                 .gap(px(6.))
-                .rounded(px(6.))
+                .rounded(crate::ui::kit::corner(6.))
                 .border_1()
                 .text_size(px(12.5))
                 .cursor_pointer()

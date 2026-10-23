@@ -41,7 +41,7 @@ fn update_card(theme: &Theme, updates: &super::updates::Updates) -> Option<AnyEl
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .child(div().px(px(10.)).py(px(6.)).rounded(px(6.)).bg(theme.element).font_family(super::theme::mono_font()).text_size(px(12.5)).text_color(theme.text).child(command))
+                        .child(div().px(px(10.)).py(px(6.)).rounded(crate::ui::kit::corner(6.)).bg(theme.element).font_family(super::theme::mono_font()).text_size(px(12.5)).text_color(theme.text).child(command))
                         .child(Button::new("update-copy", "Copy").icon("copy").on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))))
                 }))
                 .child(
@@ -226,11 +226,11 @@ impl Render for LicensesDialog {
             .flex_col()
             .gap(px(14.))
             .p(px(18.))
-            .rounded(px(10.))
+            .rounded(crate::ui::kit::corner(10.))
             .bg(theme.elevated)
             .border_1()
             .border_color(theme.border)
-            .shadow_lg()
+            .when(!crate::ui::kit::square(), |d| d.shadow_lg())
             .text_color(theme.text)
             .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Licenses"))
             .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(

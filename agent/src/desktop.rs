@@ -71,6 +71,26 @@ pub(crate) fn drag_grid(w: i32, h: i32, step: i32, band: i32, mut drags: impl Fn
     Some(areas)
 }
 
+/// Where a window `w`×`h` at (`x`, `y`) goes to stay inside `area` (left,
+/// top, right, bottom): moved left and up just enough, when it fits there.
+#[cfg(any(windows, test))]
+pub(crate) fn kept_inside((left, top, right, bottom): (i32, i32, i32, i32), (x, y): (i32, i32), (w, h): (i32, i32)) -> (i32, i32) {
+    (x.min(right - w).max(left), y.min(bottom - h).max(top))
+}
+
+#[cfg(test)]
+mod kept_inside_tests {
+    #[test]
+    fn moves_a_window_back_onto_its_screen() {
+        let screen = (0, 0, 1280, 752);
+        // Grown past the right edge: back left just enough; fine as it was: where it was.
+        assert_eq!(super::kept_inside(screen, (700, 60), (1010, 633)), (270, 60));
+        assert_eq!(super::kept_inside(screen, (100, 60), (1010, 633)), (100, 60));
+        // Bigger than the screen: its top left stays on it.
+        assert_eq!(super::kept_inside(screen, (300, 200), (1500, 900)), (0, 0));
+    }
+}
+
 /// Keeps `found` up to date with a window's drag areas (`areas`), on a
 /// thread of its own: once its `size` settles after a change, and `every`
 /// while it doesn't (tabs open and close), until `stop`.

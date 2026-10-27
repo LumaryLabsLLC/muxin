@@ -100,6 +100,8 @@ struct AppWindow {
     /// Its size (whole) and whether it was maximized before the app first
     /// resized it: so it's left again when the stream ends.
     restore: Option<(i32, i32, bool)>,
+    /// Where it was (whole, top left) before a resize moved it to stay on its screen.
+    moved_from: Option<(i32, i32)>,
 }
 
 impl AppWindow {
@@ -116,7 +118,7 @@ impl AppWindow {
             (unsafe { IsIconic(hwnd) } == 0).then(|| drag_areas(hwnd)).flatten()
         };
         crate::desktop::watch_drag_areas(size, areas, Duration::from_secs(3), drag.clone(), stop.clone());
-        AppWindow { hwnd, whole, cursor: "", minimized: None, drag, stop, held_at: None, restore: None }
+        AppWindow { hwnd, whole, cursor: "", minimized: None, drag, stop, held_at: None, restore: None, moved_from: None }
     }
 }
 
@@ -125,10 +127,11 @@ impl Drop for AppWindow {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         // Resized for its window in the app: back as it was.
         if let Some((w, h, maximized)) = self.restore.filter(|_| unsafe { IsWindow(self.hwnd) } != 0) {
+            let (x, y, keep) = self.moved_from.map_or((0, 0, SWP_NOMOVE), |(x, y)| (x, y, 0));
             unsafe {
                 match maximized {
                     true => ShowWindow(self.hwnd, SW_MAXIMIZE),
-                    false => SetWindowPos(self.hwnd, std::ptr::null_mut(), 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE),
+                    false => SetWindowPos(self.hwnd, std::ptr::null_mut(), x, y, w, h, keep | SWP_NOZORDER | SWP_NOACTIVATE),
                 };
             }
         }
@@ -289,7 +292,8 @@ impl WinScreen {
         let (fw, fh) = self.size();
         let (ix, iy) = ((self.rect.left - whole.left).max(0), (self.rect.top - whole.top).max(0));
         unsafe {
-            let drawn = if !covered(hwnd) {
+            // (Past a screen's edge the screen has nothing to copy: the window draws itself.)
+            let drawn = if on_screen(self.rect) && !covered(hwnd) {
                 BitBlt(self.mem_dc, ix, iy, fw as i32, fh as i32, self.screen_dc, self.rect.left, self.rect.top, SRCCOPY | CAPTUREBLT)
             } else {
                 windows_sys::Win32::Storage::Xps::PrintWindow(hwnd, self.mem_dc, PW_RENDERFULLCONTENT)
@@ -480,15 +484,25 @@ impl WinScreen {
         if let Some(win) = self.window.as_mut().filter(|w| w.restore.is_none()) {
             win.restore = Some((whole.right - whole.left, whole.bottom - whole.top, unsafe { IsZoomed(hwnd) } != 0));
         }
+        // A maximized window keeps its size: make it an ordinary one first.
+        if unsafe { IsZoomed(hwnd) } != 0 {
+            unsafe { ShowWindow(hwnd, SW_RESTORE) };
+        }
+        let (whole, visible) = window_bounds(hwnd).unwrap_or((whole, visible));
         // The invisible borders come on top of what shows.
         let (bw, bh) = ((whole.right - whole.left) - (visible.right - visible.left), (whole.bottom - whole.top) - (visible.bottom - visible.top));
-        unsafe {
-            // A maximized window keeps its size: make it an ordinary one first.
-            if IsZoomed(hwnd) != 0 {
-                ShowWindow(hwnd, SW_RESTORE);
-            }
-            SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, w + bw, h + bh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        // Kept on its screen: past its edge the screen has nothing to show
+        // (and apps drawn by DirectComposition don't draw themselves there either).
+        let at = (visible.left, visible.top);
+        let to = work_area(hwnd).map_or(at, |a| crate::desktop::kept_inside((a.left, a.top, a.right, a.bottom), at, (w, h)));
+        let (dx, dy) = (visible.left - whole.left, visible.top - whole.top);
+        let mut flags = SWP_NOZORDER | SWP_NOACTIVATE;
+        if to == at {
+            flags |= SWP_NOMOVE;
+        } else if let Some(win) = self.window.as_mut() {
+            win.moved_from.get_or_insert((whole.left, whole.top));
         }
+        unsafe { SetWindowPos(hwnd, std::ptr::null_mut(), to.0 - dx, to.1 - dy, w + bw, h + bh, flags) };
     }
 }
 
@@ -562,6 +576,24 @@ fn covered(hwnd: HWND) -> bool {
         above = unsafe { GetWindow(above, GW_HWNDPREV) };
     }
     false
+}
+
+/// The part of the window's monitor that windows go on (without the taskbar).
+fn work_area(hwnd: HWND) -> Option<RECT> {
+    unsafe {
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        (!monitor.is_null() && GetMonitorInfoW(monitor, &mut info) != 0).then_some(info.rcWork)
+    }
+}
+
+/// Whether all of `r` lies on the desktop's monitors (each corner on one).
+fn on_screen(r: RECT) -> bool {
+    use windows_sys::Win32::Foundation::POINT;
+    [(r.left, r.top), (r.right - 1, r.top), (r.left, r.bottom - 1), (r.right - 1, r.bottom - 1)]
+        .into_iter()
+        .all(|(x, y)| !unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONULL) }.is_null())
 }
 
 /// Whether Windows keeps the window out of sight (suspended Store apps, other

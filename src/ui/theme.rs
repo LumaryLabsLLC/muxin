@@ -157,6 +157,8 @@ pub struct Appearance {
     pub icon_style: String,
     /// Shortcuts the user changed: id → keys ("" for none). See shortcuts.rs.
     pub shortcuts: std::collections::BTreeMap<String, String>,
+    /// How many times an app's window here said how to close it (it stops after a few).
+    pub close_hints: u32,
     /// Where to save; None in demo mode.
     #[serde(skip)]
     pub path: Option<PathBuf>,
@@ -183,6 +185,7 @@ impl Default for Appearance {
             forwards: Vec::new(),
             icon_style: super::kit::IconStyle::default().id().into(),
             shortcuts: Default::default(),
+            close_hints: 0,
             path: None,
         }
     }

@@ -114,70 +114,76 @@ impl Root {
                 if !self.engine.is_demo() {
                     buttons.push(self.machine_share_button(&m, m.host.is_empty() || offline, cx));
                 }
-                {
-                    let mid = m.id.clone();
-                    buttons.push(
-                        Button::new("m-logs", "Logs")
-                            .icon("scroll-text")
-                            .disabled(m.host.is_empty() || offline)
-                            .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Logs(mid.clone()), window, cx)))
-                            .into_any_element(),
-                    );
-                    let mid = m.id.clone();
-                    buttons.push(
-                        Button::new("m-services", "Services")
-                            .icon("layers")
-                            .disabled(m.host.is_empty() || offline)
-                            .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Services(mid.clone()), window, cx)))
-                            .into_any_element(),
-                    );
-                }
-                let mid = m.id.clone();
-                buttons.push(
-                    Button::new("m-install", "Install runner")
-                        .icon("plus")
-                        .disabled(m.host.is_empty() || busy || offline)
-                        .on_click(cx.listener(move |this, _, window, cx| this.show_install_dialog(&mid, window, cx)))
-                        .into_any_element(),
-                );
-                {
-                    let mid = m.id.clone();
-                    buttons.push(
-                        Button::new("m-copy", "Copy files")
-                            .icon("folder")
-                            .disabled(m.host.is_empty() || offline)
-                            .on_click(cx.listener(move |this, _, window, cx| this.show_copy_files(Some(mid.clone()), None, window, cx)))
-                            .into_any_element(),
-                    );
-                }
+                // The places to go on it, as one group.
+                let down = m.host.is_empty() || offline;
+                let places = {
+                    let (logs, services, files) = (m.id.clone(), m.id.clone(), m.id.clone());
+                    let segment = |id: &'static str, label: &'static str, glyph: &'static str| {
+                        div()
+                            .id(id)
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .px(px(10.))
+                            .text_size(px(13.))
+                            .text_color(theme.text)
+                            .child(icon(glyph, 14., theme.text_muted))
+                            .child(label)
+                            .when(down, |d| d.opacity(0.45))
+                            .when(!down, |d| d.cursor_pointer().hover(|st| st.bg(theme.element_hover)))
+                    };
+                    let divider = || div().w(px(1.)).h(px(14.)).bg(theme.border_variant);
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .h(px(26.))
+                        .rounded(kit::corner(6.))
+                        .overflow_hidden()
+                        .bg(theme.element)
+                        .border_1()
+                        .border_color(theme.border_variant)
+                        .child(segment("m-logs", "Logs", "scroll-text").when(!down, |d| d.on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Logs(logs.clone()), window, cx)))))
+                        .child(divider())
+                        .child(segment("m-services", "Services", "layers").when(!down, |d| d.on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Services(services.clone()), window, cx)))))
+                        .child(divider())
+                        .child(
+                            segment("m-copy", "Files", "folder")
+                                .tooltip(|window, cx| kit::Tooltip::view("Browse its files and copy them between machines".into(), window, cx))
+                                .when(!down, |d| d.on_click(cx.listener(move |this, _, window, cx| this.show_copy_files(Some(files.clone()), None, window, cx)))),
+                        )
+                        .into_any_element()
+                };
+                buttons.push(places);
+                // Then, at the end: refresh it, and the rest (install a runner, remove it).
+                let mut end: Vec<AnyElement> = Vec::new();
                 if !disconnected {
                     let mid = m.id.clone();
-                    buttons.push(
-                        Button::new("m-check", "Refresh")
+                    end.push(
+                        Button::icon_only("m-check", "refresh-cw")
                             .tooltip("Read its status, CPU, memory, disk, runners and sessions again")
-                            .icon("refresh-cw")
                             .loading(m.checking)
                             .disabled(m.host.is_empty())
                             .on_click(cx.listener(move |this, _, _, _| this.engine.trigger_check(Some(mid.clone()))))
                             .into_any_element(),
                     );
                 }
-                let remove = {
-                    let machine = m.clone();
-                    Button::icon_only("m-remove", "trash-2")
-                        .style(ButtonStyle::Danger)
-                        .tooltip(if machine.cloud.is_some() { "Destroy" } else { "Remove from Muxin" })
-                        .on_click(cx.listener(move |this, _, window, cx| this.confirm_remove_machine(&machine, window, cx)))
-                };
-                // Remove stays beside the button before it, never on a line of its own.
-                let last = buttons.pop();
+                let mid = m.id.clone();
+                end.push(
+                    Button::icon_only("m-more", "ellipsis")
+                        .tooltip("More")
+                        .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.open_menu(super::menu::MenuTarget::MachineMore(mid.clone()), e.position(), cx)))
+                        .into_any_element(),
+                );
                 div()
                     .flex()
                     .flex_wrap()
+                    .items_center()
                     .min_w(px(0.))
                     .gap(px(6.))
                     .children(buttons)
-                    .child(div().flex_none().flex().items_center().gap(px(6.)).children(last).child(remove))
+                    .child(div().flex_none().ml_auto().flex().items_center().gap(px(6.)).children(end))
             });
 
         let mut body = page("machine-page", &self.page_scroll).child(header);

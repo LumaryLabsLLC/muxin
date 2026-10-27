@@ -19,6 +19,10 @@ pub const INPUT: u8 = 21;
 /// Only what changed, as JPEG patches (the live view).
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub const TILES: u8 = 23;
+/// What changed about an app's window shown on its own: its pointer, its
+/// drag areas, whether it's minimized (JSON, see agent/src/desktop.rs).
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub const META: u8 = 24;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Screenshot {
@@ -30,6 +34,35 @@ pub struct Screenshot {
     /// The screen's real size (big screens are scaled down).
     pub screen_width: u32,
     pub screen_height: u32,
+}
+
+/// An app's window on a machine's desktop, to show on its own: pass
+/// `window:<id>` as the display (Windows, Macs, and Linux on X11).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AppWindowInfo {
+    pub id: String,
+    pub title: String,
+    /// Its program ("notepad").
+    #[serde(default)]
+    pub app: String,
+    /// What shows of it, in the machine's pixels (whole numbers, though an
+    /// agent may send them as 3412.0).
+    #[serde(default)]
+    pub width: f64,
+    #[serde(default)]
+    pub height: f64,
+    #[serde(default)]
+    pub minimized: bool,
+    /// It's the window in front there.
+    #[serde(default)]
+    pub front: bool,
+}
+
+impl AppWindowInfo {
+    /// What to pass as a desktop's display to show it.
+    pub fn display(&self) -> String {
+        format!("window:{}", self.id)
+    }
 }
 
 /// Something to do on a desktop. Coordinates are screenshot pixels.
@@ -207,6 +240,17 @@ impl Engine {
         Ok(found)
     }
 
+    /// The apps' windows on the machine's desktop, front first.
+    pub async fn app_windows(self: &Arc<Self>, machine_id: &str) -> Result<Vec<AppWindowInfo>, String> {
+        let (spec, probe) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
+        if self.demo_world().is_some() {
+            return Err("The demo has no apps to show.".into());
+        }
+        super::sessions::agent::ensure(&spec, probe.as_ref()).await?;
+        let reply = super::sessions::agent::ctl(&spec, &json!({ "op": "windows" })).await?;
+        serde_json::from_value(reply["windows"].clone()).map_err(|_| format!("{} gave a list of windows Muxin can't read.", spec.name))
+    }
+
     /// Adds a virtual monitor (`width`×`height`) to the machine's desktop.
     pub async fn add_display(self: &Arc<Self>, machine_id: &str, width: u32, height: u32, name: Option<&str>) -> Result<DisplayInfo, AddDisplayError> {
         let (spec, probe) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
@@ -354,5 +398,20 @@ fn demo_displays(machine_id: &str) -> Vec<DisplayInfo> {
         "orbit" | "harbor" => vec![one("1", "Built-in display", 0., 1728., 1117., true)],
         "pebble" => vec![one("eDP-1", "eDP-1", 0., 1920., 1200., true)],
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppWindowInfo;
+
+    #[test]
+    fn reads_window_lists_from_every_agent() {
+        // A Mac's agent sent sizes as 3412.0 for a while; Windows and Linux send whole numbers.
+        let list = r#"[{"id":"7","title":"Notes","app":"Notes","width":3412.0,"height":2710.0,"minimized":false,"front":true},
+                       {"id":"262334","title":"Untitled - Notepad","app":"Notepad","width":950,"height":538}]"#;
+        let windows: Vec<AppWindowInfo> = serde_json::from_str(list).unwrap();
+        assert_eq!((windows[0].width, windows[1].height), (3412., 538.));
+        assert_eq!(windows[1].display(), "window:262334");
     }
 }

@@ -10,6 +10,8 @@ use crate::ops::RunnerAction;
 
 pub enum MenuTarget {
     Machine(String),
+    /// A machine page's ··· menu: what isn't on the page (install a runner, remove it).
+    MachineMore(String),
     /// A runner, by id ("beelink/beelink-01").
     Runner(String),
     /// A queued or running job, by GitHub id.
@@ -29,6 +31,8 @@ pub enum MenuTarget {
     Workspace(String),
     /// One of a machine's monitors.
     Display { machine: String, display: String },
+    /// A machine's apps' windows, to open one here.
+    Apps(String),
     /// The editors to open a machine's folder in.
     Editors { machine: String, path: String },
     /// A shared session's guests and link (by session id).
@@ -104,6 +108,8 @@ enum Action {
     EditPrompts,
     AddDisplay(String),
     ShowDisplay(String, String),
+    /// One of a machine's apps' windows, as a window of its own here.
+    OpenApp(String, crate::fleet::desktop::AppWindowInfo),
     RenameDisplay(String, String),
     RemoveDisplay(String, String),
     /// A monitor's size or scale.
@@ -271,6 +277,20 @@ impl Root {
                     let label = if m.vm.is_some() { "Destroy…" } else { "Remove from Muxin…" };
                     items.push(Item::Action { label: label.into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
                 }
+                items
+            }
+            MenuTarget::MachineMore(id) => {
+                let Some(m) = s.machines.iter().find(|m| &m.id == id) else { return Vec::new() };
+                let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(id.as_str()) && o.kind != "logs");
+                let install = "Install runner…";
+                let mut items = vec![match m.host.is_empty() || busy || m.is_down() {
+                    true => Item::Off { label: install.into(), glyph: Glyph::Icon("plus") },
+                    false => act(install, "plus", Action::InstallRunner(id.clone())),
+                }];
+                items.push(Item::Separator);
+                // A cloud machine or a VM Muxin made goes with its disk.
+                let label = if m.cloud.is_some() || m.vm.is_some() { "Destroy…" } else { "Remove from Muxin…" };
+                items.push(Item::Action { label: label.into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
                 items
             }
             MenuTarget::Runner(id) => {
@@ -464,6 +484,24 @@ impl Root {
                 items.push(Item::Action { label: "Stop sharing".into(), glyph: Glyph::Icon("power"), action: Action::ShareStop(share.id.clone()), danger: true });
                 items
             }
+            MenuTarget::Apps(machine) => {
+                let mut items = vec![Item::Note("Open in a window of its own".into())];
+                match self.app_windows.get(machine) {
+                    None | Some(None) => items.push(Item::Note("Looking for its apps…".into())),
+                    Some(Some(Err(e))) => items.push(Item::Note(e.clone())),
+                    Some(Some(Ok(list))) if list.is_empty() => items.push(Item::Note("No apps are open there.".into())),
+                    Some(Some(Ok(list))) => {
+                        for w in list {
+                            let label = match w.minimized {
+                                true => format!("{} (minimized)", w.title),
+                                false => w.title.clone(),
+                            };
+                            items.push(Item::Action { label, glyph: Glyph::Icon("monitor"), action: Action::OpenApp(machine.clone(), w.clone()), danger: false });
+                        }
+                    }
+                }
+                items
+            }
             MenuTarget::Editors { machine, path } => {
                 let mut items = vec![Item::Note("Open it in".into())];
                 items.extend(editor_items(&self.engine.settings().editor, machine, path, false));
@@ -614,6 +652,7 @@ impl Root {
             Action::FavoriteMachine(id, favorite) => self.set_favorite_machine(&id, favorite, cx),
             Action::AddDisplay(id) => self.show_add_display(id, window, cx),
             Action::ShowDisplay(machine, display) => self.show_display(machine, Some(display), window, cx),
+            Action::OpenApp(machine, app) => self.open_app_window(machine, app, cx),
             Action::RenameDisplay(machine, display) => self.show_rename(super::dialogs::RenameTarget::Display(machine, display), window, cx),
             Action::RemoveDisplay(machine, display) => self.remove_display(machine, display, window, cx),
             Action::SetDisplay(machine, display, size, scale) => self.set_display(machine, display, size, scale, window, cx),

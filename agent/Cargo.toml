@@ -23,7 +23,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macro
 
 # The desktop view (`screen`): X11 capture and input on Linux, JPEG frames.
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.13", features = ["xtest", "shm", "xfixes", "randr"] }
+x11rb = { version = "0.13", features = ["xtest", "shm", "xfixes", "randr", "composite"] }
 
 # The console in raw mode for `attach`, on Windows.
 [target.'cfg(windows)'.dependencies]
@@ -37,6 +37,10 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_RemoteDesktop",
   "Win32_System_DataExchange",
   "Win32_System_Memory",
+  # One app's window: its frame (DWM), its program, PrintWindow.
+  "Win32_Graphics_Dwm",
+  "Win32_System_Threading",
+  "Win32_Storage_Xps",
 ] }
 jpeg-encoder = "0.6"
 

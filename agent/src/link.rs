@@ -120,6 +120,9 @@ type Attached = Arc<Mutex<HashMap<u32, Sink>>>;
 struct Program {
     input: Box<dyn Write + Send>,
     stop: Stop,
+    /// A Mac's screen capture: it ends by itself, maybe later (see desktop.rs's
+    /// `captures`), and isn't killed for taking its time.
+    patient: bool,
 }
 
 enum Stop {
@@ -141,7 +144,7 @@ impl Program {
             let stream = stream?;
             let reader = stream.try_clone().map_err(|e| e.to_string())?;
             let writer = stream.try_clone().map_err(|e| e.to_string())?;
-            return Ok((Program { input: Box::new(writer), stop: Stop::Socket(stream) }, Box::new(reader)));
+            return Ok((Program { input: Box::new(writer), stop: Stop::Socket(stream), patient: false }, Box::new(reader)));
         }
         let exe = std::env::current_exe().map_err(|_| "can't find the agent".to_string())?;
         let log = std::fs::OpenOptions::new().create(true).append(true).open(crate::home_dir().join("screen.log"));
@@ -157,15 +160,29 @@ impl Program {
             let _ = child.kill();
             return Err("couldn't start it".into());
         };
-        Ok((Program { input: Box::new(stdin), stop: Stop::Child(child) }, Box::new(stdout)))
+        let patient = cfg!(target_os = "macos") && args.first().map(String::as_str) == Some("screen");
+        Ok((Program { input: Box::new(stdin), stop: Stop::Child(child), patient }, Box::new(stdout)))
     }
 
     fn close(self) {
         drop(self.input);
         match self.stop {
+            // Its input closed, it ends by itself, letting go of any key or
+            // button it holds down there (a ⌘ held to close its window, say).
+            // Killed only if it hasn't ended in a moment.
             Stop::Child(mut child) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                let grace = if self.patient { 3700 } else { 2 };
+                thread::spawn(move || {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(grace);
+                    while std::time::Instant::now() < deadline {
+                        if matches!(child.try_wait(), Ok(Some(_))) {
+                            return;
+                        }
+                        thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    let _ = child.kill();
+                    let _ = child.wait();
+                });
             }
             Stop::Socket(s) => {
                 let _ = s.shutdown(std::net::Shutdown::Both);
@@ -417,7 +434,7 @@ fn desktop(req: &Value, out: &Out, attached: &Attached) -> Value {
     let info = crate::gui::read_hello(&mut frames);
     if let Some(e) = info["error"].as_str() {
         program.close();
-        return json!({ "ok": false, "error": e });
+        return json!({ "ok": false, "error": e, "gone": info["gone"].as_bool() == Some(true) });
     }
     attached.lock().unwrap().insert(channel, Sink::Desktop(program));
     relay(out, attached, channel, frames);
@@ -433,6 +450,8 @@ fn relay(out: &Out, attached: &Attached, channel: u32, mut from: Box<dyn Read + 
     thread::spawn(move || {
         while let Ok((kind, frame)) = proto::read_frame(&mut from) {
             if send(&out, channel, kind, &frame).is_err() {
+                // Read to its end all the same: a program stuck writing never ends.
+                let _ = io::copy(&mut from, &mut io::sink());
                 break;
             }
         }

@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use windows_sys::Win32::Foundation::{LPARAM, RECT};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -63,52 +63,134 @@ pub fn displays() -> Value {
     json!({ "ok": true, "displays": out })
 }
 
-/// A display, captured with GDI.
+/// A display, or one app's window, captured with GDI.
 pub struct WinScreen {
+    /// What's shown, in desktop coordinates: a display, or the visible part of
+    /// an app's window.
     rect: RECT,
+    /// The app's window, when that's what's shown.
+    window: Option<AppWindow>,
     screen_dc: HDC,
     mem_dc: HDC,
     bitmap: HBITMAP,
     bits: *mut u8,
+    /// The bitmap's size: the display's, or the whole window's.
+    bits_size: (i32, i32),
     frame: Vec<u8>,
     held: Vec<u16>,
     buttons: Vec<u64>,
 }
 
+/// An app's window shown on its own (`window:<id>`, an id from `windows`).
+struct AppWindow {
+    hwnd: HWND,
+    /// The whole window on the desktop, as PrintWindow draws it: Windows 10
+    /// and 11 add invisible borders around what shows, to resize it by.
+    whole: RECT,
+    /// What the app was last told (see `meta`): the pointer over the window,
+    /// whether it's minimized; and its drag areas, from a thread that asks
+    /// Windows for them now and then (`drag_areas`), until `stop`.
+    cursor: &'static str,
+    minimized: Option<bool>,
+    drag: std::sync::Arc<std::sync::Mutex<Option<Vec<[i32; 4]>>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Where it was when a button went down: input maps from there until let
+    /// go, so an app moving its own window doesn't run from the pointer.
+    held_at: Option<(i32, i32)>,
+    /// Its size (whole) and whether it was maximized before the app first
+    /// resized it: so it's left again when the stream ends.
+    restore: Option<(i32, i32, bool)>,
+}
+
+impl AppWindow {
+    fn new(hwnd: HWND, whole: RECT) -> AppWindow {
+        let drag = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let id = hwnd as usize;
+        let size = move || {
+            let hwnd = id as HWND;
+            (unsafe { IsWindow(hwnd) } != 0).then(|| window_bounds(hwnd).map_or((0, 0), |(_, r)| (r.right - r.left, r.bottom - r.top)))
+        };
+        let areas = move || {
+            let hwnd = id as HWND;
+            (unsafe { IsIconic(hwnd) } == 0).then(|| drag_areas(hwnd)).flatten()
+        };
+        crate::desktop::watch_drag_areas(size, areas, Duration::from_secs(3), drag.clone(), stop.clone());
+        AppWindow { hwnd, whole, cursor: "", minimized: None, drag, stop, held_at: None, restore: None }
+    }
+}
+
+impl Drop for AppWindow {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Resized for its window in the app: back as it was.
+        if let Some((w, h, maximized)) = self.restore.filter(|_| unsafe { IsWindow(self.hwnd) } != 0) {
+            unsafe {
+                match maximized {
+                    true => ShowWindow(self.hwnd, SW_MAXIMIZE),
+                    false => SetWindowPos(self.hwnd, std::ptr::null_mut(), 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE),
+                };
+            }
+        }
+    }
+}
+
 impl WinScreen {
-    /// `display`: a monitor's number from `displays`, "all", or None for the main one.
+    /// `display`: a monitor's number from `displays`, "all", `window:<id>` for
+    /// an app's window, or None for the main monitor.
     pub fn open(display: Option<&str>) -> Result<WinScreen, String> {
         dpi_aware();
+        if let Some(id) = display.and_then(|d| d.strip_prefix("window:")) {
+            return Self::open_window(id);
+        }
         let ms = monitors();
         let rect = match display {
             Some("all") => virtual_screen(),
             Some(n) => ms.get(n.parse::<usize>().map_err(|_| format!("No display called {n}."))?.saturating_sub(1)).map(|m| m.1).ok_or_else(|| format!("No display called {n}."))?,
             None => ms.iter().find(|m| m.2).or(ms.first()).map(|m| m.1).unwrap_or_else(virtual_screen),
         };
-        let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
-        if w <= 0 || h <= 0 {
+        if rect.right <= rect.left || rect.bottom <= rect.top {
             return Err("Windows has no screen here (nobody signed in?).".into());
         }
+        Self::with(rect, None)
+    }
+
+    fn open_window(id: &str) -> Result<WinScreen, String> {
+        let closed = || crate::desktop::WINDOW_CLOSED.to_string();
+        let hwnd = id.parse::<usize>().map_err(|_| closed())? as HWND;
+        if unsafe { IsWindow(hwnd) } == 0 {
+            return Err(closed());
+        }
+        // Minimized, it draws nothing: bring it back.
+        if unsafe { IsIconic(hwnd) } != 0 {
+            unsafe { ShowWindow(hwnd, SW_RESTORE) };
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        let (whole, visible) = window_bounds(hwnd).ok_or_else(closed)?;
+        if visible.right <= visible.left || visible.bottom <= visible.top {
+            return Err("That window has no size.".into());
+        }
+        // (Not brought to the front: it's captured even when covered, and a
+        // click brings it. A screenshot changes nothing there.)
+        Self::with(visible, Some(AppWindow::new(hwnd, whole)))
+    }
+
+    fn with(rect: RECT, window: Option<AppWindow>) -> Result<WinScreen, String> {
+        let area = window.as_ref().map_or(rect, |w| w.whole);
+        let (w, h) = (area.right - area.left, area.bottom - area.top);
         unsafe {
             let screen_dc = GetDC(std::ptr::null_mut());
             if screen_dc.is_null() {
                 return Err("Can't reach the screen (nobody signed in to the desktop?).".into());
             }
             let mem_dc = CreateCompatibleDC(screen_dc);
-            let mut bmi: BITMAPINFO = std::mem::zeroed();
-            bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-            bmi.bmiHeader.biWidth = w;
-            bmi.bmiHeader.biHeight = -h; // top-down
-            bmi.bmiHeader.biPlanes = 1;
-            bmi.bmiHeader.biBitCount = 32;
-            bmi.bmiHeader.biCompression = BI_RGB;
-            let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-            let bitmap = CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
-            if bitmap.is_null() || bits.is_null() {
+            let Some((bitmap, bits)) = dib(mem_dc, w, h) else {
+                DeleteDC(mem_dc);
+                ReleaseDC(std::ptr::null_mut(), screen_dc);
                 return Err("Can't make room for the screen.".into());
-            }
-            SelectObject(mem_dc, bitmap as HGDIOBJ);
-            Ok(WinScreen { rect, screen_dc, mem_dc, bitmap, bits: bits as *mut u8, frame: vec![0; (w * h * 4) as usize], held: Vec::new(), buttons: Vec::new() })
+            };
+            let shown = ((rect.right - rect.left) * (rect.bottom - rect.top) * 4) as usize;
+            Ok(WinScreen { rect, window, screen_dc, mem_dc, bitmap, bits, bits_size: (w, h), frame: vec![0; shown], held: Vec::new(), buttons: Vec::new() })
         }
     }
 
@@ -116,8 +198,71 @@ impl WinScreen {
         ((self.rect.right - self.rect.left) as usize, (self.rect.bottom - self.rect.top) as usize)
     }
 
+    /// An app's window: its title and how much Windows scales it up (1.5 at
+    /// 150%), for the app to size its own window by.
+    pub fn info(&self) -> serde_json::Map<String, Value> {
+        let mut info = serde_json::Map::new();
+        if let Some(w) = &self.window {
+            info.insert("title".into(), title_of(w.hwnd).into());
+            info.insert("scale".into(), scale_of(w.hwnd).into());
+        }
+        info
+    }
+
+    /// An app's window: what changed for the app to know (see desktop.rs's `Screen::meta`).
+    pub fn meta(&mut self) -> Option<Value> {
+        let rect = self.rect;
+        let w = self.window.as_mut()?;
+        let mut changed = serde_json::Map::new();
+        let minimized = unsafe { IsIconic(w.hwnd) } != 0;
+        if w.minimized != Some(minimized) {
+            w.minimized = Some(minimized);
+            changed.insert("minimized".into(), minimized.into());
+        }
+        if let Some(kind) = pointer_over(rect).filter(|k| *k != w.cursor) {
+            w.cursor = kind;
+            changed.insert("cursor".into(), kind.into());
+        }
+        if let Some(drag) = w.drag.lock().unwrap().take() {
+            changed.insert("drag".into(), json!(drag));
+        }
+        (!changed.is_empty()).then_some(Value::Object(changed))
+    }
+
+    /// Follows an app's window as it moves and changes size; true when its size changed.
+    pub fn resized(&mut self) -> bool {
+        let Some(hwnd) = self.window.as_ref().map(|w| w.hwnd) else { return false };
+        if unsafe { IsIconic(hwnd) } != 0 {
+            return false;
+        }
+        let Some((whole, visible)) = window_bounds(hwnd) else { return false };
+        let (w, h) = (whole.right - whole.left, whole.bottom - whole.top);
+        if visible.right <= visible.left || visible.bottom <= visible.top || w <= 0 || h <= 0 {
+            return false;
+        }
+        if (w, h) != self.bits_size {
+            let Some((bitmap, bits)) = (unsafe { dib(self.mem_dc, w, h) }) else { return false };
+            unsafe { DeleteObject(self.bitmap as HGDIOBJ) };
+            (self.bitmap, self.bits, self.bits_size) = (bitmap, bits, (w, h));
+        }
+        let before = self.size();
+        self.rect = visible;
+        if let Some(win) = self.window.as_mut() {
+            win.whole = whole;
+        }
+        let (fw, fh) = self.size();
+        if (fw, fh) == before {
+            return false;
+        }
+        self.frame = vec![0; fw * fh * 4];
+        true
+    }
+
     /// The screen now, with the mouse pointer drawn in.
     pub fn grab(&mut self) -> Option<Option<&[u8]>> {
+        if let Some(win) = &self.window {
+            return self.grab_window(win.hwnd, win.whole);
+        }
         let (w, h) = self.size();
         unsafe {
             // Fails while the secure desktop is up (a UAC prompt, the lock
@@ -125,32 +270,76 @@ impl WinScreen {
             if BitBlt(self.mem_dc, 0, 0, w as i32, h as i32, self.screen_dc, self.rect.left, self.rect.top, SRCCOPY | CAPTUREBLT) == 0 {
                 return Some(None);
             }
-            let mut ci: CURSORINFO = std::mem::zeroed();
-            ci.cbSize = std::mem::size_of::<CURSORINFO>() as u32;
-            if GetCursorInfo(&mut ci) != 0 && ci.flags & CURSOR_SHOWING != 0 {
-                let mut ii: ICONINFO = std::mem::zeroed();
-                if GetIconInfo(ci.hCursor, &mut ii) != 0 {
-                    let (x, y) = (ci.ptScreenPos.x - self.rect.left - ii.xHotspot as i32, ci.ptScreenPos.y - self.rect.top - ii.yHotspot as i32);
-                    DrawIconEx(self.mem_dc, x, y, ci.hCursor, 0, 0, 0, std::ptr::null_mut(), DI_NORMAL);
-                    if !ii.hbmMask.is_null() {
-                        DeleteObject(ii.hbmMask as HGDIOBJ);
-                    }
-                    if !ii.hbmColor.is_null() {
-                        DeleteObject(ii.hbmColor as HGDIOBJ);
-                    }
-                }
-            }
+            self.draw_pointer(self.rect.left, self.rect.top);
             GdiFlush();
             std::ptr::copy_nonoverlapping(self.bits, self.frame.as_mut_ptr(), self.frame.len());
         }
         Some(Some(&self.frame))
     }
 
+    /// An app's window now. Uncovered, it's that part of the screen, so its
+    /// menus and dialogs show too; under another app's window, the window alone.
+    fn grab_window(&mut self, hwnd: HWND, whole: RECT) -> Option<Option<&[u8]>> {
+        if unsafe { IsWindow(hwnd) } == 0 {
+            return None;
+        }
+        if unsafe { IsIconic(hwnd) } != 0 {
+            return Some(None);
+        }
+        let (fw, fh) = self.size();
+        let (ix, iy) = ((self.rect.left - whole.left).max(0), (self.rect.top - whole.top).max(0));
+        unsafe {
+            let drawn = if !covered(hwnd) {
+                BitBlt(self.mem_dc, ix, iy, fw as i32, fh as i32, self.screen_dc, self.rect.left, self.rect.top, SRCCOPY | CAPTUREBLT)
+            } else {
+                windows_sys::Win32::Storage::Xps::PrintWindow(hwnd, self.mem_dc, PW_RENDERFULLCONTENT)
+            };
+            if drawn == 0 {
+                return Some(None);
+            }
+            // (No pointer drawn in: the app shows its own, shaped like this one; see `meta`.)
+            GdiFlush();
+            // The visible part, out of the whole window.
+            let (bw, bh) = (self.bits_size.0 as usize, self.bits_size.1 as usize);
+            let bits = std::slice::from_raw_parts(self.bits, bw * bh * 4);
+            let (ix, iy) = (ix as usize, iy as usize);
+            let w = fw.min(bw.saturating_sub(ix));
+            for row in 0..fh.min(bh.saturating_sub(iy)) {
+                let src = ((iy + row) * bw + ix) * 4;
+                self.frame[row * fw * 4..(row * fw + w) * 4].copy_from_slice(&bits[src..src + w * 4]);
+            }
+        }
+        Some(Some(&self.frame))
+    }
+
+    /// Draws the mouse pointer into the bitmap, whose top left is at (`left`, `top`) on the desktop.
+    unsafe fn draw_pointer(&self, left: i32, top: i32) {
+        unsafe {
+            let mut ci: CURSORINFO = std::mem::zeroed();
+            ci.cbSize = std::mem::size_of::<CURSORINFO>() as u32;
+            if GetCursorInfo(&mut ci) == 0 || ci.flags & CURSOR_SHOWING == 0 {
+                return;
+            }
+            let p = ci.ptScreenPos;
+            let mut ii: ICONINFO = std::mem::zeroed();
+            if GetIconInfo(ci.hCursor, &mut ii) != 0 {
+                DrawIconEx(self.mem_dc, p.x - left - ii.xHotspot as i32, p.y - top - ii.yHotspot as i32, ci.hCursor, 0, 0, 0, std::ptr::null_mut(), DI_NORMAL);
+                if !ii.hbmMask.is_null() {
+                    DeleteObject(ii.hbmMask as HGDIOBJ);
+                }
+                if !ii.hbmColor.is_null() {
+                    DeleteObject(ii.hbmColor as HGDIOBJ);
+                }
+            }
+        }
+    }
+
     /// The desktop's coordinates, as SendInput wants them (0..65535 across all screens).
     fn absolute(&self, e: &Value, frame: (usize, usize)) -> (i32, i32) {
         let (w, h) = self.size();
-        let x = self.rect.left as f64 + e["x"].as_f64().unwrap_or(0.) * w as f64 / frame.0 as f64;
-        let y = self.rect.top as f64 + e["y"].as_f64().unwrap_or(0.) * h as f64 / frame.1 as f64;
+        let (left, top) = self.window.as_ref().and_then(|w| w.held_at).unwrap_or((self.rect.left, self.rect.top));
+        let x = left as f64 + e["x"].as_f64().unwrap_or(0.) * w as f64 / frame.0 as f64;
+        let y = top as f64 + e["y"].as_f64().unwrap_or(0.) * h as f64 / frame.1 as f64;
         let v = virtual_screen();
         let nx = ((x - v.left as f64) * 65535. / ((v.right - v.left - 1).max(1)) as f64).round() as i32;
         let ny = ((y - v.top as f64) * 65535. / ((v.bottom - v.top - 1).max(1)) as f64).round() as i32;
@@ -158,7 +347,31 @@ impl WinScreen {
     }
 
     pub fn apply(&mut self, e: &Value, frame: (usize, usize)) {
-        match e["t"].as_str().unwrap_or("") {
+        let kind = e["t"].as_str().unwrap_or("");
+        if let Some(hwnd) = self.window.as_ref().map(|w| w.hwnd) {
+            let down = e["down"].as_bool().unwrap_or(false);
+            match kind {
+                // Clicks, the wheel and keys are for this window: bring it to
+                // the front first. Keys only go when it's there, never to another app.
+                "button" if down => {
+                    raise(hwnd);
+                    let at = (self.rect.left, self.rect.top);
+                    self.window.as_mut().map(|w| w.held_at.get_or_insert(at));
+                }
+                "scroll" => raise(hwnd),
+                "key" | "text" if down || kind == "text" => {
+                    raise(hwnd);
+                    if !crate::desktop::comes_to_front(|| in_front(hwnd)) {
+                        return;
+                    }
+                }
+                "resize" => return self.resize_window(hwnd, e),
+                // Its window in the app came back: so does it.
+                "restore" => return raise(hwnd),
+                _ => {}
+            }
+        }
+        match kind {
             "move" => {
                 let (x, y) = self.absolute(e, frame);
                 send(&[mouse(x, y, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)]);
@@ -187,6 +400,9 @@ impl WinScreen {
                 if down {
                     self.buttons.push(b);
                 }
+                if let Some(w) = self.window.as_mut().filter(|_| self.buttons.is_empty()) {
+                    w.held_at = None;
+                }
             }
             "scroll" => {
                 let (x, y) = self.absolute(e, frame);
@@ -203,8 +419,10 @@ impl WinScreen {
                 send(&events);
             }
             "text" => {
-                let mut events = Vec::new();
+                // A character at a time, a moment apart: apps miss some in one
+                // long burst (Windows 11's Notepad).
                 for unit in e["s"].as_str().unwrap_or("").encode_utf16() {
+                    let mut events = Vec::new();
                     match unit {
                         0x0a | 0x0d => {
                             events.push(key(VK_RETURN, 0, 0));
@@ -215,24 +433,23 @@ impl WinScreen {
                             events.push(key(VK_TAB, 0, KEYEVENTF_KEYUP));
                         }
                         u => {
-                            // The key that types it (with Shift, Ctrl, Alt as the layout
-                            // needs), as a keyboard would; else the character itself.
+                            // The key that types it, as a keyboard would, when it takes
+                            // no Shift, Ctrl or Alt; else the character itself (apps
+                            // read Shift as already up in a burst like this one).
                             let scan = unsafe { VkKeyScanW(u) };
-                            if scan != -1 && u < 0x80 {
+                            if scan != -1 && u < 0x80 && scan as u16 & 0x700 == 0 {
                                 let vk = (scan as u16) & 0xff;
-                                let mods: Vec<VIRTUAL_KEY> = [(0x100, VK_SHIFT), (0x200, VK_CONTROL), (0x400, VK_MENU)].iter().filter(|(bit, _)| scan as u16 & bit != 0).map(|(_, k)| *k).collect();
-                                events.extend(mods.iter().map(|m| key(*m, 0, 0)));
                                 events.push(key(vk, 0, 0));
                                 events.push(key(vk, 0, KEYEVENTF_KEYUP));
-                                events.extend(mods.iter().rev().map(|m| key(*m, 0, KEYEVENTF_KEYUP)));
                             } else {
                                 events.push(key(0, u, KEYEVENTF_UNICODE));
                                 events.push(key(0, u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
                             }
                         }
                     }
+                    send(&events);
+                    std::thread::sleep(Duration::from_millis(8));
                 }
-                send(&events);
             }
             "key" => {
                 let sym = e["keysym"].as_u64().unwrap_or(0) as u32;
@@ -251,6 +468,285 @@ impl WinScreen {
             _ => {}
         }
     }
+
+    /// Resizes an app's window to `w`×`h` (in 100% pixels: Windows scales
+    /// them up as it does the window), from the app's window being resized.
+    fn resize_window(&mut self, hwnd: HWND, e: &Value) {
+        let scale = scale_of(hwnd);
+        let screen = virtual_screen();
+        let want = |k: &str, min: f64, max: i32| (e[k].as_f64().unwrap_or(0.).max(min) * scale).round().min(max as f64) as i32;
+        let (w, h) = (want("w", 240., screen.right - screen.left), want("h", 160., screen.bottom - screen.top));
+        let Some((whole, visible)) = window_bounds(hwnd) else { return };
+        if let Some(win) = self.window.as_mut().filter(|w| w.restore.is_none()) {
+            win.restore = Some((whole.right - whole.left, whole.bottom - whole.top, unsafe { IsZoomed(hwnd) } != 0));
+        }
+        // The invisible borders come on top of what shows.
+        let (bw, bh) = ((whole.right - whole.left) - (visible.right - visible.left), (whole.bottom - whole.top) - (visible.bottom - visible.top));
+        unsafe {
+            // A maximized window keeps its size: make it an ordinary one first.
+            if IsZoomed(hwnd) != 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+            SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, w + bw, h + bh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+}
+
+/// A top-down 32-bit bitmap of `w`×`h` for `dc`, selected into it, and its pixels.
+unsafe fn dib(dc: HDC, w: i32, h: i32) -> Option<(HBITMAP, *mut u8)> {
+    unsafe {
+        let mut bmi: BITMAPINFO = std::mem::zeroed();
+        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h; // top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let bitmap = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+        if bitmap.is_null() || bits.is_null() {
+            return None;
+        }
+        SelectObject(dc, bitmap as HGDIOBJ);
+        Some((bitmap, bits as *mut u8))
+    }
+}
+
+// --- Apps' windows -----------------------------------------------------------
+
+/// A window's whole rectangle on the desktop, and the part of it that shows
+/// (without the invisible borders), in real pixels.
+fn window_bounds(hwnd: HWND) -> Option<(RECT, RECT)> {
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+    unsafe {
+        let mut whole: RECT = std::mem::zeroed();
+        if GetWindowRect(hwnd, &mut whole) == 0 {
+            return None;
+        }
+        let mut visible: RECT = std::mem::zeroed();
+        if DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS as u32, &mut visible as *mut RECT as _, std::mem::size_of::<RECT>() as u32) != 0 {
+            visible = whole;
+        }
+        Some((whole, visible))
+    }
+}
+
+/// Whether the window is the one in front, or one of its own (a dialog, a
+/// menu's window) is.
+fn in_front(hwnd: HWND) -> bool {
+    unsafe {
+        let front = GetForegroundWindow();
+        !front.is_null() && (front == hwnd || GetAncestor(front, GA_ROOTOWNER) == hwnd)
+    }
+}
+
+/// Whether another app's window lies over part of this one (its own menus,
+/// dialogs and tooltips don't count, nor click-through overlays).
+fn covered(hwnd: HWND) -> bool {
+    let Some((_, mine)) = window_bounds(hwnd) else { return false };
+    let process = |h: HWND| {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(h, &mut pid) };
+        pid
+    };
+    let own = process(hwnd);
+    let mut above = unsafe { GetWindow(hwnd, GW_HWNDPREV) };
+    while !above.is_null() {
+        let ex = unsafe { GetWindowLongPtrW(above, GWL_EXSTYLE) } as u32;
+        if unsafe { IsWindowVisible(above) } != 0 && ex & WS_EX_TRANSPARENT == 0 && !cloaked(above) && process(above) != own
+            && let Some((_, r)) = window_bounds(above)
+            && r.left < mine.right && mine.left < r.right && r.top < mine.bottom && mine.top < r.bottom
+        {
+            return true;
+        }
+        above = unsafe { GetWindow(above, GW_HWNDPREV) };
+    }
+    false
+}
+
+/// Whether Windows keeps the window out of sight (suspended Store apps, other
+/// virtual desktops' windows).
+fn cloaked(hwnd: HWND) -> bool {
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+    let mut cloaked = 0u32;
+    unsafe { DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED as u32, &mut cloaked as *mut u32 as _, 4) == 0 && cloaked != 0 }
+}
+
+/// Brings an app's window to the front, uncovered, so clicks and keys reach it.
+fn raise(hwnd: HWND) {
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        let front = in_front(hwnd) || SetForegroundWindow(hwnd) != 0;
+        if front && !covered(hwnd) {
+            return;
+        }
+        // Windows lets only some programs pick the window in front. Above the
+        // others it goes anyway, and a click on it then brings it in front.
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
+/// The shape of the pointer, when it's over `rect`: "arrow", "text", "hand",
+/// "ew", "ns", "nwse", "nesw", "move", "no", "crosshair", "wait".
+fn pointer_over(rect: RECT) -> Option<&'static str> {
+    static SHAPES: std::sync::OnceLock<Vec<(usize, &'static str)>> = std::sync::OnceLock::new();
+    let shapes = SHAPES.get_or_init(|| {
+        let shape = |id: windows_sys::core::PCWSTR| unsafe { LoadCursorW(std::ptr::null_mut(), id) } as usize;
+        vec![
+            (shape(IDC_ARROW), "arrow"),
+            (shape(IDC_IBEAM), "text"),
+            (shape(IDC_HAND), "hand"),
+            (shape(IDC_SIZEWE), "ew"),
+            (shape(IDC_SIZENS), "ns"),
+            (shape(IDC_SIZENWSE), "nwse"),
+            (shape(IDC_SIZENESW), "nesw"),
+            (shape(IDC_SIZEALL), "move"),
+            (shape(IDC_NO), "no"),
+            (shape(IDC_CROSS), "crosshair"),
+            (shape(IDC_WAIT), "wait"),
+            (shape(IDC_APPSTARTING), "wait"),
+        ]
+    });
+    let mut ci: CURSORINFO = unsafe { std::mem::zeroed() };
+    ci.cbSize = std::mem::size_of::<CURSORINFO>() as u32;
+    if unsafe { GetCursorInfo(&mut ci) } == 0 {
+        return None;
+    }
+    let p = ci.ptScreenPos;
+    if p.x < rect.left || p.x >= rect.right || p.y < rect.top || p.y >= rect.bottom {
+        return None;
+    }
+    // An app's own pointer: the arrow is the nearest thing.
+    Some(shapes.iter().find(|(h, _)| *h == ci.hCursor as usize).map_or("arrow", |(_, k)| *k))
+}
+
+/// The parts of the window's top that drag it (its title bar, without its
+/// buttons and tabs), as rectangles in its pixels: Windows is asked what's
+/// at each point of a grid there, as it asks when the mouse goes down.
+fn drag_areas(hwnd: HWND) -> Option<Vec<[i32; 4]>> {
+    let (_, r) = window_bounds(hwnd)?;
+    let scale = scale_of(hwnd);
+    let caption = |x: i32, y: i32| {
+        let at = (((r.top + y) as u32 & 0xffff) << 16 | ((r.left + x) as u32 & 0xffff)) as isize;
+        let mut what = 0usize;
+        let answered = unsafe { SendMessageTimeoutW(hwnd, WM_NCHITTEST, 0, at, SMTO_ABORTIFHUNG, 100, &mut what) } != 0;
+        answered.then_some(what as u32 == HTCAPTION)
+    };
+    crate::desktop::drag_grid(r.right - r.left, r.bottom - r.top, ((6. * scale).round() as i32).max(4), (60. * scale) as i32, caption)
+}
+
+fn title_of(hwnd: HWND) -> String {
+    let mut buf = [0u16; 512];
+    let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+/// How much Windows scales the window up (1.0 at 100%, 1.5 at 150%).
+fn scale_of(hwnd: HWND) -> f64 {
+    match unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) } {
+        0 => 1.,
+        dpi => dpi as f64 / 96.,
+    }
+}
+
+/// The name of the program a window belongs to ("notepad"). A Store app's
+/// window is ApplicationFrameHost's, holding the app's own window: that one's.
+fn program_of(hwnd: HWND) -> String {
+    let pid_of = |h: HWND| {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(h, &mut pid) };
+        pid
+    };
+    let host = pid_of(hwnd);
+    let name = process_name(host);
+    if !name.eq_ignore_ascii_case("ApplicationFrameHost") {
+        return name;
+    }
+    unsafe extern "system" fn each(child: HWND, data: LPARAM) -> i32 {
+        let (host, found) = unsafe { &mut *(data as *mut (u32, u32)) };
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(child, &mut pid) };
+        if pid != *host {
+            *found = pid;
+            return 0;
+        }
+        1
+    }
+    let mut search = (host, 0u32);
+    unsafe { EnumChildWindows(hwnd, Some(each), &mut search as *mut (u32, u32) as LPARAM) };
+    match search.1 {
+        0 => name,
+        app => process_name(app),
+    }
+}
+
+/// A process's program name ("notepad"), or "" when Windows won't say.
+fn process_name(pid: u32) -> String {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return String::new();
+        }
+        let mut buf = [0u16; 1024];
+        let mut n = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut n) != 0;
+        CloseHandle(process);
+        if !ok {
+            return String::new();
+        }
+        let path = String::from_utf16_lossy(&buf[..n as usize]);
+        std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+    }
+}
+
+/// A window Alt+Tab would list: shown, with a title, not a tool window or a
+/// window another owns (dialogs, menus), and not hidden away by Windows
+/// (suspended Store apps are "cloaked").
+fn is_app_window(hwnd: HWND) -> bool {
+    unsafe {
+        if IsWindowVisible(hwnd) == 0 || hwnd == GetShellWindow() {
+            return false;
+        }
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        if ex & WS_EX_APPWINDOW == 0 && (ex & WS_EX_TOOLWINDOW != 0 || !GetWindow(hwnd, GW_OWNER).is_null()) {
+            return false;
+        }
+    }
+    !cloaked(hwnd) && !title_of(hwnd).trim().is_empty()
+}
+
+/// `muxen-agent windows` on Windows: the apps' windows on the desktop, front
+/// first, each with the id to show it by (`window:<id>`).
+pub fn windows() -> Value {
+    dpi_aware();
+    unsafe extern "system" fn each(hwnd: HWND, data: LPARAM) -> i32 {
+        unsafe { (*(data as *mut Vec<HWND>)).push(hwnd) };
+        1
+    }
+    let mut all: Vec<HWND> = Vec::new();
+    unsafe { EnumWindows(Some(each), &mut all as *mut Vec<HWND> as LPARAM) };
+    let list: Vec<Value> = all
+        .into_iter()
+        .filter(|h| is_app_window(*h))
+        .map(|h| {
+            let r = window_bounds(h).map_or(RECT { left: 0, top: 0, right: 0, bottom: 0 }, |(_, visible)| visible);
+            json!({
+                "id": (h as usize).to_string(),
+                "title": title_of(h),
+                "app": program_of(h),
+                "width": r.right - r.left,
+                "height": r.bottom - r.top,
+                "minimized": unsafe { IsIconic(h) } != 0,
+                "front": in_front(h),
+            })
+        })
+        .collect();
+    json!({ "ok": true, "windows": list })
 }
 
 impl Drop for WinScreen {
@@ -588,7 +1084,7 @@ pub fn start_in_desktop(args: &[String]) -> Result<TcpStream, String> {
 const GUI_IDLE: Duration = Duration::from_secs(30 * 60);
 
 /// `muxen-agent gui-serve`, in the desktop session: runs what links ask for
-/// (`screen`, `clip`, `displays`) with each connection as the program's stdin
+/// (`screen`, `clip`, `displays`, `windows`) with each connection as the program's stdin
 /// and stdout. A connection sends the token from gui.port, then
 /// `{"run": [args]}`.
 pub fn gui_serve() -> i32 {
@@ -644,7 +1140,7 @@ pub fn gui_serve() -> i32 {
             let Some(req) = line(&mut conn).and_then(|l| serde_json::from_str::<Value>(&l).ok()) else { return };
             let args: Vec<String> = req["run"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
             // Only the programs that need the desktop session.
-            if !matches!(args.first().map(String::as_str), Some("screen" | "clip" | "displays" | "version")) {
+            if !matches!(args.first().map(String::as_str), Some("screen" | "clip" | "displays" | "windows" | "version")) {
                 return;
             }
             let _ = conn.set_read_timeout(None);

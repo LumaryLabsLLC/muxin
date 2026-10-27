@@ -408,6 +408,9 @@ pub struct Root {
     pub(super) offline_details: std::collections::HashSet<String>,
     /// The open right-click menu.
     pub(super) context_menu: Option<super::menu::ContextMenu>,
+    /// Apps' windows on machines, for the Apps menu: None while they're being
+    /// looked up, else the list or why there isn't one.
+    pub(super) app_windows: std::collections::HashMap<String, Option<Result<Vec<crate::fleet::desktop::AppWindowInfo>, String>>>,
     /// ⌘P / ⇧⌘P, while it's open.
     pub(super) palette: Option<super::palette::Palette>,
     /// Focus the root on the next render (the focused terminal went away).
@@ -597,6 +600,7 @@ impl Root {
             last_notice: None,
             refocus: false,
             context_menu: None,
+            app_windows: Default::default(),
             palette: None,
             window_active: false,
             ws_ui: WorkspaceUi::default(),
@@ -1494,6 +1498,12 @@ impl Root {
     /// Shows one of a machine's displays (None: its default one) on the desktop page.
     pub(super) fn show_display(&mut self, machine: String, display: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.pin_desktop(&machine, cx);
+        // Not open yet: open on that display from the start.
+        if !self.desktops.contains_key(&machine) {
+            let (engine, id, shown) = (self.engine.clone(), machine.clone(), display.clone());
+            let view = cx.new(|cx| super::desktop::DesktopView::showing(engine, id, shown, window, cx));
+            self.desktops.insert(machine.clone(), view);
+        }
         self.navigate(Route::Desktop(machine.clone()), window, cx);
         if let Some(view) = self.desktops.get(&machine).cloned() {
             view.update(cx, |v, cx| v.set_display(display, window, cx));
@@ -3153,6 +3163,18 @@ impl Root {
                     .into_any_element(),
             );
         }
+        // Its apps, each as a window of its own here.
+        if machine.is_some() && !self.snapshot.demo {
+            let mid = id.to_string();
+            extra.push(
+                Button::new("desktop-apps", "Apps")
+                    .style(ButtonStyle::Ghost)
+                    .icon("layout-grid")
+                    .tooltip("Open one of its apps in a window of its own")
+                    .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.show_apps(&mid, e.position(), cx)))
+                    .into_any_element(),
+            );
+        }
         extra.extend(vec![
             Button::new("desktop-window", "Open in window")
                 .style(ButtonStyle::Ghost)
@@ -3382,6 +3404,31 @@ impl Root {
                 super::menu::on_right_click(move || super::menu::MenuTarget::Display { machine: machine.clone(), display: display.clone() }, cx)
             })
             .on_click(cx.listener(move |this, _, window, cx| this.show_display(machine.clone(), Some(display.clone()), window, cx)))
+    }
+
+    /// The Apps menu for a machine: its apps' windows, looked up as it opens.
+    pub(super) fn show_apps(&mut self, machine_id: &str, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        self.app_windows.insert(machine_id.to_string(), None);
+        self.open_menu(super::menu::MenuTarget::Apps(machine_id.to_string()), position, cx);
+        let (engine, id) = (self.engine.clone(), machine_id.to_string());
+        let job = engine.runtime().spawn({
+            let (engine, id) = (engine.clone(), id.clone());
+            async move { engine.app_windows(&id).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let found = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                this.app_windows.insert(id, Some(found));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Opens one of a machine's apps' windows as a window of its own here.
+    pub(super) fn open_app_window(&mut self, machine_id: String, app: crate::fleet::desktop::AppWindowInfo, cx: &mut Context<Self>) {
+        let name = self.snapshot.machines.iter().find(|m| m.id == machine_id).map(|m| m.name.clone()).unwrap_or_else(|| machine_id.clone());
+        super::desktop::open_app_window(self.engine.clone(), machine_id, app, name, cx);
     }
 
     /// Moves a machine's desktop into a window of its own (and out of this one).

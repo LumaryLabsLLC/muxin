@@ -368,6 +368,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "machine_connection" => ok(api::machine_connection(engine, &args::<api::GitStatusRequest>(a)?.machine_id).await?),
         "desktop_input" => ok(api::desktop_input(engine, args(a)?).await?),
         "desktop_displays" => ok(json!({ "displays": api::desktop_displays(engine, args(a)?).await? })),
+        "desktop_windows" => ok(json!({ "windows": api::desktop_windows(engine, args(a)?).await? })),
         "desktop_add_display" => ok(api::desktop_add_display(engine, args(a)?).await?),
         "desktop_remove_display" => ok(api::desktop_remove_display(engine, args(a)?).await?),
         "desktop_set_display" => ok(api::desktop_set_display(engine, args(a)?).await?),
@@ -406,7 +407,7 @@ fn schema(properties: Value, required: &[&str]) -> Value {
 }
 
 const MACHINE_ID: &str = "Machine id (a slug like \"mac-studio\"; the display name also works).";
-const DISPLAY_ID: &str = "One of the machine's displays, by its id from desktop_displays. Default: the whole desktop (Linux) or the main display (a Mac).";
+const DISPLAY_ID: &str = "One of the machine's displays, by its id from desktop_displays, or one app's window as \"window:<id>\" (an id from desktop_windows). Default: the whole desktop (Linux) or the main display (a Mac).";
 const WORKSPACE_ID: &str = "Workspace id from workspace_create or workspace_list, e.g. \"ws-7f3a2c\".";
 const WS_PATH: &str = "Path relative to the workspace folder, e.g. \"src/main.rs\". Absolute paths and \"..\" escapes are rejected.";
 const SESSION_ID: &str = "Session id from session_list or session_start: \"<machine-id>/<name>\", e.g. \"beelink/claude-3f9a\". A bare name works when unique.";
@@ -1061,6 +1062,12 @@ pub fn tools() -> Vec<Value> {
             "annotations": annotations("List displays", true, false, true, false),
         }),
         json!({
+            "name": "desktop_windows",
+            "description": "The apps' windows on a machine's desktop (Windows, a Mac, or Linux on X11), front first: each with its id, title, program (`app`), size, and whether it's minimized or in front. Pass \"window:<id>\" as `display` to desktop_screenshot and desktop_input to see and use just that window (smaller pictures, even while it's covered; a minimized one is restored, and clicks or keys bring it to the front).",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
+            "annotations": annotations("List apps' windows", true, false, true, false),
+        }),
+        json!({
             "name": "desktop_add_display",
             "description": "Add a virtual monitor to a machine's desktop, like plugging in another screen (no screen needed): windows can move there, and you can screenshot and use it on its own (pass its id as `display`). Linux (X11) and macOS. On Linux it takes root: when sudo there wants a password, this fails and the user adds the monitor from the Muxin app, which asks for it. Stays until removed or the machine restarts. Only when asked.",
             "inputSchema": schema(json!({
@@ -1286,7 +1293,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 95);
+        assert_eq!(tools.len(), 96);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

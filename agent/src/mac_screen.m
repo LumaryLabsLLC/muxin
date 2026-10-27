@@ -8,6 +8,10 @@
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
+#import <ApplicationServices/ApplicationServices.h>
+
+// The CGWindowID behind an Accessibility window (private, long-standing).
+extern AXError _AXUIElementGetWindow(AXUIElementRef element, CGWindowID *window);
 
 typedef void (*muxen_frame_fn)(void *ctx, const uint8_t *bgra, size_t width, size_t height, size_t stride);
 
@@ -48,6 +52,11 @@ typedef void (*muxen_frame_fn)(void *ctx, const uint8_t *bgra, size_t width, siz
 
 static SCStream *muxen_stream;
 static MuxenOutput *muxen_output;
+static SCStreamConfiguration *muxen_config;
+// A window captured through its display (see `muxen_capture_window_start`):
+// where that display sits on the desktop, to place the window on it.
+static BOOL muxen_via_display;
+static CGPoint muxen_display_at;
 
 static void say(char *err, size_t len, NSString *what) {
     snprintf(err, len, "%s", what.UTF8String ? what.UTF8String : "unknown error");
@@ -182,26 +191,78 @@ int muxen_display_set_mode(uint32_t id, uint32_t w, uint32_t h, char *err, size_
     return failed;
 }
 
+/// What's shareable on the screen now, or nil (and why in `err`).
+static SCShareableContent *shareable(BOOL on_screen_only, int timeout, char *err, size_t errlen) {
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    __block SCShareableContent *content = nil;
+    __block NSError *failure = nil;
+    [SCShareableContent getShareableContentExcludingDesktopWindows:NO
+                                               onScreenWindowsOnly:on_screen_only
+                                                 completionHandler:^(SCShareableContent *c, NSError *e) {
+                                                     content = c;
+                                                     failure = e;
+                                                     dispatch_semaphore_signal(done);
+                                                 }];
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, timeout * NSEC_PER_SEC)) != 0) {
+        say(err, errlen, @"the screen didn't answer");
+        return nil;
+    }
+    if (!content) {
+        say(err, errlen, failure ? failure.localizedDescription : @"no screen to show");
+    }
+    return content;
+}
+
+/// Streams what `filter` shows (of it, `source` when it isn't null) at
+/// width×height, waiting up to `timeout` seconds for it to start. 0 when
+/// it's going; otherwise 1 and why in `err`.
+static int start_stream(SCContentFilter *filter, CGRect source, int fps, size_t width, size_t height, BOOL cursor, int timeout, muxen_frame_fn fn, void *ctx, char *err, size_t errlen) {
+    SCStreamConfiguration *config = [SCStreamConfiguration new];
+    config.width = width;
+    config.height = height;
+    if (!CGRectIsNull(source)) {
+        config.sourceRect = source;
+    }
+    config.pixelFormat = kCVPixelFormatType_32BGRA;
+    config.minimumFrameInterval = CMTimeMake(1, fps > 0 ? fps : 30);
+    config.showsCursor = cursor;
+    config.queueDepth = 3;
+    muxen_config = config;
+    muxen_output = [MuxenOutput new];
+    muxen_output.fn = fn;
+    muxen_output.ctx = ctx;
+    muxen_stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:muxen_output];
+    NSError *added = nil;
+    dispatch_queue_t queue = dispatch_queue_create("muxen.screen", DISPATCH_QUEUE_SERIAL);
+    if (![muxen_stream addStreamOutput:muxen_output type:SCStreamOutputTypeScreen sampleHandlerQueue:queue error:&added]) {
+        say(err, errlen, added ? added.localizedDescription : @"couldn't capture the screen");
+        return 1;
+    }
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    __block NSError *start = nil;
+    [muxen_stream startCaptureWithCompletionHandler:^(NSError *e) {
+        start = e;
+        dispatch_semaphore_signal(done);
+    }];
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, timeout * NSEC_PER_SEC)) != 0) {
+        say(err, errlen, @"the screen capture didn't start");
+        [muxen_stream stopCaptureWithCompletionHandler:nil];
+        muxen_stream = nil;
+        return 1;
+    }
+    if (start) {
+        say(err, errlen, start.localizedDescription);
+        return 1;
+    }
+    return 0;
+}
+
 /// Starts streaming a display (0: the main one) at width×height. 0 when it's
 /// going; otherwise 1 and why in `err`.
 int muxen_capture_start(uint32_t id, int fps, size_t width, size_t height, muxen_frame_fn fn, void *ctx, char *err, size_t errlen) {
     @autoreleasepool {
-        dispatch_semaphore_t done = dispatch_semaphore_create(0);
-        __block SCShareableContent *content = nil;
-        __block NSError *failure = nil;
-        [SCShareableContent getShareableContentExcludingDesktopWindows:NO
-                                                   onScreenWindowsOnly:YES
-                                                     completionHandler:^(SCShareableContent *c, NSError *e) {
-                                                         content = c;
-                                                         failure = e;
-                                                         dispatch_semaphore_signal(done);
-                                                     }];
-        if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) != 0) {
-            say(err, errlen, @"the screen didn't answer");
-            return 1;
-        }
+        SCShareableContent *content = shareable(YES, 10, err, errlen);
         if (!content) {
-            say(err, errlen, failure ? failure.localizedDescription : @"no screen to show");
             return 1;
         }
         CGDirectDisplayID want = id ? id : CGMainDisplayID();
@@ -219,38 +280,329 @@ int muxen_capture_start(uint32_t id, int fps, size_t width, size_t height, muxen
             return 1;
         }
         SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
-        SCStreamConfiguration *config = [SCStreamConfiguration new];
-        config.width = width;
-        config.height = height;
-        config.pixelFormat = kCVPixelFormatType_32BGRA;
-        config.minimumFrameInterval = CMTimeMake(1, fps > 0 ? fps : 30);
-        config.showsCursor = YES;
-        config.queueDepth = 3;
-        muxen_output = [MuxenOutput new];
-        muxen_output.fn = fn;
-        muxen_output.ctx = ctx;
-        muxen_stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:muxen_output];
-        NSError *added = nil;
-        dispatch_queue_t queue = dispatch_queue_create("muxen.screen", DISPATCH_QUEUE_SERIAL);
-        if (![muxen_stream addStreamOutput:muxen_output type:SCStreamOutputTypeScreen sampleHandlerQueue:queue error:&added]) {
-            say(err, errlen, added ? added.localizedDescription : @"couldn't capture the screen");
-            return 1;
-        }
-        __block NSError *start = nil;
-        [muxen_stream startCaptureWithCompletionHandler:^(NSError *e) {
-            start = e;
-            dispatch_semaphore_signal(done);
-        }];
-        if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) != 0) {
-            say(err, errlen, @"the screen capture didn't start");
-            return 1;
-        }
-        if (start) {
-            say(err, errlen, start.localizedDescription);
-            return 1;
-        }
-        return 0;
+        return start_stream(filter, CGRectNull, fps, width, height, YES, 10, fn, ctx, err, errlen);
     }
+}
+
+/// Starts streaming one window on its own (even while it's covered) at
+/// width×height, without the pointer (the app shows its own). 0 when it's
+/// going; 2 when the window is gone; otherwise 1 and why in `err`.
+int muxen_capture_window_start(uint32_t window_id, int fps, size_t width, size_t height, muxen_frame_fn fn, void *ctx, char *err, size_t errlen) {
+    @autoreleasepool {
+        SCShareableContent *content = shareable(NO, 5, err, errlen);
+        if (!content) {
+            return 1;
+        }
+        SCWindow *window = nil;
+        for (SCWindow *w in content.windows) {
+            if (w.windowID == window_id) {
+                window = w;
+            }
+        }
+        if (!window) {
+            return 2;
+        }
+        SCContentFilter *alone = [[SCContentFilter alloc] initWithDesktopIndependentWindow:window];
+        if (start_stream(alone, CGRectNull, fps, width, height, NO, 6, fn, ctx, err, errlen) == 0) {
+            return 0;
+        }
+        // ScreenCaptureKit sometimes never starts a lone window: the same
+        // window through its display then, every other window left out (as
+        // the desktop view captures, so still whole while covered).
+        CGPoint middle = CGPointMake(CGRectGetMidX(window.frame), CGRectGetMidY(window.frame));
+        SCDisplay *display = nil;
+        for (SCDisplay *d in content.displays) {
+            if (CGRectContainsPoint(d.frame, middle)) {
+                display = d;
+            }
+        }
+        if (!display) {
+            return 1;
+        }
+        SCContentFilter *through = [[SCContentFilter alloc] initWithDisplay:display includingWindows:@[ window ]];
+        muxen_via_display = YES;
+        muxen_display_at = display.frame.origin;
+        CGRect source = CGRectOffset(window.frame, -display.frame.origin.x, -display.frame.origin.y);
+        return start_stream(through, source, fps, width, height, NO, 8, fn, ctx, err, errlen);
+    }
+}
+
+/// Follows the window shown as it moves (x, y) and changes size (w×h points,
+/// pw×ph pixels of frame).
+void muxen_capture_follow(double x, double y, double w, double h, size_t pw, size_t ph) {
+    if (!muxen_stream || !muxen_config) {
+        return;
+    }
+    BOOL resized = muxen_config.width != pw || muxen_config.height != ph;
+    if (!resized && !muxen_via_display) {
+        return;
+    }
+    muxen_config.width = pw;
+    muxen_config.height = ph;
+    if (muxen_via_display) {
+        muxen_config.sourceRect = CGRectMake(x - muxen_display_at.x, y - muxen_display_at.y, w, h);
+    }
+    [muxen_stream updateConfiguration:muxen_config completionHandler:nil];
+}
+
+// ---------------------------------------------------------------------------
+// Apps' windows: the list, one window's place and size, and acting on one
+// through Accessibility (bringing it to the front, resizing it).
+
+/// The apps' windows on screen, front first, as JSON:
+/// [{"id", "title", "app", "pid", "x", "y", "width", "height", "scale"}] (points).
+size_t muxen_windows_json(char *buf, size_t len) {
+    @autoreleasepool {
+        CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+        if (!list) {
+            return 0;
+        }
+        NSMutableArray *out = [NSMutableArray array];
+        for (NSDictionary *w in (__bridge NSArray *)list) {
+            CGRect r;
+            if ([w[(id)kCGWindowLayer] intValue] != 0 || [w[(id)kCGWindowAlpha] doubleValue] <= 0 ||
+                !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)w[(id)kCGWindowBounds], &r) || r.size.width < 60 || r.size.height < 40) {
+                continue;
+            }
+            NSString *app = w[(id)kCGWindowOwnerName] ?: @"";
+            NSString *title = w[(id)kCGWindowName] ?: @"";
+            NSScreen *on = NSScreen.mainScreen;
+            for (NSScreen *screen in NSScreen.screens) {
+                NSRect f = screen.frame;
+                CGFloat top = NSMaxY(NSScreen.screens.firstObject.frame) - NSMaxY(f);
+                if (CGRectContainsPoint(CGRectMake(f.origin.x, top, f.size.width, f.size.height), CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r)))) {
+                    on = screen;
+                }
+            }
+            [out addObject:@{
+                @"id" : w[(id)kCGWindowNumber],
+                @"title" : title.length ? title : app,
+                @"app" : app,
+                @"pid" : w[(id)kCGWindowOwnerPID],
+                @"x" : @(r.origin.x),
+                @"y" : @(r.origin.y),
+                @"width" : @(r.size.width),
+                @"height" : @(r.size.height),
+                @"scale" : @(on.backingScaleFactor),
+            }];
+        }
+        CFRelease(list);
+        NSData *json = [NSJSONSerialization dataWithJSONObject:out options:0 error:nil];
+        if (json.length < len) {
+            memcpy(buf, json.bytes, json.length);
+            buf[json.length] = 0;
+        }
+        return json.length;
+    }
+}
+
+/// One window: its place and size (points, top left of the main display at
+/// 0, 0, as for input), its owner, and whether it's on screen. 0 when it's gone.
+int muxen_window_info(uint32_t window_id, double *x, double *y, double *w, double *h, int32_t *pid, int *on_screen) {
+    @autoreleasepool {
+        CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, window_id);
+        if (!list) {
+            return 0;
+        }
+        NSArray *found = (__bridge NSArray *)list;
+        int ok = 0;
+        if (found.count > 0) {
+            NSDictionary *info = found.firstObject;
+            CGRect r;
+            if (CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)info[(id)kCGWindowBounds], &r)) {
+                *x = r.origin.x;
+                *y = r.origin.y;
+                *w = r.size.width;
+                *h = r.size.height;
+                *pid = [info[(id)kCGWindowOwnerPID] intValue];
+                *on_screen = [info[(id)kCGWindowIsOnscreen] boolValue] ? 1 : 0;
+                ok = 1;
+            }
+        }
+        CFRelease(list);
+        return ok;
+    }
+}
+
+/// A window's title, or its app's name when it has none.
+size_t muxen_window_title(uint32_t window_id, char *buf, size_t len) {
+    @autoreleasepool {
+        CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, window_id);
+        if (!list) {
+            if (len) {
+                buf[0] = 0;
+            }
+            return 0;
+        }
+        NSDictionary *info = ((__bridge NSArray *)list).firstObject;
+        NSString *title = [info[(id)kCGWindowName] length] ? info[(id)kCGWindowName] : (info[(id)kCGWindowOwnerName] ?: @"");
+        snprintf(buf, len, "%s", title.UTF8String ?: "");
+        CFRelease(list);
+        return strlen(buf);
+    }
+}
+
+/// How many pixels a point is on the display at (x, y) (points, as for input).
+double muxen_scale_at(double x, double y) {
+    @autoreleasepool {
+        CGFloat top = NSMaxY(NSScreen.screens.firstObject.frame);
+        for (NSScreen *screen in NSScreen.screens) {
+            NSRect f = screen.frame;
+            if (CGRectContainsPoint(CGRectMake(f.origin.x, top - NSMaxY(f), f.size.width, f.size.height), CGPointMake(x, y))) {
+                return screen.backingScaleFactor;
+            }
+        }
+        return NSScreen.mainScreen.backingScaleFactor ?: 1;
+    }
+}
+
+/// Where the pointer is (points, as for input).
+void muxen_pointer(double *x, double *y) {
+    CGEventRef e = CGEventCreate(NULL);
+    CGPoint p = e ? CGEventGetLocation(e) : CGPointZero;
+    if (e) {
+        CFRelease(e);
+    }
+    *x = p.x;
+    *y = p.y;
+}
+
+/// The Accessibility element of window `id` of app `pid` (retained), or NULL.
+static AXUIElementRef ax_window(uint32_t window_id, int32_t pid) {
+    AXUIElementRef app = AXUIElementCreateApplication(pid);
+    CFArrayRef windows = NULL;
+    AXUIElementRef found = NULL;
+    if (AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, (CFTypeRef *)&windows) == kAXErrorSuccess && windows) {
+        for (CFIndex i = 0; i < CFArrayGetCount(windows); i++) {
+            AXUIElementRef w = (AXUIElementRef)CFArrayGetValueAtIndex(windows, i);
+            CGWindowID wid = 0;
+            if (_AXUIElementGetWindow(w, &wid) == kAXErrorSuccess && wid == window_id) {
+                found = (AXUIElementRef)CFRetain(w);
+                break;
+            }
+        }
+        CFRelease(windows);
+    }
+    CFRelease(app);
+    return found;
+}
+
+/// Whether app `pid` is the one in front.
+int muxen_app_in_front(int32_t pid) {
+    return NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == pid ? 1 : 0;
+}
+
+/// Brings window `id` of app `pid` to the front (out of the Dock when minimized).
+void muxen_window_raise(uint32_t window_id, int32_t pid) {
+    @autoreleasepool {
+        AXUIElementRef w = ax_window(window_id, pid);
+        if (w) {
+            AXUIElementSetAttributeValue(w, kAXMinimizedAttribute, kCFBooleanFalse);
+            AXUIElementPerformAction(w, kAXRaiseAction);
+            CFRelease(w);
+        }
+        [[NSRunningApplication runningApplicationWithProcessIdentifier:pid] activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+    }
+}
+
+/// Resizes window `id` of app `pid` to w×h points.
+void muxen_window_resize(uint32_t window_id, int32_t pid, double w, double h) {
+    @autoreleasepool {
+        AXUIElementRef win = ax_window(window_id, pid);
+        if (!win) {
+            return;
+        }
+        CGSize size = CGSizeMake(w, h);
+        AXValueRef value = AXValueCreate(kAXValueCGSizeType, &size);
+        AXUIElementSetAttributeValue(win, kAXSizeAttribute, value);
+        CFRelease(value);
+        CFRelease(win);
+    }
+}
+
+/// What's at (x, y) (points) in app `pid`, near its window's top: 1 when a
+/// press there drags the window (the title bar, an empty toolbar, a label, the
+/// empty part of an Electron app's own title bar), 0 when it's something to
+/// click (anything that can be pressed or typed in), -1 when the app doesn't say.
+int muxen_drags_at(int32_t pid, double x, double y) {
+    AXUIElementRef app = AXUIElementCreateApplication(pid);
+    AXUIElementSetMessagingTimeout(app, 0.1);
+    AXUIElementRef element = NULL;
+    int answer = -1;
+    if (AXUIElementCopyElementAtPosition(app, x, y, &element) == kAXErrorSuccess && element) {
+        answer = 0;
+        CFStringRef role = NULL;
+        if (AXUIElementCopyAttributeValue(element, kAXRoleAttribute, (CFTypeRef *)&role) == kAXErrorSuccess && role) {
+            NSString *r = (__bridge NSString *)role;
+            NSArray *still = @[ @"AXWindow", @"AXToolbar", @"AXGroup", @"AXUnknown", @"AXStaticText", @"AXWebArea", @"AXSplitGroup", @"AXImage", @"AXLayoutArea" ];
+            if ([still containsObject:r]) {
+                CFArrayRef actions = NULL;
+                BOOL pressable = NO;
+                if (AXUIElementCopyActionNames(element, &actions) == kAXErrorSuccess && actions) {
+                    pressable = CFArrayContainsValue(actions, CFRangeMake(0, CFArrayGetCount(actions)), kAXPressAction);
+                    CFRelease(actions);
+                }
+                answer = pressable ? 0 : 1;
+            }
+            CFRelease(role);
+        }
+        CFRelease(element);
+    }
+    CFRelease(app);
+    return answer;
+}
+
+/// The shape of the pointer: "arrow", "text", "hand", "ew", "ns",
+/// "crosshair", "move" (the system's own shapes, told apart by size and hot spot).
+const char *muxen_cursor_kind(void) {
+    @autoreleasepool {
+        NSCursor *now = NSCursor.currentSystemCursor;
+        if (!now) {
+            return "arrow";
+        }
+        // The arrow first: others drawn on it (with a badge) share its size and hot spot.
+        struct { NSCursor *cursor; const char *kind; } shapes[] = {
+            {NSCursor.arrowCursor, "arrow"},
+            {NSCursor.IBeamCursor, "text"},
+            {NSCursor.pointingHandCursor, "hand"},
+            {NSCursor.resizeLeftRightCursor, "ew"},
+            {NSCursor.resizeUpDownCursor, "ns"},
+            {NSCursor.crosshairCursor, "crosshair"},
+            {NSCursor.closedHandCursor, "move"},
+        };
+        for (size_t i = 0; i < sizeof shapes / sizeof shapes[0]; i++) {
+            if (NSEqualPoints(now.hotSpot, shapes[i].cursor.hotSpot) && NSEqualSizes(now.image.size, shapes[i].cursor.image.size)) {
+                return shapes[i].kind;
+            }
+        }
+        return "arrow";
+    }
+}
+
+/// Keeps the stream going but next to nothing: a tiny frame a second (see
+/// `linger` in desktop.rs).
+void muxen_capture_idle(void) {
+    if (!muxen_stream || !muxen_config) {
+        return;
+    }
+    muxen_config.width = 16;
+    muxen_config.height = 16;
+    muxen_config.minimumFrameInterval = CMTimeMake(1, 1);
+    [muxen_stream updateConfiguration:muxen_config completionHandler:nil];
+}
+
+/// Stops the stream and waits a moment for ScreenCaptureKit to let it go.
+void muxen_capture_stop(void) {
+    if (!muxen_stream) {
+        return;
+    }
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    [muxen_stream stopCaptureWithCompletionHandler:^(NSError *e) {
+        (void)e;
+        dispatch_semaphore_signal(done);
+    }];
+    dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+    muxen_stream = nil;
 }
 
 /// Whether the stream stopped on its own (the display went away, permission was taken back).

@@ -99,11 +99,12 @@ fn run(mut conn: UnixStream) {
     } else {
         let _ = child.kill();
     }
-    let _ = child.wait();
-    // The other side reads to the end: tell it this is the end. (The thread
+    // The other side reads to the end: tell it this is the end, before the
+    // program has gone (a Mac's capture may linger a while). (The thread
     // above holds the socket open, so dropping ours alone doesn't, and a
     // program that answers once, like `displays`, would leave it waiting.)
     let _ = conn.shutdown(std::net::Shutdown::Write);
+    let _ = child.wait();
 }
 
 #[cfg(unix)]

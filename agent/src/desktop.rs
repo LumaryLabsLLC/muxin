@@ -117,6 +117,22 @@ mod drag_tests {
     }
 }
 
+/// Whether an app's window is in front, or comes there in a moment (`front`
+/// asked every 20 ms, up to 300): a key typed just as it's brought there
+/// waits for it rather than being dropped.
+pub(crate) fn comes_to_front(mut front: impl FnMut() -> bool) -> bool {
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    loop {
+        if front() {
+            return true;
+        }
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// HELLO for a screen that couldn't open: why (and whether it's an app's window that's gone).
 fn refused(e: String) -> i32 {
     hello(&serde_json::json!({ "gone": e == WINDOW_CLOSED, "error": e }));
@@ -440,7 +456,7 @@ fn stream(mut screen: impl Screen, fps: u32, quality: u8, max_width: u32, tiles:
     let mut soft = vec![false; fw.div_ceil(TILE) * fh.div_ceil(TILE)];
     let mut changed_at = Instant::now();
     let mut stdout = std::io::stdout().lock();
-    loop {
+    let code = loop {
         // Input first, until it's time for a frame; a frame soon after input
         // shows its effect without waiting a whole tick.
         match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
@@ -453,10 +469,7 @@ fn stream(mut screen: impl Screen, fps: u32, quality: u8, max_width: u32, tiles:
                 next = next.min(Instant::now() + Duration::from_millis(12));
                 continue;
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                screen.linger();
-                return 0;
-            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break 0,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         next = Instant::now() + tick;
@@ -480,18 +493,18 @@ fn stream(mut screen: impl Screen, fps: u32, quality: u8, max_width: u32, tiles:
                 }
             }
             if crate::proto::write_frame(&mut stdout, META, &serde_json::to_vec(&meta).unwrap_or_default()).and_then(|_| stdout.flush()).is_err() {
-                return 0;
+                break 0;
             }
         }
         let src = match screen.grab() {
-            None => return 1,
+            None => break 1,
             Some(None) => None,
-            Some(Some(src)) if src.len() < sw * sh * 4 => return 1,
+            Some(Some(src)) if src.len() < sw * sh * 4 => break 1,
             Some(Some(src)) => Some(src),
         };
         let Some(src) = src else {
             if refine && !send_sharp(&mut stdout, prev.as_deref(), (fw, fh), &mut soft, changed_at, workers) {
-                return 0;
+                break 0;
             }
             continue;
         };
@@ -545,7 +558,7 @@ fn stream(mut screen: impl Screen, fps: u32, quality: u8, max_width: u32, tiles:
         });
         if patches.is_empty() {
             if refine && !send_sharp(&mut stdout, prev.as_deref(), (fw, fh), &mut soft, changed_at, workers) {
-                return 0;
+                break 0;
             }
             continue;
         }
@@ -572,14 +585,32 @@ fn stream(mut screen: impl Screen, fps: u32, quality: u8, max_width: u32, tiles:
             crate::proto::write_frame(&mut stdout, FRAME, &msg)
         };
         if sent.and_then(|_| stdout.flush()).is_err() {
-            return 0;
+            break 0;
         }
         // What the app has now, to compare the next frame with.
         match &mut prev {
             Some(p) => std::mem::swap(p, &mut cur),
             None => prev = Some(cur.clone()),
         }
+    };
+    ended(&mut screen, code)
+}
+
+/// The stream is over, however it ended (the app closed it, the window
+/// closed, the capture stopped): the app is told first (its end of the pipe
+/// closes), then what's left is done (`linger`: a window goes back to its
+/// size; a Mac's capture waits for this Mac's others, whichever way it ended).
+fn ended(screen: &mut impl Screen, code: i32) -> i32 {
+    #[cfg(unix)]
+    unsafe {
+        let null = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
+        if null >= 0 {
+            libc::dup2(null, 1);
+            libc::close(null);
+        }
     }
+    screen.linger();
+    code
 }
 
 /// A TILES message: `[width][height][count]`, then each `[x][y][w][h][len: u32][jpeg]`.
@@ -1260,7 +1291,7 @@ mod x11 {
                     }
                     "key" | "text" if down || kind == "text" => {
                         self.raise(&win);
-                        in_front(&self.conn, self.root, &win.atoms, win.client)
+                        super::comes_to_front(|| in_front(&self.conn, self.root, &win.atoms, win.client))
                     }
                     "resize" => {
                         self.resize_window(&mut win, e);
@@ -1848,7 +1879,7 @@ mod mac {
                     }
                     "key" | "text" if down || kind == "text" => {
                         self.raise(&win);
-                        (unsafe { muxen_app_in_front(win.pid) }) == 1
+                        super::comes_to_front(|| unsafe { muxen_app_in_front(win.pid) } == 1)
                     }
                     "resize" => {
                         let (w, h) = (e["w"].as_f64().unwrap_or(0.).max(200.), e["h"].as_f64().unwrap_or(0.).max(120.));

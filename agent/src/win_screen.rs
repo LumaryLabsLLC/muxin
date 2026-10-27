@@ -361,7 +361,7 @@ impl WinScreen {
                 "scroll" => raise(hwnd),
                 "key" | "text" if down || kind == "text" => {
                     raise(hwnd);
-                    if !in_front(hwnd) {
+                    if !crate::desktop::comes_to_front(|| in_front(hwnd)) {
                         return;
                     }
                 }

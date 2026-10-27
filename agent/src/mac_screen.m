@@ -354,6 +354,9 @@ void muxen_capture_follow(double x, double y, double w, double h, size_t pw, siz
 size_t muxen_windows_json(char *buf, size_t len) {
     @autoreleasepool {
         CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+        if (!list) {
+            return 0;
+        }
         NSMutableArray *out = [NSMutableArray array];
         for (NSDictionary *w in (__bridge NSArray *)list) {
             CGRect r;
@@ -398,6 +401,9 @@ size_t muxen_windows_json(char *buf, size_t len) {
 int muxen_window_info(uint32_t window_id, double *x, double *y, double *w, double *h, int32_t *pid, int *on_screen) {
     @autoreleasepool {
         CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, window_id);
+        if (!list) {
+            return 0;
+        }
         NSArray *found = (__bridge NSArray *)list;
         int ok = 0;
         if (found.count > 0) {
@@ -422,6 +428,12 @@ int muxen_window_info(uint32_t window_id, double *x, double *y, double *w, doubl
 size_t muxen_window_title(uint32_t window_id, char *buf, size_t len) {
     @autoreleasepool {
         CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, window_id);
+        if (!list) {
+            if (len) {
+                buf[0] = 0;
+            }
+            return 0;
+        }
         NSDictionary *info = ((__bridge NSArray *)list).firstObject;
         NSString *title = [info[(id)kCGWindowName] length] ? info[(id)kCGWindowName] : (info[(id)kCGWindowOwnerName] ?: @"");
         snprintf(buf, len, "%s", title.UTF8String ?: "");

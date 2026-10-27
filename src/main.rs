@@ -656,6 +656,8 @@ enum DesktopCommand {
     Input(DesktopInputArgs),
     /// List the machine's monitors, virtual ones included
     Displays(MachineArgs),
+    /// List the apps' windows on the machine's desktop (show one with --display window:<id>)
+    Windows(MachineArgs),
     /// Add a virtual monitor (like plugging in another screen)
     Add(DesktopAddArgs),
     /// Remove a virtual monitor Muxin added
@@ -2285,6 +2287,19 @@ fn desktop(cmd: DesktopCommand, runtime: &tokio::runtime::Runtime) -> u8 {
                     .map(|d| {
                         let tags = [d.main.then_some("main"), d.is_virtual.then_some("virtual")].into_iter().flatten().collect::<Vec<_>>().join(", ");
                         format!("{:<16} {:<20} {:>5}×{:<5} at {},{}{}\n", d.id, d.name, d.width, d.height, d.x, d.y, if tags.is_empty() { String::new() } else { format!("  ({tags})") })
+                    })
+                    .collect::<String>()
+            })
+        }
+        DesktopCommand::Windows(a) => {
+            let req = api::MachineRequest { machine_id: a.machine_id };
+            run(runtime, &a.agent, async move |e| api::desktop_windows(&e, req).await, |windows| {
+                windows
+                    .iter()
+                    .map(|w| {
+                        let tags = [w.front.then_some("in front"), w.minimized.then_some("minimized")].into_iter().flatten().collect::<Vec<_>>().join(", ");
+                        let size = format!("{}×{}", w.width, w.height);
+                        format!("window:{:<12} {:<11} {:<14} {}{}\n", w.id, size, w.app, w.title, if tags.is_empty() { String::new() } else { format!("  ({tags})") })
                     })
                     .collect::<String>()
             })

@@ -226,6 +226,7 @@ The MCP server has these tools:
 | `machine_connection`, `direct_connection` | How a machine is reached (direct, ssh, which network, Tailscale's view); pair it for direct connections. |
 | `desktop_screenshot`, `desktop_input` | Look at a machine's screen (or one monitor of it); click, type and scroll there. |
 | `desktop_displays`, `desktop_add_display`, `desktop_remove_display`, `desktop_set_display` | A machine's monitors; add or remove virtual ones, change their resolution or scale. |
+| `desktop_windows` | A machine's apps' windows, to see and use just one (`display: "window:<id>"`). |
 | `log_sources`, `logs_read` | A machine's logs: its system log, files, containers and services, and their last lines. |
 | `machine_services`, `service_action` | A machine's services, containers, images and Compose projects (with CPU and memory); start, stop, restart, enable or disable one. |
 | `docker_run`, `docker_pull`, `compose_action` | Run a container, pull an image, bring a Compose project up or down (or start, stop, restart one of its services). |
@@ -481,6 +482,13 @@ muxin desktop add beelink --size 2560x1440         # another monitor, "Display 2
 muxin desktop shot beelink --display DisplayPort-0 # a screenshot of just that one
 muxin desktop set beelink HDMI-A-0 --size 3840x2160 --scale 2  # 4K, things twice as big
 muxin desktop remove beelink DisplayPort-0
+```
+
+**Apps in windows of their own.** Above a machine's desktop, **Apps** lists the apps open there (Windows, Macs, and Linux on X11). Pick one, and it opens here as a window of its own, at its size there, with nothing around it but its own title bar: drag that to move the window, double-click it to zoom. The pointer takes the app's shapes (a text cursor over text, a hand over links). Click and type as usual: the app comes to the front there first, so keys never land in another app. Resize either window and the other follows; minimize or close the app there and its window here does the same. Once the picture is still, it's sent again sharp. While nothing covers the app there, its menus and dialogs show too. On a Mac, an app's menus stay in the menu bar there.
+
+```sh
+muxin desktop windows win11                        # its apps' windows
+muxin desktop shot win11 --display window:1312130  # a screenshot of just one
 ```
 
 - **Macs** ask once, on their own screen, to allow `muxen-agent` under Privacy & Security › Screen Recording (to see it) and Accessibility (to control it). The screen goes over ssh to the agent's background service in your session there, so no other network permission is needed. Release builds sign the agent with a Developer ID, so the permissions survive updates.

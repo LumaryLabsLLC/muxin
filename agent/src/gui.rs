@@ -61,7 +61,7 @@ fn run(mut conn: UnixStream) {
     let Ok(req) = crate::proto::read_line(&mut conn) else { return };
     let args: Vec<String> = req["run"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
     // Only the programs that need the session.
-    if !matches!(args.first().map(String::as_str), Some("screen" | "clip" | "displays" | "display-mode" | "vdisplay")) {
+    if !matches!(args.first().map(String::as_str), Some("screen" | "clip" | "displays" | "windows" | "display-mode" | "vdisplay")) {
         return;
     }
     // A virtual display's holder outlives the connection: start it, say its id.
@@ -92,8 +92,18 @@ fn run(mut conn: UnixStream) {
         let _ = io::copy(&mut from_link, &mut stdin);
     });
     let _ = io::copy(&mut stdout, &mut conn);
-    let _ = child.kill();
+    // A Mac's screen capture ends by itself, maybe a while later (see
+    // desktop.rs's `captures`): read it to the end rather than kill it.
+    if cfg!(target_os = "macos") && args.first().map(String::as_str) == Some("screen") {
+        let _ = io::copy(&mut stdout, &mut io::sink());
+    } else {
+        let _ = child.kill();
+    }
     let _ = child.wait();
+    // The other side reads to the end: tell it this is the end. (The thread
+    // above holds the socket open, so dropping ours alone doesn't, and a
+    // program that answers once, like `displays`, would leave it waiting.)
+    let _ = conn.shutdown(std::net::Shutdown::Write);
 }
 
 #[cfg(unix)]

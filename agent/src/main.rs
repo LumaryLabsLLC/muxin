@@ -75,6 +75,10 @@ fn main() {
             println!("{}", win_screen::displays());
             0
         }
+        Some("windows") => {
+            println!("{}", desktop::windows());
+            0
+        }
         #[cfg(windows)]
         Some("gui-serve") => win_screen::gui_serve(),
         #[cfg(target_os = "macos")]

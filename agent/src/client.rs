@@ -94,6 +94,14 @@ pub fn handle(req: &Value) -> Value {
         "displays" => windows_displays(),
         #[cfg(windows)]
         "display_create" | "display_remove" | "display_rename" | "display_set" => json!({ "ok": false, "error": "Muxen can't add or change monitors on Windows yet." }),
+        // Apps' windows, to show one on its own (`window:<id>` as a display).
+        #[cfg(windows)]
+        "windows" => match crate::win_screen::in_desktop_session() {
+            true => crate::win_screen::windows(),
+            false => in_desktop(&["windows"], "Windows didn't list its windows."),
+        },
+        #[cfg(unix)]
+        "windows" => crate::displays::in_session(&["windows".to_string()]).unwrap_or_else(|e| json!({ "ok": false, "error": e })),
         "log_sources" => crate::logs::sources(),
         "logs_read" => crate::logs::read(&req),
         "services" => crate::services::list(&req),
@@ -133,14 +141,21 @@ fn windows_displays() -> Value {
     if crate::win_screen::in_desktop_session() {
         return crate::win_screen::displays();
     }
-    let mut stream = match crate::win_screen::start_in_desktop(&["displays".to_string()]) {
+    in_desktop(&["displays"], "Windows didn't list its monitors.")
+}
+
+/// What `muxen-agent <args>` prints, run in the signed-in desktop session.
+#[cfg(windows)]
+fn in_desktop(args: &[&str], failed: &str) -> Value {
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let mut stream = match crate::win_screen::start_in_desktop(&args) {
         Ok(s) => s,
         Err(e) => return json!({ "ok": false, "error": e }),
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let mut text = String::new();
     let _ = stream.read_to_string(&mut text);
-    serde_json::from_str(text.trim()).unwrap_or_else(|_| json!({ "ok": false, "error": "Windows didn't list its monitors." }))
+    serde_json::from_str(text.trim()).unwrap_or_else(|_| json!({ "ok": false, "error": failed }))
 }
 
 /// Titles the user gave sessions, by session name (`~/.muxen/titles.json`).

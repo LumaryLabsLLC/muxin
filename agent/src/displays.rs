@@ -152,7 +152,7 @@ fn query() -> Result<Vec<Value>, String> {
 }
 
 /// Runs `muxen-agent <args>` where it can see the screens, for its JSON reply.
-fn in_session(args: &[String]) -> Result<Value, String> {
+pub(crate) fn in_session(args: &[String]) -> Result<Value, String> {
     let out = if crate::gui::needed() {
         let mut stream = crate::gui::connect(args)?;
         let mut text = String::new();
@@ -164,7 +164,7 @@ fn in_session(args: &[String]) -> Result<Value, String> {
         let output = Command::new(exe).args(args).envs(env).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
         String::from_utf8_lossy(&output.stdout).into_owned()
     };
-    serde_json::from_str(out.trim()).map_err(|_| "Couldn't read the displays.".to_string())
+    serde_json::from_str(out.trim()).map_err(|_| "The desktop session didn't answer.".to_string())
 }
 
 /// `muxen-agent displays`: prints the displays as JSON (run in the desktop session).

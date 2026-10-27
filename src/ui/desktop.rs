@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use super::kit::{self, Button, ButtonStyle, spinner};
 use super::theme::ActiveTheme;
 use crate::fleet::Engine;
-use crate::fleet::desktop::{FRAME, INPUT, TILES, keysym};
+use crate::fleet::desktop::{FRAME, INPUT, META, TILES, keysym};
 use crate::fleet::link::Link;
 use crate::share::guest;
 
@@ -42,8 +42,9 @@ enum State {
 }
 
 enum Msg {
-    /// The stream is up: its channel, frame size, and how it travels.
-    Ready(Arc<Remote>, u32, u32, String, Option<String>),
+    /// The stream is up: its channel, frame size, how it travels, a note, and
+    /// what else the machine said about it.
+    Ready(Arc<Remote>, u32, u32, String, Option<String>, Value),
     /// The screen picture changed (see `Canvas`).
     Changed,
     /// The stream ended: why, and whether it may well work again in a moment
@@ -53,6 +54,10 @@ enum Msg {
     NoScreen(String),
     /// The monitor asked for is gone: showing the default one instead.
     Gone,
+    /// The app's window shown was closed there: why.
+    Closed(String),
+    /// What changed about the app's window shown (see `apply_meta`).
+    Meta(Value),
 }
 
 /// The machine's screen as last received: patches land here as they arrive,
@@ -73,6 +78,16 @@ pub const NATIVE: u32 = 16384;
 
 /// Monitor sizes with a short name, offered when the monitor has them.
 const SIZES: [((u32, u32), &str); 4] = [((1280, 720), "720p"), ((1920, 1080), "1080p"), ((2560, 1440), "1440p"), ((3840, 2160), "4K")];
+
+/// An app's window shown on its own (a `window:<id>` display), as its stream
+/// describes it.
+#[derive(Clone)]
+pub struct AppShown {
+    pub title: String,
+    /// Frame pixels per point: how much its machine scales it up (2 at
+    /// 200%), less how much the stream scales it down (on a slow network).
+    pub scale: f32,
+}
 
 /// The desktop's channel: on the machine's link, or on a share.
 enum Remote {
@@ -108,8 +123,24 @@ pub struct DesktopView {
     can_control: bool,
     /// A shared desktop's quality ("low" to "max", see share::host).
     quality: &'static str,
-    /// One of the machine's displays (None: the whole desktop, or a Mac's main display).
+    /// One of the machine's displays (None: the whole desktop, or a Mac's
+    /// main display), or an app's window (`window:<id>`).
     display: Option<String>,
+    /// That app's window, once its stream started; and the size last asked
+    /// of it there (points), so a resize asks once.
+    app: Option<AppShown>,
+    asked: Option<(f32, f32)>,
+    /// It was closed there.
+    closed: bool,
+    /// The pointer's shape over it, the parts of it that drag this window
+    /// (frame pixels: x, y, w, h), whether it's minimized there, and whether
+    /// this window is being dragged (that press's release isn't the app's).
+    pointer: gpui::CursorStyle,
+    drag: Vec<[f32; 4]>,
+    minimized: bool,
+    moving: bool,
+    /// Until when an app's window says how to close it (its first few times).
+    hint: Option<Instant>,
     /// The frame width asked for (None: native on a local network, else 1080p).
     width: Option<u32>,
     /// How the stream travels ("Direct · Local network").
@@ -170,18 +201,25 @@ impl Focusable for DesktopView {
 
 impl DesktopView {
     pub fn new(engine: Arc<Engine>, machine_id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::make(engine, machine_id, None, "medium", window, cx)
+        Self::make(engine, machine_id, None, None, "medium", window, cx)
+    }
+
+    /// Showing one of the machine's displays, or an app's window
+    /// (`window:<id>`), from the start (not the default one first: two
+    /// captures starting at once on a Mac can leave one never starting).
+    pub fn showing(engine: Arc<Engine>, machine_id: String, display: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::make(engine, machine_id, None, display, "medium", window, cx)
     }
 
     /// A desktop someone shared with you: input goes there only while they
     /// let you control it (`set_control`).
     pub fn shared(engine: Arc<Engine>, joined: Arc<guest::Joined>, mac: bool, quality: &'static str, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut view = Self::make(engine, String::new(), Some(joined), quality, window, cx);
+        let mut view = Self::make(engine, String::new(), Some(joined), None, quality, window, cx);
         view.mac = mac;
         view
     }
 
-    fn make(engine: Arc<Engine>, machine_id: String, shared: Option<Arc<guest::Joined>>, quality: &'static str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn make(engine: Arc<Engine>, machine_id: String, shared: Option<Arc<guest::Joined>>, display: Option<String>, quality: &'static str, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let can_control = shared.as_ref().is_none_or(|j| j.can_control());
         let mut view = DesktopView {
             engine,
@@ -190,6 +228,14 @@ impl DesktopView {
             can_control,
             quality,
             display: None,
+            app: None,
+            asked: None,
+            closed: false,
+            pointer: gpui::CursorStyle::Arrow,
+            drag: Vec::new(),
+            minimized: false,
+            moving: false,
+            hint: None,
             width: None,
             via: String::new(),
             canvas: Arc::new(std::sync::Mutex::new(Canvas::default())),
@@ -225,6 +271,7 @@ impl DesktopView {
         };
         view.platform = view.engine.current().machines.iter().find(|m| m.id == view.machine).map(|m| m.platform.clone()).unwrap_or_default();
         view.mac = view.platform.starts_with("darwin");
+        view.display = display;
         view.start(window, cx);
         if view.shared.is_some() {
             let blur = cx.on_focus_out(&view.focus, window, |this, _, _, _| this.let_go());
@@ -237,6 +284,9 @@ impl DesktopView {
         let away = cx.observe_window_activation(window, |this, window, _| {
             if !window.is_window_active() {
                 this.let_go();
+            } else if std::mem::take(&mut this.minimized) && this.shows_window() {
+                // Its window here came back: so does the app's there.
+                this.send(json!({ "t": "restore" }));
             }
         });
         view._subscriptions = vec![blur, away];
@@ -317,10 +367,118 @@ impl DesktopView {
         self.display.as_deref()
     }
 
+    /// Whether it shows an app's window rather than a display.
+    pub fn shows_window(&self) -> bool {
+        self.display.as_deref().is_some_and(|d| d.starts_with("window:"))
+    }
+
+    /// The app's window shown, once its stream has started.
+    pub fn app(&self) -> Option<&AppShown> {
+        self.app.as_ref()
+    }
+
+    /// Whether the app's window shown was closed there.
+    pub fn closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Whether the picture is up (not connecting, reconnecting or failed).
+    pub fn live(&self) -> bool {
+        matches!(self.state, State::Live) && self.frame.is_some() && self.offline.is_none()
+    }
+
+    /// The size last asked of the app's window there (points).
+    pub fn asked(&self) -> Option<(f32, f32)> {
+        self.asked
+    }
+
+    /// What changed about the app's window shown: its pointer's shape, the
+    /// parts of it that drag this window, whether it was minimized there.
+    fn apply_meta(&mut self, meta: &Value, window: &mut Window) {
+        if let Some(kind) = meta["cursor"].as_str() {
+            self.pointer = pointer_style(kind);
+        }
+        if let Some(rects) = meta["drag"].as_array() {
+            self.drag = rects
+                .iter()
+                .filter_map(|r| {
+                    let r = r.as_array()?;
+                    let n = |i: usize| r.get(i).and_then(Value::as_f64).map(|v| v as f32);
+                    Some([n(0)?, n(1)?, n(2)?, n(3)?])
+                })
+                .collect();
+        }
+        if let Some(minimized) = meta["minimized"].as_bool() {
+            self.minimized = minimized;
+            if minimized && self.shows_window() {
+                window.minimize_window();
+            }
+        }
+    }
+
+    /// Whether a press here drags this window: an empty part of the app's
+    /// own title bar.
+    fn drags_window(&self, p: Point<Pixels>) -> bool {
+        self.shows_window()
+            && self.can_control
+            && self.at(p).is_some_and(|(x, y)| {
+                let (x, y) = (x as f32, y as f32);
+                self.drag.iter().any(|r| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3])
+            })
+    }
+
+    /// The app's window's size in points (as big as it looks there).
+    pub fn app_size(&self) -> Option<(f32, f32)> {
+        let app = self.app.as_ref().filter(|_| self.size.0 > 0 && self.size.1 > 0)?;
+        Some((self.size.0 as f32 / app.scale, self.size.1 as f32 / app.scale))
+    }
+
+    /// An app's window has nothing of ours around it: its first few times, a
+    /// moment saying how to close it.
+    fn show_close_hint(&mut self, cx: &mut Context<Self>) {
+        const TIMES: u32 = 3;
+        if cx.global::<super::theme::Appearance>().close_hints >= TIMES {
+            return;
+        }
+        super::theme::remember(cx, |a| a.close_hints += 1);
+        let shown = Duration::from_secs(5);
+        self.hint = Some(Instant::now() + shown);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(shown).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
+    /// How many screen pixels here each of the app window's pixels takes, when
+    /// that's a whole number above one (it's at 100% there, on a Retina screen
+    /// here): its picture is then enlarged that much, each pixel a sharp block,
+    /// rather than smoothed into its neighbours as it's drawn.
+    fn crisp(&self, window: &Window) -> Option<u32> {
+        let app = self.app.as_ref().filter(|_| self.shows_window())?;
+        let m = window.scale_factor() / app.scale;
+        let whole = m.round();
+        (whole >= 2. && (m - whole).abs() < 0.05).then_some(whole as u32)
+    }
+
+    /// Resizes the app's window there to fill the space it's drawn in here
+    /// (after this window was resized).
+    pub fn fit_app(&mut self) {
+        let (Some(have), Some(area)) = (self.app_size(), self.area.get()) else { return };
+        let want = (f32::from(area.size.width).round(), f32::from(area.size.height).round());
+        let near = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 4. && (a.1 - b.1).abs() < 4.;
+        if near(want, have) || self.asked.is_some_and(|a| near(a, want)) {
+            return;
+        }
+        self.asked = Some(want);
+        self.send(json!({ "t": "resize", "w": want.0, "h": want.1 }));
+    }
+
     /// Shows another of the machine's displays: a new stream.
     pub fn set_display(&mut self, display: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         if display != self.display {
             self.display = display;
+            (self.app, self.asked) = (None, None);
             self.retries = 0;
             // Not the last monitor's picture while the new one comes.
             if let Some(old) = self.frame.take() {
@@ -416,7 +574,7 @@ impl DesktopView {
                     }
                 };
                 let (w, h) = (reply["width"].as_u64().unwrap_or(0) as u32, reply["height"].as_u64().unwrap_or(0) as u32);
-                let _ = tx.unbounded_send(Msg::Ready(Arc::new(Remote::Shared(joined, channel)), w, h, "Shared".into(), None));
+                let _ = tx.unbounded_send(Msg::Ready(Arc::new(Remote::Shared(joined, channel)), w, h, "Shared".into(), None, reply));
                 while let Some((kind, bytes)) = frames.recv().await {
                     if kind != TILES && kind != FRAME {
                         continue;
@@ -441,7 +599,12 @@ impl DesktopView {
                 }
                 // Its monitors as they are now (one may have been added, removed
                 // or resized since), for the picker; a gone one falls back to the default.
-                if let Ok(displays) = engine.displays(&machine_id).await {
+                // (An app's window isn't one of them.)
+                let displays = match display.starts_with("window:") {
+                    true => None,
+                    false => engine.displays(&machine_id).await.ok(),
+                };
+                if let Some(displays) = displays {
                     if !display.is_empty() && display != "all" && !displays.iter().any(|d| d.id == display) {
                         display.clear();
                         let _ = tx.unbounded_send(Msg::Gone);
@@ -460,21 +623,36 @@ impl DesktopView {
                     return;
                 };
                 let network = link.network();
-                // Full resolution on a local network; 1080p further away.
-                let width = wanted.unwrap_or(if matches!(network, Some("Local network" | "This computer")) { NATIVE } else { 1920 });
+                // Full resolution on a local network; further away, 1080p (an app's
+                // window: up to 4K wide, as a big one on a Retina Mac is).
+                let far = if display.starts_with("window:") { 3840 } else { 1920 };
+                let width = wanted.unwrap_or(if matches!(network, Some("Local network" | "This computer")) { NATIVE } else { far });
                 let via = [Some(if link.transport() == "direct" { "Direct" } else { "Over ssh" }), network].into_iter().flatten().collect::<Vec<_>>().join(" · ");
                 let (channel, mut frames) = link.open_channel();
                 let request = json!({ "op": "desktop", "channel": channel, "fps": 30, "quality": 78, "max_width": width, "tiles": true, "display": display });
-                match link.request(request, Duration::from_secs(20)).await {
+                let (asked, what) = (Instant::now(), format!("{} {} (channel {channel}, {via})", spec.name, if display.is_empty() { "desktop" } else { display.as_str() }));
+                tracing::info!("desktop {what}: asking");
+                // (A Mac's window may take a second try at starting: see mac_screen.m.)
+                let reply = link.request(request, Duration::from_secs(30)).await;
+                match &reply {
+                    Ok(r) if r["ok"].as_bool() == Some(true) => tracing::info!("desktop {what}: ready after {:?}", asked.elapsed()),
+                    Ok(r) => tracing::info!("desktop {what}: refused after {:?}: {}", asked.elapsed(), r["error"]),
+                    Err(e) => tracing::info!("desktop {what}: no answer after {:?}: {e}", asked.elapsed()),
+                }
+                match reply {
                     Ok(r) if r["ok"].as_bool() == Some(true) => {
                         let (w, h) = (r["width"].as_u64().unwrap_or(0) as u32, r["height"].as_u64().unwrap_or(0) as u32);
                         let note = r["note"].as_str().map(str::to_string);
-                        let _ = tx.unbounded_send(Msg::Ready(Arc::new(Remote::Link(link.clone(), channel)), w, h, format!("{via}|{width}"), note));
+                        let _ = tx.unbounded_send(Msg::Ready(Arc::new(Remote::Link(link.clone(), channel)), w, h, format!("{via}|{width}"), note, r));
                     }
                     Ok(r) => {
                         link.close_channel(channel);
                         let why = r["error"].as_str().unwrap_or("The machine can't show its desktop.").to_string();
-                        let _ = tx.unbounded_send(if r["no_session"].as_bool() == Some(true) { Msg::NoScreen(why) } else { Msg::Ended(why, false) });
+                        let _ = tx.unbounded_send(match (r["no_session"].as_bool(), r["gone"].as_bool()) {
+                            (Some(true), _) => Msg::NoScreen(why),
+                            (_, Some(true)) => Msg::Closed(why),
+                            _ => Msg::Ended(why, false),
+                        });
                         return;
                     }
                     Err(e) => {
@@ -483,7 +661,17 @@ impl DesktopView {
                         return;
                     }
                 }
+                let mut pictured = false;
                 while let Some((kind, bytes)) = frames.recv().await {
+                    if kind == META {
+                        if let Ok(meta) = serde_json::from_slice::<Value>(&bytes)
+                            && tx.unbounded_send(Msg::Meta(meta)).is_err()
+                        {
+                            tracing::info!("desktop {what}: closed here");
+                            return;
+                        }
+                        continue;
+                    }
                     if kind != TILES && kind != FRAME {
                         continue;
                     }
@@ -492,11 +680,16 @@ impl DesktopView {
                     let changed = tokio::task::spawn_blocking(move || if kind == TILES { paint_tiles(&canvas, &bytes) } else { paint_frame(&canvas, &bytes) })
                         .await
                         .unwrap_or(false);
+                    if changed && !std::mem::replace(&mut pictured, true) {
+                        tracing::info!("desktop {what}: first picture after {:?}", asked.elapsed());
+                    }
                     // One draw request at a time; the view takes the newest picture.
                     if changed && !pending.swap(true, std::sync::atomic::Ordering::AcqRel) && tx.unbounded_send(Msg::Changed).is_err() {
+                        tracing::info!("desktop {what}: closed here");
                         return;
                     }
                 }
+                tracing::info!("desktop {what}: the machine ended it after {:?}", asked.elapsed());
                 let _ = tx.unbounded_send(Msg::Ended("The desktop stream stopped.".into(), true));
             });
         }
@@ -510,8 +703,13 @@ impl DesktopView {
                 let alive = this.update_in(cx, |this, window, cx| {
                     for msg in batch {
                         match msg {
-                            Msg::Ready(remote, w, h, via, note) => {
+                            Msg::Ready(remote, w, h, via, note, info) => {
                                 this.note = note;
+                                if this.shows_window() {
+                                    let scale = info["scale"].as_f64().filter(|s| *s > 0.).unwrap_or(1.);
+                                    let shrunk = w as f64 / info["screen_width"].as_f64().filter(|s| *s > 0.).unwrap_or(w as f64);
+                                    this.app = Some(AppShown { title: info["title"].as_str().unwrap_or_default().to_string(), scale: (scale * shrunk) as f32 });
+                                }
                                 this.remote = Some(remote);
                                 this.size = (w, h);
                                 this.state = State::Live;
@@ -525,8 +723,16 @@ impl DesktopView {
                                     let c = this.canvas.lock().unwrap();
                                     image::RgbaImage::from_raw(c.w, c.h, c.data.clone())
                                 };
-                                if let Some(picture) = picture {
+                                if let Some(mut picture) = picture {
+                                    // An app's window changes size as it's resized there.
+                                    this.size = picture.dimensions();
                                     this.frames += 1;
+                                    if this.frames == 1 && this.shows_window() {
+                                        this.show_close_hint(cx);
+                                    }
+                                    if let Some(m) = this.crisp(window) {
+                                        picture = enlarge(picture, m);
+                                    }
                                     let image = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(picture)]));
                                     // Only the newest picture matters; free the one it replaces.
                                     if let Some(old) = this.frame.replace(image) {
@@ -535,6 +741,13 @@ impl DesktopView {
                                 }
                             }
                             Msg::Gone => this.display = None,
+                            Msg::Meta(meta) => this.apply_meta(&meta, window),
+                            Msg::Closed(why) => {
+                                this.remote = None;
+                                this.resuming = false;
+                                this.closed = true;
+                                this.state = State::Ended(why);
+                            }
                             Msg::NoScreen(why) => {
                                 this.remote = None;
                                 this.resuming = false;
@@ -761,6 +974,43 @@ impl DesktopView {
     }
 }
 
+/// A picture `m` times as big, each pixel an m×m block (see `DesktopView::crisp`).
+fn enlarge(picture: image::RgbaImage, m: u32) -> image::RgbaImage {
+    let (w, h) = picture.dimensions();
+    let src = picture.as_raw();
+    let mut out = Vec::with_capacity((w * h * m * m * 4) as usize);
+    let mut row = Vec::with_capacity((w * m * 4) as usize);
+    for y in 0..h as usize {
+        row.clear();
+        for px in src[y * w as usize * 4..(y + 1) * w as usize * 4].as_chunks::<4>().0 {
+            for _ in 0..m {
+                row.extend_from_slice(px);
+            }
+        }
+        for _ in 0..m {
+            out.extend_from_slice(&row);
+        }
+    }
+    image::RgbaImage::from_raw(w * m, h * m, out).unwrap_or(picture)
+}
+
+/// The pointer for a shape an app's window has there (see agent/src/desktop.rs).
+fn pointer_style(kind: &str) -> gpui::CursorStyle {
+    use gpui::CursorStyle::*;
+    match kind {
+        "text" => IBeam,
+        "hand" => PointingHand,
+        "ew" => ResizeLeftRight,
+        "ns" => ResizeUpDown,
+        "nwse" => ResizeUpLeftDownRight,
+        "nesw" => ResizeUpRightDownLeft,
+        "move" => ClosedHand,
+        "no" => OperationNotAllowed,
+        "crosshair" => Crosshair,
+        _ => Arrow,
+    }
+}
+
 /// Paints a TILES message into the canvas: `[w][h][count]`, then each
 /// `[x][y][w][h][len: u32][jpeg]`. Patches decode side by side.
 fn paint_tiles(canvas: &std::sync::Mutex<Canvas>, msg: &[u8]) -> bool {
@@ -889,7 +1139,9 @@ impl Render for DesktopView {
                                 this.retries = 0;
                                 this.start(window, cx);
                                 cx.notify();
-                            }))),
+                            })))
+                            // An app's window has no title bar of its own until it shows.
+                            .when(self.shows_window(), |d| d.child(Button::new("desktop-close-app", "Close").icon("x").on_click(|_, window, _| window.remove_window()))),
                     )
                     .children(self.opened.clone().map(|(text, failed)| {
                         div().max_w(px(460.)).text_center().text_size(px(12.5)).text_color(if failed { theme.error } else { theme.text_muted }).child(text)
@@ -909,6 +1161,25 @@ impl Render for DesktopView {
         };
         // Showing every screen: each monitor's name over its corner opens it.
         let labels = self.monitor_labels(cx);
+        let hint = self.hint.filter(|until| Instant::now() < *until && self.frame.is_some()).map(|_| {
+            let keys = if cfg!(target_os = "macos") { "⌘W" } else { "Ctrl+Shift+W" };
+            div().absolute().bottom(px(18.)).left_0().right_0().flex().justify_center().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .h(px(30.))
+                    .px(px(14.))
+                    .rounded(crate::ui::kit::corner(15.))
+                    .bg(gpui::black().opacity(0.72))
+                    .border_1()
+                    .border_color(gpui::white().opacity(0.14))
+                    .text_size(px(12.5))
+                    .text_color(gpui::white())
+                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(keys))
+                    .child(div().text_color(gpui::white().opacity(0.8)).child("closes this window")),
+            )
+        });
         div()
             .id("desktop")
             .key_context(CONTEXT)
@@ -916,21 +1187,53 @@ impl Render for DesktopView {
             .size_full()
             .relative()
             .bg(gpui::black())
-            .cursor_default()
+            // An app's window: the pointer shaped as it is there.
+            .cursor(if self.shows_window() { self.pointer } else { gpui::CursorStyle::Arrow })
             .child(picture)
             .children(labels)
+            .children(hint)
             // Over the last picture, dimmed: it's no longer live.
             .children(waiting.map(|w| div().absolute().inset_0().flex().items_center().justify_center().when(self.frame.is_some(), |d| d.bg(gpui::black().opacity(0.72))).child(w)))
             .on_mouse_move(cx.listener(Self::mouse_move))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, w, cx| this.mouse_button(e.button, e.position, true, w, cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseDownEvent, w, cx| {
+                    // A press on the app's own title bar drags this window, as
+                    // a title bar here would (a double click zooms it).
+                    this.moving = this.drags_window(e.position);
+                    if this.moving {
+                        super::title_bar_press(e, w);
+                        return;
+                    }
+                    this.mouse_button(e.button, e.position, true, w, cx)
+                }),
+            )
             .on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, w, cx| this.mouse_button(e.button, e.position, true, w, cx)))
             .on_mouse_down(MouseButton::Middle, cx.listener(|this, e: &MouseDownEvent, w, cx| this.mouse_button(e.button, e.position, true, w, cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.position, false, w, cx)))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseUpEvent, w, cx| {
+                    if !std::mem::take(&mut this.moving) {
+                        this.mouse_button(e.button, e.position, false, w, cx)
+                    }
+                }),
+            )
             .on_mouse_up(MouseButton::Right, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.position, false, w, cx)))
             .on_mouse_up(MouseButton::Middle, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.position, false, w, cx)))
             .on_scroll_wheel(cx.listener(Self::scroll))
             .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, _, _| this.modifiers(e.modifiers)))
-            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                // ⌘W closes an app's window here, as any window here (Ctrl+Shift+W
+                // off a Mac: Ctrl+W is the app's); the app goes on there.
+                let m = e.keystroke.modifiers;
+                let close = if cfg!(target_os = "macos") { m.platform && !m.shift } else { m.control && m.shift };
+                if this.shows_window() && close && e.keystroke.key.eq_ignore_ascii_case("w") {
+                    cx.stop_propagation();
+                    // The machine was told those keys are down: not left so.
+                    this.let_go();
+                    window.remove_window();
+                    return;
+                }
                 this.modifiers(e.keystroke.modifiers);
                 this.key(&e.keystroke.key, true, cx)
             }))
@@ -954,8 +1257,13 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
         let v = view.read(cx);
         (v.status(), v.via().to_string(), v.machine.clone(), v.display.clone(), v.engine.clone())
     };
-    // Its monitors, when it has more than one: pick the one to show.
-    let displays = engine.current().machines.iter().find(|m| m.id == machine).map(|m| m.displays.clone()).unwrap_or_default();
+    // Its monitors, when it has more than one: pick the one to show (none
+    // for an app's window).
+    let app_window = shown.as_deref().is_some_and(|d| d.starts_with("window:"));
+    let displays = match app_window {
+        true => Vec::new(),
+        false => engine.current().machines.iter().find(|m| m.id == machine).map(|m| m.displays.clone()).unwrap_or_default(),
+    };
     // Shown unless another is picked: the main monitor.
     let default = displays.iter().find(|d| d.main && d.id != "all").or_else(|| displays.iter().find(|d| d.id != "all")).map(|d| d.id.clone());
     let showing = shown.or(default);
@@ -1070,13 +1378,35 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
         .into_any_element()
 }
 
-/// A desktop in a window of its own (to put on another screen, or full screen).
+/// A desktop in a window of its own (to put on another screen, or full
+/// screen), or an app's window from a machine, as a window here.
 pub struct DesktopWindow {
     view: Entity<DesktopView>,
+    /// An app's window: nothing around it but its own title bar and frame.
+    app: bool,
+    /// An app's window: this window took its size once it came, and the
+    /// size it last matched (points).
+    sized: bool,
+    shown: Option<(f32, f32)>,
+    /// Whether macOS's own buttons are hidden (the app's title bar is showing).
+    buttons_hidden: bool,
+    /// Until when this window's size changes are its own doing (sizing it to
+    /// the app, or macOS fitting that on the screen), not someone resizing it:
+    /// those don't resize the app there.
+    settling: Option<std::time::Instant>,
+    /// Its size last seen: a change of place alone (a move) isn't a resize.
+    last_size: Option<gpui::Size<Pixels>>,
+    /// Resizing the app's window there to this one's new size, a moment after
+    /// the resizing here stops.
+    fit: Option<Task<()>>,
+    _subscriptions: Vec<gpui::Subscription>,
 }
 
 impl Render for DesktopWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.app {
+            return div().relative().size_full().bg(gpui::black()).child(self.view.clone()).children(super::frame::resize_edges(window)).into_any_element();
+        }
         let full = window.is_fullscreen();
         let button = Button::new("desktop-fullscreen", if full { "Exit full screen" } else { "Full screen" })
             .style(ButtonStyle::Ghost)
@@ -1107,6 +1437,7 @@ impl Render for DesktopWindow {
             )
             .child(div().flex_1().min_h(px(0.)).child(self.view.clone()))
             .children(super::frame::resize_edges(window))
+            .into_any_element()
     }
 }
 
@@ -1126,15 +1457,127 @@ pub fn open_window(engine: Arc<Engine>, machine_id: String, display: Option<Stri
         // (Wayland gets no title from the options.)
         window.set_window_title(&title);
         super::theme::apply(window, cx);
-        let view = cx.new(|cx| {
-            let mut v = DesktopView::new(engine, machine_id, window, cx);
-            v.set_display(display, window, cx);
-            v
-        });
+        let view = cx.new(|cx| DesktopView::showing(engine, machine_id, display, window, cx));
         window.focus(&view.focus_handle(cx));
-        cx.new(|_| DesktopWindow { view })
+        cx.new(|_| DesktopWindow { view, app: false, sized: false, shown: None, buttons_hidden: false, settling: None, last_size: None, fit: None, _subscriptions: Vec::new() })
     });
     if let Err(e) = opened {
         tracing::warn!("couldn't open the desktop window: {e:#}");
+    }
+}
+
+/// Hides macOS's close, minimize and zoom buttons (the app's own title bar
+/// has its own), or shows them again (while it isn't showing: something to
+/// close the window with).
+#[allow(unexpected_cfgs)] // objc's msg_send! checks a cfg this crate doesn't declare
+fn hide_window_buttons(window: &Window, hidden: bool) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc::runtime::{NO, Object, YES};
+        use objc::{msg_send, sel, sel_impl};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+        let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+        let view = h.ns_view.as_ptr() as *mut Object;
+        let ns_window: *mut Object = msg_send![view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        // NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton.
+        for kind in 0u64..3 {
+            let button: *mut Object = msg_send![ns_window, standardWindowButton: kind];
+            if !button.is_null() {
+                let _: () = msg_send![button, setHidden: if hidden { YES } else { NO }];
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, hidden);
+}
+
+/// `size` (points) made to fit this window's screen, keeping its shape: an
+/// app's window bigger than the screen here shows smaller, rather than cut off
+/// with bars beside it. (The screen less room for the menu bar and Dock.)
+fn fit_on_screen(window: &Window, cx: &App, (w, h): (f32, f32)) -> (f32, f32) {
+    let Some(screen) = window.display(cx).map(|d| d.bounds()) else { return (w.round(), h.round()) };
+    let (room_w, room_h) = (f32::from(screen.size.width) * 0.95, f32::from(screen.size.height) - 90.);
+    let k = (room_w / w.max(1.)).min(room_h / h.max(1.)).min(1.);
+    ((w * k).round(), (h * k).round())
+}
+
+/// Opens an app's window from a machine as a window of its own here, as big
+/// as it is there, with nothing around it but its own title bar: dragging
+/// that moves this window, and resizing either one resizes the other.
+pub fn open_app_window(engine: Arc<Engine>, machine_id: String, app: crate::fleet::desktop::AppWindowInfo, machine_name: String, cx: &mut App) {
+    // Its size there (until its stream says how much Windows scales it up).
+    let guess = gpui::size(px((app.width as f32).clamp(480., 1600.)), px((app.height as f32).clamp(320., 1000.)));
+    let bounds = Bounds::centered(None, guess, cx);
+    let title = format!("{} · {machine_name}", app.title);
+    let options = gpui::WindowOptions {
+        window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
+        titlebar: Some(gpui::TitlebarOptions { title: Some(title.clone().into()), appears_transparent: cfg!(target_os = "macos"), traffic_light_position: None }),
+        window_min_size: Some(gpui::size(px(320.), px(240.))),
+        app_id: Some("muxin".into()),
+        window_decorations: super::frame::requested(),
+        ..Default::default()
+    };
+    let opened = cx.open_window(options, |window, cx| {
+        window.set_window_title(&title);
+        super::theme::apply(window, cx);
+        let view = cx.new(|cx| DesktopView::showing(engine, machine_id, Some(app.display()), window, cx));
+        window.focus(&view.focus_handle(cx));
+        cx.new(|cx| {
+            // Once its stream says how big it is and what it's called now: that,
+            // here. Later, when it changes size there by itself (maximized, or
+            // kept from getting as small as asked): the same here.
+            let started = cx.observe_in(&view, window, move |this: &mut DesktopWindow, view, window, cx| {
+                let v = view.read(cx);
+                // Closed there: closed here.
+                if v.closed() {
+                    window.remove_window();
+                    return;
+                }
+                // macOS's own buttons only while the app isn't showing (connecting, failed).
+                if this.buttons_hidden != v.live() {
+                    this.buttons_hidden = v.live();
+                    hide_window_buttons(window, this.buttons_hidden);
+                }
+                let (Some((w, h)), Some(app)) = (v.app_size(), v.app()) else { return };
+                let near = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 4. && (a.1 - b.1).abs() < 4.;
+                let follow = match (this.sized, this.shown) {
+                    (false, _) => {
+                        if !app.title.is_empty() {
+                            window.set_window_title(&format!("{} · {machine_name}", app.title));
+                        }
+                        true
+                    }
+                    (true, Some(shown)) => !near(shown, (w, h)) && !v.asked().is_some_and(|a| near(a, (w, h))) && !window.is_fullscreen(),
+                    (true, None) => false,
+                };
+                (this.sized, this.shown) = (true, Some((w, h)));
+                if follow {
+                    this.settling = Some(std::time::Instant::now() + Duration::from_millis(800));
+                    let (w, h) = fit_on_screen(window, cx, (w, h));
+                    window.resize(gpui::size(px(w), px(h)));
+                }
+            });
+            // Resized here: the same there, once the resizing stops.
+            let resized = cx.observe_window_bounds(window, |this: &mut DesktopWindow, window, cx| {
+                let size = window.bounds().size;
+                let moved = this.last_size.replace(size) == Some(size);
+                if moved || !this.sized || window.is_fullscreen() || this.settling.is_some_and(|t| std::time::Instant::now() < t) {
+                    return;
+                }
+                let view = this.view.clone();
+                this.fit = Some(cx.spawn_in(window, async move |_, cx| {
+                    cx.background_executor().timer(Duration::from_millis(250)).await;
+                    let _ = view.update(cx, |v, _| v.fit_app());
+                }));
+            });
+            DesktopWindow { view, app: true, sized: false, shown: None, buttons_hidden: false, settling: None, last_size: None, fit: None, _subscriptions: vec![started, resized] }
+        })
+    });
+    if let Err(e) = opened {
+        tracing::warn!("couldn't open the app's window: {e:#}");
     }
 }

@@ -167,6 +167,9 @@ fn verified() -> &'static Mutex<HashMap<String, String>> {
 /// not. Cheap after the first time per machine.
 pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(), String> {
     spec.refuse_if_disconnected()?;
+    if cfg!(target_os = "ios") {
+        return running_agent(spec).await;
+    }
     let target = target(probe).ok_or_else(|| match probe {
         Some(p) => format!("Muxin has no agent for {}-{} machines yet.", p.os.as_deref().unwrap_or("?"), p.arch.as_deref().unwrap_or("?")),
         None => format!("Muxin hasn't reached {} yet, so it doesn't know which agent build it needs. Refresh it first.", spec.name),
@@ -206,6 +209,15 @@ pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(
     }
     verified().lock().unwrap().insert(spec.id.clone(), hash);
     Ok(())
+}
+
+/// Muxin on an iPad carries no agent builds and can't install one (there's no
+/// ssh there): it uses the agent a paired machine runs, over its direct link.
+async fn running_agent(spec: &MachineSpec) -> Result<(), String> {
+    match crate::fleet::link::current_or_direct(spec).await {
+        Some(_) => Ok(()),
+        None => Err(format!("Can't reach {}. It may be off, or not paired with this iPad.", spec.name)),
+    }
 }
 
 /// Forget that a machine was verified (after an error, it's checked again).
@@ -426,6 +438,15 @@ pub async fn ctl_reply(spec: &MachineSpec, request: &Value) -> Result<Value, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_ipad_uses_the_running_agent_only_over_a_direct_link() {
+        // Not paired: no link to use, and no ssh tried instead.
+        let mut spec: MachineSpec = toml::from_str("name = \"Beelink\"\nhost = \"beelink.invalid\"").unwrap();
+        spec.id = format!("unpaired-{}", std::process::id());
+        let err = running_agent(&spec).await.unwrap_err();
+        assert!(err.contains("not paired with this iPad"), "{err}");
+    }
 
     #[test]
     fn the_install_scripts_check_the_upload_before_the_swap() {

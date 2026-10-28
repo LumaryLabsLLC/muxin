@@ -407,6 +407,10 @@ pub struct MachineSummary {
     pub disk_free: Option<String>,
     pub disk_free_bytes: Option<u64>,
     pub uptime: Option<String>,
+    /// Docker's version, when the machine's user can use it (boxes and
+    /// Docker workspaces need it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docker: Option<String>,
     /// Warnings and errors (info items don't count).
     pub problems: usize,
     /// Worst diagnostic level: "error" | "warning" | "unknown" | "info" | null
@@ -566,6 +570,11 @@ pub struct OperationOut {
     pub log_tail: Vec<String>,
     pub log_lines: usize,
     pub truncated: bool,
+    /// A copy's bytes so far, of how many, and how fast lately.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<crate::fleet::model::OpProgress>,
+    /// cancel_operation can stop it.
+    pub cancellable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -695,6 +704,7 @@ pub fn machine_summary(m: &Machine) -> MachineSummary {
         disk_free: p.and_then(|p| p.disk_free).map(util::bytes),
         disk_free_bytes: p.and_then(|p| p.disk_free),
         uptime: p.and_then(|p| p.uptime_sec).map(util::uptime),
+        docker: p.and_then(|p| p.docker.clone()),
         problems,
         worst,
         checked_at: m.probe.as_ref().map(|p| p.checked_at),
@@ -805,6 +815,8 @@ pub fn operation_out(o: &Operation, tail: usize) -> OperationOut {
         log_tail: o.log[start..].to_vec(),
         log_lines: o.log.len(),
         truncated: start > 0,
+        progress: o.progress.clone(),
+        cancellable: o.cancellable && o.status == "running",
     }
 }
 
@@ -2312,6 +2324,39 @@ pub fn workspace_allow(engine: &Arc<Engine>, req: WorkspaceAllowRequest, surface
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_has_each_day_and_the_busiest_folders() {
+        use crate::fleet::usage::{MachineUsage, Tokens, UsageFolder, UsageHour};
+        // An hour bucket `days_ago` days back, at noon here (in UTC, as logs keep them).
+        let hour = |days_ago: i64| {
+            let noon = chrono::Local::now().date_naive() - chrono::Duration::days(days_ago);
+            let local = noon.and_hms_opt(12, 0, 0).unwrap().and_local_timezone(chrono::Local).unwrap();
+            local.with_timezone(&Utc).format("%Y-%m-%dT%H").to_string()
+        };
+        let tokens = Tokens { output: 1_000_000, requests: 2, ..Default::default() };
+        let used = |tool: &str, days_ago: i64| UsageHour { hour: hour(days_ago), tool: tool.into(), model: "claude-opus-4-1".into(), tokens };
+        let folder = |cwd: &str, days_ago: i64, out: u64| UsageFolder { tool: "claude".into(), cwd: cwd.into(), last: format!("{}:00:00Z", hour(days_ago)), models: vec!["claude-opus-4-1".into()], tokens: Tokens { output: out, ..Default::default() } };
+        let all = vec![MachineUsage {
+            machine_id: "forge".into(),
+            tools: vec!["claude".into(), "codex".into()],
+            hours: vec![used("claude", 0), used("codex", 0), used("claude", 2), used("claude", 9)],
+            folders: vec![folder("/home/me/code/api", 0, 10), folder("/home/me/code/web", 1, 500), folder("/home/me/old", 9, 900)],
+        }];
+        let (daily, folders) = usage_by_day_and_folder(&all, 3);
+        // Three days, oldest first; use from before them isn't counted.
+        assert_eq!(daily.len(), 3);
+        assert_eq!(daily[2].day, chrono::Local::now().date_naive().to_string());
+        assert!(daily[0].claude > 0. && daily[0].codex == 0.);
+        assert_eq!(daily[1].requests, 0);
+        assert!(daily[2].claude > 0. && daily[2].codex > 0.);
+        assert_eq!(daily.iter().map(|d| d.requests).sum::<u64>(), 6);
+        // The folders of the period, the costliest first.
+        let cwds: Vec<&str> = folders.iter().map(|f| f.cwd.as_str()).collect();
+        assert_eq!(cwds, ["/home/me/code/web", "/home/me/code/api"]);
+        // Today alone, for one day.
+        assert_eq!(usage_by_day_and_folder(&all, 1).0.len(), 1);
+    }
     use crate::config::Paths;
 
     fn demo() -> Arc<Engine> {
@@ -3861,6 +3906,30 @@ pub struct UsageMachine {
 }
 
 #[derive(Debug, Serialize)]
+pub struct UsageDay {
+    /// "YYYY-MM-DD", in this computer's time zone.
+    pub day: String,
+    /// At list prices: Claude Code's and Codex's.
+    pub claude: f64,
+    pub codex: f64,
+    pub requests: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UsageFolder {
+    pub machine_id: String,
+    /// "claude" or "codex".
+    pub tool: String,
+    pub cwd: String,
+    /// When an agent last worked there (UTC, as its log says).
+    pub last: String,
+    #[serde(flatten)]
+    pub tokens: crate::fleet::usage::Tokens,
+    /// At its model's list price (its first model's, when it used several).
+    pub cost: f64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct UsageOut {
     pub days: u32,
     /// What it'd all cost at list prices (models without a known price left out).
@@ -3868,6 +3937,10 @@ pub struct UsageOut {
     pub prices_as_of: &'static str,
     pub models: Vec<UsageModel>,
     pub machines: Vec<UsageMachine>,
+    /// Each day of the period, oldest first (a day without use too).
+    pub daily: Vec<UsageDay>,
+    /// Where agents worked most in the period, by cost: up to 12 folders.
+    pub folders: Vec<UsageFolder>,
     /// Machines that couldn't say, and why.
     pub errors: Vec<serde_json::Value>,
 }
@@ -3905,7 +3978,44 @@ pub async fn usage(engine: &Arc<Engine>, req: UsageRequest) -> ApiResult<UsageOu
         })
         .collect();
     let total_cost = models.iter().filter_map(|m| m.cost).sum();
-    Ok(UsageOut { days, total_cost, prices_as_of: crate::fleet::usage::PRICES_AS_OF, models, machines, errors })
+    let (daily, folders) = usage_by_day_and_folder(&ok, days);
+    Ok(UsageOut { days, total_cost, prices_as_of: crate::fleet::usage::PRICES_AS_OF, models, machines, daily, folders, errors })
+}
+
+/// Each day of the last `days` (today alone for 1), as the Mac's chart has
+/// them, and the busiest folders in that time.
+fn usage_by_day_and_folder(all: &[crate::fleet::usage::MachineUsage], days: u32) -> (Vec<UsageDay>, Vec<UsageFolder>) {
+    use crate::fleet::usage::{cost, local_day};
+    let today = chrono::Local::now().date_naive();
+    let first = today - chrono::Duration::days(days as i64 - 1);
+    let mut daily: Vec<UsageDay> = (0..days as i64).map(|i| UsageDay { day: (first + chrono::Duration::days(i)).to_string(), claude: 0., codex: 0., requests: 0 }).collect();
+    for h in all.iter().flat_map(|u| &u.hours) {
+        let Some(d) = local_day(&h.hour).filter(|d| *d >= first && *d <= today) else { continue };
+        let e = &mut daily[(d - first).num_days() as usize];
+        let c = cost(&h.model, &h.tokens).unwrap_or(0.);
+        if h.tool == "codex" {
+            e.codex += c;
+        } else {
+            e.claude += c;
+        }
+        e.requests += h.tokens.requests;
+    }
+    let mut folders: Vec<UsageFolder> = all
+        .iter()
+        .flat_map(|u| u.folders.iter().map(move |f| (u.machine_id.clone(), f)))
+        .filter(|(_, f)| local_day(f.last.get(..13).unwrap_or("")).is_some_and(|d| d >= first))
+        .map(|(machine_id, f)| UsageFolder {
+            machine_id,
+            tool: f.tool.clone(),
+            cwd: f.cwd.clone(),
+            last: f.last.clone(),
+            tokens: f.tokens,
+            cost: f.models.first().and_then(|m| cost(m, &f.tokens)).unwrap_or(0.),
+        })
+        .collect();
+    folders.sort_by(|a, b| b.cost.total_cmp(&a.cost));
+    folders.truncate(12);
+    (daily, folders)
 }
 
 #[derive(Debug, Deserialize)]

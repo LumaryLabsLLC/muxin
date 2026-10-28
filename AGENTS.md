@@ -107,7 +107,7 @@ The CLI equivalents are `muxin session ls|start|read|question|answer|send|do|han
 
 A box is one task handed to an agent CLI: a fresh checkout of a repo on a new branch, in a Docker container of its own on one of the user's machines, with the agent running in it with its permission prompts off (the container is its sandbox). Ids look like `box-7k2m9q`.
 
-- `box_create(repo, prompt, agent?, machine_id?)` makes one and starts its agent on the task. `repo` can also be a checkout's folder on `machine_id` (from `local_checkouts`): the box starts from it with its uncommitted changes, and pushes where it does (default agent `claude`; default machine: the online one with Docker and the most free memory). The first box on a machine builds Muxin's image there, a few minutes. It runs the repo's `.agents/setup` first. The agent can push its branch and open pull requests with the user's GitHub login. Only when the user asked.
+- `box_create(repo, prompt, agent?, machine_id?)` makes one and starts its agent on the task. `repo` can also be a checkout's folder on `machine_id` (from `local_checkouts`): the box starts from it with its uncommitted changes, and pushes where it does (default agent `claude`; default machine: the online one with Docker, `docker` in `status`'s machines, and the most free memory). The first box on a machine builds Muxin's image there, a few minutes. It runs the repo's `.agents/setup` first. The agent can push its branch and open pull requests with the user's GitHub login. Only when the user asked.
 - `box_list` shows them: `state` (`running`, `starting`, `paused`), `busy`, `attention` (waiting for an answer), `session_id` while it runs, its `task`, and `git` (what it changed, its pull request).
 - `box_send(box_id, text)` asks its agent more. A paused box starts again and its agent continues the conversation with `text` as the next message; no `text` just starts it. `session_read` and `session_question` work on its `session_id`.
 - A box pauses by itself after 15 minutes without output from its agent or a shell in it (an open terminal doesn't keep it going), or when its agent quits; `box_pause` pauses it now. Its files and the conversation stay; processes it started (dev servers) end.
@@ -120,7 +120,7 @@ The CLI equivalents are `muxin box new|ls|send|resume|pause|attach|shell|rm`.
 
 ## Usage and cost
 
-- `agent_usage(days?, machine_id?)` says what Claude Code and Codex used over the last N days (default 7), from their own logs on each machine: tokens (input, output, cache reads and writes) and requests by model and machine, and the cost at Anthropic's and OpenAI's API list prices (`null` for a model whose price isn't known). With a Claude or ChatGPT plan the user doesn't pay per token: say it's what the same use would cost through the API. Read-only.
+- `agent_usage(days?, machine_id?)` says what Claude Code and Codex used over the last N days (default 7), from their own logs on each machine: tokens (input, output, cache reads and writes) and requests by model and machine, each day's cost (`daily`) and the busiest folders (`folders`), and the cost at Anthropic's and OpenAI's API list prices (`null` for a model whose price isn't known). With a Claude or ChatGPT plan the user doesn't pay per token: say it's what the same use would cost through the API. Read-only.
 - The CLI equivalent is `muxin usage [--days N] [--machine X]`.
 
 ## GitHub and the user's code
@@ -219,7 +219,7 @@ The CLI equivalents are `muxin schedule ls|add|rm|run|log`.
 ## Files
 
 - `list_files(machine_id, path)` lists a folder on any Linux or macOS machine, this computer included.
-- `copy_files(from, paths, to, to_dir)` copies files and folders from one machine to another, through Muxin, so the machines don't need to reach each other. Files with the same names in `to_dir` are replaced: `list_files` it first, and confirm with the user before overwriting. It waits by default; with `wait: false`, poll `get_operation`, and `cancel_operation` stops a copy.
+- `copy_files(from, paths, to, to_dir)` copies files and folders from one machine to another, through Muxin, so the machines don't need to reach each other. Files with the same names in `to_dir` are replaced: `list_files` it first, and confirm with the user before overwriting. It waits by default; with `wait: false`, poll `get_operation` (its `progress`: bytes `done` of `total`), and `cancel_operation` stops a copy (`cancellable`).
 - The CLI equivalents are `muxin files <machine>:<folder>` and `muxin cp <machine>:<path>... <machine>:<folder>`.
 - Text copied on the user's Mac is shared with machines that have a desktop, and back, when the user has that on (Settings › Clipboard). Don't rely on it to move data; use `copy_files`.
 

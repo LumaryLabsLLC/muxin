@@ -218,7 +218,8 @@ impl ProbeResult {
 /// Checks one machine. Never fails: problems are reported in `ProbeResult::error`.
 pub async fn probe(spec: &MachineSpec, remembered: Option<Shell>) -> ProbeResult {
     let mut r = check(spec, remembered).await;
-    if spec.is_checkable() && !spec.is_local() {
+    // ssh's route and sign-in only matter where ssh runs (not an iPad).
+    if spec.is_checkable() && !spec.is_local() && !cfg!(target_os = "ios") {
         r.route = ssh_route(spec).await;
         r.refused_user = refused_user(spec, &r).await;
     }

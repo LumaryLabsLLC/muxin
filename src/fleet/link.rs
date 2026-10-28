@@ -311,8 +311,13 @@ async fn connect(spec: &MachineSpec) -> Result<Arc<Link>, String> {
     if let Some(paired) = super::direct::paired(&spec.id).filter(|_| !spec.is_local()) {
         match connect_direct(spec, &paired).await {
             Ok(link) => return Ok(link),
+            // Muxin on an iPad can't start ssh: a direct link is the only way in.
+            Err(e) if cfg!(target_os = "ios") => return Err(e),
             Err(e) => tracing::debug!("no direct connection to {}: {e}; using ssh", spec.name),
         }
+    }
+    if cfg!(target_os = "ios") {
+        return Err(format!("{} isn't paired with this iPad.", spec.name));
     }
     connect_ssh(spec).await
 }

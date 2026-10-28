@@ -420,6 +420,15 @@ fn command(spec: &MachineSpec, shell: Shell) -> Command {
     }
 }
 
+/// Whether a machine answers yet, after it was started: ssh gets in, or on an
+/// iPad (which can't run ssh) its direct link connects.
+pub async fn answers(spec: &MachineSpec) -> bool {
+    if cfg!(target_os = "ios") {
+        return crate::fleet::link::current_or_direct(spec).await.is_some();
+    }
+    Command::new("ssh").args(probe::ssh_args(spec)).arg("exit").output().await.is_ok_and(|o| o.status.success())
+}
+
 /// Masks secrets, drops ANSI escapes and carriage-return progress redraws.
 pub fn clean_line(line: &str, secrets: &[String]) -> String {
     let line = line.rsplit('\r').find(|s| !s.is_empty()).unwrap_or("");

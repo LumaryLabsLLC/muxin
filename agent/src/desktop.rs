@@ -1044,6 +1044,46 @@ mod x11 {
         }
     }
 
+    /// Turns on the driver's TearFree on the screens it can (AMD's and
+    /// Intel's drivers), when it isn't: with it off or "auto", a compositor's
+    /// frames can be flipped onto the screen straight from its own buffers,
+    /// so the screen the X server hands out (what's captured) stops changing
+    /// while nobody captures it. The next stream then starts from that old
+    /// picture, and parts of it stay old until they change again. With
+    /// TearFree on, the driver draws every frame into that screen itself.
+    /// Changing it repaints the whole screen once; it stays on (it also stops
+    /// tearing), so later streams don't repaint again.
+    fn tear_free(conn: &RustConnection, root: u32) {
+        use x11rb::protocol::randr::{Connection as State, ConnectionExt as _};
+        use x11rb::protocol::xproto::PropMode;
+        let atom = |name: &[u8]| conn.intern_atom(true, name).ok().and_then(|c| c.reply().ok()).map(|r| r.atom).filter(|a| *a != 0);
+        // No such property: not a driver that has it.
+        let (Some(prop), Some(on)) = (atom(b"TearFree"), atom(b"on")) else { return };
+        let Some(res) = conn.randr_get_screen_resources_current(root).ok().and_then(|c| c.reply().ok()) else { return };
+        let mut changed = false;
+        for output in res.outputs {
+            let Some(info) = conn.randr_get_output_info(output, res.config_timestamp).ok().and_then(|c| c.reply().ok()) else { continue };
+            if info.connection != State::CONNECTED || info.crtc == 0 {
+                continue;
+            }
+            let Some(now) = conn.randr_get_output_property(output, prop, AtomEnum::ANY, 0, 1, false, false).ok().and_then(|c| c.reply().ok()) else { continue };
+            if now.format != 32 || now.data.len() < 4 {
+                continue;
+            }
+            if u32::from_ne_bytes([now.data[0], now.data[1], now.data[2], now.data[3]]) == on {
+                continue;
+            }
+            if conn.randr_change_output_property(output, prop, AtomEnum::ATOM.into(), 32, PropMode::REPLACE, 1, &on.to_ne_bytes()).ok().and_then(|c| c.check().ok()).is_some() {
+                eprintln!("screen: turned TearFree on for {} (its picture went stale between streams)", String::from_utf8_lossy(&info.name));
+                changed = true;
+            }
+        }
+        // The repaint it brings, before the first frame.
+        if changed {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    }
+
     /// Where a monitor is on the desktop (None: the whole desktop), right now.
     fn area(conn: &RustConnection, root: u32, monitor: Option<&str>) -> Result<(i16, i16, usize, usize), String> {
         use x11rb::protocol::randr::ConnectionExt as _;
@@ -1063,6 +1103,7 @@ mod x11 {
         pub fn open(monitor: Option<&str>) -> Result<X11, String> {
             let (conn, screen_num) = x11rb::connect(None).map_err(|e| format!("Can't reach the desktop ({e}). Is someone logged in to a graphical session?"))?;
             let root = conn.setup().roots[screen_num].root;
+            tear_free(&conn, root);
             let (_, _, dw, dh) = area(&conn, root, None)?;
             if let Some(id) = monitor.and_then(|m| m.strip_prefix("window:")) {
                 return Self::open_window(conn, root, (dw, dh), id);

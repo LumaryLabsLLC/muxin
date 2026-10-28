@@ -315,6 +315,10 @@ fn client_config(p: &Paired) -> Result<quinn::ClientConfig, String> {
 
 /// The machine's address as ssh resolves it (aliases in ~/.ssh/config included).
 pub async fn resolve_host(spec: &MachineSpec) -> Option<String> {
+    // An iPad can't run `ssh -G`.
+    if cfg!(target_os = "ios") {
+        return None;
+    }
     let out = tokio::process::Command::new("ssh").arg("-G").args(probe::ssh_args(spec)).output().await.ok()?;
     String::from_utf8_lossy(&out.stdout).lines().find_map(|l| l.strip_prefix("hostname ").map(|h| h.trim().to_string())).filter(|h| !h.is_empty())
 }

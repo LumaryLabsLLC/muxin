@@ -77,6 +77,13 @@ pub struct Session {
 }
 
 impl Session {
+    /// A session for an app calling the tools in-process (Muxin for iPad):
+    /// what it makes is the user's, "app", as the Mac app's is.
+    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+    pub fn named(client: &str) -> Session {
+        Session { client: Mutex::new(Some(client.to_string())) }
+    }
+
     /// The MCP client's name from `initialize` (e.g. "claude-code"), else "mcp".
     pub fn owner(&self) -> String {
         self.client.lock().unwrap().clone().unwrap_or_else(|| "mcp".into())

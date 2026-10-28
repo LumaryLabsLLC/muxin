@@ -376,12 +376,14 @@ pub async fn output(spec: &MachineSpec, shell: Shell, script: String, timeout: D
 }
 
 /// Muxin on an iPad can't run ssh: a script goes over the machine's direct
-/// link instead (the agent runs it in the machine's shell, PowerShell on
-/// Windows), and its output comes when it's done, not line by line. Its
-/// stdout, its stderr, and its exit status (None: terminated).
+/// link instead, and its output comes when it's done, not line by line. Its
+/// stdout, its stderr, and its exit status (None: terminated). The agent runs
+/// it as ssh would (`sh -s`, PowerShell on Windows), not in the user's login
+/// shell: these scripts are sh, and zsh, say, reads them otherwise (it
+/// doesn't split `$LIST` into words).
 async fn over_link(spec: &MachineSpec, script: String, timeout: Duration) -> Result<(Vec<u8>, Vec<u8>, Option<i32>), String> {
     let link = crate::fleet::link::current_or_direct(spec).await.ok_or_else(|| format!("Can't reach {}. It may be off, or not paired with this iPad.", spec.name))?;
-    let req = serde_json::json!({ "op": "sh", "script": script, "timeout": timeout.as_secs() });
+    let req = serde_json::json!({ "op": "sh", "script": script, "timeout": timeout.as_secs(), "login": false });
     let reply = link.request(req, timeout + Duration::from_secs(10)).await?;
     if reply["ok"].as_bool() != Some(true) {
         return Err(reply["error"].as_str().unwrap_or("The script couldn't start.").to_string());

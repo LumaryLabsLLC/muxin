@@ -128,6 +128,17 @@ pub async fn run(
     on_line: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) -> Result<Output, String> {
     spec.refuse_if_disconnected()?;
+    // Muxin on an iPad can't run ssh: every script goes over the machine's
+    // direct link, and output to stream comes when the script is done.
+    if cfg!(target_os = "ios") && !spec.is_local() {
+        let link = crate::fleet::link::current_or_direct(spec).await.ok_or_else(|| format!("Can't reach {}. It may be off, or not paired with this iPad.", spec.name))?;
+        let req = serde_json::json!({ "op": "sh", "script": script, "timeout": timeout.as_secs() });
+        let reply = link.request(req, timeout + Duration::from_secs(10)).await?;
+        if reply["ok"].as_bool() != Some(true) {
+            return Err(reply["error"].as_str().unwrap_or("The script couldn't start.").to_string());
+        }
+        return Ok(from_link(marker, limits, secrets, &reply, on_line));
+    }
     // Over the machine's live link when there is one: no ssh handshake. Scripts
     // that stream their output (operation logs) and big uploads still use ssh.
     if !windows && !spec.is_local() && on_line.is_none() && script.len() < 8 << 20 {
@@ -135,7 +146,7 @@ pub async fn run(
             let req = serde_json::json!({ "op": "sh", "script": script, "timeout": timeout.as_secs() });
             if let Ok(reply) = link.request(req, timeout + Duration::from_secs(10)).await {
                 if reply["ok"].as_bool() == Some(true) {
-                    return Ok(from_link(marker, limits, secrets, &reply));
+                    return Ok(from_link(marker, limits, secrets, &reply, None));
                 }
             }
         }
@@ -224,13 +235,13 @@ pub async fn run(
 }
 
 /// A script's result from the agent's link, read the same way as ssh output.
-fn from_link(marker: &str, limits: Limits, secrets: &[String], reply: &serde_json::Value) -> Output {
+fn from_link(marker: &str, limits: Limits, secrets: &[String], reply: &serde_json::Value, on_line: Option<&(dyn Fn(&str) + Send + Sync)>) -> Output {
     let mut out = Collector::new(marker, limits, secrets, false);
     let mut err = Collector::new(marker, Limits::OUTPUT, secrets, true);
-    out.push(reply["stdout"].as_str().unwrap_or("").as_bytes(), None);
-    err.push(reply["stderr"].as_str().unwrap_or("").as_bytes(), None);
-    out.finish(None);
-    err.finish(None);
+    out.push(reply["stdout"].as_str().unwrap_or("").as_bytes(), on_line);
+    err.push(reply["stderr"].as_str().unwrap_or("").as_bytes(), on_line);
+    out.finish(on_line);
+    err.finish(on_line);
     let started = out.started || err.started;
     let (stdout, out_trunc) = out.text();
     let (stderr, err_trunc) = err.text();

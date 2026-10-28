@@ -102,6 +102,9 @@ enum Command {
     Git(GitCommand),
     /// How Muxin reaches a machine (direct, ssh link); --direct on|off to change it
     Connection(ConnectionArgs),
+    /// iPads that reach your machines (Muxin for iPad): pair one with a QR code, list them, unpair one
+    #[command(subcommand)]
+    Ipad(IpadCommand),
     /// A machine's desktop: a screenshot, or mouse and keyboard input
     #[command(subcommand)]
     Desktop(DesktopCommand),
@@ -570,6 +573,36 @@ struct VmCreateArgs {
     /// Return right away with the operation id
     #[arg(long)]
     no_wait: bool,
+}
+
+#[derive(Subcommand)]
+enum IpadCommand {
+    /// Pair an iPad: shows a QR code to scan with Muxin on the iPad
+    Pair(IpadPairArgs),
+    /// The iPads paired from here
+    Ls(AgentArgs),
+    /// Unpair an iPad: the machines that trust it forget its key
+    Rm(IpadRmArgs),
+}
+
+#[derive(Args)]
+struct IpadPairArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// A machine to pair it with (again for more) [default: every machine that's online, but this computer]
+    #[arg(long = "machine", value_name = "MACHINE")]
+    machines: Vec<String>,
+    /// Let the iPad pair without asking (check that it shows the same code)
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+struct IpadRmArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Its name, or its key (`muxin ipad ls --json`)
+    ipad: String,
 }
 
 #[derive(Subcommand)]
@@ -1676,6 +1709,14 @@ fn main() -> ExitCode {
             )
         }
         Some(Command::Cloud(cmd)) => cloud(cmd, &runtime),
+        Some(Command::Ipad(cmd)) => match cmd {
+            IpadCommand::Pair(a) => ipad_pair(a, &runtime),
+            IpadCommand::Ls(a) => run(&runtime, &a, async move |e| Ok::<_, api::ApiError>(api::ipads(&e)), cli::ipads),
+            IpadCommand::Rm(a) => {
+                let name = a.ipad.clone();
+                run(&runtime, &a.agent, async move |e| api::remove_ipad(&e, &name).await, cli::ipad_removed)
+            }
+        },
         Some(Command::Schedule(cmd)) => match cmd {
             ScheduleCommand::Ls(a) => {
                 let req = api::ScheduleListRequest { machine_id: a.on };
@@ -2197,6 +2238,114 @@ fn github(cmd: GithubCommand, runtime: &tokio::runtime::Runtime) -> u8 {
             run(runtime, &a.agent, async move |e| api::github_item(&e, req).await, cli::github_item)
         }
     }
+}
+
+/// Pairs an iPad: the link as a QR code, the iPad's code to check, and the
+/// user's yes (asked here unless --yes), until it's paired or the link goes.
+fn ipad_pair(a: IpadPairArgs, runtime: &tokio::runtime::Runtime) -> u8 {
+    let _guard = runtime.enter();
+    let engine = Engine::new(a.agent.common.paths(), a.agent.demo);
+    let ids = match api::ipad_machines(&engine, &a.machines) {
+        Ok(ids) => ids,
+        Err(e) => return report_error(&a.agent, &e),
+    };
+    let mut views = match runtime.block_on(engine.pair_ipad(&ids)) {
+        Ok(rx) => rx,
+        Err(e) => return report_error(&a.agent, &api::ApiError::operation_failed(e)),
+    };
+    let (json, yes) = (a.agent.json, a.yes);
+    runtime.block_on(async move {
+        let mut asked = false;
+        loop {
+            let v = views.borrow_and_update().clone();
+            if json {
+                println!("{}", serde_json::to_string(&v).unwrap_or_default());
+            }
+            match v.state.as_str() {
+                "waiting" if !json => {
+                    if !asked {
+                        println!("Scan this with Muxin on your iPad, or paste the link there:\n");
+                        if std::io::stdout().is_terminal() {
+                            print!("{}", terminal_qr(&v.link));
+                        }
+                        println!("{}\n\nFor {}. The link works for 10 minutes; Ctrl-C stops.", v.link, v.machines.join(", "));
+                    }
+                }
+                "asking" if !asked => {
+                    asked = true;
+                    let (device, code) = (v.device.clone().unwrap_or_default(), v.code.clone().unwrap_or_default());
+                    let ok = if yes {
+                        true
+                    } else {
+                        if !json {
+                            print!("\n{device} wants to pair. It shows {} {}. Allow it? [y/N] ", &code[..3.min(code.len())], &code[3.min(code.len())..]);
+                        }
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
+                        let answer = tokio::task::spawn_blocking(|| {
+                            let mut line = String::new();
+                            let _ = std::io::stdin().read_line(&mut line);
+                            line
+                        });
+                        tokio::select! {
+                            a = answer => matches!(a.unwrap_or_default().trim().to_lowercase().as_str(), "y" | "yes"),
+                            // It gave up before the answer.
+                            _ = views.changed() => { asked = false; continue; }
+                        }
+                    };
+                    crate::share::pair::allow(ok);
+                }
+                "pairing" if !json => println!("Pairing it with {}...", v.machines.join(", ")),
+                "done" | "failed" | "denied" | "ended" => {
+                    if !json {
+                        match v.state.as_str() {
+                            "done" => println!("Paired {} with {}.", v.device.as_deref().unwrap_or("the iPad"), v.paired.join(", ")),
+                            "denied" => println!("Not paired."),
+                            _ => println!("{}", v.error.as_deref().unwrap_or("Pairing ended.")),
+                        }
+                        for f in &v.failed {
+                            println!("Couldn't pair {}: {}", f.name, f.error);
+                        }
+                    }
+                    return if v.state == "done" { 0 } else { 1 };
+                }
+                _ => {}
+            }
+            tokio::select! {
+                changed = views.changed() => if changed.is_err() { return 1 },
+                _ = tokio::signal::ctrl_c() => {
+                    crate::share::pair::stop();
+                    return 130;
+                }
+            }
+        }
+    })
+}
+
+/// A QR code for a terminal: black on white whatever its colors (two rows
+/// per line, with the quiet zone a scanner needs).
+fn terminal_qr(text: &str) -> String {
+    let Ok(code) = qrcode::QrCode::new(text.as_bytes()) else { return String::new() };
+    let width = code.width();
+    let colors = code.to_colors();
+    let quiet = 2usize;
+    let size = width + quiet * 2;
+    let dark = |x: usize, y: usize| x >= quiet && y >= quiet && x < quiet + width && y < quiet + width && colors[(y - quiet) * width + (x - quiet)] == qrcode::Color::Dark;
+    let mut out = String::new();
+    for y in (0..size).step_by(2) {
+        out.push_str("  \x1b[38;5;16;48;5;231m");
+        for x in 0..size {
+            out.push(match (dark(x, y), y + 1 < size && dark(x, y + 1)) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            });
+        }
+        out.push_str("\x1b[0m\n");
+    }
+    out.push('\n');
+    out
 }
 
 fn cloud(cmd: CloudCommand, runtime: &tokio::runtime::Runtime) -> u8 {

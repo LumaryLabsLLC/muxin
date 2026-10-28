@@ -14,6 +14,7 @@ pub mod schedules;
 pub mod services;
 pub mod engine;
 pub mod files;
+pub mod ipads;
 pub mod model;
 pub mod ports;
 pub mod procs;

@@ -42,9 +42,12 @@
 //! `"desktop"`, `"tcp"` or `"refused"` (`channel`, `error`), `"typing"` and
 //! `"control"` (`allowed` changed), `"access"` (the desktop or servers
 //! shared changed), `"ended"` (`why`), `"error"`.
+//!
+//! Pairing an iPad (`pair.rs`) goes the same way, with a link of its own.
 
 pub mod guest;
 pub mod host;
+pub mod pair;
 mod rtc;
 mod signal;
 #[cfg(test)]

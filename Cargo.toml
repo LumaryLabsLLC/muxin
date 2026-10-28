@@ -46,6 +46,8 @@ webrtc = { version = "0.21", default-features = false, features = ["runtime-toki
 rtc = { version = "0.21", default-features = false, features = ["crypto-ring"] }
 async-trait = "0.1"
 bytes = "1"
+# Pairing an iPad (src/share/pair.rs): the link as a QR code, in the terminal and the app.
+qrcode = { version = "0.14", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Already part of GPUI's dependency tree; used to set the Dock icon when running

@@ -289,6 +289,7 @@ muxin ssh-hosts                          # ~/.ssh/config, your tailnet, and this
 muxin files <machine>[:<folder>]         # what's in a folder (alias: ls)
 muxin cp <machine>:<path>... <machine>:<folder>   # copy between machines
 muxin connection <machine> [--direct on|off]
+muxin ipad pair [--machine <machine>]... # pair an iPad: a QR code to scan (ls, rm <name>)
 muxin check [--json]                     # one-shot full report
 muxin workspace …                        # agent workspaces, see below (alias: ws)
 ```
@@ -461,6 +462,8 @@ Muxin first reaches a machine with `ssh`, installs its small agent there, and fr
 - **Direct**: on a machine's page, **Connect directly** pairs the app with its agent (each trusts only the other's certificate, swapped over ssh) and runs the agent's listener as a user service there (systemd or launchd) on UDP port 47821. Muxin then connects over QUIC, falling back to ssh whenever the direct connection is down.
 - `MUXEN_NO_LINK=1` turns all of this off: one ssh connection per request, as before.
 - **Disconnect** (a machine's right-click menu, or its Connection section) stops all of it for that machine: Muxin closes the connection and stops checking it and reading its sessions, which keep running there. It shows as Disconnected until you **Connect** (its page, its menu, or search). It's kept in `config.toml` as `disconnected = true`.
+
+**iPads.** Muxin for iPad reaches your machines directly too, with a key of its own. Pair one in **Settings › iPads › Pair an iPad**: the iPad scans the QR code that shows (or you paste its link), both show the same six digits, and you click **Allow**. Each machine you picked then trusts the iPad's key, and the iPad gets their addresses; your Mac isn't needed after that. **Unpair** takes the key off those machines again, and an iPad connected at the time is let go within seconds. From a terminal: `muxin ipad pair`, `muxin ipad ls` and `muxin ipad rm <name>`.
 
 **Servers.** A machine's page lists what's listening there: web servers first, with their page's title (a dev server, a Docker container's site), then its other ports. **Open** puts one on this computer at `localhost` (the same port number when it's free) and opens it in your browser; no desktop needed. Each connection goes through the machine's live connection, so it works over ssh or direct alike, even for servers that listen only on the machine itself. Open ports are listed under their machine in the sidebar (click to open, × to close) and come back when Muxin starts. **Open a port** takes any port number. From a terminal: `muxin ports <machine>` and `muxin forward <machine> <port>`.
 

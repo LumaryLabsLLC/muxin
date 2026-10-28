@@ -454,3 +454,186 @@ async fn hosts_for_a_browser() {
     }
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// Waits for a pairing to reach `state`.
+async fn pairing_reaches(views: &mut tokio::sync::watch::Receiver<super::pair::View>, state: &str) -> super::pair::View {
+    let wait = async {
+        loop {
+            let v = views.borrow_and_update().clone();
+            if v.state == state {
+                return v;
+            }
+            assert!(!v.finished(), "the pairing ended {} ({:?}) waiting for {state}", v.state, v.error);
+            views.changed().await.expect("pairing went away");
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(30), wait).await.unwrap_or_else(|_| panic!("no {state}"))
+}
+
+/// What the stand-in machines trusted (machine, key), and the iPad this app noted (name, key, machines).
+type Trusted = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+type Noted = Arc<std::sync::Mutex<Option<(String, String, Vec<String>)>>>;
+
+fn pairing_hooks(trusted: Trusted, noted: Noted) -> super::pair::Hooks {
+    use futures::FutureExt;
+    super::pair::Hooks {
+        trust: Box::new(move |id, key| {
+            let trusted = trusted.clone();
+            async move {
+                if id == "forge" {
+                    return Err("Couldn't reach the agent on Forge.".to_string());
+                }
+                trusted.lock().unwrap().push((id.clone(), key));
+                let direct = crate::fleet::direct::Paired { fingerprint: "cd".repeat(32), host: "beacon.local".into(), port: 7790, lan: vec!["192.168.1.20".into()], tailnet: Vec::new() };
+                Ok(super::pair::Machine { id, name: "Beacon".into(), host: "beacon".into(), direct })
+            }
+            .boxed()
+        }),
+        paired: Box::new(move |name, key, ids| *noted.lock().unwrap() = Some((name, key, ids))),
+    }
+}
+
+/// Pairing an iPad, both sides here: the link, the same code on each, the
+/// user's yes, the machines trusting the iPad's own key, and the iPad keeping
+/// them. No agent: the machines' side is a stand-in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn an_ipad_pairs_once_allowed() {
+    use super::pair;
+    let server = std::env::var("MUXIN_TEST_SHARE_SERVER").expect("set MUXIN_TEST_SHARE_SERVER");
+    let ipad = std::env::temp_dir().join(format!("muxin-pair-{}", std::process::id()));
+    std::fs::create_dir_all(&ipad).unwrap();
+    crate::fleet::direct::init(ipad.clone());
+    let key = crate::fleet::direct::app_fingerprint().unwrap();
+    let (trusted, noted) = (Arc::new(std::sync::Mutex::new(Vec::new())), Arc::new(std::sync::Mutex::new(None)));
+    let machines = vec![("beacon".to_string(), "Beacon".to_string()), ("forge".to_string(), "Forge".to_string())];
+    let mut views = pair::start(&server, machines.clone(), pairing_hooks(trusted.clone(), noted.clone())).await.expect("pairing");
+    let link = views.borrow().link.clone();
+    assert!(super::ticket::is_pair_link(&link));
+    // It isn't a share.
+    assert!(guest::join(&link, "Mallory").await.err().is_some_and(|e| e.contains("pairing an iPad")));
+
+    let updates = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (u, l) = (updates.clone(), link.clone());
+    let joining = tokio::spawn(async move { pair::join(&l, "Test iPad", move |x| u.lock().unwrap().push(x)).await });
+    let asking = pairing_reaches(&mut views, "asking").await;
+    assert_eq!(asking.device.as_deref(), Some("Test iPad"));
+    pair::allow(true);
+    let (got, failed) = joining.await.unwrap().expect("paired");
+    assert_eq!(got.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["beacon"]);
+    assert_eq!(failed.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["Forge"]);
+    // Both sides showed the same code.
+    let shown = updates.lock().unwrap().iter().find_map(|x| match x {
+        pair::Update::Code(c) => Some(c.clone()),
+        _ => None,
+    });
+    assert_eq!(shown, asking.code);
+    assert!(updates.lock().unwrap().contains(&pair::Update::Waiting));
+    // The machine trusts the iPad's own key, and this app noted the iPad.
+    assert_eq!(trusted.lock().unwrap().clone(), vec![("beacon".to_string(), key.clone())]);
+    assert_eq!(noted.lock().unwrap().clone(), Some(("Test iPad".to_string(), key.clone(), vec!["beacon".to_string()])));
+    let done = pairing_reaches(&mut views, "done").await;
+    assert_eq!((done.paired.clone(), done.failed.len()), (vec!["Beacon".to_string()], 1));
+
+    // The iPad keeps them; pairing again keeps the same entry.
+    let inventory = ipad.join("config.toml");
+    assert_eq!(pair::save(&inventory, &got).unwrap(), vec!["beacon"]);
+    assert_eq!(crate::fleet::direct::paired("beacon").map(|p| p.port), Some(7790));
+    assert_eq!(pair::save(&inventory, &got).unwrap(), vec!["beacon"]);
+    assert_eq!(std::fs::read_to_string(&inventory).unwrap().matches("[[machine]]").count(), 1);
+
+    // Once used, the link is closed.
+    for _ in 0..50 {
+        if pair::watch().is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(pair::join(&link, "Test iPad", |_| {}).await.is_err());
+
+    // Saying no: nothing is trusted.
+    trusted.lock().unwrap().clear();
+    let mut views = pair::start(&server, machines, pairing_hooks(trusted.clone(), noted.clone())).await.expect("pairing");
+    let l = views.borrow().link.clone();
+    let joining = tokio::spawn(async move { pair::join(&l, "Test iPad", |_| {}).await });
+    pairing_reaches(&mut views, "asking").await;
+    pair::allow(false);
+    assert!(joining.await.unwrap().unwrap_err().contains("didn't allow"));
+    assert!(trusted.lock().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&ipad);
+}
+
+/// The agent's `trust`: another app's key, added where direct connections
+/// are set up (and only there), without pairing anew. In the test agent's
+/// own home, never this computer's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn the_agent_trusts_another_app() {
+    let (home, _spec, l) = test_machine("trust").await;
+    let (mac, ipad) = ("ab".repeat(32), "cd".repeat(32));
+    let ask = json!({ "op": "trust", "client": ipad });
+    let r = l.request(ask.clone(), Duration::from_secs(10)).await.unwrap();
+    assert_eq!(r["ok"], false, "not set up yet: {r}");
+    let direct = home.join(".muxen/direct");
+    std::fs::create_dir_all(&direct).unwrap();
+    std::fs::write(direct.join("trusted"), format!("{mac}\n")).unwrap();
+    let r = l.request(ask, Duration::from_secs(10)).await.unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["fingerprint"].as_str().map(str::len), Some(64));
+    assert!(r["port"].as_u64().is_some_and(|p| p > 0));
+    let trusted = std::fs::read_to_string(direct.join("trusted")).unwrap();
+    assert!(trusted.contains(&mac) && trusted.contains(&ipad), "{trusted}");
+    let r = l.request(json!({ "op": "trust", "client": "nope" }), Duration::from_secs(10)).await.unwrap();
+    assert_eq!(r["ok"], false);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// An app unpaired while it's connected directly is let go within seconds
+/// (the listener watches `trusted`), not when it next reconnects. The test
+/// agent listens in a home of its own, on a port of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn an_unpaired_app_is_let_go() {
+    use crate::fleet::direct;
+    let agent = std::env::var("MUXIN_TEST_AGENT").expect("set MUXIN_TEST_AGENT");
+    let home = std::env::temp_dir().join(format!("muxin-unpaired-{}", std::process::id()));
+    let dir = home.join(".muxen/direct");
+    std::fs::create_dir_all(&dir).unwrap();
+    let app_home = home.join("app");
+    std::fs::create_dir_all(&app_home).unwrap();
+    direct::init(app_home);
+    let app = direct::app_fingerprint().unwrap();
+    let port = 47000 + (std::process::id() % 2000) as u16;
+    std::fs::write(dir.join("port"), port.to_string()).unwrap();
+    std::fs::write(dir.join("trusted"), format!("{app}\n")).unwrap();
+    let mut listener = std::process::Command::new(&agent).arg("listen").env("HOME", &home).stderr(std::process::Stdio::null()).spawn().unwrap();
+    // Its certificate, made as it starts.
+    let mut agent_fp = None;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Ok(cert) = std::fs::read(dir.join("cert.der")) {
+            agent_fp = Some(direct::fingerprint(&cert));
+            break;
+        }
+    }
+    let paired = direct::Paired { fingerprint: agent_fp.expect("the agent's certificate"), host: "127.0.0.1".into(), port, lan: vec!["127.0.0.1".into()], tailnet: Vec::new() };
+    let mut conn = None;
+    for _ in 0..20 {
+        if let Ok(c) = direct::connect("unpaired-test", &paired).await {
+            conn = Some(c);
+            break;
+        }
+        direct::retry_now("unpaired-test");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let conn = conn.expect("a direct connection");
+    // Still paired: it stays.
+    assert!(tokio::time::timeout(Duration::from_secs(6), conn.closed()).await.is_err());
+    std::fs::write(dir.join("trusted"), format!("{}\n", "ef".repeat(32))).unwrap();
+    let why = tokio::time::timeout(Duration::from_secs(10), conn.closed()).await.expect("let go once unpaired");
+    assert!(format!("{why}").contains("unpaired"), "{why}");
+    let _ = listener.kill();
+    let _ = listener.wait();
+    let _ = std::fs::remove_dir_all(&home);
+}

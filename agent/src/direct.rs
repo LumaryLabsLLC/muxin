@@ -5,7 +5,8 @@
 //! Both sides use self-signed certificates and accept only each other's, by
 //! SHA-256 fingerprint. The app's fingerprint arrives over ssh when it pairs
 //! (`{"op": "pair"}` on a link), which also installs `listen` as a user service
-//! (systemd on Linux, launchd on macOS) so it survives reboots.
+//! (systemd on Linux, launchd on macOS) so it survives reboots. Other apps
+//! (an iPad, paired from a Mac) are added with `{"op": "trust"}` once it runs.
 //!
 //! Files, in ~/.muxen/direct: `cert.der` and `key.der` (this machine's
 //! identity), `trusted` (one app fingerprint per line), `port`.
@@ -184,6 +185,24 @@ async fn accept_loop() -> Result<(), String> {
     while let Some(incoming) = endpoint.accept().await {
         tokio::spawn(async move {
             let Ok(conn) = incoming.await else { return };
+            // An app unpaired while it's connected (an iPad removed on the
+            // Mac) goes within seconds, not when it next reconnects.
+            let app = conn.peer_identity().and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok()).and_then(|certs| certs.first().map(|c| fingerprint(c.as_ref())));
+            if let Some(app) = app {
+                let watched = conn.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = watched.closed() => return,
+                            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                        }
+                        if !trusted().contains(&app) {
+                            watched.close(1u32.into(), b"unpaired");
+                            return;
+                        }
+                    }
+                });
+            }
             // Each bidirectional stream is one link.
             while let Ok((send, recv)) = conn.accept_bi().await {
                 tokio::spawn(bridge(send, recv));
@@ -279,6 +298,32 @@ pub fn pair(req: &Value) -> Value {
     }
     let service = install_service();
     json!({ "ok": true, "fingerprint": fingerprint(cert.as_ref()), "port": port(), "service": service.0, "note": service.1, "addresses": lan_addresses(), "tailnet": tailnet_addresses() })
+}
+
+/// `{"op": "trust", "client": "<app fingerprint>"}` on any link: trusts
+/// another app (an iPad paired from a Mac) where direct connections are
+/// already set up, without restarting `listen` (it reads `trusted` for each
+/// new connection, so a direct link can carry this). Says how to reach the
+/// machine, as `pair` does; `{"ok": false}` where they aren't set up yet.
+pub fn trust(req: &Value) -> Value {
+    let client = req["client"].as_str().unwrap_or("").trim().to_lowercase();
+    if client.len() != 64 || !client.chars().all(|c| c.is_ascii_hexdigit()) {
+        return json!({ "ok": false, "error": "trust needs the app's certificate fingerprint" });
+    }
+    if !dir().join("trusted").exists() {
+        return json!({ "ok": false, "error": "Direct connections aren't set up on this machine yet." });
+    }
+    let (cert, _) = match identity() {
+        Ok(i) => i,
+        Err(e) => return json!({ "ok": false, "error": format!("couldn't read this machine's certificate: {e}") }),
+    };
+    let mut all = trusted();
+    all.insert(client);
+    let list: String = all.iter().map(|f| format!("{f}\n")).collect();
+    if let Err(e) = write_private(&dir().join("trusted"), list.as_bytes()) {
+        return json!({ "ok": false, "error": e });
+    }
+    json!({ "ok": true, "fingerprint": fingerprint(cert.as_ref()), "port": port(), "addresses": lan_addresses(), "tailnet": tailnet_addresses() })
 }
 
 /// This machine's addresses on its local networks (not loopback, Docker

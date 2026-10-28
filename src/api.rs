@@ -56,6 +56,10 @@ impl ApiError {
         ApiError::new("invalid", message)
     }
 
+    pub fn operation_failed(message: impl Into<String>) -> ApiError {
+        ApiError::new("operation_failed", message)
+    }
+
     fn with_hint(mut self, hint: impl Into<String>) -> ApiError {
         self.hint = Some(hint.into());
         self
@@ -3506,6 +3510,53 @@ pub async fn machine_connection(engine: &Arc<Engine>, machine_id: &str) -> ApiRe
 pub async fn set_direct(engine: &Arc<Engine>, req: DirectRequest) -> ApiResult<crate::fleet::connection::Connection> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
     engine.set_direct(&m.id, req.enabled).await.map_err(|e| ApiError::new("operation_failed", e))
+}
+
+/// The machines to pair an iPad with: those named, or every machine that's
+/// online but this computer (which an iPad doesn't reach).
+pub fn ipad_machines(engine: &Arc<Engine>, named: &[String]) -> ApiResult<Vec<String>> {
+    let s = engine.current();
+    if !named.is_empty() {
+        let mut ids = Vec::new();
+        for n in named {
+            let m = find_machine(&s, n)?;
+            if m.local {
+                return Err(ApiError::invalid(format!("{} is this computer; an iPad reaches your other machines.", m.name)));
+            }
+            ids.push(m.id.clone());
+        }
+        return Ok(ids);
+    }
+    let ids: Vec<String> = s.machines.iter().filter(|m| !m.local && m.status == "online").map(|m| m.id.clone()).collect();
+    if ids.is_empty() {
+        return Err(ApiError::invalid("No machine is online to pair an iPad with.").with_hint("Check them with `muxin check`, or name one with --machine."));
+    }
+    Ok(ids)
+}
+
+#[derive(Debug, Serialize)]
+pub struct IpadsOut {
+    pub ipads: Vec<crate::fleet::ipads::Ipad>,
+}
+
+/// The iPads paired from here (`muxin ipad pair`, or Settings › iPads).
+pub fn ipads(engine: &Arc<Engine>) -> IpadsOut {
+    IpadsOut { ipads: engine.ipads() }
+}
+
+#[derive(Debug, Serialize)]
+pub struct IpadRemovedOut {
+    pub ipad: crate::fleet::ipads::Ipad,
+    /// Machines that couldn't be reached, which still trust it.
+    pub kept: Vec<String>,
+}
+
+/// Unpairs an iPad: the machines that trust it forget its key.
+pub async fn remove_ipad(engine: &Arc<Engine>, name_or_key: &str) -> ApiResult<IpadRemovedOut> {
+    let known = engine.ipads();
+    crate::fleet::ipads::find(&known, name_or_key).map_err(ApiError::not_found)?;
+    let (ipad, kept) = engine.remove_ipad(name_or_key).await.map_err(ApiError::operation_failed)?;
+    Ok(IpadRemovedOut { ipad, kept })
 }
 
 #[derive(Debug, Deserialize)]

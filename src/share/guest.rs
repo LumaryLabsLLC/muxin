@@ -305,6 +305,9 @@ impl Joined {
 /// Joins the share behind `link` as `name`. Runs on the current Tokio
 /// runtime; updates arrive until the share ends or `leave`.
 pub async fn join(link: &str, name: &str) -> Result<(Arc<Joined>, mpsc::UnboundedReceiver<Update>), String> {
+    if super::ticket::is_pair_link(link) {
+        return Err("That link is for pairing an iPad: open it with Muxin on the iPad.".into());
+    }
     let ticket = Ticket::parse(link)?;
     let server = signal::Server::new(&ticket.server);
     let room = ticket.room();

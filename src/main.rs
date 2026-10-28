@@ -15,6 +15,7 @@ mod renamed;
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 mod share;
 mod shell_command;
+mod skill;
 mod update;
 #[cfg(feature = "gui")]
 mod ui;
@@ -144,6 +145,9 @@ enum Command {
     Boxes(BoxCommand),
     /// Run the MCP server on stdio for AI agents (Claude Code, Codex, ...)
     Mcp(McpArgs),
+    /// The Muxin skill that teaches agents (Claude Code, Codex, Hermes, ...) this CLI: put it in their skills folders
+    #[command(subcommand)]
+    Skill(SkillCommand),
     /// Check every machine once and print a report
     Check(CheckArgs),
     /// Write a starter config.toml
@@ -1439,6 +1443,28 @@ struct McpArgs {
     print_config: bool,
 }
 
+#[derive(Subcommand)]
+enum SkillCommand {
+    /// Write the skill into agents' skills folders (every agent found here, or --agent)
+    Install(SkillArgs),
+    /// Take it out of those folders again
+    Remove(SkillArgs),
+}
+
+#[derive(Args)]
+struct SkillArgs {
+    /// claude, codex, opencode, gemini, pi, hermes, or agents (~/.agents/skills); repeat for several
+    /// [default: every agent found on this computer]
+    #[arg(long = "agent", value_name = "AGENT")]
+    agents: Vec<String>,
+    /// Another skills folder instead (the skill goes in <DIR>/muxin)
+    #[arg(long, value_name = "DIR", conflicts_with = "agents")]
+    dir: Option<PathBuf>,
+    /// Print machine-readable JSON
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Args)]
 struct CheckArgs {
     #[command(flatten)]
@@ -1738,6 +1764,7 @@ fn main() -> ExitCode {
             }
         }
         Some(Command::Mcp(a)) => mcp(a, &runtime),
+        Some(Command::Skill(cmd)) => skill(cmd),
         Some(Command::Check(args)) => {
             let _guard = runtime.enter();
             let engine = Engine::new(args.common.paths(), args.demo);
@@ -2642,6 +2669,45 @@ fn mcp(args: McpArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     }
 }
 
+fn skill(cmd: SkillCommand) -> u8 {
+    let (args, installing) = match cmd {
+        SkillCommand::Install(a) => (a, true),
+        SkillCommand::Remove(a) => (a, false),
+    };
+    let targets = match skill::targets(&args.agents, args.dir, installing) {
+        Ok(t) => t,
+        Err(e) if args.json => {
+            println!("{}", serde_json::json!({ "error": { "code": "invalid", "message": e } }));
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    let results: Vec<skill::Outcome> = targets
+        .into_iter()
+        .map(|(agent, dir)| if installing { skill::install(agent, &dir) } else { skill::remove(agent, &dir) })
+        .collect();
+    if args.json {
+        let out = serde_json::json!({ "skill": "muxin", "version": env!("CARGO_PKG_VERSION"), "results": results });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+    } else if results.is_empty() {
+        println!("The Muxin skill isn't in any agent's skills folder here.");
+    } else {
+        for r in &results {
+            println!("{:<9} {:<10} {}", r.agent, r.result, r.path);
+            if let Some(note) = &r.note {
+                println!("          {note}");
+            }
+        }
+        if installing && results.iter().any(|r| matches!(r.result, "installed" | "updated")) {
+            println!("New agent sessions have it.");
+        }
+    }
+    if results.iter().any(|r| r.result == "failed") { 1 } else { 0 }
+}
+
 fn init(args: InitArgs) -> u8 {
     let paths = args.common.paths();
     if paths.inventory.exists() && !args.force {
@@ -2698,6 +2764,75 @@ mod tests {
         assert!(Cli::try_parse_from(["muxin", "workspace", "sync", "ws-1", "."]).is_err(), "needs --push or --pull");
         assert!(Cli::try_parse_from(["muxin", "workspace", "sync", "ws-1", ".", "--push", "--pull"]).is_err());
         assert!(Cli::try_parse_from(["muxin", "workspace", "create", "--platform", "linux", "--repo", "acme/api", "--ref", "main", "--json"]).is_ok());
+    }
+
+    /// The skill (skills/muxin) shows only commands and flags that exist:
+    /// whole commands in code blocks parse, and inline ones name real flags.
+    #[test]
+    fn skill_uses_real_commands() {
+        let mut root = Cli::command();
+        root.build();
+        for (path, text) in skill::FILES {
+            let mut fenced = false;
+            for line in text.lines() {
+                if line.trim_start().starts_with("```") {
+                    fenced = !fenced;
+                } else if fenced {
+                    if line.starts_with("muxin ") {
+                        let words = shell_words(line);
+                        if let Err(e) = Cli::try_parse_from(&words) {
+                            panic!("{path}: `{line}` doesn't parse:\n{e}");
+                        }
+                    }
+                } else {
+                    for span in line.split('`').skip(1).step_by(2).filter(|s| s.starts_with("muxin ")) {
+                        let words = shell_words(span);
+                        let (mut cmd, mut rest) = (&root, &words[1..]);
+                        while let Some(sub) = rest.first().and_then(|w| cmd.find_subcommand(w)) {
+                            (cmd, rest) = (sub, &rest[1..]);
+                        }
+                        assert!(!cmd.has_subcommands() || rest.is_empty(), "{path}: `{span}`: no such command");
+                        for word in rest.iter().take_while(|w| *w != "--") {
+                            if let Some(long) = word.strip_prefix("--") {
+                                assert!(cmd.get_arguments().any(|a| a.get_long() == Some(long)), "{path}: `{span}`: `{}` has no --{long}", cmd.get_name());
+                            } else if let Some(short) = word.strip_prefix('-').filter(|s| s.len() == 1).and_then(|s| s.chars().next()) {
+                                assert!(cmd.get_arguments().any(|a| a.get_short() == Some(short)), "{path}: `{span}`: `{}` has no -{short}", cmd.get_name());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A shell line's words, with quotes taken off and a `# comment` left out.
+    fn shell_words(line: &str) -> Vec<String> {
+        let (mut words, mut word, mut quote, mut in_word, mut after_space) = (Vec::new(), String::new(), None, false, true);
+        for c in line.chars() {
+            match quote {
+                Some(q) if c == q => quote = None,
+                Some(_) => word.push(c),
+                None if c == '\'' || c == '"' => (quote, in_word) = (Some(c), true),
+                None if c == '#' && after_space => break,
+                None if c.is_whitespace() => {
+                    if std::mem::take(&mut in_word) {
+                        words.push(std::mem::take(&mut word));
+                    }
+                }
+                None => (in_word, _) = (true, word.push(c)),
+            }
+            after_space = quote.is_none() && c.is_whitespace();
+        }
+        if in_word {
+            words.push(word);
+        }
+        words
+    }
+
+    #[test]
+    fn splits_shell_words() {
+        assert_eq!(shell_words(r#"muxin session send a/b "Yes, and add a test" --json   # type it"#), ["muxin", "session", "send", "a/b", "Yes, and add a test", "--json"]);
+        assert_eq!(shell_words("muxin session rename a/b \"\" --cwd '~/x' acme/api#142"), ["muxin", "session", "rename", "a/b", "", "--cwd", "~/x", "acme/api#142"]);
     }
 
     #[test]

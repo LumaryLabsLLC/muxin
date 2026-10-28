@@ -240,20 +240,50 @@ pub async fn get(spec: &MachineSpec) -> Option<Arc<Link>> {
         return Some(l);
     }
     match connect(spec).await {
-        Ok(link) => {
-            tracing::debug!("linked to {} (agent {})", spec.name, link.version());
-            slots().lock().unwrap().insert(spec.id.clone(), Slot::Up(link.clone()));
-            if let Some(hook) = on_connect().lock().unwrap().as_ref() {
-                hook(link.clone());
-            }
-            Some(link)
-        }
+        Ok(link) => Some(up(spec, link)),
         Err(e) => {
             tracing::debug!("no link to {}: {e}", spec.name);
             slots().lock().unwrap().insert(spec.id.clone(), Slot::Down(Instant::now()));
             None
         }
     }
+}
+
+/// The machine's live link, or a new direct one when it's paired; never a new
+/// ssh link. For checks: they don't start ssh links (a check is also how Muxin
+/// first reaches a machine), but a paired machine's own way in costs nothing,
+/// and where ssh can't run (an iPad) it's the only way in. A failure here is
+/// left to the direct connection's own wait, so `get` still tries ssh.
+pub async fn current_or_direct(spec: &MachineSpec) -> Option<Arc<Link>> {
+    if spec.disconnected || spec.is_local() || std::env::var_os("MUXEN_NO_LINK").is_some() {
+        return None;
+    }
+    if let Some(l) = current(&spec.id) {
+        return Some(l);
+    }
+    let paired = super::direct::paired(&spec.id)?;
+    let gate = gate(&spec.id);
+    let _turn = gate.lock().await;
+    if let Some(l) = current(&spec.id) {
+        return Some(l);
+    }
+    match connect_direct(spec, &paired).await {
+        Ok(link) => Some(up(spec, link)),
+        Err(e) => {
+            tracing::debug!("no direct connection to {}: {e}", spec.name);
+            None
+        }
+    }
+}
+
+/// Keeps a new link as the machine's and tells the engine.
+fn up(spec: &MachineSpec, link: Arc<Link>) -> Arc<Link> {
+    tracing::debug!("linked to {} (agent {})", spec.name, link.version());
+    slots().lock().unwrap().insert(spec.id.clone(), Slot::Up(link.clone()));
+    if let Some(hook) = on_connect().lock().unwrap().as_ref() {
+        hook(link.clone());
+    }
+    link
 }
 
 /// Forget recent failures to connect, so the next use tries again right away
@@ -386,7 +416,18 @@ pub fn network_of(ip: std::net::IpAddr) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::network_of;
+    use super::*;
+
+    #[tokio::test]
+    async fn a_check_opens_no_ssh_link() {
+        // Not paired: no link, and no failure that would keep `get` from trying ssh.
+        for host in ["unpaired.invalid", "local"] {
+            let mut spec: MachineSpec = toml::from_str(&format!("name = \"Unpaired\"\nhost = \"{host}\"")).unwrap();
+            spec.id = format!("unpaired-{}", std::process::id());
+            assert!(current_or_direct(&spec).await.is_none(), "{host}");
+            assert!(!slots().lock().unwrap().contains_key(&spec.id), "{host}");
+        }
+    }
 
     #[test]
     fn names_networks() {

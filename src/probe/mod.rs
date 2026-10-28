@@ -473,9 +473,10 @@ impl std::fmt::Display for RunError {
 async fn run(spec: &MachineSpec, shell: Shell) -> Result<String, RunError> {
     let script = script_for(spec, shell);
     // Over the machine's live link when one is up (no ssh handshake). A check
-    // doesn't make one: it's also how Muxin first reaches a machine.
+    // doesn't make an ssh link (it's also how Muxin first reaches a machine),
+    // only a direct one to a paired machine.
     if shell == Shell::Sh && !spec.is_local() {
-        if let Some(link) = crate::fleet::link::current(&spec.id) {
+        if let Some(link) = crate::fleet::link::current_or_direct(spec).await {
             let req = serde_json::json!({ "op": "sh", "script": script, "login": false, "timeout": TIMEOUT.as_secs() });
             if let Ok(reply) = link.request(req, TIMEOUT).await {
                 let stdout = reply["stdout"].as_str().unwrap_or("").to_string();

@@ -94,6 +94,24 @@ async fn test_machine(tag: &str) -> (std::path::PathBuf, MachineSpec, Arc<Link>)
     (home, spec, l)
 }
 
+/// The app's own folder for this run (its key, its pairings). `direct::init`
+/// takes one for the whole process, so the tests that need an app's key
+/// share it, and it stays until the run ends.
+fn app_home() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("muxin-test-app-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::fleet::direct::init(dir.clone());
+    dir
+}
+
+/// One runtime for the tests that connect directly: the app's endpoints for
+/// direct connections are made once a process, on the runtime that first
+/// uses them, and stop with it.
+fn direct_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().expect("a runtime"))
+}
+
 async fn start_session(l: &Link, home: &std::path::Path, name: &str, title: &str) {
     let started = l.request(json!({ "op": "start", "name": name, "title": title, "agent": "shell", "cwd": home.display().to_string(), "cols": 100, "rows": 30 }), Duration::from_secs(15)).await.unwrap();
     assert_eq!(started["ok"], true, "{started}");
@@ -501,9 +519,7 @@ fn pairing_hooks(trusted: Trusted, noted: Noted) -> super::pair::Hooks {
 async fn an_ipad_pairs_once_allowed() {
     use super::pair;
     let server = std::env::var("MUXIN_TEST_SHARE_SERVER").expect("set MUXIN_TEST_SHARE_SERVER");
-    let ipad = std::env::temp_dir().join(format!("muxin-pair-{}", std::process::id()));
-    std::fs::create_dir_all(&ipad).unwrap();
-    crate::fleet::direct::init(ipad.clone());
+    let ipad = app_home();
     let key = crate::fleet::direct::app_fingerprint().unwrap();
     let (trusted, noted) = (Arc::new(std::sync::Mutex::new(Vec::new())), Arc::new(std::sync::Mutex::new(None)));
     let machines = vec![("beacon".to_string(), "Beacon".to_string()), ("forge".to_string(), "Forge".to_string())];
@@ -561,7 +577,8 @@ async fn an_ipad_pairs_once_allowed() {
     pair::allow(false);
     assert!(joining.await.unwrap().unwrap_err().contains("didn't allow"));
     assert!(trusted.lock().unwrap().is_empty());
-    let _ = std::fs::remove_dir_all(&ipad);
+    let _ = std::fs::remove_file(ipad.join("config.toml"));
+    let _ = crate::fleet::direct::save("beacon", None);
 }
 
 /// The agent's `trust`: another app's key, added where direct connections
@@ -592,17 +609,19 @@ async fn the_agent_trusts_another_app() {
 /// An app unpaired while it's connected directly is let go within seconds
 /// (the listener watches `trusted`), not when it next reconnects. The test
 /// agent listens in a home of its own, on a port of its own.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore]
-async fn an_unpaired_app_is_let_go() {
+fn an_unpaired_app_is_let_go() {
+    direct_runtime().block_on(unpaired_app_is_let_go());
+}
+
+async fn unpaired_app_is_let_go() {
     use crate::fleet::direct;
     let agent = std::env::var("MUXIN_TEST_AGENT").expect("set MUXIN_TEST_AGENT");
     let home = std::env::temp_dir().join(format!("muxin-unpaired-{}", std::process::id()));
     let dir = home.join(".muxen/direct");
     std::fs::create_dir_all(&dir).unwrap();
-    let app_home = home.join("app");
-    std::fs::create_dir_all(&app_home).unwrap();
-    direct::init(app_home);
+    app_home();
     let app = direct::app_fingerprint().unwrap();
     let port = 47000 + (std::process::id() % 2000) as u16;
     std::fs::write(dir.join("port"), port.to_string()).unwrap();
@@ -618,16 +637,16 @@ async fn an_unpaired_app_is_let_go() {
         }
     }
     let paired = direct::Paired { fingerprint: agent_fp.expect("the agent's certificate"), host: "127.0.0.1".into(), port, lan: vec!["127.0.0.1".into()], tailnet: Vec::new() };
-    let mut conn = None;
+    let mut conn = Err(String::new());
     for _ in 0..20 {
-        if let Ok(c) = direct::connect("unpaired-test", &paired).await {
-            conn = Some(c);
+        conn = direct::connect("unpaired-test", &paired).await;
+        if conn.is_ok() {
             break;
         }
         direct::retry_now("unpaired-test");
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    let conn = conn.expect("a direct connection");
+    let conn = conn.unwrap_or_else(|e| panic!("a direct connection: {e}"));
     // Still paired: it stays.
     assert!(tokio::time::timeout(Duration::from_secs(6), conn.closed()).await.is_err());
     std::fs::write(dir.join("trusted"), format!("{}\n", "ef".repeat(32))).unwrap();
@@ -635,5 +654,122 @@ async fn an_unpaired_app_is_let_go() {
     assert!(format!("{why}").contains("unpaired"), "{why}");
     let _ = listener.kill();
     let _ = listener.wait();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Alerts for an iPad, end to end: a paired app turns them on over its direct
+/// link, then hears through the relay (the share server's stub) that an agent
+/// worked and is waiting, rang the bell, and exited with an error, sealed
+/// with its key. Unpaired, its alerts go.
+#[test]
+#[ignore]
+fn an_ipad_hears_when_an_agent_waits() {
+    direct_runtime().block_on(ipad_hears_when_an_agent_waits());
+}
+
+async fn ipad_hears_when_an_agent_waits() {
+    use crate::fleet::direct;
+    use base64::Engine as _;
+    let agent = std::env::var("MUXIN_TEST_AGENT").expect("set MUXIN_TEST_AGENT");
+    let server = std::env::var("MUXIN_TEST_SHARE_SERVER").expect("set MUXIN_TEST_SHARE_SERVER");
+    let home = std::env::temp_dir().join(format!("muxin-alerts-{}", std::process::id()));
+    let dir = home.join(".muxen/direct");
+    std::fs::create_dir_all(&dir).unwrap();
+    app_home();
+    let app = direct::app_fingerprint().unwrap();
+    let port = 45000 + (std::process::id() % 2000) as u16;
+    std::fs::write(dir.join("port"), port.to_string()).unwrap();
+    std::fs::write(dir.join("trusted"), format!("{app}\n")).unwrap();
+    let mut listener = std::process::Command::new(&agent).arg("listen").env("HOME", &home).stderr(std::process::Stdio::null()).spawn().unwrap();
+    let mut agent_fp = None;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Ok(cert) = std::fs::read(dir.join("cert.der")) {
+            agent_fp = Some(direct::fingerprint(&cert));
+            break;
+        }
+    }
+    let paired = direct::Paired { fingerprint: agent_fp.expect("the agent's certificate"), host: "127.0.0.1".into(), port, lan: vec!["127.0.0.1".into()], tailnet: Vec::new() };
+    direct::save("alerts-test", Some(paired)).unwrap();
+    let spec: MachineSpec = toml::from_str("name = \"Alerts\"\nid = \"alerts-test\"\nhost = \"alerts.invalid\"").unwrap();
+    let mut l = None;
+    for _ in 0..20 {
+        if let Some(found) = link::current_or_direct(&spec).await {
+            l = Some(found);
+            break;
+        }
+        direct::retry_now("alerts-test");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let l = l.expect("a direct link");
+
+    let http = reqwest::Client::new();
+    let device: serde_json::Value = http.post(format!("{server}/push/v1/devices")).json(&json!({ "token": "ab".repeat(32), "env": "sandbox" })).send().await.unwrap().json().await.unwrap();
+    let key = [9u8; 32];
+    let set = json!({ "relay": server, "to": device["id"], "key": base64::engine::general_purpose::STANDARD.encode(key), "machine_id": "alerts-test", "machine": "Alerts" });
+    let r = l.request(json!({ "op": "push", "set": set }), Duration::from_secs(10)).await.unwrap();
+    assert_eq!((r["ok"].as_bool(), r["set"].as_bool()), (Some(true), Some(true)), "{r}");
+    assert!(std::fs::read_to_string(dir.join("push.json")).unwrap().contains(&app));
+
+    // What the relay got for one session, opened with the key.
+    let sent = |collapse: &'static str| {
+        let http = http.clone();
+        let server = server.clone();
+        async move {
+            for _ in 0..60 {
+                let all: serde_json::Value = http.get(format!("{server}/push/v1/sent")).send().await.unwrap().json().await.unwrap();
+                if let Some(p) = all["sent"].as_array().into_iter().flatten().rev().find(|p| p["collapse"] == collapse) {
+                    let sealed = base64::engine::general_purpose::STANDARD.decode(p["alert"].as_str().unwrap()).unwrap();
+                    let open = ring::aead::LessSafeKey::new(ring::aead::UnboundKey::new(&ring::aead::CHACHA20_POLY1305, &key).unwrap());
+                    let mut data = sealed[12..].to_vec();
+                    let plain = open.open_in_place(ring::aead::Nonce::try_assume_unique_for_key(&sealed[..12]).unwrap(), ring::aead::Aad::empty(), &mut data).unwrap();
+                    return serde_json::from_slice::<serde_json::Value>(plain).unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            panic!("no alert for {collapse}");
+        }
+    };
+    let r = l.request(json!({ "op": "push", "test": true }), Duration::from_secs(15)).await.unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    let test = sent("test").await;
+    assert_eq!((test["kind"].as_str(), test["machine"].as_str()), (Some("test"), Some("Alerts")));
+
+    let cwd = home.display().to_string();
+    for (name, title, run) in [
+        ("claude-works", "Checkout fix", "for i in 1 2 3 4 5 6; do echo working $i; sleep 1; done; sleep 120"),
+        ("codex-rings", "Rings", "sleep 3; printf '\\a'; sleep 120"),
+        ("claude-fails", "Fails", "sleep 3; exit 3"),
+    ] {
+        let r = l.request(json!({ "op": "start", "name": name, "title": title, "agent": name.split('-').next(), "cwd": cwd, "cols": 80, "rows": 24, "run": run }), Duration::from_secs(15)).await.unwrap();
+        assert_eq!(r["ok"], true, "{r}");
+    }
+    let waiting = sent("claude-works").await;
+    assert_eq!((waiting["kind"].as_str(), waiting["title"].as_str(), waiting["agent"].as_str(), waiting["machine_id"].as_str()), (Some("waiting"), Some("Checkout fix"), Some("claude"), Some("alerts-test")), "{waiting}");
+    assert_eq!(sent("codex-rings").await["kind"], "bell");
+    let failed = sent("claude-fails").await;
+    assert_eq!((failed["kind"].as_str(), failed["code"].as_i64()), (Some("exited"), Some(3)), "{failed}");
+
+    // Unpaired: its alerts go within seconds.
+    std::fs::write(dir.join("trusted"), format!("{}\n", "ef".repeat(32))).unwrap();
+    let mut gone = false;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if !dir.join("push.json").exists() {
+            gone = true;
+            break;
+        }
+    }
+    assert!(gone, "push.json outlived the pairing");
+    for name in ["claude-works", "codex-rings", "claude-fails"] {
+        let _ = std::process::Command::new(&agent).arg("ctl").env("HOME", &home).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).spawn().map(|mut c| {
+            use std::io::Write as _;
+            let _ = c.stdin.take().map(|mut i| i.write_all(json!({ "op": "stop", "name": name }).to_string().as_bytes()));
+            let _ = c.wait();
+        });
+    }
+    let _ = listener.kill();
+    let _ = listener.wait();
+    let _ = direct::save("alerts-test", None);
     let _ = std::fs::remove_dir_all(&home);
 }

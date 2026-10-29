@@ -1,6 +1,6 @@
 [package]
 name = "muxen-agent"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Runs on each machine Muxen manages: keeps agent sessions alive and lets the app attach to them"
 license = "Apache-2.0"
@@ -16,7 +16,9 @@ serde_json = "1"
 # Direct connections (`listen`): QUIC with mutually pinned certificates.
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 socket2 = "0.6"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Alerts for paired iPads go to their relay over HTTPS (push.rs).
+webpki-roots = "1"
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
 ring = "0.17"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync", "signal"] }

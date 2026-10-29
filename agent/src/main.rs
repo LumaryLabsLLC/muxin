@@ -37,6 +37,7 @@ mod files;
 mod gui;
 mod link;
 mod proto;
+mod push;
 mod repos;
 mod schedules;
 mod screen;

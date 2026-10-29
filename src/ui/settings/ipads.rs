@@ -138,6 +138,8 @@ impl SettingsPage {
             .child(div().w_full().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(
                 "Muxin for iPad reaches your machines directly, with a key of its own. On the iPad, tap Pair with your Mac and scan the code that shows here.",
             ))
+            // Until it is: then its App Store link.
+            .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child("Muxin for iPad isn't on the App Store yet."))
             .child(match going {
                 Some(v) => self.pairing_now(v, theme),
                 None => self.pair_form(theme, cx),

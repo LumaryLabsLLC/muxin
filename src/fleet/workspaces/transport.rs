@@ -8,15 +8,14 @@
 //! confused with ssh's own exit codes.
 
 use std::collections::VecDeque;
-use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::config::MachineSpec;
+use crate::fleet::child::Child;
 use crate::ops::remote::{clean_line, clixml_text};
-use crate::probe;
 
 /// sh-family login shells read the script from stdin as a login shell; anything
 /// else (fish, nushell, xonsh) falls back to a login `sh`. Valid in every one
@@ -91,9 +90,10 @@ pub fn with_marker(marker: &str, windows: bool, script: &str) -> String {
     }
 }
 
-fn command(spec: &MachineSpec, windows: bool) -> Command {
+/// The shell that runs a script (on stdin): here, or there over ssh.
+async fn start(spec: &MachineSpec, windows: bool) -> Result<Child, String> {
     if spec.is_local() {
-        if windows {
+        let c = if windows {
             let mut c = Command::new("powershell");
             c.args(crate::ops::remote::ps_stdin_args());
             c
@@ -101,16 +101,11 @@ fn command(spec: &MachineSpec, windows: bool) -> Command {
             let mut c = Command::new("/bin/sh");
             c.args(["-c", LOGIN_WRAPPER]);
             c
-        }
+        };
+        Child::local(c).map_err(|e| format!("Couldn't start a shell: {e}"))
     } else {
-        let mut c = Command::new("ssh");
-        c.args(probe::ssh_args(spec));
-        c.arg(if windows {
-            format!("powershell {}", crate::ops::remote::ps_stdin_args().join(" "))
-        } else {
-            format!("sh -c '{LOGIN_WRAPPER}'")
-        });
-        c
+        let shell = if windows { format!("powershell {}", crate::ops::remote::ps_stdin_args().join(" ")) } else { format!("sh -c '{LOGIN_WRAPPER}'") };
+        crate::fleet::child::ssh(spec, &shell).await
     }
 }
 
@@ -128,9 +123,10 @@ pub async fn run(
     on_line: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) -> Result<Output, String> {
     spec.refuse_if_disconnected()?;
-    // Muxin on an iPad can't run ssh: every script goes over the machine's
-    // direct link, and output to stream comes when the script is done.
-    if cfg!(target_os = "ios") && !spec.is_local() {
+    // Muxin on an iPad can't run ssh: a paired machine's scripts go over its
+    // direct link, and output to stream comes when the script is done. (One
+    // it's adding, not paired yet, takes them over its own ssh, as below.)
+    if cfg!(target_os = "ios") && !spec.is_local() && crate::fleet::direct::paired(&spec.id).is_some() {
         let link = crate::fleet::link::current_or_direct(spec).await.ok_or_else(|| format!("Can't reach {}. It may be off, or not paired with this iPad.", spec.name))?;
         let req = serde_json::json!({ "op": "sh", "script": script, "timeout": timeout.as_secs() });
         let reply = link.request(req, timeout + Duration::from_secs(10)).await?;
@@ -151,14 +147,10 @@ pub async fn run(
             }
         }
     }
-    let mut cmd = command(spec, windows);
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| {
-        if spec.is_local() { format!("Couldn't start a shell: {e}") } else { format!("Couldn't run ssh: {e}") }
-    })?;
-    let mut stdin = child.stdin.take().ok_or("No stdin for the script")?;
-    let mut stdout = child.stdout.take().ok_or("No stdout for the script")?;
-    let mut stderr = child.stderr.take().ok_or("No stderr for the script")?;
+    let mut child = start(spec, windows).await?;
+    let mut stdin = child.take_stdin().ok_or("No stdin for the script")?;
+    let mut stdout = child.take_stdout().ok_or("No stdout for the script")?;
+    let mut stderr = child.take_stderr().ok_or("No stderr for the script")?;
 
     let mut out = Collector::new(marker, limits, secrets, false);
     let mut err = Collector::new(marker, Limits::OUTPUT, secrets, true);
@@ -208,12 +200,12 @@ pub async fn run(
         match tokio::time::timeout(AFTER_EXIT_GRACE, child.wait()).await {
             Ok(Ok(s)) => s.code(),
             _ => {
-                let _ = child.kill().await;
+                child.kill().await;
                 None
             }
         }
     } else {
-        let _ = child.kill().await;
+        child.kill().await;
         None
     };
 

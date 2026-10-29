@@ -55,6 +55,12 @@ pub fn init(config_dir: PathBuf) {
     let _ = DIR.set(config_dir);
 }
 
+/// Muxin's config folder, once set (where this app's keys are kept).
+#[cfg_attr(not(any(target_os = "ios", test)), allow(dead_code))]
+pub fn config_dir() -> Option<PathBuf> {
+    DIR.get().cloned()
+}
+
 fn store() -> Option<PathBuf> {
     DIR.get().map(|d| d.join("direct.json"))
 }

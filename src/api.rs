@@ -1196,7 +1196,7 @@ pub async fn check(engine: &Arc<Engine>, req: CheckRequest) -> ApiResult<Vec<Mac
 
 pub async fn add_machine(engine: &Arc<Engine>, req: AddMachineRequest, surface: Surface) -> ApiResult<AddMachineResponse> {
     engine.refresh_from_disk();
-    let id = engine.add_machine(NewMachine { name: req.name, host: req.host }).map_err(op_error)?;
+    let id = engine.add_machine(NewMachine { name: req.name, host: req.host, port: None }).map_err(op_error)?;
     let machine = if req.check {
         wait_checked(engine, &id, CHECK_WAIT).await;
         let s = engine.current();

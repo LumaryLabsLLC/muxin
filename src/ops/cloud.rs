@@ -163,7 +163,7 @@ impl Engine {
         self.op_log(op, format!("✓ Started at {ip}"));
 
         // Into the fleet, marked as a cloud machine.
-        let machine_id = self.add_machine(NewMachine { name: name.clone(), host: format!("{user}@{ip}") })?;
+        let machine_id = self.add_machine(NewMachine { name: name.clone(), host: format!("{user}@{ip}"), port: None })?;
         let cloud = CloudRef {
             provider: "digitalocean".into(),
             id,

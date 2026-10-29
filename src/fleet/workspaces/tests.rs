@@ -462,7 +462,7 @@ async fn demo_docker_flow() {
     let err = engine.create_workspace_with(CreateWorkspace::default(), docker(Some("node 22"))).await.unwrap_err();
     assert!(err.contains("isn't a docker image"), "{err}");
     // The demo has no Windows machine; this one only exists for tests.
-    let id = engine.add_machine(crate::ops::NewMachine { name: "Test Windows".into(), host: "test-windows".into() }).unwrap();
+    let id = engine.add_machine(crate::ops::NewMachine { name: "Test Windows".into(), host: "test-windows".into(), port: None }).unwrap();
     engine.run_check(Some(vec![id.clone()])).await;
     let err = engine.create_workspace_with(CreateWorkspace { machine: Some(id), ..Default::default() }, docker(None)).await.unwrap_err();
     assert!(err.contains("Windows"), "{err}");

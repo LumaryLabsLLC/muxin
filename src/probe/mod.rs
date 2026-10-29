@@ -487,8 +487,8 @@ async fn run(spec: &MachineSpec, shell: Shell) -> Result<String, RunError> {
             }
         }
     }
-    let mut cmd = if spec.is_local() {
-        match shell {
+    let mut child = if spec.is_local() {
+        let c = match shell {
             Shell::Sh => {
                 let mut c = Command::new("/bin/sh");
                 c.arg("-s");
@@ -499,22 +499,21 @@ async fn run(spec: &MachineSpec, shell: Shell) -> Result<String, RunError> {
                 c.args(crate::ops::remote::ps_stdin_args());
                 c
             }
-        }
+        };
+        crate::fleet::child::Child::local(c).map_err(|e| RunError::Spawn(format!("Couldn't start the check: {e}")))?
     } else {
-        let mut c = Command::new("ssh");
-        c.args(ssh_args(spec));
-        c.arg(match shell {
+        let shell = match shell {
             Shell::Sh => "sh -s".to_string(),
             Shell::Powershell => format!("powershell {}", crate::ops::remote::ps_stdin_args().join(" ")),
-        });
-        c
+        };
+        match crate::fleet::child::ssh(spec, &shell).await {
+            Ok(c) => c,
+            // Muxin's own client: it didn't get in (what ssh says on stderr, exiting 255).
+            Err(e) if cfg!(target_os = "ios") => return Err(RunError::Output { code: Some(255), stderr: e }),
+            Err(e) => return Err(RunError::Spawn(e)),
+        }
     };
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-
-    let mut child = cmd.spawn().map_err(|e| {
-        RunError::Spawn(if spec.is_local() { format!("Couldn't start the check: {e}") } else { format!("Couldn't run ssh: {e}") })
-    })?;
-    let mut stdin = child.stdin.take().expect("piped stdin");
+    let mut stdin = child.take_stdin().expect("piped stdin");
     let output = async move {
         // The script is small; ignore write errors (e.g. ssh exiting early) and read why from stderr.
         let script = if shell == Shell::Powershell { crate::ops::remote::ps_sendable(&script) } else { script };

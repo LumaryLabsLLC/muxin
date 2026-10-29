@@ -63,6 +63,19 @@ security-framework = "3"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Muxin's own ssh client (src/fleet/ssh.rs), where no `ssh` program can run:
+# an iPad adding a machine. Exact versions: russh pins release candidates.
+# The agent builds ship gzipped in the iPad app (sessions/agent.rs).
+[target.'cfg(target_os = "ios")'.dependencies]
+russh = { version = "=0.65.0", default-features = false, features = ["ring", "rsa"] }
+russh-sftp = "=3.0.1"
+flate2 = "1"
+
+# The ssh client's tests run here, against a server of russh's own.
+[dev-dependencies]
+russh = { version = "=0.65.0", default-features = false, features = ["ring", "rsa"] }
+russh-sftp = "=3.0.1"
+
 # The icon and name in the Windows executable (build.rs).
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

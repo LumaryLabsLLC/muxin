@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::config::MachineSpec;
@@ -68,7 +68,7 @@ pub struct Link {
 }
 
 enum Holder {
-    Ssh(Child),
+    Ssh(super::child::Child),
     Direct(quinn::Connection),
 }
 
@@ -173,9 +173,7 @@ impl Link {
         self.pending.lock().unwrap().clear();
         self.channels.lock().unwrap().clear();
         match self.holder.lock().unwrap().take() {
-            Some(Holder::Ssh(mut c)) => {
-                let _ = c.start_kill();
-            }
+            Some(Holder::Ssh(mut c)) => c.start_kill(),
             Some(Holder::Direct(conn)) => conn.close(0u32.into(), b"bye"),
             None => {}
         }
@@ -311,13 +309,11 @@ async fn connect(spec: &MachineSpec) -> Result<Arc<Link>, String> {
     if let Some(paired) = super::direct::paired(&spec.id).filter(|_| !spec.is_local()) {
         match connect_direct(spec, &paired).await {
             Ok(link) => return Ok(link),
-            // Muxin on an iPad can't start ssh: a direct link is the only way in.
+            // Muxin on an iPad reaches a paired machine only directly. (One
+            // it's adding, not paired yet, over its own ssh, below.)
             Err(e) if cfg!(target_os = "ios") => return Err(e),
             Err(e) => tracing::debug!("no direct connection to {}: {e}; using ssh", spec.name),
         }
-    }
-    if cfg!(target_os = "ios") {
-        return Err(format!("{} isn't paired with this iPad.", spec.name));
     }
     connect_ssh(spec).await
 }
@@ -350,29 +346,38 @@ async fn connect_direct(spec: &MachineSpec, paired: &super::direct::Paired) -> R
 }
 
 async fn connect_ssh(spec: &MachineSpec) -> Result<Arc<Link>, String> {
-    let mut cmd = if spec.is_local() {
-        let mut c = Command::new(local_agent());
-        c.arg("link");
-        // Without the terminal Muxin may have been started from: nothing the
-        // agent runs (an interactive shell, say) can take it over and stop us.
-        #[cfg(unix)]
-        unsafe {
-            c.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
+    let mut child = if cfg!(target_os = "ios") && !spec.is_local() {
+        // Muxin's own ssh client: what the agent says on stderr is read and dropped.
+        let mut c = super::child::ssh(spec, &super::sessions::agent::command(spec, "link")).await?;
+        if let Some(mut err) = c.take_stderr() {
+            tokio::spawn(async move { tokio::io::copy(&mut err, &mut tokio::io::sink()).await });
         }
         c
     } else {
-        let mut c = Command::new("ssh");
-        c.args(probe::ssh_args(spec));
-        c.arg(super::sessions::agent::command(spec, "link"));
-        c
+        let mut cmd = if spec.is_local() {
+            let mut c = Command::new(local_agent());
+            c.arg("link");
+            // Without the terminal Muxin may have been started from: nothing the
+            // agent runs (an interactive shell, say) can take it over and stop us.
+            #[cfg(unix)]
+            unsafe {
+                c.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+            c
+        } else {
+            let mut c = Command::new("ssh");
+            c.args(probe::ssh_args(spec));
+            c.arg(super::sessions::agent::command(spec, "link"));
+            c
+        };
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+        super::child::Child::Process(cmd.spawn().map_err(|e| format!("couldn't start the link: {e}"))?)
     };
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| format!("couldn't start the link: {e}"))?;
-    let stdin = child.stdin.take().ok_or("no stdin")?;
-    let stdout = child.stdout.take().ok_or("no stdout")?;
+    let stdin = child.take_stdin().ok_or("no stdin")?;
+    let stdout = child.take_stdout().ok_or("no stdout")?;
     let link = start(spec, stdout, stdin, Holder::Ssh(child), "ssh").await?;
     // Where ssh goes, to say which network the machine is on.
     if spec.is_local() {

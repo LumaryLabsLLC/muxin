@@ -252,6 +252,25 @@ Every tool returns structured JSON. Failures come back with a `code` an agent ca
 
 Many failures also include a `hint` with the exact command that fixes them. [AGENTS.md](AGENTS.md) has guidance written for agents.
 
+### Agent skill
+
+Agents that load skills (Claude Code, Codex, OpenCode, Gemini CLI, Pi, Hermes, …) can learn Muxin's CLI from the skill in [`skills/muxin`](skills/muxin/SKILL.md), with no MCP server to set up. It has the ground rules (start with `muxin status --json`, confirm before changing things, pass hints on verbatim) and how to work with sessions, boxes, workspaces, runners, machines, cloud machines and VMs. Ask your agent to "review PR 142 in my session on beelink" and it knows what to run.
+
+```sh
+muxin skill install                   # for every agent found on this computer
+muxin skill install --agent hermes    # just one: claude, codex, opencode, gemini, pi, hermes, or agents
+muxin skill install --dir ~/my-agent/skills
+muxin skill remove
+```
+
+The skill is built into Muxin, so `muxin skill install` writes the version that matches yours. Run it again after updating. It goes in `~/.claude/skills/muxin`, `~/.codex/skills/muxin`, `~/.config/opencode/skills/muxin`, `~/.gemini/skills/muxin`, `~/.pi/agent/skills/muxin`, `~/.hermes/skills/muxin`, or for `agents` the shared `~/.agents/skills/muxin`.
+
+To follow this repository instead, copy or link the folder into your agent's skills folder (`muxin skill install` leaves a link alone):
+
+```sh
+ln -s "$PWD/skills/muxin" ~/.claude/skills/muxin
+```
+
 ### The CLI, for scripts and agents without MCP
 
 Every command takes `--json`. In that mode stdout carries JSON only, and errors are printed as `{"error": {...}}`. Progress and logs go to stderr. Exit codes:

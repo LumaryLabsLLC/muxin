@@ -564,6 +564,44 @@ pub async fn ssh_key_for(spec: &MachineSpec) -> Option<String> {
         .map(|p| format!("{p}.pub"))
 }
 
+/// An ssh agent to use when this process has no usable `SSH_AUTH_SOCK`, as
+/// `IdentityAgent` would take it. A desktop app started from a launcher (in a
+/// systemd/uwsm session) doesn't always inherit the variable, even though an
+/// agent is running here and ssh in a terminal works.
+#[cfg(all(unix, not(target_os = "ios")))]
+fn agent_socket() -> Option<String> {
+    let current = std::env::var_os("SSH_AUTH_SOCK").map(std::path::PathBuf::from);
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })));
+    let mut candidates = vec![
+        runtime.join("ssh-agent.socket"),
+        runtime.join("ssh-agent"),
+        runtime.join("gcr/ssh"),
+        runtime.join("keyring/ssh"),
+        runtime.join("gnupg/S.gpg-agent.ssh"),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".gnupg/S.gpg-agent.ssh"));
+    }
+    agent_from(current.as_deref(), &candidates).map(|p| p.display().to_string())
+}
+
+#[cfg(any(not(unix), target_os = "ios"))]
+fn agent_socket() -> Option<String> {
+    None
+}
+
+/// A working `current` wins: ssh finds the agent by itself then. A stale one
+/// (a path that's gone, as after an agent restart) doesn't stop the search.
+#[cfg(all(unix, not(target_os = "ios")))]
+fn agent_from(current: Option<&std::path::Path>, candidates: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    if current.is_some_and(std::path::Path::exists) {
+        return None;
+    }
+    candidates.iter().find(|p| p.exists()).cloned()
+}
+
 pub fn ssh_args(spec: &MachineSpec) -> Vec<String> {
     let mut args: Vec<String> = [
         "-T",
@@ -583,6 +621,11 @@ pub fn ssh_args(spec: &MachineSpec) -> Vec<String> {
         args.extend(["-l".into(), user.to_string()]);
     }
     args.extend(spec.ssh_options.iter().cloned());
+    // No SSH_AUTH_SOCK here (a launcher-started app): point ssh at the agent
+    // it can't see, so an encrypted key works without a passphrase prompt.
+    if let Some(agent) = agent_socket() {
+        args.extend(["-o".into(), format!("IdentityAgent={agent}")]);
+    }
     // Away from home, through Tailscale, when the usual host only works there
     // (ssh's config still supplies the user, key and port).
     if let Some(address) = crate::fleet::tailscale::ssh_override(&spec.id) {
@@ -961,6 +1004,27 @@ c1.restarts=7
         // ssh's own failures, or killed: not a shell's answer.
         assert!(!ssh_got_through(Some(255)));
         assert!(!ssh_got_through(None));
+    }
+
+    #[cfg(all(unix, not(target_os = "ios")))]
+    #[test]
+    fn finds_an_agent_for_a_launcher_started_app() {
+        let dir = std::env::temp_dir().join(format!("muxin-agent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("ssh-agent.socket");
+        let _agent = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+
+        // No SSH_AUTH_SOCK here: find the agent that is.
+        assert_eq!(agent_from(None, std::slice::from_ref(&socket)), Some(socket.clone()));
+        // A stale one (the agent restarted) doesn't hide it.
+        let gone = dir.join("gone");
+        assert_eq!(agent_from(Some(&gone), std::slice::from_ref(&socket)), Some(socket.clone()));
+        // A working one needs no help.
+        assert_eq!(agent_from(Some(&socket), std::slice::from_ref(&socket)), None);
+
+        drop(_agent);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

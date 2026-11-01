@@ -281,6 +281,7 @@ pub fn agent_look(agent: &str) -> (&'static str, (u32, u32)) {
         "codex" => ("agent-codex", (0x3d3d42, 0x111114)),
         "opencode" => ("agent-opencode", (0x34363c, 0x16171a)),
         "gemini" => ("agent-gemini", (0x4796e3, 0x9a6fd0)),
+        "agy" => ("agent-agy", (0x5e5ce6, 0x3f3d99)),
         "amp" => ("agent-amp", (0xf2704f, 0xc9352b)),
         "pi" => ("agent-pi", (0x5aa6cf, 0x3a7fa6)),
         "shell" => ("terminal", (0x8f95ff, 0x5057e0)),

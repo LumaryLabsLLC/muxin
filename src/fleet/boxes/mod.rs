@@ -92,6 +92,14 @@ fn launch(agent: &str) -> Option<Launch> {
             dirs: &[".config/opencode", ".local/share/opencode"],
         },
         "gemini" => Launch { new: r#"gemini --yolo ${p:+-i "$p"}"#, resume: r#"gemini --yolo --resume latest ${p:+-i "$p"}"#, prepare: "", typed: false, dirs: &[".gemini"] },
+        // Antigravity CLI stores credentials, settings and presence under ~/.gemini/antigravity-cli.
+        "agy" => Launch {
+            new: r#"agy --dangerously-skip-permissions ${p:+-i "$p"}"#,
+            resume: r#"agy --dangerously-skip-permissions --continue ${p:+-i "$p"}"#,
+            prepare: "",
+            typed: false,
+            dirs: &[".gemini"],
+        },
         "pi" => Launch { new: r#"pi ${p:+"$p"}"#, resume: r#"pi --continue ${p:+"$p"}"#, prepare: "", typed: false, dirs: &[".pi"] },
         _ => return None,
     })
@@ -104,7 +112,7 @@ pub(crate) fn launcher(agent: &str) -> Option<(String, bool)> {
 }
 
 /// The agent CLIs a box can run (ids from `sessions::AGENTS`).
-pub const BOX_AGENTS: &[&str] = &["claude", "codex", "amp", "opencode", "gemini", "pi"];
+pub const BOX_AGENTS: &[&str] = &["claude", "codex", "amp", "opencode", "gemini", "agy", "pi"];
 
 /// Every agent CLI's folders in the home (sign-ins, settings, history): the
 /// machine's are mounted into each box, so its agents are signed in as there.
@@ -655,6 +663,10 @@ mod tests {
         // Claude Code's first-run answers go in the box's own ~/.claude.json, before it starts.
         let claude = start_script(&launch("claude").unwrap());
         assert!(claude.find("hasTrustDialogAccepted").unwrap() < claude.find("exec claude").unwrap());
+        // Antigravity launches with permissions skipped and uses -i for initial prompt.
+        let agy = start_script(&launch("agy").unwrap());
+        assert!(agy.contains(r#"exec agy --dangerously-skip-permissions ${p:+-i "$p"}"#));
+        assert!(agy.contains(r#"exec agy --dangerously-skip-permissions --continue ${p:+-i "$p"}"#));
     }
 
     #[test]

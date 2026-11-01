@@ -763,10 +763,13 @@ impl Render for LogsView {
                                 let mid = if mid.is_empty() && n != r1 { " ".to_string() } else { mid };
                                 row.child(head).child(div().bg(selected_bg).child(mid)).child(tail)
                             }
-                            None if compose && let Some(bar) = line.find('|') => {
-                                let color = service_of(&line).map(|s| service_color(s, &services)).unwrap_or(colors.text_muted);
-                                row.child(div().text_color(color).child(line[..=bar].to_string())).child(line[bar + 1..].to_string())
-                            }
+                            None if compose => match line.find('|') {
+                                Some(bar) => {
+                                    let color = service_of(&line).map(|s| service_color(s, &services)).unwrap_or(colors.text_muted);
+                                    row.child(div().text_color(color).child(line[..=bar].to_string())).child(line[bar + 1..].to_string())
+                                }
+                                None => row.child(line),
+                            },
                             None => row.child(line),
                         }
                     })

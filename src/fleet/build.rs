@@ -565,7 +565,13 @@ fn powered_off_reason(spec: &MachineSpec, p: &ProbeResult) -> Unreachable {
 pub fn explain_unreachable(spec: &MachineSpec, p: &ProbeResult, retrying: bool, device: Option<&TailnetDevice>, tailscale: Option<&TailscaleStatus>) -> Unreachable {
     let error = p.error.clone().unwrap_or_else(|| "The check failed.".into());
     let (name, host) = (spec.name.as_str(), spec.host.trim());
-    let kind = if spec.is_local() { "error" } else { unreachable_kind(&error) };
+    let kind = if spec.is_local() {
+        "error"
+    } else if p.locked_key.is_some() {
+        "key-locked"
+    } else {
+        unreachable_kind(&error)
+    };
     let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
     let again = if retrying { "Reconnects when it's back." } else { "Check again when it's back." };
     let os = p.os.as_deref().or(spec.platform.as_deref()).or(device.map(|d| d.os.as_str())).unwrap_or("").to_ascii_lowercase();
@@ -587,6 +593,17 @@ pub fn explain_unreachable(spec: &MachineSpec, p: &ProbeResult, retrying: bool, 
                 "its ssh server isn't running"
             };
             (format!("{name} isn't accepting connections"), format!("Starting up, or {ssh}."), None)
+        }
+        // The machine has the key, so copying it again can't help: ssh needs
+        // an agent to unlock it.
+        "key-locked" => {
+            let key = p.locked_key.as_deref().unwrap_or_default();
+            let key = if key.contains(' ') { crate::ops::remote::sh_quote(key) } else { key.to_string() };
+            (
+                format!("Your ssh key for {name} is locked"),
+                format!("{name} already has this key. It has a passphrase, and Muxin can't reach an ssh agent that holds it. Add it to your agent. If ssh works in a terminal, you can also start Muxin from there."),
+                Some(format!("ssh-add {key}")),
+            )
         }
         // The account ssh guessed isn't one the machine lets in: a key can't
         // fix that, the right account name can.
@@ -1460,6 +1477,26 @@ mod tests {
         let u = explain_unreachable(&inv.machines[0], &denied("ahanna@box.local: Permission denied (publickey).", Some("ahanna")), true, None, None);
         assert!(u.hint.unwrap().ends_with(" ahanna@box.local"));
         assert!(u.detail.contains("password for ahanna"), "{}", u.detail);
+    }
+
+    #[test]
+    fn says_when_the_key_is_there_but_locked() {
+        let inv = inventory("[[machine]]\nname = \"Hub\"\nhost = \"martin@hub.local\"\n");
+        let locked = |key: &str| ProbeResult {
+            ok: false,
+            error: Some("martin@hub.local: Permission denied (publickey,password).".into()),
+            locked_key: Some(key.into()),
+            ..Default::default()
+        };
+        let u = explain_unreachable(&inv.machines[0], &locked("/home/martin/.ssh/id_ed25519"), true, None, None);
+        // Its own kind: "auth" is what offers to copy the key.
+        assert_eq!(u.kind, "key-locked");
+        assert_eq!(u.title, "Your ssh key for Hub is locked");
+        assert!(u.detail.starts_with("Hub already has this key."), "{}", u.detail);
+        assert_eq!(u.hint.as_deref(), Some("ssh-add /home/martin/.ssh/id_ed25519"));
+
+        let u = explain_unreachable(&inv.machines[0], &locked("/home/m h/.ssh/id_ed25519"), true, None, None);
+        assert_eq!(u.hint.as_deref(), Some("ssh-add '/home/m h/.ssh/id_ed25519'"));
     }
 
     #[test]

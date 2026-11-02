@@ -223,6 +223,7 @@ pub fn unreachable_reason(m: &Machine) -> String {
         Some("powered-off") => "Powered off",
         Some("refused") => "Not accepting ssh",
         Some("auth") => "ssh key not accepted",
+        Some("key-locked") => "ssh key is locked",
         Some("unknown-host") => "Host not found",
         Some("host-key") => "Host key changed",
         Some("tailscale-off") => "Tailscale is off here",

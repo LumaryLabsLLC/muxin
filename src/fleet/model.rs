@@ -377,7 +377,8 @@ pub struct Probe {
 #[serde(rename_all = "camelCase")]
 pub struct Unreachable {
     /// "offline" (no answer: shut down, asleep, off the network) | "refused" |
-    /// "auth" | "unknown-host" | "host-key" | "tailscale-off" (this computer's
+    /// "auth" | "key-locked" (the machine has the key, and it has a passphrase
+    /// no agent here unlocks) | "unknown-host" | "host-key" | "tailscale-off" (this computer's
     /// Tailscale is off or signed out, and the machine is on the tailnet) |
     /// "powered-off" (a cloud machine) | "host-down" (the machine it runs on or
     /// is reached through is off) | "stopped" (its container there isn't

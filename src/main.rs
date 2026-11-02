@@ -1527,6 +1527,8 @@ struct InitArgs {
 }
 
 fn main() -> ExitCode {
+    #[cfg(unix)]
+    probe::find_ssh_agent();
     crash::install(concat!("muxin ", env!("CARGO_PKG_VERSION")), config::dir_from_env().join("crash.log"));
     // Logs always go to stderr: stdout is reserved for --json output and MCP messages.
     tracing_subscriber::fmt()

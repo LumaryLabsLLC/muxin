@@ -92,6 +92,10 @@ pub struct ProbeResult {
     /// account there, or ssh there doesn't let it in.
     #[serde(default)]
     pub refused_user: Option<String>,
+    /// The key the machine accepted and ssh couldn't sign in with: it has a
+    /// passphrase, and no ssh agent ssh can reach holds it.
+    #[serde(default)]
+    pub locked_key: Option<String>,
 }
 
 /// A Docker container that publishes ports on its machine.
@@ -221,9 +225,58 @@ pub async fn probe(spec: &MachineSpec, remembered: Option<Shell>) -> ProbeResult
     // ssh's route and sign-in only matter where ssh runs (not an iPad).
     if spec.is_checkable() && !spec.is_local() && !cfg!(target_os = "ios") {
         r.route = ssh_route(spec).await;
-        r.refused_user = refused_user(spec, &r).await;
+        r.locked_key = locked_key(spec, &r).await;
+        // A machine that accepted the key has the account, too.
+        if r.locked_key.is_none() {
+            r.refused_user = refused_user(spec, &r).await;
+        }
     }
     r
+}
+
+/// The key a machine already has but ssh couldn't use, when it has a
+/// passphrase: ssh in BatchMode can only use one through an agent, and says
+/// just "Permission denied" without one. Asked once, after that failure.
+async fn locked_key(spec: &MachineSpec, r: &ProbeResult) -> Option<String> {
+    if crate::fleet::build::unreachable_kind(r.error.as_deref()?) != "auth" {
+        return None;
+    }
+    let mut cmd = Command::new("ssh");
+    // ssh keeps the first value it's given for an option.
+    cmd.args(["-v", "-o", "ControlPath=none"]).args(ssh_args(spec)).arg("true");
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(15), cmd.output()).await.ok()?.ok()?;
+    let key = accepted_key(&String::from_utf8_lossy(&out.stderr))?;
+    has_passphrase(&key).await.then_some(key)
+}
+
+/// The key `ssh -v` last saw a server accept, from a line like "debug1: Server
+/// accepts key: /home/a/.ssh/id_ed25519 ED25519 SHA256:abc explicit", unless
+/// it then got in: that was a jump host's, and the machine behind it refused.
+fn accepted_key(log: &str) -> Option<String> {
+    let mut key = None;
+    for line in log.lines() {
+        if let Some((_, rest)) = line.split_once("Server accepts key: ") {
+            // The name may have spaces: it's all that's before the type and fingerprint.
+            let words: Vec<&str> = rest.split(' ').collect();
+            let fingerprint = words.iter().position(|w| w.starts_with("SHA256:") || w.starts_with("MD5:"));
+            key = fingerprint.filter(|&at| at >= 2).map(|at| words[..at - 1].join(" "));
+        } else if line.contains("Authenticated to ") {
+            key = None;
+        }
+    }
+    key
+}
+
+/// Whether a private key file needs a passphrase: ssh-keygen says so, without
+/// asking, when it's given an empty one. A key in an agent isn't a file: no.
+async fn has_passphrase(key: &str) -> bool {
+    let mut cmd = Command::new("ssh-keygen");
+    cmd.args(["-y", "-P", "", "-f", key]).stdin(Stdio::null()).kill_on_drop(true);
+    match tokio::time::timeout(Duration::from_secs(5), cmd.output()).await {
+        Ok(Ok(out)) => !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("passphrase"),
+        _ => false,
+    }
 }
 
 /// The account a machine turns away, when its key wasn't accepted for one
@@ -562,6 +615,45 @@ pub async fn ssh_key_for(spec: &MachineSpec) -> Option<String> {
             full.is_file() && std::path::PathBuf::from(format!("{}.pub", full.display())).is_file()
         })
         .map(|p| format!("{p}.pub"))
+}
+
+/// Sets SSH_AUTH_SOCK when this process has no working one and an ssh agent is
+/// at a usual place: an app started from a launcher doesn't get what a shell's
+/// profile exports, so ssh works in a terminal and not here. In the environment
+/// and not as ssh's `-o IdentityAgent`, so `IdentityAgent` in the user's ssh
+/// config still wins, and all Muxin starts gets it (ssh, sftp, rsync, an editor).
+///
+/// `main` calls it first: the environment can't change once there are threads.
+#[cfg(all(unix, not(target_os = "ios")))]
+pub fn find_ssh_agent() {
+    let current = std::env::var_os("SSH_AUTH_SOCK").map(std::path::PathBuf::from);
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })));
+    let mut candidates = vec![
+        runtime.join("ssh-agent.socket"),
+        runtime.join("ssh-agent"),
+        runtime.join("gcr/ssh"),
+        runtime.join("keyring/ssh"),
+        runtime.join("gnupg/S.gpg-agent.ssh"),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".gnupg/S.gpg-agent.ssh"));
+    }
+    if let Some(agent) = agent_from(current.as_deref(), &candidates) {
+        unsafe { std::env::set_var("SSH_AUTH_SOCK", agent) };
+    }
+}
+
+/// The agent to use when `current` doesn't answer (none, or left from an agent
+/// that's gone): the first candidate something listens on.
+#[cfg(all(unix, not(target_os = "ios")))]
+fn agent_from(current: Option<&std::path::Path>, candidates: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    let answers = |p: &std::path::Path| std::os::unix::net::UnixStream::connect(p).is_ok();
+    if current.is_some_and(answers) {
+        return None;
+    }
+    candidates.iter().find(|p| answers(p)).cloned()
 }
 
 pub fn ssh_args(spec: &MachineSpec) -> Vec<String> {
@@ -961,6 +1053,81 @@ c1.restarts=7
         // ssh's own failures, or killed: not a shell's answer.
         assert!(!ssh_got_through(Some(255)));
         assert!(!ssh_got_through(None));
+    }
+
+    #[test]
+    fn says_which_key_a_machine_accepted() {
+        // What ssh 10.2 says for a key with a passphrase and no agent.
+        let locked = "debug1: Will attempt key: /home/a/.ssh/id_ed25519 ED25519 SHA256:Hy4U explicit\n\
+            debug1: Offering public key: /home/a/.ssh/id_ed25519 ED25519 SHA256:Hy4U explicit\n\
+            debug1: Server accepts key: /home/a/.ssh/id_ed25519 ED25519 SHA256:Hy4U explicit\n\
+            debug1: No more authentication methods to try.\n\
+            a@box: Permission denied (publickey).\n";
+        assert_eq!(accepted_key(locked).as_deref(), Some("/home/a/.ssh/id_ed25519"));
+        // ssh's default keys carry no "explicit", and a name can have spaces.
+        assert_eq!(accepted_key("debug1: Server accepts key: /home/a b/.ssh/id_rsa RSA SHA256:x\n").as_deref(), Some("/home/a b/.ssh/id_rsa"));
+        assert_eq!(accepted_key("debug1: Server accepts key: me@laptop ED25519 SHA256:x agent\n").as_deref(), Some("me@laptop"));
+
+        // The machine doesn't have it.
+        let unknown = "debug1: Offering public key: /home/a/.ssh/id_ed25519 ED25519 SHA256:Hy4U explicit\n\
+            debug1: No more authentication methods to try.\n\
+            a@box: Permission denied (publickey).\n";
+        assert_eq!(accepted_key(unknown), None);
+        // Signed in: nothing's locked.
+        let signed_in = "debug1: Server accepts key: /home/a/.ssh/id_ed25519 ED25519 SHA256:Hy4U explicit\n\
+            Authenticated to box ([10.0.0.2]:22) using \"publickey\".\n";
+        assert_eq!(accepted_key(signed_in), None);
+        // A jump host took the key, and the machine behind it didn't.
+        let behind = format!("{signed_in}debug1: Offering public key: /home/a/.ssh/id_ed25519 ED25519 SHA256:Hy4U explicit\na@box: Permission denied (publickey).\n");
+        assert_eq!(accepted_key(&behind), None);
+        // An ssh too old to name the key: nothing to go on.
+        assert_eq!(accepted_key("debug1: Server accepts key: pkalg ssh-ed25519 blen 51\n"), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tells_a_key_with_a_passphrase() {
+        let dir = std::env::temp_dir().join(format!("muxin-passphrase-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let make = |name: &str, passphrase: &str| {
+            let key = dir.join(name);
+            let made = std::process::Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", passphrase, "-f"]).arg(&key).status().unwrap();
+            assert!(made.success());
+            key.display().to_string()
+        };
+        assert!(has_passphrase(&make("locked", "not empty")).await);
+        assert!(!has_passphrase(&make("plain", "")).await);
+        // An agent's key has a comment for a name, and no file.
+        assert!(!has_passphrase("me@laptop").await);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(all(unix, not(target_os = "ios")))]
+    #[test]
+    fn finds_an_agent_for_a_launcher_started_app() {
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("muxin-agent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = dir.join("live");
+        let _agent = UnixListener::bind(&live).unwrap();
+        // A socket left by an agent that's gone, and a folder of that name.
+        let dead = dir.join("dead");
+        drop(UnixListener::bind(&dead).unwrap());
+        let folder = dir.join("folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        let gone = dir.join("gone");
+
+        // Nothing here: the agent that's there, past what isn't one.
+        let candidates = [gone.clone(), dead.clone(), folder.clone(), live.clone()];
+        assert_eq!(agent_from(None, &candidates), Some(live.clone()));
+        // What it was given doesn't work: same.
+        assert_eq!(agent_from(Some(&gone), &candidates), Some(live.clone()));
+        assert_eq!(agent_from(Some(&dead), &candidates), Some(live.clone()));
+        // What it was given works: nothing to do.
+        assert_eq!(agent_from(Some(&live), &candidates), None);
+        // No agent anywhere: nothing to set.
+        assert_eq!(agent_from(None, &[gone, dead, folder]), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

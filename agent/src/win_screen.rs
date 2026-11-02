@@ -890,7 +890,7 @@ fn vk_of(sym: u32) -> Option<(VIRTUAL_KEY, bool)> {
         0xffbe..=0xffc9 => (VK_F1 + (sym - 0xffbe) as u16, false),
         // Letters: Shift comes on its own. Other characters: see `typed_key`.
         _ => {
-            let c = char::from_u32(sym).filter(char::is_ascii_lowercase)?;
+            let c = char::from_u32(sym).filter(char::is_ascii_alphabetic)?;
             (c.to_ascii_uppercase() as u16, false)
         }
     })

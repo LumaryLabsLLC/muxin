@@ -22,7 +22,7 @@ icons!(
     "triangle-alert", "x", "zap", "arrow-left", "arrow-right", "gauge", "radio", "workflow",
     "bot", "square-terminal", "power", "plug", "unplug",
     "eye", "link", "users", "user-x", "user-check",
-    "agent-claude", "agent-codex", "agent-gemini", "agent-opencode", "agent-amp", "agent-pi", "agent-github",
+    "agent-claude", "agent-codex", "agent-gemini", "agent-opencode", "agent-agy", "agent-amp", "agent-pi", "agent-github",
     "circle-dot", "git-pull-request", "git-pull-request-draft", "git-merge", "message-square", "lock", "star",
     "arrow-down", "arrow-up", "book-open", "star-filled", "maximize", "minimize", "panel-right", "panel-left", "columns-2", "rows-2", "pause", "circle-stop",
     "folder", "file", "sliders-horizontal", "palette", "keyboard", "cloud", "tablet", "brand-digitalocean", "pencil", "code", "corner-down-right", "arrow-right-left",

@@ -492,7 +492,7 @@ struct ScheduleAddArgs {
     /// A shell command to run
     #[arg(long)]
     command: Option<String>,
-    /// Or an agent session: claude, codex, opencode, gemini, amp, pi
+    /// Or an agent session: claude, codex, opencode, gemini, agy, amp, pi
     #[arg(long = "agent")]
     cli: Option<String>,
     /// What the agent is asked
@@ -1023,7 +1023,7 @@ enum SessionCommand {
     /// List sessions (and which agents each machine has)
     #[command(alias = "list")]
     Ls(SessionLsArgs),
-    /// Start an agent (claude, codex, opencode, gemini, amp, pi) or a shell on a machine
+    /// Start an agent (claude, codex, opencode, gemini, agy, amp, pi) or a shell on a machine
     Start(SessionStartArgs),
     /// Print a session's screen and recent scrollback
     Read(SessionReadArgs),
@@ -1149,7 +1149,7 @@ struct SessionStartArgs {
     agent: AgentArgs,
     /// Machine id or name
     machine: String,
-    /// claude, codex, opencode, gemini, amp, pi or shell
+    /// claude, codex, opencode, gemini, agy, amp, pi or shell
     #[arg(value_name = "AGENT")]
     kind: String,
     /// Folder on the machine (default: home)
@@ -1196,7 +1196,7 @@ struct SessionHandoffArgs {
     agent: AgentArgs,
     /// Session id (<machine-id>/<name>), unique name, or a box id
     session_id: String,
-    /// The agent to hand it to: claude, codex, opencode, gemini, amp or pi
+    /// The agent to hand it to: claude, codex, opencode, gemini, agy, amp or pi
     to: String,
     /// Keep the old session running too
     #[arg(long)]

@@ -1,5 +1,4 @@
-<!-- agy: a stand-in, not Antigravity's own logo -->
+<!-- agy: brand mark of its owner; SVG from LobeHub Icons (MIT) -->
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd">
-  <path d="M12 3.25a1 1 0 0 1 .86.49l7.75 13.25A1 1 0 0 1 19.75 18.5H4.25a1 1 0 0 1-.86-1.51L11.14 3.74a1 1 0 0 1 .86-.49zm0 3.75L6.6 16.5h10.8L12 7zm0 4a1.75 1.75 0 1 1 0 3.5 1.75 1.75 0 0 1 0-3.5z"/>
-  <rect x="5" y="20.5" width="14" height="1.75" rx="0.875"/>
+  <path d="M21.751 22.607c1.34 1.005 3.35.335 1.508-1.508C17.73 15.74 18.904 1 12.037 1 5.17 1 6.342 15.74.815 21.1c-2.01 2.009.167 2.511 1.507 1.506 5.192-3.517 4.857-9.714 9.715-9.714 4.857 0 4.522 6.197 9.714 9.715z"/>
 </svg>

@@ -1282,8 +1282,9 @@ pub fn print_config() -> String {
     .unwrap_or_default();
     format!(
         "# Claude Code\nclaude mcp add muxin -- {exe} mcp\n\n\
+         # Antigravity CLI\nagy mcp add muxin -- {exe} mcp\n\n\
          # Codex (~/.codex/config.toml)\n[mcp_servers.muxin]\ncommand = \"{exe}\"\nargs = [\"mcp\"]\n\n\
-         # Other MCP clients (Claude Desktop, Cursor, Antigravity's ~/.gemini/config/mcp_config.json, ...)\n{json_block}\n\n\
+         # Other MCP clients (Claude Desktop, Cursor, ...)\n{json_block}\n\n\
          # Try it safely first with simulated machines: add \"--demo\" after \"mcp\".\n"
     )
 }

@@ -40,23 +40,21 @@ pub struct AgentKind {
     pub name: &'static str,
     /// The command to run; empty for a plain shell.
     pub command: &'static str,
-    /// Default flags to pass when launching this agent CLI.
-    pub args: &'static str,
     /// Accepts an initial prompt on its command line.
     pub prompt_arg: bool,
-    /// Optional flag placed before the prompt argument (e.g. `Some("-i")` for `agy`), or `None` if positional.
+    /// The flag before that prompt (`-i` for `agy`); none when it's positional.
     pub prompt_flag: Option<&'static str>,
 }
 
 pub const AGENTS: &[AgentKind] = &[
-    AgentKind { id: "claude", name: "Claude Code", command: "claude", args: "", prompt_arg: true, prompt_flag: None },
-    AgentKind { id: "codex", name: "Codex", command: "codex", args: "", prompt_arg: true, prompt_flag: None },
-    AgentKind { id: "opencode", name: "OpenCode", command: "opencode", args: "", prompt_arg: false, prompt_flag: None },
-    AgentKind { id: "gemini", name: "Gemini CLI", command: "gemini", args: "", prompt_arg: false, prompt_flag: None },
-    AgentKind { id: "agy", name: "Antigravity", command: "agy", args: "--dangerously-skip-permissions", prompt_arg: true, prompt_flag: Some("-i") },
-    AgentKind { id: "amp", name: "Amp", command: "amp", args: "", prompt_arg: false, prompt_flag: None },
-    AgentKind { id: "pi", name: "Pi", command: "pi", args: "", prompt_arg: true, prompt_flag: None },
-    AgentKind { id: "shell", name: "Shell", command: "", args: "", prompt_arg: false, prompt_flag: None },
+    AgentKind { id: "claude", name: "Claude Code", command: "claude", prompt_arg: true, prompt_flag: None },
+    AgentKind { id: "codex", name: "Codex", command: "codex", prompt_arg: true, prompt_flag: None },
+    AgentKind { id: "opencode", name: "OpenCode", command: "opencode", prompt_arg: false, prompt_flag: None },
+    AgentKind { id: "gemini", name: "Gemini CLI", command: "gemini", prompt_arg: false, prompt_flag: None },
+    AgentKind { id: "agy", name: "Antigravity", command: "agy", prompt_arg: true, prompt_flag: Some("-i") },
+    AgentKind { id: "amp", name: "Amp", command: "amp", prompt_arg: false, prompt_flag: None },
+    AgentKind { id: "pi", name: "Pi", command: "pi", prompt_arg: true, prompt_flag: None },
+    AgentKind { id: "shell", name: "Shell", command: "", prompt_arg: false, prompt_flag: None },
 ];
 
 pub fn agent(id: &str) -> Option<&'static AgentKind> {
@@ -67,22 +65,13 @@ pub fn agent(id: &str) -> Option<&'static AgentKind> {
 /// an argument; else the plain command and the prompt to type in once it's up.
 pub fn launch_line(kind: &AgentKind, prompt: Option<&str>, windows: bool) -> (String, Option<String>) {
     let prompt = prompt.map(str::trim).filter(|p| !p.is_empty());
-    if kind.command.is_empty() {
-        return (String::new(), prompt.map(str::to_string));
-    }
-    let base = match (kind.command, kind.args) {
-        (c, "") => c.to_string(),
-        (c, a) => format!("{c} {a}"),
-    };
-    match prompt {
-        Some(p) if kind.prompt_arg => {
-            let flag = match kind.prompt_flag {
-                Some(f) if !f.is_empty() => format!("{f} "),
-                _ => String::new(),
-            };
-            (format!("{base} {flag}{}", if windows { ps_quote(p) } else { sh_quote(p) }), None)
+    match (kind.command, prompt) {
+        ("", p) => (String::new(), p.map(str::to_string)),
+        (c, Some(p)) if kind.prompt_arg => {
+            let quoted = if windows { ps_quote(p) } else { sh_quote(p) };
+            (kind.prompt_flag.map_or_else(|| format!("{c} {quoted}"), |f| format!("{c} {f} {quoted}")), None)
         }
-        _ => (base, prompt.map(str::to_string)),
+        (c, p) => (c.to_string(), p.map(str::to_string)),
     }
 }
 
@@ -804,8 +793,9 @@ mod tests {
     fn titles_and_ids() {
         assert_eq!(default_title(agent("claude").unwrap(), "~/code/api/"), "Claude Code · api");
         assert_eq!(default_title(agent("agy").unwrap(), "~/code/api/"), "Antigravity · api");
-        assert_eq!(launch_line(agent("agy").unwrap(), None, false).0, "agy --dangerously-skip-permissions");
-        assert_eq!(launch_line(agent("agy").unwrap(), Some("fix tests"), false).0, "agy --dangerously-skip-permissions -i 'fix tests'");
+        // On the user's own machines an agent asks before it acts: only a box's container turns that off.
+        assert_eq!(launch_line(agent("agy").unwrap(), None, false).0, "agy");
+        assert_eq!(launch_line(agent("agy").unwrap(), Some("fix tests"), false).0, "agy -i 'fix tests'");
         assert_eq!(launch_line(agent("claude").unwrap(), Some("fix tests"), false).0, "claude 'fix tests'");
         assert_eq!(default_title(agent("shell").unwrap(), "~"), "Shell · home");
         assert!(split_id("beelink/claude-1").is_ok());

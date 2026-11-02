@@ -2990,7 +2990,7 @@ pub struct BoxCreateRequest {
     /// What the agent is asked to do.
     #[serde(default)]
     pub prompt: String,
-    /// claude (default), codex, amp, opencode, gemini, agy or pi.
+    /// claude (default), codex, amp, opencode, gemini or pi.
     #[serde(default)]
     pub agent: Option<String>,
     /// Where it runs; default: the online machine with Docker and the most free memory.

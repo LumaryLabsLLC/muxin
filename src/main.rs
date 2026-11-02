@@ -1084,7 +1084,7 @@ struct BoxNewArgs {
     /// What the agent is asked to do
     #[arg(num_args = 1..)]
     prompt: Vec<String>,
-    /// claude (default), codex, amp, opencode, gemini, agy or pi
+    /// claude (default), codex, amp, opencode, gemini or pi
     #[arg(long = "agent", value_name = "AGENT")]
     cli: Option<String>,
     /// The machine it runs on (default: the one with Docker and the most free memory)

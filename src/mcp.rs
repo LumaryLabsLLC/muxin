@@ -651,7 +651,7 @@ pub fn tools() -> Vec<Value> {
             "inputSchema": schema(json!({
                 "repo": { "type": "string", "description": "owner/name on GitHub, a git URL, or a checkout's folder on machine_id (see local_checkouts): the box starts from that checkout with its uncommitted changes." },
                 "prompt": { "type": "string", "description": "The task: what the agent is asked to do (an issue's URL and text works well)." },
-                "agent": { "type": "string", "enum": ["claude", "codex", "amp", "opencode", "gemini", "agy", "pi"], "description": "Which agent CLI. Default claude. It's signed in as it is on that machine (its ~/.claude, ~/.codex, ... are shared with the box); if it isn't signed in there, the user signs it in once from the box's terminal." },
+                "agent": { "type": "string", "enum": ["claude", "codex", "amp", "opencode", "gemini", "pi"], "description": "Which agent CLI. Default claude. It's signed in as it is on that machine (its ~/.claude, ~/.codex, ... are shared with the box); if it isn't signed in there, the user signs it in once from the box's terminal." },
                 "machine_id": { "type": "string", "description": "Where it runs. Default: the online machine with Docker and the most free memory." },
                 "name": { "type": "string", "description": "Its name. Default: the task's first words." },
                 "branch": { "type": "string", "description": "The branch it works on. Default box/<name>." },
@@ -1281,9 +1281,8 @@ pub fn print_config() -> String {
     .unwrap_or_default();
     format!(
         "# Claude Code\nclaude mcp add muxin -- {exe} mcp\n\n\
-         # Antigravity CLI\nagy mcp add muxin -- {exe} mcp\n\n\
          # Codex (~/.codex/config.toml)\n[mcp_servers.muxin]\ncommand = \"{exe}\"\nargs = [\"mcp\"]\n\n\
-         # Other MCP clients (Claude Desktop, Cursor, ...)\n{json_block}\n\n\
+         # Other MCP clients (Claude Desktop, Cursor, Antigravity's ~/.gemini/config/mcp_config.json, ...)\n{json_block}\n\n\
          # Try it safely first with simulated machines: add \"--demo\" after \"mcp\".\n"
     )
 }

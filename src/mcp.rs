@@ -364,7 +364,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "session_rename" => ok(api::session_rename(engine, args(a)?).await?),
         "session_handoff" => ok(api::session_handoff(engine, args(a)?).await?),
         "github_inbox" => ok(api::github_inbox(engine).await?),
-        "github_repos" => ok(json!({ "repos": api::github_repos(engine).await? })),
+        "github_repos" => ok(json!({ "repos": api::github_repos(engine).await?, "favorites": engine.settings().favorite_repos })),
         "github_favorite" => ok(api::github_favorite(engine, args(a)?)?),
         "github_accounts" => ok(api::github_accounts(engine).await?),
         "github_use_account" => ok(api::github_use_account(engine, args(a)?).await?),
@@ -980,7 +980,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "github_repos",
-            "description": "The user's GitHub repositories (owned, collaborator, and through their orgs): their favorites first (`favorite: true`, the ones they work on most), then most recently pushed, with visibility, default branch, language, open issue count and `can_push`. A fork's `parent` names the repository it came from (`full_name`, `private`, `html_url`, `open_issues`), even one the user doesn't otherwise have here: its issues and pull requests are usually there, through github_repo. `parent` is null on a fork when GitHub doesn't name it to this login.",
+            "description": "The user's GitHub repositories (owned, collaborator, and through their orgs): their favorites first (`favorite: true`, the ones they work on most), then most recently pushed, with visibility, default branch, language, open issue count and `can_push`. A fork's `parent` names the repository it came from (`full_name`, `private`, `html_url`, `open_issues`), even one the user doesn't otherwise have here: its issues and pull requests are usually there, through github_repo. `parent` is null on a fork when GitHub doesn't name it to this login. `favorites` names all their favorites in the order they were added, including ones that aren't in `repos` (a fork's `parent`, say).",
             "inputSchema": schema(json!({}), &[]),
             "annotations": annotations("GitHub repositories", true, false, true, true),
         }),
@@ -1350,6 +1350,25 @@ mod tests {
         let bg = readable_text("workspace_exec", &json!({ "background_pid": 42, "log_path": ".muxen/logs/1.log", "duration_ms": 5 })).unwrap();
         assert!(bg.contains("pid 42") && bg.contains(".muxen/logs/1.log"));
         assert!(readable_text("status", &json!({})).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_repos_names_favorites_that_arent_in_its_list() {
+        let engine = demo();
+        let session = Session::default();
+        for repo in ["zed-industries/zed", "acme/api"] {
+            let starred = call_tool(&engine, &session, "github_favorite", json!({ "repo": repo })).await;
+            assert_eq!(starred["isError"], false, "{starred}");
+        }
+        let out = call_tool(&engine, &session, "github_repos", json!({})).await;
+        assert_eq!(out["isError"], false, "{out}");
+        let result = &out["structuredContent"];
+        assert_eq!(result["favorites"], json!(["zed-industries/zed", "acme/api"]));
+        // What was there before stays: the list itself, with the flag on the ones it has.
+        let repos = result["repos"].as_array().unwrap();
+        assert!(!repos.iter().any(|r| r["full_name"] == "zed-industries/zed"));
+        assert_eq!(repos[0]["full_name"], "acme/api");
+        assert_eq!(repos[0]["favorite"], true);
     }
 
     #[tokio::test(flavor = "multi_thread")]

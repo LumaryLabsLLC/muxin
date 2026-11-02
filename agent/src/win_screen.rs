@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use crate::desktop::WinPress;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
@@ -78,6 +79,8 @@ pub struct WinScreen {
     bits_size: (i32, i32),
     frame: Vec<u8>,
     held: Vec<u16>,
+    /// Of those, the ones down for a character: (keysym, virtual key).
+    typed: Vec<(u32, u16)>,
     buttons: Vec<u64>,
 }
 
@@ -193,7 +196,7 @@ impl WinScreen {
                 return Err("Can't make room for the screen.".into());
             };
             let shown = ((rect.right - rect.left) * (rect.bottom - rect.top) * 4) as usize;
-            Ok(WinScreen { rect, window, screen_dc, mem_dc, bitmap, bits, bits_size: (w, h), frame: vec![0; shown], held: Vec::new(), buttons: Vec::new() })
+            Ok(WinScreen { rect, window, screen_dc, mem_dc, bitmap, bits, bits_size: (w, h), frame: vec![0; shown], held: Vec::new(), typed: Vec::new(), buttons: Vec::new() })
         }
     }
 
@@ -438,11 +441,12 @@ impl WinScreen {
                         }
                         u => {
                             // The key that types it, as a keyboard would, when it takes
-                            // no Shift, Ctrl or Alt; else the character itself (apps
-                            // read Shift as already up in a burst like this one).
-                            let scan = unsafe { VkKeyScanW(u) };
-                            if scan != -1 && u < 0x80 && scan as u16 & 0x700 == 0 {
-                                let vk = (scan as u16) & 0xff;
+                            // no Shift, Ctrl or Alt and doesn't wait for another key
+                            // (`^` on a German keyboard); else the character itself
+                            // (apps read Shift as already up in a burst like this one).
+                            let (scan, dead) = scan_of(u);
+                            let vk = (scan as u16) & 0xff;
+                            if scan != -1 && u < 0x80 && scan as u16 & 0x700 == 0 && !dead {
                                 events.push(key(vk, 0, 0));
                                 events.push(key(vk, 0, KEYEVENTF_KEYUP));
                             } else {
@@ -458,6 +462,9 @@ impl WinScreen {
             "key" => {
                 let sym = e["keysym"].as_u64().unwrap_or(0) as u32;
                 let down = e["down"].as_bool().unwrap_or(false);
+                if let Some(unit) = crate::desktop::typed_char(sym) {
+                    return self.typed_key(sym, unit, down, e["char"].as_bool().unwrap_or(false));
+                }
                 let Some((vk, extended)) = vk_of(sym) else { return };
                 let mut flags = if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
                 if !down {
@@ -470,6 +477,44 @@ impl WinScreen {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A key that stands for a character (see `win_press`).
+    fn typed_key(&mut self, sym: u32, unit: u16, down: bool, exact: bool) {
+        if !down {
+            // Its key, if it's down. A character sent as itself is finished already.
+            if let Some(i) = self.typed.iter().position(|(s, _)| *s == sym) {
+                let (_, vk) = self.typed.remove(i);
+                send(&[key(vk, 0, KEYEVENTF_KEYUP)]);
+                self.held.retain(|x| *x != vk);
+            }
+            return;
+        }
+        let (scan, dead) = scan_of(unit);
+        let shifts: Vec<u16> = self.held.iter().copied().filter(|vk| matches!(*vk, VK_LSHIFT | VK_RSHIFT)).collect();
+        let shortcut = self.held.iter().any(|vk| matches!(*vk, VK_LCONTROL | VK_RCONTROL | VK_LMENU | VK_RMENU | VK_LWIN | VK_RWIN));
+        match crate::desktop::win_press(scan, dead, !shifts.is_empty(), shortcut, exact) {
+            WinPress::Key(vk) => {
+                send(&[key(vk, 0, 0)]);
+                self.held.retain(|x| *x != vk);
+                self.held.push(vk);
+                self.typed.retain(|(s, _)| *s != sym);
+                self.typed.push((sym, vk));
+            }
+            WinPress::Tap(vk, shift) => {
+                // A moment apart: apps read Shift as already up in a burst (see "text").
+                let (change, undo) = if shift { (0, KEYEVENTF_KEYUP) } else { (KEYEVENTF_KEYUP, 0) };
+                let shifts = if shift { vec![VK_LSHIFT] } else { shifts };
+                let of = |flags: KEYBD_EVENT_FLAGS| -> Vec<INPUT> { shifts.iter().map(|vk| key(*vk, 0, flags)).collect() };
+                send(&of(change));
+                std::thread::sleep(Duration::from_millis(8));
+                send(&[key(vk, 0, 0), key(vk, 0, KEYEVENTF_KEYUP)]);
+                std::thread::sleep(Duration::from_millis(8));
+                send(&of(undo));
+            }
+            WinPress::Char => send(&[key(0, unit, KEYEVENTF_UNICODE), key(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)]),
+            WinPress::Nothing => {}
         }
     }
 
@@ -843,27 +888,24 @@ fn vk_of(sym: u32) -> Option<(VIRTUAL_KEY, bool)> {
         0xffeb | 0xffe7 => (VK_LWIN, true),
         0xffec | 0xffe8 => (VK_RWIN, true),
         0xffbe..=0xffc9 => (VK_F1 + (sym - 0xffbe) as u16, false),
+        // Letters: Shift comes on its own. Other characters: see `typed_key`.
         _ => {
-            let c = char::from_u32(sym)?;
-            if c.is_ascii_alphabetic() {
-                (c.to_ascii_uppercase() as u16, false)
-            } else if c.is_ascii_digit() {
-                (c as u16, false)
-            } else {
-                // Punctuation: the key it's on, in this keyboard's layout (Shift comes on its own).
-                let mut units = [0u16; 2];
-                let n = c.encode_utf16(&mut units).len();
-                if n != 1 {
-                    return None;
-                }
-                let scan = unsafe { VkKeyScanW(units[0]) };
-                if scan == -1 {
-                    return None;
-                }
-                ((scan as u16) & 0xff, false)
-            }
+            let c = char::from_u32(sym).filter(char::is_ascii_alphabetic)?;
+            (c.to_ascii_uppercase() as u16, false)
         }
     })
+}
+
+/// How a character is typed in the window in front, where keys go (each thread
+/// has its own layout, and this one's dates from when the agent started):
+/// `VkKeyScanExW`'s answer, and whether its key waits for the next one.
+fn scan_of(unit: u16) -> (i16, bool) {
+    unsafe {
+        let layout = GetKeyboardLayout(GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut()));
+        let scan = VkKeyScanExW(unit, layout);
+        let dead = scan != -1 && MapVirtualKeyExW((scan as u16 & 0xff) as u32, MAPVK_VK_TO_CHAR, layout) & 0x8000_0000 != 0;
+        (scan, dead)
+    }
 }
 
 // --- The clipboard -----------------------------------------------------------

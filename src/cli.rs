@@ -697,10 +697,15 @@ pub fn github_repos(r: &[crate::github::hub::Repo]) -> String {
                 if x.private { "private".into() } else { "public".into() },
                 x.open_issues.to_string(),
                 x.pushed_at.map(ago).unwrap_or_else(|| "—".into()),
+                match &x.parent {
+                    Some(p) => p.full_name.clone(),
+                    None if x.fork => "(not named)".into(),
+                    None => "—".into(),
+                },
             ]
         })
         .collect();
-    table(&["REPOSITORY", "VISIBILITY", "OPEN", "PUSHED"], &rows)
+    table(&["REPOSITORY", "VISIBILITY", "OPEN", "PUSHED", "FORK OF"], &rows)
 }
 
 pub fn github_accounts(a: &crate::api::AccountsOut) -> String {
@@ -755,6 +760,11 @@ pub fn github_favorites(f: &crate::api::FavoritesOut) -> String {
 
 pub fn github_repo(r: &crate::api::RepoOut) -> String {
     let mut out = format!("{} · {}\n", r.repo.full_name, r.repo.description.clone().unwrap_or_default());
+    match &r.repo.parent {
+        Some(p) => out.push_str(&format!("Fork of {} ({} open there). See it with `muxin github repo {}`.\n", p.full_name, p.open_issues, p.full_name)),
+        None if r.repo.fork => out.push_str("Fork of a repository GitHub doesn't name to this login.\n"),
+        None => {}
+    }
     out.push_str(&format!("\nIssues ({})\n", r.issues.len()));
     out.push_str(&table(&["ITEM", "KIND", "TITLE", "UPDATED"], &item_rows(&r.issues)));
     out.push_str(&format!("\nPull requests ({})\n", r.pulls.len()));

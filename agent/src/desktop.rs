@@ -1812,6 +1812,7 @@ mod mac {
         fn muxen_scroll(dy: i32, dx: i32);
         fn muxen_key(keycode: u16, down: i32, flags: u64);
         fn muxen_text(utf16: *const u16, len: usize);
+        fn muxen_key_layout(keys: *mut [u16; 4], count: usize) -> i32;
         fn muxen_capture_window_start(id: u32, fps: i32, width: usize, height: usize, f: FrameFn, ctx: *mut std::ffi::c_void, err: *mut u8, errlen: usize) -> i32;
         fn muxen_capture_follow(x: f64, y: f64, w: f64, h: f64, pw: usize, ph: usize);
         fn muxen_windows_json(buf: *mut u8, len: usize) -> usize;
@@ -1903,9 +1904,9 @@ mod mac {
         held: [bool; 3],
         flags: u64,
         last_click: Option<(Instant, u32, f64, f64, i64)>,
-        /// Keys pressed and not yet let go, and where the pointer was: let go
-        /// when the stream ends, so none stays held.
-        pressed: Vec<u16>,
+        /// Keys pressed and not yet let go (keycode, the keysym that pressed it),
+        /// and where the pointer was: let go when the stream ends, so none stays held.
+        pressed: Vec<(u16, u32)>,
         at: (f64, f64),
         /// An app's window shown on its own, and the widest frame asked for.
         window: Option<MacWin>,
@@ -2111,7 +2112,7 @@ mod mac {
 
         /// Lets go of every key and button it pressed there.
         fn let_go(&mut self) {
-            for code in self.pressed.drain(..) {
+            for (code, _) in self.pressed.drain(..) {
                 unsafe { muxen_key(code, 0, 0) };
             }
             let (x, y) = self.at;
@@ -2365,21 +2366,28 @@ mod mac {
                         }
                     }
                     if !down {
-                        // A character typed as text has no key to let go.
-                        if let Some(code) = keycode(sym).filter(|code| super::typed_char(sym).is_none() || self.pressed.contains(code)) {
+                        // The key it pressed, as the layout may have changed since, or
+                        // the one it names (`@` pressed, `2` let go). A character typed
+                        // as text has no key to let go.
+                        let pressed = self.pressed.iter().find(|(_, s)| *s == sym).map(|(code, _)| *code);
+                        let code = pressed.or_else(|| {
+                            let (code, _) = keycode(sym, self.flags, &Layout::current())?;
+                            (super::typed_char(sym).is_none() || self.pressed.iter().any(|(c, _)| *c == code)).then_some(code)
+                        });
+                        if let Some(code) = code {
                             unsafe { muxen_key(code, 0, self.flags) };
-                            self.pressed.retain(|x| *x != code);
+                            self.pressed.retain(|(c, _)| *c != code);
                         }
                         return;
                     }
-                    match mac_press(sym, self.flags, e["char"].as_bool().unwrap_or(false)) {
+                    match mac_press(sym, self.flags, e["char"].as_bool().unwrap_or(false), &Layout::current()) {
                         MacPress::Key(code, flags) => {
                             unsafe { muxen_key(code, 1, flags) };
-                            self.pressed.retain(|x| *x != code);
-                            self.pressed.push(code);
+                            self.pressed.retain(|(c, _)| *c != code);
+                            self.pressed.push((code, sym));
                         }
                         MacPress::Text => {
-                            let unit = sym as u16;
+                            let unit = text_unit(sym, self.flags);
                             unsafe { muxen_text(&unit, 1) };
                         }
                         MacPress::Nothing => {}
@@ -2421,32 +2429,101 @@ mod mac {
         Nothing,
     }
 
-    /// How to press a "key" event's keysym. `keycode` knows a US keyboard: a
-    /// character goes as its key when Shift is as that key wants it there (apps
-    /// that read key codes get a real one), or when a shortcut needs a key, with
-    /// Shift corrected; else as text, which needs no key. `exact`: see `level_help`.
-    fn mac_press(sym: u32, flags: u64, exact: bool) -> MacPress {
-        const SHIFT: u64 = 0x20000;
-        const SHORTCUT: u64 = 0x40000 | 0x80000 | 0x100000;
-        let code = keycode(sym);
-        let Some(unit) = super::typed_char(sym) else {
-            return code.map_or(MacPress::Nothing, |code| MacPress::Key(code, flags));
-        };
-        let wants_shift = char::from_u32(unit as u32).is_some_and(|c| c.is_ascii_uppercase() || "!@#$%^&*()_+{}|:\"<>?~".contains(c));
-        let shift_held = flags & SHIFT != 0;
-        if flags & SHORTCUT != 0 {
-            let flags = if wants_shift { flags | SHIFT } else if exact { flags & !SHIFT } else { flags };
-            return code.map_or(MacPress::Nothing, |code| MacPress::Key(code, flags));
+    const SHIFT: u64 = 0x20000;
+    const COMMAND: u64 = 0x100000;
+    /// Held, a key is a shortcut rather than a character typed.
+    const SHORTCUT: u64 = 0x40000 | 0x80000 | COMMAND;
+
+    /// What a Mac's keys type on a keyboard layout, by keycode: by itself, with
+    /// Shift, with ⌘, with ⌘⇧. 0: nothing, or a dead key, which types nothing yet.
+    struct Layout([[u16; 4]; 128]);
+
+    impl Layout {
+        /// This Mac's layout now, read for each key as it can change at any time.
+        /// A US keyboard's when it can't say.
+        fn current() -> Layout {
+            let mut keys = [[0; 4]; 128];
+            if unsafe { muxen_key_layout(keys.as_mut_ptr(), keys.len()) } == 1 { Layout(keys) } else { Layout::us() }
         }
-        match code {
-            Some(code) if wants_shift == shift_held || (shift_held && !exact) => MacPress::Key(code, flags),
+
+        /// From what each of those four types, key after key: keycodes 0 to 50,
+        /// without Return (36), Tab (48) and Space (49).
+        fn from_levels(levels: [&str; 4]) -> Layout {
+            let mut keys = [[0; 4]; 128];
+            for (level, typed) in levels.iter().enumerate() {
+                let codes = (0..=50).filter(|code| !matches!(code, 36 | 48 | 49));
+                for (code, c) in codes.zip(typed.chars()) {
+                    keys[code][level] = c as u16;
+                }
+            }
+            Layout(keys)
+        }
+
+        /// A US keyboard, which has no key 10.
+        fn us() -> Layout {
+            const ALONE: &str = "asdfhgzxcv\0bqweryt123465=97-80]ou[iplj'k;\\,/nm.`";
+            const WITH_SHIFT: &str = "ASDFHGZXCV\0BQWERYT!@#$^%+(&_*)}OU{IPLJ\"K:|<?NM>~";
+            Layout::from_levels([ALONE, WITH_SHIFT, ALONE, ALONE])
+        }
+
+        /// The key for a character, and whether it wants Shift for it. Typing, what
+        /// the keys type. A shortcut can use more: with ⌘ held many layouts go by
+        /// other keys (Latin on a Russian one, QWERTY on "Dvorak - QWERTY ⌘"), so
+        /// that comes first then, and dead keys don't wait.
+        fn key_for(&self, c: u16, flags: u64) -> Option<(u16, bool)> {
+            let levels: &[usize] = if flags & COMMAND != 0 {
+                &[2, 0, 1, 3]
+            } else if flags & SHORTCUT != 0 {
+                &[0, 1, 2, 3]
+            } else {
+                &[0, 1]
+            };
+            levels.iter().find_map(|&level| {
+                let code = self.0.iter().position(|key| key[level] == c)?;
+                Some((code as u16, level % 2 == 1))
+            })
+        }
+    }
+
+    /// How to press a "key" event's keysym. A character goes as its key on this
+    /// Mac's layout when Shift is as that key wants it (apps that read key codes
+    /// get a real one), or when a shortcut needs a key, with Shift corrected; else
+    /// as text, which needs no key. So does what the layout has only behind Option
+    /// (`@` on a German one), as Windows does with AltGr: apps read Option as a
+    /// shortcut, and terminals as Meta. `exact`: see `level_help`.
+    fn mac_press(sym: u32, flags: u64, exact: bool, layout: &Layout) -> MacPress {
+        let key = keycode(sym, flags, layout);
+        let shortcut = flags & SHORTCUT != 0;
+        if super::typed_char(sym).is_none() {
+            return match key {
+                Some((code, _)) => MacPress::Key(code, flags),
+                // A letter this layout has no key for.
+                None if !shortcut && (0x61..=0x7a).contains(&sym) => MacPress::Text,
+                None => MacPress::Nothing,
+            };
+        }
+        let shift_held = flags & SHIFT != 0;
+        if shortcut {
+            return key.map_or(MacPress::Nothing, |(code, wants_shift)| {
+                let flags = if wants_shift { flags | SHIFT } else if exact { flags & !SHIFT } else { flags };
+                MacPress::Key(code, flags)
+            });
+        }
+        match key {
+            Some((code, wants_shift)) if wants_shift == shift_held || (shift_held && !exact) => MacPress::Key(code, flags),
             _ => MacPress::Text,
         }
     }
 
-    /// An X keysym's macOS virtual keycode (a US keyboard's layout).
-    fn keycode(sym: u32) -> Option<u16> {
-        Some(match sym {
+    /// The character `MacPress::Text` types. A letter's keysym doesn't say Shift.
+    fn text_unit(sym: u32, flags: u64) -> u16 {
+        if flags & SHIFT != 0 { (sym as u8).to_ascii_uppercase() as u16 } else { sym as u16 }
+    }
+
+    /// An X keysym's macOS virtual keycode, and whether it wants Shift. Named keys
+    /// are the same on every layout; a character's is where this layout has it.
+    fn keycode(sym: u32, flags: u64, layout: &Layout) -> Option<(u16, bool)> {
+        let code = match sym {
             0xff0d => 36,          // return
             0xff09 => 48,          // tab
             0x20 => 49,            // space
@@ -2466,25 +2543,23 @@ mod mac {
             0xffe9 | 0xffea => 58, // option
             0xffeb | 0xffec | 0xffe7 => 55, // command
             0xffbe..=0xffc9 => [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111][(sym - 0xffbe) as usize], // F1-F12
-            _ => {
-                let c = char::from_u32(sym)?.to_ascii_lowercase();
-                match c {
-                    'a' => 0, 's' => 1, 'd' => 2, 'f' => 3, 'h' => 4, 'g' => 5, 'z' => 6, 'x' => 7, 'c' => 8, 'v' => 9,
-                    'b' => 11, 'q' => 12, 'w' => 13, 'e' => 14, 'r' => 15, 'y' => 16, 't' => 17,
-                    '1' | '!' => 18, '2' | '@' => 19, '3' | '#' => 20, '4' | '$' => 21, '6' | '^' => 22, '5' | '%' => 23,
-                    '=' | '+' => 24, '9' | '(' => 25, '7' | '&' => 26, '-' | '_' => 27, '8' | '*' => 28, '0' | ')' => 29,
-                    ']' | '}' => 30, 'o' => 31, 'u' => 32, '[' | '{' => 33, 'i' => 34, 'p' => 35, 'l' => 37, 'j' => 38,
-                    '\'' | '"' => 39, 'k' => 40, ';' | ':' => 41, '\\' | '|' => 42, ',' | '<' => 43, '/' | '?' => 44,
-                    'n' => 45, 'm' => 46, '.' | '>' => 47, '`' | '~' => 50,
-                    _ => return None,
-                }
-            }
-        })
+            _ => return layout.key_for(u16::try_from(sym).ok().filter(|c| *c != 0)?, flags),
+        };
+        Some((code, false))
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        // On a US keyboard, unless a test says otherwise.
+        fn mac_press(sym: u32, flags: u64, exact: bool) -> MacPress {
+            super::mac_press(sym, flags, exact, &Layout::us())
+        }
+
+        fn keycode(sym: u32) -> Option<u16> {
+            super::keycode(sym, 0, &Layout::us()).map(|(code, _)| code)
+        }
 
         #[test]
         fn maps_keys() {
@@ -2549,6 +2624,152 @@ mod mac {
             // "@" by itself, or an older app, which lets go of Shift first.
             assert_eq!(mac_press('@' as u32, 0, false), MacPress::Text);
             assert_eq!(mac_press('@' as u32, SHIFT, false), MacPress::Key(19, SHIFT));
+        }
+
+        // Layouts as `muxen_read_keys` reads them from macOS's own data.
+        fn german() -> Layout {
+            Layout::from_levels([
+                "asdfhgyxcv\0bqwerzt123465\097ß80+ouüipljäkö#,-nm.<",
+                "ASDFHGYXCV°BQWERZT!\"§$&%\0)/?(=*OUÜIPLJÄKÖ';_NM:>",
+                "asdfhgyxcv^bqwerzt123465´97ß80+ouüipljäkö#,-nm.<",
+                "asdfhgyxcv°bqwerzt123465`97/80*ouüipljäkö^;_nm:>",
+            ])
+        }
+
+        fn russian() -> Layout {
+            Layout::from_levels([
+                "фыварпячсм>ийцукне123465=97-80ъщгхшздоэлжёб/тью]",
+                "ФЫВАРПЯЧСМ<ИЙЦУКНЕ!\"№%,:+(._;)ЪЩГХШЗДОЭЛЖЁБ?ТЬЮ[",
+                "asdfhgzxcv§bqweryt123465=97-80]ou[iplj'k;\\,/nm.`",
+                "ASDFHGZXCV±BQWERYT!@#$^%+(&_*)}OU{IPLJ\"K:|<?NM>~",
+            ])
+        }
+
+        fn dvorak_qwerty_command() -> Layout {
+            Layout::from_levels([
+                "aoeudi;qjk\0x',.pfy123465]97[80=rg/clnh-ts\\wzbmv`",
+                "AOEUDI:QJK\0X\"<>PFY!@#$^%}(&{*)+RG?CLNH_TS|WZBMV~",
+                "asdfhgzxcv\0bqweryt123465=97-80]ou[iplj'k;\\,/nm.`",
+                "asdfhgzxcv\0bqweryt!@#$^%+(&_*)}ou{iplj\"k:|<?nm>~",
+            ])
+        }
+
+        fn on_german(c: char, flags: u64) -> MacPress {
+            super::mac_press(c as u32, flags, true, &german())
+        }
+
+        #[test]
+        fn levels_reach_the_last_key() {
+            for layout in [Layout::us(), german(), russian(), dvorak_qwerty_command()] {
+                for level in 0..4 {
+                    assert_ne!(layout.0[50][level], 0, "level {level}");
+                }
+            }
+        }
+
+        #[test]
+        fn a_german_macs_letters_are_where_it_has_them() {
+            // Not swapped, typed or in a shortcut.
+            for flags in [0, SHIFT, CMD, CMD | SHIFT] {
+                assert_eq!(super::mac_press('z' as u32, flags, false, &german()), MacPress::Key(16, flags));
+                assert_eq!(super::mac_press('y' as u32, flags, false, &german()), MacPress::Key(6, flags));
+            }
+            assert_eq!(super::keycode(0xff0d, 0, &german()), Some((36, false)));
+            assert_eq!(super::keycode(0x20, 0, &german()), Some((49, false)));
+        }
+
+        #[test]
+        fn a_german_macs_characters_are_its_keys_when_shift_matches() {
+            for (c, code, flags) in [
+                ('"', 19, SHIFT),
+                ('§', 20, SHIFT),
+                ('/', 26, SHIFT),
+                ('=', 29, SHIFT),
+                ('?', 27, SHIFT),
+                ('*', 30, SHIFT),
+                ('ß', 27, 0),
+                ('+', 30, 0),
+                ('ö', 41, 0),
+                ('Ö', 41, SHIFT),
+                ('ü', 33, 0),
+                ('ä', 39, 0),
+                ('#', 42, 0),
+                ('\'', 42, SHIFT),
+                ('-', 44, 0),
+                ('_', 44, SHIFT),
+                ('<', 50, 0),
+                ('>', 50, SHIFT),
+                ('°', 10, SHIFT),
+            ] {
+                assert_eq!(on_german(c, flags), MacPress::Key(code, flags), "{c}");
+            }
+        }
+
+        #[test]
+        fn a_german_mac_types_as_text_what_a_key_wouldnt_type() {
+            // Shift+2 from a US Mac: `@` is behind Option here, and this key with Shift is `"`.
+            assert_eq!(on_german('@', SHIFT), MacPress::Text);
+            // Behind Option too.
+            for c in ['[', ']', '{', '}', '|', '\\', '~'] {
+                assert_eq!(on_german(c, 0), MacPress::Text, "{c}");
+            }
+            // `/` from a US Mac, no Shift there: here it wants it.
+            assert_eq!(on_german('/', 0), MacPress::Text);
+            // Dead keys would wait for the next one.
+            for (c, flags) in [('^', 0), ('´', 0), ('`', SHIFT)] {
+                assert_eq!(on_german(c, flags), MacPress::Text, "{c}");
+            }
+        }
+
+        #[test]
+        fn a_german_macs_shortcuts_keep_their_keys() {
+            // ⌘⇧3 from a German Mac.
+            assert_eq!(on_german('§', CMD | SHIFT), MacPress::Key(20, CMD | SHIFT));
+            // ⌘/ from a US Mac, and ⌘⇧7 from a German one, the same on a German Mac.
+            assert_eq!(on_german('/', CMD), MacPress::Key(26, CMD | SHIFT));
+            assert_eq!(on_german('/', CMD | SHIFT), MacPress::Key(26, CMD | SHIFT));
+            // Shift comes off a key that doesn't want it.
+            assert_eq!(on_german('#', CMD | SHIFT), MacPress::Key(42, CMD));
+            // Dead keys don't wait with ⌘, or Control.
+            assert_eq!(on_german('^', CMD), MacPress::Key(10, CMD));
+            assert_eq!(on_german('´', CMD), MacPress::Key(24, CMD));
+            assert_eq!(on_german('`', CMD | SHIFT), MacPress::Key(24, CMD | SHIFT));
+            assert_eq!(on_german('^', CTRL), MacPress::Key(10, CTRL));
+            // Behind Option: nothing, rather than typing it over a shortcut.
+            assert_eq!(on_german('@', CMD), MacPress::Nothing);
+        }
+
+        #[test]
+        fn a_german_mac_without_char_keeps_shift_and_a_key() {
+            let press = |c: char, flags| super::mac_press(c as u32, flags, false, &german());
+            // `muxin desktop input` "shift+2", whatever that types here, and "2".
+            assert_eq!(press('2', SHIFT), MacPress::Key(19, SHIFT));
+            assert_eq!(press('2', 0), MacPress::Key(19, 0));
+            // "@" by itself.
+            assert_eq!(press('@', 0), MacPress::Text);
+            assert_eq!(press('@', SHIFT), MacPress::Text);
+        }
+
+        #[test]
+        fn a_layout_without_latin_letters_types_them_and_has_them_for_shortcuts() {
+            let press = |c: char, flags| super::mac_press(c as u32, flags, false, &russian());
+            assert_eq!(press('a', 0), MacPress::Text);
+            assert_eq!(text_unit('a' as u32, SHIFT), 'A' as u16);
+            assert_eq!(text_unit('a' as u32, 0), 'a' as u16);
+            assert_eq!(text_unit('/' as u32, SHIFT), '/' as u16);
+            assert_eq!(text_unit('§' as u32, SHIFT), '§' as u16);
+            // With ⌘ this layout goes by Latin letters, and they're there for Control too.
+            assert_eq!(press('c', CMD), MacPress::Key(8, CMD));
+            assert_eq!(press('c', CTRL), MacPress::Key(8, CTRL));
+            assert_eq!(press('2', 0), MacPress::Key(19, 0));
+        }
+
+        #[test]
+        fn a_layout_with_other_keys_for_command_uses_them_only_with_it() {
+            let press = |c: char, flags| super::mac_press(c as u32, flags, false, &dvorak_qwerty_command());
+            assert_eq!(press('c', 0), MacPress::Key(34, 0));
+            assert_eq!(press('c', CTRL), MacPress::Key(34, CTRL));
+            assert_eq!(press('c', CMD), MacPress::Key(8, CMD));
         }
     }
 }

@@ -9,6 +9,8 @@
 #import <CoreVideo/CoreVideo.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <ApplicationServices/ApplicationServices.h>
+#import <Carbon/Carbon.h>
+#import <pthread.h>
 
 // The CGWindowID behind an Accessibility window (private, long-standing).
 extern AXError _AXUIElementGetWindow(AXUIElementRef element, CGWindowID *window);
@@ -679,6 +681,66 @@ void muxen_text(const uint16_t *utf16, size_t len) {
             CFRelease(e);
         }
     }
+}
+
+/// What the character keys type on `layout`, read as a key of keyboard `type`:
+/// keys[keycode] is by itself, with Shift, with ⌘, with ⌘⇧. 0: not one character,
+/// or a dead key, which types nothing until the next key. With ⌘ it doesn't wait,
+/// so there it's its character. `board`: what's really there, as some keys are
+/// only on ISO (10) or JIS (93, 94) keyboards. Not the keypad: it repeats these.
+static void muxen_read_keys(const UCKeyboardLayout *layout, UInt32 type, PhysicalKeyboardLayoutType board, uint16_t (*keys)[4], size_t count) {
+    static const struct {
+        UInt32 modifiers;
+        OptionBits options;
+    } levels[4] = {
+        {0, 0},
+        {shiftKey >> 8, 0},
+        {cmdKey >> 8, kUCKeyTranslateNoDeadKeysMask},
+        {(cmdKey | shiftKey) >> 8, kUCKeyTranslateNoDeadKeysMask},
+    };
+    memset(keys, 0, count * sizeof keys[0]);
+    for (size_t code = 0; code < count; code++) {
+        bool character = (code <= 50 && code != 36 && code != 48 && code != 49) || code == 93 || code == 94;
+        bool missing = (code == 10 && board == kKeyboardANSI) || ((code == 93 || code == 94) && board != kKeyboardJIS);
+        if (!character || missing) {
+            continue;
+        }
+        for (int i = 0; i < 4; i++) {
+            UInt32 dead = 0;
+            UniChar c[4];
+            UniCharCount n = 0;
+            OSStatus status = UCKeyTranslate(layout, (UInt16)code, kUCKeyActionDown, levels[i].modifiers, type, levels[i].options, &dead, 4, &n, c);
+            if (status == noErr && n == 1 && dead == 0 && c[0] >= 0x20 && c[0] != 0x7f) {
+                keys[code][i] = c[0];
+            }
+        }
+    }
+}
+
+/// What the keys type on this Mac's layout right now (see `muxen_read_keys`); 0
+/// when it can't say. Main thread only (`muxen-agent screen`'s input runs there),
+/// as Text Input Sources can insist on it.
+int muxen_key_layout(uint16_t (*keys)[4], size_t count) {
+    if (!pthread_main_np()) {
+        return 0;
+    }
+    // Text Input Sources hears of changes through the run loop; nothing else runs it here.
+    for (int i = 0; i < 8 && CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true) == kCFRunLoopRunHandledSource; i++) {
+    }
+    TISInputSourceRef source = TISCopyCurrentKeyboardLayoutInputSource();
+    CFDataRef data = source ? TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) : NULL;
+    // Apps read a key by the keyboard type its event says, so the type of the
+    // events `muxen_key` posts. This one is never posted.
+    CGEventRef e = data ? CGEventCreateKeyboardEvent(NULL, 0, true) : NULL;
+    if (e) {
+        UInt32 type = (UInt32)CGEventGetIntegerValueField(e, kCGKeyboardEventKeyboardType);
+        muxen_read_keys((const UCKeyboardLayout *)CFDataGetBytePtr(data), type, KBGetLayoutType(LMGetKbdType()), keys, count);
+        CFRelease(e);
+    }
+    if (source) {
+        CFRelease(source);
+    }
+    return e ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------

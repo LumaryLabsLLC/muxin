@@ -813,7 +813,7 @@ impl Root {
             "offline" => ("power", theme.text_muted),
             "refused" => ("unplug", theme.warning),
             "tailscale-off" => ("network", theme.warning),
-            "auth" | "host-key" => ("lock", theme.error),
+            "auth" | "key-locked" | "host-key" => ("lock", theme.error),
             _ => ("circle-alert", theme.error),
         };
         let open = self.offline_details.contains(&m.id);

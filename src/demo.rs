@@ -392,6 +392,7 @@ impl World {
             route: None,
             kvm: hw.id == "beacon",
             refused_user: None,
+            locked_key: None,
         }
     }
 

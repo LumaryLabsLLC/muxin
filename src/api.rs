@@ -423,7 +423,7 @@ pub struct MachineSummary {
     pub error: Option<String>,
     /// Why it can't be reached, in plain words: `kind` is "offline" (shut
     /// down, asleep, off the network: nothing to fix), "refused", "auth",
-    /// "unknown-host", "host-key" or "error"; `hint` is a command to try.
+    /// "key-locked", "unknown-host", "host-key" or "error"; `hint` is a command to try.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unreachable: Option<crate::fleet::model::Unreachable>,
     /// It on the user's Tailscale network: whether Tailscale sees it online,

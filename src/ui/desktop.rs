@@ -189,6 +189,8 @@ pub struct DesktopView {
     resuming: bool,
     retries: u32,
     retry: Option<Task<()>>,
+    /// Stopped while its window is closed, the picture kept (see `pause`).
+    paused: bool,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -264,6 +266,7 @@ impl DesktopView {
             resuming: false,
             retries: 0,
             retry: None,
+            paused: false,
             changing: false,
             change_error: None,
             _tasks: Vec::new(),
@@ -352,6 +355,28 @@ impl DesktopView {
         if quality != self.quality && self.shared.is_some() {
             self.quality = quality;
             self.retries = 0;
+            self.start(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Stops the stream while its window is closed, keeping the picture.
+    pub fn pause(&mut self) {
+        if matches!(self.state, State::Ended(_)) {
+            return;
+        }
+        self.let_go();
+        self.paused = true;
+        self.resuming = false;
+        // Without its feed or its channel, the stream ends here and on the machine.
+        (self.stream, self.retry, self.remote) = (None, None, None);
+    }
+
+    /// Picks the stream back up: the old picture shows until the new one comes.
+    pub fn resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.paused) {
+            self.retries = 0;
+            self.resuming = true;
             self.start(window, cx);
             cx.notify();
         }
@@ -552,6 +577,10 @@ impl DesktopView {
 
     /// (Re)starts the stream from the machine.
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // (The machine coming back, say. `resume` starts it.)
+        if self.paused {
+            return;
+        }
         self.remote = None;
         self.state = State::Connecting;
         self.no_screen = false;

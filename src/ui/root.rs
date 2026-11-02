@@ -68,6 +68,7 @@ actions!(
         Dismiss,
         Quit,
         CheckForUpdates,
+        ShowMainWindow,
         HideApp,
         HideOthers,
         ShowAll,
@@ -114,6 +115,12 @@ pub fn bind_keys(cx: &mut App) {
 
 pub fn menus() -> Vec<Menu> {
     use super::input;
+    let mut window_items = vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom)];
+    // A closed window comes back from the Dock, but not while an app's window
+    // of ours still shows: the Dock has nothing to do then.
+    if cfg!(target_os = "macos") {
+        window_items.extend([MenuItem::separator(), MenuItem::action("Show Muxin", ShowMainWindow)]);
+    }
     vec![
         Menu {
             name: "Muxin".into(),
@@ -177,7 +184,7 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Show or Hide Sidebar", ToggleSidebar),
             ],
         },
-        Menu { name: "Window".into(), items: vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom)] },
+        Menu { name: "Window".into(), items: window_items },
         Menu {
             name: "Help".into(),
             items: vec![
@@ -199,6 +206,7 @@ pub fn bind_app_actions(cx: &mut App) {
     cx.on_action(|_: &HideApp, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+    cx.on_action(|_: &ShowMainWindow, cx| super::show_main_window(cx));
     fn on_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
         if let Some(handle) = cx.active_window() {
             let _ = handle.update(cx, |_, window, _| f(window));
@@ -648,11 +656,41 @@ impl Root {
                         this.pending_join = Some(link);
                         cx.notify()
                     });
+                    // The window asks about it, so it has to show.
+                    let _ = cx.update(super::show_main_window);
                 }
             });
             ws._tasks.push(opened);
         }
         ws
+    }
+
+    /// The window closed but stays alive (on a Mac; see `ui::hide_main_window`).
+    /// Machine checks, links and forwards go on, and sessions stay attached.
+    pub(super) fn window_hidden(&mut self, cx: &mut Context<Self>) {
+        // Rendering has stopped, so this wouldn't be noticed: notices for the
+        // session that was showing stay unread now.
+        self.window_active = false;
+        (self.show_keys, self.keys_soon) = (false, None);
+        // Nobody can see these, and a machine would go on capturing its screen.
+        for view in self.all_desktops() {
+            view.update(cx, |view, _| view.pause());
+        }
+        // Nobody could let a guest in or see who's there.
+        crate::share::host::stop_all();
+    }
+
+    /// The window is back (see `ui::show_main_window`).
+    pub(super) fn window_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for view in self.all_desktops() {
+            view.update(cx, |view, cx| view.resume(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// The desktops of this window: machines', and ones shared with you.
+    fn all_desktops(&self) -> Vec<Entity<super::desktop::DesktopView>> {
+        self.desktops.values().chain(self.joined.iter().filter_map(|j| j.desktop.as_ref())).cloned().collect()
     }
 
     fn apply_snapshot(&mut self, snapshot: Arc<Snapshot>, cx: &mut Context<Self>) {

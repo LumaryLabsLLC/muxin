@@ -56,9 +56,12 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
     let app = Application::new().with_assets(assets::Assets);
     // Share links (muxin://join?server=...#...) opened with Muxin.
     app.on_open_urls(|urls| urls.into_iter().filter(|u| u.starts_with("muxin://join")).for_each(open_link));
+    // The Dock icon clicked, or Muxin opened again, with no window showing.
+    app.on_reopen(show_main_window);
     app.run(move |cx: &mut App| {
         assets::load_fonts(cx);
         assets::set_dock_icon();
+        keep_from_napping();
         // The look lives in config.toml ([ui]); demo mode keeps it in memory.
         let prefs_path = (!engine.is_demo()).then(|| engine.paths().config.clone());
         let appearance = Appearance::load(prefs_path);
@@ -128,15 +131,28 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
                     // Comma-separated, e.g. "theme:gruvbox-light,machine:mac-studio".
                     view.update(cx, |ws, cx| v.split(',').for_each(|v| ws.open_view(v.trim(), window, cx)));
                 }
+                // A Mac's Dock brings the window back, so closing only hides it.
+                // Linux and Windows have nothing to bring it back with: closing quits.
+                if cfg!(target_os = "macos") {
+                    window.on_window_should_close(cx, |window, cx| {
+                        hide_main_window(window, cx);
+                        false
+                    });
+                }
                 view
             },
         );
-        if let Err(e) = window {
-            tracing::error!("couldn't open a window: {e:#}");
-            cx.quit();
-            return;
-        }
-        // Closing the window quits, like a single-window utility should.
+        let window = match window {
+            Ok(window) => window,
+            Err(e) => {
+                tracing::error!("couldn't open a window: {e:#}");
+                cx.quit();
+                return;
+            }
+        };
+        cx.set_global(MainWindow { handle: window, takes_focus: !wants_builtin });
+        // With no window left, there's nothing to come back to. (On a Mac the
+        // main window is only ever hidden, so this doesn't happen there.)
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -148,6 +164,102 @@ pub fn run(engine: Arc<Engine>, initial_view: Option<String>) {
         }
     });
 }
+
+/// The app's main window, for bringing it back.
+struct MainWindow {
+    handle: gpui::WindowHandle<Root>,
+    /// Not a test window (see `--view display:builtin`).
+    takes_focus: bool,
+}
+
+impl gpui::Global for MainWindow {}
+
+/// Brings the main window back as it was left, in front of the others.
+fn show_main_window(cx: &mut App) {
+    let Some(&MainWindow { handle, takes_focus }) = cx.try_global::<MainWindow>() else { return };
+    let _ = handle.update(cx, |root, window, cx| {
+        root.window_shown(window, cx);
+        window.activate_window();
+    });
+    if takes_focus {
+        cx.activate(true);
+    }
+}
+
+/// Keeps App Nap off for as long as the app runs. Minutes after its windows go
+/// out of sight, it would hold back the app's timers by a minute or more, and
+/// machine checks, connections and forwards with them. The Mac can still sleep.
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)] // objc's msg_send! checks a cfg this crate doesn't declare
+fn keep_from_napping() {
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSString;
+    use objc::{class, msg_send, sel, sel_impl};
+    // NSActivityUserInitiatedAllowingIdleSystemSleep.
+    const OPTIONS: u64 = 0x00EF_FFFF;
+    unsafe {
+        let info: id = msg_send![class!(NSProcessInfo), processInfo];
+        let reason = NSString::alloc(nil).init_str("Keeping up with your machines");
+        let activity: id = msg_send![info, beginActivityWithOptions: OPTIONS reason: reason];
+        // Never ended: it lasts until the app quits.
+        let _: id = msg_send![activity, retain];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keep_from_napping() {}
+
+/// Closes the main window on a Mac: it goes out of sight with everything in it
+/// (`show_main_window` brings it back), and the app keeps running until ⌘Q.
+fn hide_main_window(window: &mut gpui::Window, cx: &mut App) {
+    if let Some(Some(root)) = window.root::<Root>() {
+        root.update(cx, |root, cx| root.window_hidden(cx));
+    }
+    if !window.is_fullscreen() {
+        order_out(window, cx);
+        return;
+    }
+    // Hidden while it fills the screen, it would leave an empty Space behind.
+    window.toggle_fullscreen();
+    let handle = window.window_handle();
+    cx.spawn(async move |cx| {
+        for _ in 0..50 {
+            cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+            if !handle.update(cx, |_, window, _| window.is_fullscreen()).unwrap_or(false) {
+                break;
+            }
+        }
+        // (The animation may still be finishing.)
+        cx.background_executor().timer(std::time::Duration::from_millis(700)).await;
+        let _ = handle.update(cx, |_, window, cx| order_out(window, cx));
+    })
+    .detach();
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)] // objc's msg_send! checks a cfg this crate doesn't declare
+fn order_out(window: &gpui::Window, cx: &App) {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+    let view = h.ns_view.as_ptr() as *mut Object;
+    let ns_window: *mut Object = unsafe { msg_send![view, window] };
+    if ns_window.is_null() {
+        return;
+    }
+    // Not from in here: another of the app's windows gets the keyboard at once,
+    // and draws a frame then, which GPUI can't do while it's already busy.
+    cx.foreground_executor()
+        .spawn(async move {
+            let _: () = unsafe { msg_send![ns_window, orderOut: std::ptr::null_mut::<Object>()] };
+        })
+        .detach();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn order_out(_: &gpui::Window, _: &App) {}
 
 fn opened_links() -> &'static (futures::channel::mpsc::UnboundedSender<String>, std::sync::Mutex<Option<futures::channel::mpsc::UnboundedReceiver<String>>>) {
     static LINKS: std::sync::OnceLock<(futures::channel::mpsc::UnboundedSender<String>, std::sync::Mutex<Option<futures::channel::mpsc::UnboundedReceiver<String>>>)> = std::sync::OnceLock::new();

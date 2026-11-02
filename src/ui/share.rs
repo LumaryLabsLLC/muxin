@@ -734,7 +734,7 @@ pub struct JoinedShare {
     showing: Showing,
     /// Its screen while it shows (closed when you look elsewhere, so it isn't
     /// streamed for nothing), and the quality picked for it.
-    desktop: Option<Entity<DesktopView>>,
+    pub(super) desktop: Option<Entity<DesktopView>>,
     quality: &'static str,
     /// Servers opened here: their port here, or why not.
     servers: HashMap<u16, Result<u16, String>>,

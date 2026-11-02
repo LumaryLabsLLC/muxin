@@ -30,6 +30,129 @@ fn group_open(key: &str, listed: &HashSet<String>) -> bool {
     listed.contains(key) == (key == SHARED)
 }
 
+/// A repository in the list with the user's forks of it under it. A fork's
+/// upstream is here even when it isn't one of theirs, which is how its issues
+/// and pull requests are reached.
+#[derive(Debug)]
+struct RepoTree<'a> {
+    full_name: String,
+    private: bool,
+    /// The repository that decides where it's listed: itself, else its first fork.
+    anchor: &'a Repo,
+    /// One of the user's repositories, else only known as what they forked.
+    listed: bool,
+    forks: Vec<&'a Repo>,
+}
+
+impl RepoTree<'_> {
+    fn names(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.full_name.as_str()).chain(self.forks.iter().map(|f| f.full_name.as_str()))
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.names().any(|n| n.eq_ignore_ascii_case(name))
+    }
+
+    /// `query` is lowercase; empty matches everything. A match shows the whole tree.
+    fn matches(&self, query: &str) -> bool {
+        query.is_empty() || self.names().any(|n| n.to_lowercase().contains(query))
+    }
+
+    /// How many of the user's repositories it holds.
+    fn count(&self) -> usize {
+        self.forks.len() + usize::from(self.listed)
+    }
+}
+
+/// `repos`, most recent first, as trees in that order: each fork under the top
+/// of its family as far as the list knows, so no repository shows twice and a
+/// fork of a fork needs only one level.
+fn repo_trees<'a>(repos: &[&'a Repo]) -> Vec<RepoTree<'a>> {
+    let by_name: HashMap<String, &Repo> = repos.iter().map(|r| (r.full_name.to_lowercase(), *r)).collect();
+    let top_of = |repo: &'a Repo| {
+        let mut at = repo;
+        // Bounded: GitHub's forks don't loop, but this list shouldn't hang if they did.
+        for _ in 0..repos.len() {
+            let Some(parent) = &at.parent else { break };
+            match by_name.get(&parent.full_name.to_lowercase()) {
+                Some(up) => at = up,
+                None => return (parent.full_name.clone(), parent.private),
+            }
+        }
+        (at.full_name.clone(), at.private)
+    };
+    let mut trees: Vec<RepoTree> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    for &repo in repos {
+        let (top, private) = top_of(repo);
+        let at = *index.entry(top.to_lowercase()).or_insert_with(|| {
+            trees.push(RepoTree { full_name: top.clone(), private, anchor: repo, listed: false, forks: Vec::new() });
+            trees.len() - 1
+        });
+        if repo.full_name.eq_ignore_ascii_case(&top) {
+            trees[at].listed = true;
+            trees[at].anchor = repo;
+        } else {
+            trees[at].forks.push(repo);
+        }
+    }
+    trees
+}
+
+/// A row under Favorites.
+#[derive(Debug)]
+enum FavoriteRow<'t, 'a> {
+    /// A favorite and the rest of its tree: a tree stays together, so nothing
+    /// shows twice and a favorite fork keeps its upstream in reach.
+    Tree(&'t RepoTree<'a>),
+    /// A favorite that isn't in the list (someone else's repository).
+    Other(&'t str),
+}
+
+/// The Favorites section, in the order they were added.
+fn favorite_rows<'t, 'a>(trees: &'t [RepoTree<'a>], favorites: &'t [String]) -> Vec<FavoriteRow<'t, 'a>> {
+    let mut seen = HashSet::new();
+    favorites
+        .iter()
+        .filter_map(|f| match trees.iter().position(|t| t.has(f)) {
+            Some(i) => seen.insert(i).then(|| FavoriteRow::Tree(&trees[i])),
+            None => Some(FavoriteRow::Other(f)),
+        })
+        .collect()
+}
+
+fn is_fork_of(repo: &Repo, upstream: &str) -> bool {
+    repo.parent.as_ref().is_some_and(|p| p.full_name.eq_ignore_ascii_case(upstream))
+}
+
+/// The user's fork to work in on an issue of `upstream`, when they can't push
+/// to `upstream` itself and can push to the fork: their own before an organization's.
+fn fork_to_work_in<'a>(upstream: &str, repos: &'a [Repo], login: &str) -> Option<&'a str> {
+    if repos.iter().any(|r| r.can_push && r.full_name.eq_ignore_ascii_case(upstream)) {
+        return None;
+    }
+    let forks = repos.iter().filter(|r| r.can_push && !r.archived && is_fork_of(r, upstream));
+    forks.min_by_key(|r| !r.full_name.split('/').next().is_some_and(|o| o.eq_ignore_ascii_case(login))).map(|r| r.full_name.as_str())
+}
+
+/// What an agent needs to know to work on an issue of `upstream` from the user's fork.
+fn fork_note(upstream: &str, fork: &str) -> String {
+    let owner = fork.split('/').next().unwrap_or(fork);
+    format!(
+        "The user can't push to {upstream}, so this is worked on through their fork, {fork}. The fork may be behind: start your branch from {upstream}'s default branch, adding it as a remote if it isn't one. Push to {fork}, and open the pull request against {upstream}: gh pr create --repo {upstream} --head {owner}:<branch>"
+    )
+}
+
+/// How a row in the repository list names its repository.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowName {
+    Name,
+    /// The name with its owner under it.
+    WithOwner,
+    /// "owner/name", indented under its upstream.
+    Fork,
+}
+
 pub enum Load<T> {
     Loading,
     Ready(T),
@@ -274,7 +397,15 @@ impl Root {
             return self.gh_to_box(d, window, cx);
         }
         let workspace = how == Handoff::Workspace;
-        let local: Vec<&Checkout> = self.snapshot.checkouts.iter().filter(|c| c.repo.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(&it.repo))).collect();
+        let checkouts_of = |repo: &str| -> Vec<&Checkout> { self.snapshot.checkouts.iter().filter(|c| c.repo.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(repo))).collect() };
+        // A pull request is reviewed in its own repository. An issue of one they
+        // can't push to is worked on through their fork: in a checkout of that,
+        // else in one of the repository itself, else in a new clone of the fork.
+        let fork = (!it.pull_request).then(|| self.gh_fork_to_work_in(&it.repo)).flatten();
+        let (work_repo, local) = match fork.as_deref() {
+            Some(f) if !checkouts_of(f).is_empty() || checkouts_of(&it.repo).is_empty() => (f.to_string(), checkouts_of(f)),
+            _ => (it.repo.clone(), checkouts_of(&it.repo)),
+        };
         // The machine whose GitHub login is in use (else this computer) first,
         // then a clean checkout, then any.
         let account_machine = self.engine.settings().github.account_machine;
@@ -296,6 +427,9 @@ impl Root {
         if !body.is_empty() {
             message.push_str(&format!("\n\n{body}"));
         }
+        if let Some(f) = &fork {
+            message.push_str(&format!("\n\n{}", fork_note(&it.repo, f)));
+        }
         // A pull request's own branch when it's in this repository (so fixes can
         // be pushed to it); GitHub's ref for one from a fork.
         let git_ref = it.pull_request.then(|| match &d.pull {
@@ -304,7 +438,7 @@ impl Root {
         });
         let short_repo = it.repo.rsplit('/').next().unwrap_or(&it.repo);
         let plan = WorkspacePlan {
-            repo: it.repo.clone(),
+            repo: work_repo.clone(),
             git_ref,
             branch: (!it.pull_request).then(|| issue_branch(it.number, &it.title)),
             name: format!("{short_repo} #{}", it.number),
@@ -315,7 +449,7 @@ impl Root {
             title: Some(format!("#{} {short}", it.number)),
             message: Some(message),
             source: Some(format!("{}#{}", it.repo, it.number)),
-            repo: Some(it.repo.clone()),
+            repo: Some(work_repo),
             command: None,
             workspace: Some(plan),
         };
@@ -326,10 +460,28 @@ impl Root {
         self.show_new_session_prefilled(machine, cwd, prefill, window, cx);
     }
 
-    /// New box, filled in for an issue: its repository, a task that says to fix
-    /// it (the issue's description goes along), and a branch named for it.
+    /// New box, filled in for an issue: its repository (or the user's fork of
+    /// one they can't push to), a task that says to fix it (the issue's
+    /// description goes along), and a branch named for it.
     fn gh_to_box(&mut self, d: &Detail, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_box_dialog(box_prefill(d), window, cx);
+        let fork = self.gh_fork_to_work_in(&d.item.repo);
+        self.show_box_dialog(box_prefill(d, fork.as_deref()), window, cx);
+    }
+
+    /// Your repositories, once they've loaded.
+    fn gh_my_repos(&self) -> &[Repo] {
+        match &self.gh.repos {
+            Some(Load::Ready(repos)) => repos,
+            _ => &[],
+        }
+    }
+
+    fn gh_fork_to_work_in(&self, upstream: &str) -> Option<String> {
+        let login = match &self.gh.inbox {
+            Some(Load::Ready(i)) => i.viewer.login.as_str(),
+            _ => "",
+        };
+        fork_to_work_in(upstream, self.gh_my_repos(), login).map(str::to_string)
     }
 
     /// `gh_to_agent` for an issue or pull request in a list: loads it first if needed.
@@ -424,21 +576,22 @@ impl Root {
         match &self.gh.repos {
             Some(Load::Ready(repos)) => {
                 let repos: Vec<&Repo> = repos.iter().filter(|r| !r.archived).collect();
+                let trees = repo_trees(&repos);
                 // Favorites, in the order they were added; one that isn't in the
                 // list (someone else's repository) still shows.
-                let favs: Vec<AnyElement> = favorites
-                    .iter()
-                    .filter(|f| matches(f))
-                    .map(|f| {
-                        let private = repos.iter().find(|r| r.full_name.eq_ignore_ascii_case(f)).is_some_and(|r| r.private);
-                        self.gh_repo_row(theme, f, private, true, true, cx)
-                    })
-                    .collect();
+                let mut favs: Vec<AnyElement> = Vec::new();
+                for row in favorite_rows(&trees, &favorites) {
+                    match row {
+                        FavoriteRow::Tree(t) if t.matches(&q) => favs.extend(self.gh_tree_rows(theme, t, true, &favorites, cx)),
+                        FavoriteRow::Other(f) if matches(f) => favs.push(self.gh_repo_row(theme, f, false, RowName::WithOwner, true, cx)),
+                        _ => {}
+                    }
+                }
                 if !favs.is_empty() {
                     body.push(list_heading(theme, "Favorites", None));
                     body.extend(favs);
                 }
-                let rest: Vec<&Repo> = repos.iter().copied().filter(|r| !is_favorite(&r.full_name) && matches(&r.full_name)).take(300).collect();
+                let rest: Vec<&RepoTree> = trees.iter().filter(|t| !t.names().any(is_favorite) && t.matches(&q)).take(300).collect();
                 body.push(list_heading(theme, "Repositories", Some(self.gh_view_toggle(theme, grouped, cx))));
                 body.push(div().px(px(12.)).pb(px(8.)).children(self.gh.filter.clone()).into_any_element());
                 if rest.is_empty() {
@@ -451,37 +604,41 @@ impl Root {
                     let owner_of = |r: &Repo| r.full_name.split_once('/').map_or("", |(o, _)| o).to_string();
                     let is_shared = |r: &Repo| !r.owner_is_org && !owner_of(r).eq_ignore_ascii_case(&you);
                     let mut owners: Vec<String> = Vec::new();
-                    for r in rest.iter().filter(|r| !is_shared(r)) {
-                        let owner = owner_of(r);
+                    for t in rest.iter().filter(|t| !is_shared(t.anchor)) {
+                        let owner = owner_of(t.anchor);
                         if !owners.iter().any(|o| o.eq_ignore_ascii_case(&owner)) {
                             owners.push(owner);
                         }
                     }
                     owners.sort_by_key(|o| (!o.eq_ignore_ascii_case(&you), o.to_lowercase()));
-                    let mut groups: Vec<(String, String, Vec<&Repo>)> = owners
+                    let mut groups: Vec<(String, String, Vec<&RepoTree>)> = owners
                         .into_iter()
                         .map(|o| {
-                            let mine = rest.iter().copied().filter(|r| !is_shared(r) && owner_of(r).eq_ignore_ascii_case(&o)).collect();
+                            let mine = rest.iter().copied().filter(|t| !is_shared(t.anchor) && owner_of(t.anchor).eq_ignore_ascii_case(&o)).collect();
                             (o.to_lowercase(), o, mine)
                         })
                         .collect();
-                    let shared: Vec<&Repo> = rest.iter().copied().filter(|r| is_shared(r)).collect();
+                    let shared: Vec<&RepoTree> = rest.iter().copied().filter(|t| is_shared(t.anchor)).collect();
                     if !shared.is_empty() {
                         groups.push((SHARED.to_string(), "Shared with you".to_string(), shared));
                     }
-                    for (key, title, repos) in groups {
+                    for (key, title, trees) in groups {
                         // A search shows every match, folded or not.
                         let open = !q.is_empty() || group_open(&key, &folded);
                         let you = key == you.to_lowercase();
-                        body.push(self.gh_owner_row(theme, &key, &title, repos.len(), open, you, cx));
+                        body.push(self.gh_owner_row(theme, &key, &title, trees.iter().map(|t| t.count()).sum(), open, you, cx));
                         if open {
                             // Shared repositories belong to different people: show whose.
                             let owner_line = key == SHARED;
-                            body.extend(repos.iter().map(|r| self.gh_repo_row(theme, &r.full_name, r.private, owner_line, false, cx)));
+                            for t in trees {
+                                body.extend(self.gh_tree_rows(theme, t, owner_line, &favorites, cx));
+                            }
                         }
                     }
                 } else {
-                    body.extend(rest.iter().map(|r| self.gh_repo_row(theme, &r.full_name, r.private, true, false, cx)));
+                    for t in rest {
+                        body.extend(self.gh_tree_rows(theme, t, true, &favorites, cx));
+                    }
                 }
             }
             Some(Load::Failed(e)) => {
@@ -644,17 +801,28 @@ impl Root {
             .into_any_element()
     }
 
+    /// A repository's row and its forks' under it. An upstream that isn't one
+    /// of the user's always says whose it is.
+    fn gh_tree_rows(&self, theme: &Theme, tree: &RepoTree, owner_line: bool, favorites: &[String], cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let favorite = |name: &str| favorites.iter().any(|f| f.eq_ignore_ascii_case(name));
+        let top = if owner_line || !tree.listed { RowName::WithOwner } else { RowName::Name };
+        let mut rows = vec![self.gh_repo_row(theme, &tree.full_name, tree.private, top, favorite(&tree.full_name), cx)];
+        rows.extend(tree.forks.iter().map(|f| self.gh_repo_row(theme, &f.full_name, f.private, RowName::Fork, favorite(&f.full_name), cx)));
+        rows
+    }
+
     /// A repository in the list: name (and owner), on-this-machine mark, and a
     /// star that shows on hover (always, once starred).
-    fn gh_repo_row(&self, theme: &Theme, full: &str, private: bool, owner_line: bool, favorite: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn gh_repo_row(&self, theme: &Theme, full: &str, private: bool, shown: RowName, favorite: bool, cx: &mut Context<Self>) -> AnyElement {
         let (owner, name) = full.split_once('/').unwrap_or(("", full));
         let selected = match &self.route {
             Route::GithubRepo(r) | Route::GithubItem(r, _) => r.eq_ignore_ascii_case(full),
             _ => false,
         };
         let local = self.snapshot.checkouts.iter().any(|c| c.repo.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(full)));
+        let indent = if shown == RowName::Fork { 14. } else { 0. };
         // Margins, padding, the lock/book icon, gaps, the laptop and the star.
-        let text_w = LIST_WIDTH - 20. - 16. - 13. - 8. - 20. - 28.;
+        let text_w = LIST_WIDTH - 20. - 16. - 13. - 8. - 20. - 28. - indent;
         let (nav, star, menu) = (full.to_string(), full.to_string(), full.to_string());
         div()
             .id(SharedString::from(format!("gh-r-{full}")))
@@ -662,20 +830,24 @@ impl Root {
             .flex()
             .items_center()
             .gap(px(8.))
-            .h(px(if owner_line { 40. } else { 30. }))
-            .mx(px(10.))
+            .h(px(if shown == RowName::WithOwner { 40. } else { 30. }))
+            .ml(px(10. + indent))
+            .mr(px(10.))
             .px(px(8.))
             .rounded(crate::ui::kit::corner(7.))
             .cursor_pointer()
             .when(selected, |d| d.bg(theme.element_selected))
             .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-            .child(kit::color_icon(theme, if private { "lock" } else { "book-open" }, 13., theme.text_placeholder))
+            .child(match shown {
+                RowName::Fork => icon("corner-down-right", 13., theme.text_placeholder),
+                _ => kit::color_icon(theme, if private { "lock" } else { "book-open" }, 13., theme.text_placeholder),
+            })
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().w(px(text_w)).truncate().text_size(px(13.)).text_color(theme.text).child(name.to_string()))
-                    .when(owner_line, |d| d.child(div().w(px(text_w)).truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(owner.to_string()))),
+                    .child(div().w(px(text_w)).truncate().text_size(px(13.)).text_color(theme.text).child(if shown == RowName::Fork { full.to_string() } else { name.to_string() }))
+                    .when(shown == RowName::WithOwner, |d| d.child(div().w(px(text_w)).truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(owner.to_string()))),
             )
             .child(div().flex_1())
             .when(local, |d| d.child(kit::color_icon(theme, "laptop", 12., theme.text_accent)))
@@ -803,8 +975,17 @@ impl Root {
         let issues = data.issues.clone();
         let pulls = data.pulls.clone();
         let runs = data.runs.clone();
+        // Your forks of it, with theirs among its checkouts (its own first).
+        let forks: Vec<String> = self.gh_my_repos().iter().filter(|f| is_fork_of(f, &r.full_name)).map(|f| f.full_name.clone()).collect();
         // Fresh from the machines, not the moment the repository loaded.
-        let checkouts: Vec<Checkout> = self.snapshot.checkouts.iter().filter(|c| c.repo.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(name))).cloned().collect();
+        let mut checkouts: Vec<Checkout> = self
+            .snapshot
+            .checkouts
+            .iter()
+            .filter(|c| c.repo.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(name) || forks.iter().any(|f| f.eq_ignore_ascii_case(x))))
+            .cloned()
+            .collect();
+        checkouts.sort_by_key(|c| !c.repo.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(name)));
 
         let meta: Vec<String> = [
             Some(if r.private { "Private".to_string() } else { "Public".into() }),
@@ -820,6 +1001,14 @@ impl Root {
         let first = checkouts.first().cloned();
         let favorite = self.gh_is_favorite(&r.full_name);
         let fav_name = r.full_name.clone();
+        // What it's tied to: what it was forked from, or the forks you have of it.
+        let mut family: Vec<AnyElement> = Vec::new();
+        match &r.parent {
+            Some(p) => family.push(self.gh_repo_link(theme, "Fork of", &p.full_name, cx)),
+            None if r.fork => family.push(div().text_size(px(12.)).text_color(theme.text_placeholder).child("Fork of a repository GitHub doesn't name to this login.").into_any_element()),
+            None => {}
+        }
+        family.extend(forks.iter().map(|f| self.gh_repo_link(theme, "Your fork", f, cx)));
         let header = div()
             .flex()
             .items_start()
@@ -834,7 +1023,8 @@ impl Root {
                     .gap(px(4.))
                     .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(r.full_name.clone()))
                     .children(r.description.clone().map(|d| div().text_size(px(13.)).text_color(theme.text_muted).child(d)))
-                    .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(meta.join("  ·  "))),
+                    .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(meta.join("  ·  ")))
+                    .children(family),
             )
             .child(
                 Button::new("gh-repo-fav", if favorite { "Favorite" } else { "Add to favorites" })
@@ -891,7 +1081,18 @@ impl Root {
                 let list = if tab == RepoTab::Issues { &issues } else { &pulls };
                 let rows: Vec<AnyElement> = list.iter().enumerate().map(|(i, it)| self.gh_item_row(theme, it, false, i, cx)).collect();
                 if rows.is_empty() {
-                    card(theme).child(kit::empty_state(theme, "circle-check", if tab == RepoTab::Issues { "No open issues." } else { "No open pull requests." })).into_any_element()
+                    let none = if tab == RepoTab::Issues { "No open issues." } else { "No open pull requests." };
+                    match &r.parent {
+                        // Forks usually have none: the work is on what they came from.
+                        Some(p) => {
+                            let upstream = p.full_name.clone();
+                            card(theme)
+                                .child(kit::empty_state(theme, "circle-check", format!("{none} This is a fork. Its work is usually on {upstream}.")))
+                                .child(div().px(px(12.)).pb(px(12.)).child(Button::new("gh-go-upstream", format!("Go to {upstream}")).icon("arrow-right").on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::GithubRepo(upstream.clone()), window, cx)))))
+                                .into_any_element()
+                        }
+                        None => card(theme).child(kit::empty_state(theme, "circle-check", none)).into_any_element(),
+                    }
                 } else {
                     card(theme).children(rows).into_any_element()
                 }
@@ -900,6 +1101,24 @@ impl Root {
             RepoTab::Checkouts => self.gh_checkouts(theme, name, &checkouts, cx),
         };
         div().flex().flex_col().gap(px(20.)).child(header).child(tabs).child(content).into_any_element()
+    }
+
+    /// "Fork of owner/name" in a repository's header: goes to that repository.
+    fn gh_repo_link(&self, theme: &Theme, what: &'static str, repo: &str, cx: &mut Context<Self>) -> AnyElement {
+        let target = repo.to_string();
+        div()
+            .id(SharedString::from(format!("gh-family-{repo}")))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .cursor_pointer()
+            .text_size(px(12.))
+            .text_color(theme.text_placeholder)
+            .child(icon("corner-down-right", 12., theme.text_placeholder))
+            .child(what)
+            .child(div().text_color(theme.text_accent).hover(|st| st.text_color(theme.text)).child(repo.to_string()))
+            .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::GithubRepo(target.clone()), window, cx)))
+            .into_any_element()
     }
 
     fn gh_checkouts(&mut self, theme: &Theme, repo: &str, checkouts: &[Checkout], cx: &mut Context<Self>) -> AnyElement {
@@ -963,7 +1182,9 @@ impl Root {
                                     .child(kit::color_icon(theme, "git-branch", 11., theme.text_placeholder))
                                     .child(div().font_family(mono_font()).child(c.branch.clone()))
                                     .child(format!("· {sync}"))
-                                    .child(if c.dirty == 0 { "· clean".to_string() } else { format!("· {} changed", c.dirty) }),
+                                    .child(if c.dirty == 0 { "· clean".to_string() } else { format!("· {} changed", c.dirty) })
+                                    // Your fork's, on its upstream's page.
+                                    .children(c.repo.as_deref().filter(|r| !r.eq_ignore_ascii_case(repo)).map(|r| format!("· {r}"))),
                             ),
                     )
                     .when(busy, |d| d.child(spinner(SharedString::from(format!("gh-git-{i}")), 13., theme.accent)))
@@ -1417,19 +1638,23 @@ fn inline(text: &str) -> String {
     out
 }
 
-/// New box for an issue: its repository, a task to fix it and open a pull
-/// request that closes it (its title and description go along to the agent,
-/// unseen), a branch named for it, and a name like "api #12".
-pub(super) fn box_prefill(d: &Detail) -> BoxPrefill {
+/// New box for an issue: its repository (or `fork`, when that's where the work
+/// has to go), a task to fix it and open a pull request that closes it (its
+/// title and description go along to the agent, unseen), a branch named for it,
+/// and a name like "api #12".
+pub(super) fn box_prefill(d: &Detail, fork: Option<&str>) -> BoxPrefill {
     let it = &d.item;
     let body: String = d.body.trim().chars().take(3000).collect();
     let mut details = format!("#{} {}", it.number, it.title);
     if !body.is_empty() {
         details.push_str(&format!("\n\n{body}"));
     }
+    if let Some(f) = fork {
+        details.push_str(&format!("\n\n{}", fork_note(&it.repo, f)));
+    }
     let short_repo = it.repo.rsplit('/').next().unwrap_or(&it.repo);
     BoxPrefill {
-        repo: Some(it.repo.clone()),
+        repo: Some(fork.unwrap_or(&it.repo).to_string()),
         task: Some(format!("Fix this GitHub issue and open a pull request that closes it: {}", it.html_url)),
         details: Some(details),
         name: Some(format!("{short_repo} #{}", it.number)),
@@ -1459,7 +1684,7 @@ mod tests {
             html_url: "https://github.com/adibhanna/muxin-handoff-test/issues/1".into(),
         };
         let d = Detail { item, body: "average([2, 4]) returns 4 instead of 3.\n".into(), comments: Vec::new(), pull: None };
-        let p = box_prefill(&d);
+        let p = box_prefill(&d, None);
         assert_eq!(p.repo.as_deref(), Some("adibhanna/muxin-handoff-test"));
         assert_eq!(p.task.as_deref(), Some("Fix this GitHub issue and open a pull request that closes it: https://github.com/adibhanna/muxin-handoff-test/issues/1"));
         assert_eq!(p.details.as_deref(), Some("#1 average() is off by one\n\naverage([2, 4]) returns 4 instead of 3."));
@@ -1468,6 +1693,161 @@ mod tests {
         // What the box's agent is asked: the task, then the issue.
         let prompt = super::super::box_dialog::prompt_for(p.task.clone().unwrap(), p.details.as_deref());
         assert_eq!(prompt, format!("{}\n\n{}", p.task.unwrap(), p.details.unwrap()));
+    }
+
+    fn repo(full_name: &str) -> Repo {
+        Repo {
+            full_name: full_name.into(),
+            description: None,
+            private: false,
+            fork: false,
+            archived: false,
+            default_branch: "main".into(),
+            language: None,
+            stars: 0,
+            open_issues: 0,
+            pushed_at: None,
+            html_url: format!("https://github.com/{full_name}"),
+            owner_is_org: false,
+            favorite: false,
+            can_push: true,
+            parent: None,
+        }
+    }
+
+    fn fork(full_name: &str, parent: &str) -> Repo {
+        let parent = crate::github::hub::RepoParent { full_name: parent.into(), private: false, html_url: format!("https://github.com/{parent}"), open_issues: 3 };
+        Repo { fork: true, parent: Some(parent), ..repo(full_name) }
+    }
+
+    /// Each tree as "top: fork, fork".
+    fn shape(repos: &[Repo]) -> Vec<String> {
+        let refs: Vec<&Repo> = repos.iter().collect();
+        repo_trees(&refs).iter().map(|t| format!("{}: {}", t.full_name, t.forks.iter().map(|f| f.full_name.as_str()).collect::<Vec<_>>().join(", "))).collect()
+    }
+
+    #[test]
+    fn a_fork_goes_under_its_upstream() {
+        let repos = [repo("me/app"), fork("me/dutchman", "dutchman-cad/dutchman"), repo("me/blog")];
+        assert_eq!(shape(&repos), ["me/app: ", "dutchman-cad/dutchman: me/dutchman", "me/blog: "]);
+        let refs: Vec<&Repo> = repos.iter().collect();
+        let trees = repo_trees(&refs);
+        // It's reached through the fork: it isn't one of theirs, and it lists where the fork does.
+        assert!(!trees[1].listed);
+        assert_eq!(trees[1].anchor.full_name, "me/dutchman");
+        assert_eq!((trees[0].count(), trees[1].count()), (1, 1));
+    }
+
+    #[test]
+    fn an_upstream_they_have_shows_once_with_its_forks_under_it() {
+        // The fork was pushed more recently, so it comes first; the tree keeps that place.
+        let repos = [fork("me/api", "acme/api"), repo("me/blog"), Repo { owner_is_org: true, ..repo("ACME/api") }];
+        assert_eq!(shape(&repos), ["ACME/api: me/api", "me/blog: "], "named as GitHub spells it in the list");
+        let refs: Vec<&Repo> = repos.iter().collect();
+        let trees = repo_trees(&refs);
+        assert!(trees[0].listed);
+        assert_eq!(trees[0].anchor.full_name, "ACME/api", "it's listed under its own owner, not the fork's");
+        assert_eq!(trees[0].count(), 2);
+    }
+
+    #[test]
+    fn two_forks_of_one_upstream_share_its_row() {
+        let repos = [fork("adibhanna/flathub", "flathub/flathub"), repo("me/app"), fork("ZenNotes/flathub", "flathub/flathub")];
+        assert_eq!(shape(&repos), ["flathub/flathub: adibhanna/flathub, ZenNotes/flathub", "me/app: "]);
+    }
+
+    #[test]
+    fn a_fork_of_a_fork_stays_one_level_deep() {
+        let repos = [fork("me/foo", "team/foo"), fork("team/foo", "up/foo")];
+        assert_eq!(shape(&repos), ["up/foo: me/foo, team/foo"]);
+        let looped = [fork("a/x", "b/x"), fork("b/x", "a/x")];
+        assert_eq!(shape(&looped).len(), 2, "doesn't hang or lose either");
+    }
+
+    #[test]
+    fn a_fork_without_a_named_parent_is_a_plain_row() {
+        let repos = [Repo { fork: true, ..repo("me/secret-fork") }];
+        assert_eq!(shape(&repos), ["me/secret-fork: "]);
+    }
+
+    #[test]
+    fn a_search_shows_the_whole_tree() {
+        let repos = [fork("spuder/dutchman", "dutchman-cad/dutchman")];
+        let refs: Vec<&Repo> = repos.iter().collect();
+        let t = &repo_trees(&refs)[0];
+        assert!(t.matches("") && t.matches("spuder") && t.matches("dutchman-cad"));
+        assert!(!t.matches("other"));
+        assert!(t.has("DUTCHMAN-cad/dutchman") && t.has("spuder/Dutchman") && !t.has("other/dutchman"));
+    }
+
+    #[test]
+    fn favorites_keep_a_tree_together() {
+        let repos = [fork("me/foo", "up/foo"), fork("org/foo", "up/foo"), repo("me/bar")];
+        let refs: Vec<&Repo> = repos.iter().collect();
+        let trees = repo_trees(&refs);
+        let shown = |favorites: &[&str]| -> Vec<String> {
+            let favorites: Vec<String> = favorites.iter().map(|f| f.to_string()).collect();
+            favorite_rows(&trees, &favorites)
+                .iter()
+                .map(|row| match row {
+                    FavoriteRow::Tree(t) => format!("tree {}", t.full_name),
+                    FavoriteRow::Other(f) => format!("other {f}"),
+                })
+                .collect()
+        };
+        // The fork brings its upstream; the upstream brings its forks.
+        assert_eq!(shown(&["me/foo"]), ["tree up/foo"]);
+        assert_eq!(shown(&["up/foo"]), ["tree up/foo"]);
+        // Starred several ways, it still shows once, where it was first starred.
+        assert_eq!(shown(&["me/bar", "org/foo", "up/foo", "me/foo"]), ["tree me/bar", "tree up/foo"]);
+        // Someone else's stays as it was.
+        assert_eq!(shown(&["zed/zed"]), ["other zed/zed"]);
+    }
+
+    #[test]
+    fn an_issue_is_worked_on_where_they_can_push() {
+        let up = "dutchman-cad/dutchman";
+        let mine = fork("spuder/dutchman", up);
+        let org = fork("aorg/dutchman", up);
+        // Only a fork of it: there, their own before an organization's.
+        assert_eq!(fork_to_work_in(up, &[org.clone(), mine.clone()], "spuder"), Some("spuder/dutchman"));
+        assert_eq!(fork_to_work_in(up, &[org], "spuder"), Some("aorg/dutchman"));
+        assert_eq!(fork_to_work_in(&up.to_uppercase(), std::slice::from_ref(&mine), "spuder"), Some("spuder/dutchman"));
+        // They can push to the upstream: there, as before.
+        assert_eq!(fork_to_work_in(up, &[repo(up), mine.clone()], "spuder"), None);
+        // Listed but read-only: the fork.
+        assert_eq!(fork_to_work_in(up, &[Repo { can_push: false, ..repo(up) }, mine.clone()], "spuder"), Some("spuder/dutchman"));
+        // No fork, or one they can't push to or that's archived: nowhere better.
+        assert_eq!(fork_to_work_in(up, &[repo("spuder/other")], "spuder"), None);
+        assert_eq!(fork_to_work_in(up, &[Repo { can_push: false, ..mine.clone() }], "spuder"), None);
+        assert_eq!(fork_to_work_in(up, &[Repo { archived: true, ..mine }], "spuder"), None);
+    }
+
+    #[test]
+    fn a_box_for_an_upstream_issue_starts_from_the_fork() {
+        let item = Item {
+            repo: "dutchman-cad/dutchman".into(),
+            number: 12,
+            title: "Wrong torque".into(),
+            pull_request: false,
+            draft: false,
+            state: "open".into(),
+            author: "someone".into(),
+            assignees: Vec::new(),
+            labels: Vec::new(),
+            comments: 0,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            html_url: "https://github.com/dutchman-cad/dutchman/issues/12".into(),
+        };
+        let d = Detail { item, body: String::new(), comments: Vec::new(), pull: None };
+        let p = box_prefill(&d, Some("spuder/dutchman"));
+        assert_eq!(p.repo.as_deref(), Some("spuder/dutchman"));
+        // The issue stays the upstream's, and the agent is told where the pull request goes.
+        assert_eq!(p.task.as_deref(), Some("Fix this GitHub issue and open a pull request that closes it: https://github.com/dutchman-cad/dutchman/issues/12"));
+        assert_eq!(p.name.as_deref(), Some("dutchman #12"));
+        let details = p.details.unwrap();
+        assert!(details.contains("gh pr create --repo dutchman-cad/dutchman --head spuder:<branch>"), "{details}");
     }
 
     #[test]

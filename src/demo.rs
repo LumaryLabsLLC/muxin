@@ -1015,6 +1015,8 @@ pub mod github {
             html_url: format!("https://github.com/{full_name}"),
             owner_is_org: full_name.starts_with("acme/"),
             favorite: false,
+            can_push: true,
+            parent: None,
         }
     }
 

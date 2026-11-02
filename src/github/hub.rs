@@ -5,9 +5,10 @@
 
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 
-use super::Client;
+use super::{CONCURRENCY, Client};
 use crate::config::GitHubSettings;
 
 #[derive(Debug, Clone, Serialize)]
@@ -36,6 +37,21 @@ pub struct Repo {
     pub owner_is_org: bool,
     /// Starred in Muxin (not GitHub's stars).
     pub favorite: bool,
+    /// This login can push to it.
+    pub can_push: bool,
+    /// What it was forked from. A fork without one: GitHub didn't name it to this login.
+    pub parent: Option<RepoParent>,
+}
+
+/// The repository a fork came from: often where its issues and pull requests are.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RepoParent {
+    /// "owner/name".
+    pub full_name: String,
+    pub private: bool,
+    pub html_url: String,
+    /// Open issues and pull requests together, as GitHub counts them.
+    pub open_issues: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -170,12 +186,31 @@ struct RawRepo {
     pushed_at: Option<DateTime<Utc>>,
     html_url: String,
     owner: Option<RawOwner>,
+    permissions: Option<RawPermissions>,
+    /// Only when a fork is read on its own, not in a list of repositories.
+    parent: Option<RawParent>,
 }
 
 #[derive(Deserialize)]
 struct RawOwner {
     #[serde(rename = "type", default)]
     kind: String,
+}
+
+#[derive(Deserialize)]
+struct RawPermissions {
+    #[serde(default)]
+    push: bool,
+}
+
+#[derive(Deserialize)]
+struct RawParent {
+    full_name: String,
+    #[serde(default)]
+    private: bool,
+    html_url: String,
+    #[serde(default)]
+    open_issues_count: u32,
 }
 
 #[derive(Deserialize)]
@@ -383,6 +418,8 @@ fn repo(raw: RawRepo) -> Repo {
         html_url: raw.html_url,
         owner_is_org: raw.owner.is_some_and(|o| o.kind == "Organization"),
         favorite: false,
+        can_push: raw.permissions.is_some_and(|p| p.push),
+        parent: raw.parent.map(|p| RepoParent { full_name: p.full_name, private: p.private, html_url: p.html_url, open_issues: p.open_issues_count }),
     }
 }
 
@@ -449,7 +486,15 @@ impl Client {
             .get_all("/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member", 4)
             .await
             .map_err(|e| e.message)?;
-        Ok(pages.into_iter().flatten().map(repo).collect())
+        let mut repos: Vec<Repo> = pages.into_iter().flatten().map(repo).collect();
+        // The list says what's a fork, but only a fork's own page says of what.
+        // One that can't be read now shows without its parent.
+        let forks: Vec<String> = repos.iter().filter(|r| r.fork).map(|r| r.full_name.clone()).collect();
+        let parents: Vec<Option<RepoParent>> = stream::iter(forks).map(|name| async move { self.repo(settings, &name).await.ok().and_then(|r| r.parent) }).buffered(CONCURRENCY).collect().await;
+        for (fork, parent) in repos.iter_mut().filter(|r| r.fork).zip(parents) {
+            fork.parent = parent;
+        }
+        Ok(repos)
     }
 
     pub async fn repo(&self, settings: &GitHubSettings, full_name: &str) -> Result<Repo, String> {
@@ -537,10 +582,22 @@ impl Client {
     }
 
     /// The pull request for a branch of a repository (the newest, open or not),
-    /// with its checks; None when the branch has none.
+    /// with its checks; None when the branch has none. A fork's branch usually
+    /// has its pull request on the repository it was forked from.
     pub async fn branch_pull(&self, settings: &GitHubSettings, full_name: &str, branch: &str) -> Result<Option<BranchPull>, String> {
         self.configure(settings);
         let owner = full_name.split('/').next().unwrap_or_default();
+        if let Some(pull) = self.pull_from(full_name, owner, branch).await? {
+            return Ok(Some(pull));
+        }
+        match self.repo(settings, full_name).await?.parent {
+            Some(parent) => self.pull_from(&parent.full_name, owner, branch).await,
+            None => Ok(None),
+        }
+    }
+
+    /// `branch_pull` in one repository, for a branch of `owner`'s.
+    async fn pull_from(&self, full_name: &str, owner: &str, branch: &str) -> Result<Option<BranchPull>, String> {
         let path = format!("/repos/{full_name}/pulls?state=all&per_page=1&head={owner}:{}", query_value(branch));
         let found: Vec<RawPullItem> = self.get(&path).await.map_err(|e| e.message)?;
         let Some(p) = found.into_iter().next() else { return Ok(None) };
@@ -597,5 +654,38 @@ mod tests {
         assert_eq!(issue_ref("https://github.com/acme/api/issues/42"), Some(("acme/api".into(), 42)));
         assert_eq!(issue_ref("https://github.com/acme/api/pull/7/files"), Some(("acme/api".into(), 7)));
         assert_eq!(issue_ref("acme/api#12"), Some(("acme/api".into(), 12)));
+    }
+
+    /// As GitHub answers: `parent` only on a fork read on its own, its
+    /// `permissions` empty, and neither in a list of repositories.
+    fn raw_repo(extra: serde_json::Value) -> RawRepo {
+        let mut v = serde_json::json!({ "full_name": "spuder/dutchman", "private": false, "fork": true, "html_url": "https://github.com/spuder/dutchman" });
+        v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn reads_a_forks_parent() {
+        let own_page = repo(raw_repo(serde_json::json!({
+            "permissions": { "admin": true, "push": true, "pull": true },
+            "parent": { "full_name": "dutchman-cad/dutchman", "private": false, "html_url": "https://github.com/dutchman-cad/dutchman", "open_issues_count": 9, "permissions": null },
+        })));
+        assert!(own_page.fork && own_page.can_push);
+        assert_eq!(own_page.parent, Some(RepoParent { full_name: "dutchman-cad/dutchman".into(), private: false, html_url: "https://github.com/dutchman-cad/dutchman".into(), open_issues: 9 }));
+
+        // In a list, or when GitHub won't name it to this login: still a fork.
+        let listed = repo(raw_repo(serde_json::json!({ "permissions": { "push": false } })));
+        assert!(listed.fork && !listed.can_push && listed.parent.is_none());
+        let bare = repo(raw_repo(serde_json::json!({ "parent": null, "permissions": null })));
+        assert!(!bare.can_push && bare.parent.is_none());
+    }
+
+    #[test]
+    fn a_new_field_changes_no_other_json() {
+        let r = serde_json::to_value(repo(raw_repo(serde_json::json!({})))).unwrap();
+        for field in ["full_name", "description", "private", "fork", "archived", "default_branch", "language", "stars", "open_issues", "pushed_at", "html_url", "owner_is_org", "favorite"] {
+            assert!(r.get(field).is_some(), "{field} stays for the iPad and for agents");
+        }
+        assert!(r["parent"].is_null() && r["can_push"] == false);
     }
 }

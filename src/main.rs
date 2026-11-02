@@ -7,6 +7,8 @@ mod crash;
 mod demo;
 mod fleet;
 mod github;
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+mod instance;
 mod mcp;
 mod ops;
 mod probe;
@@ -162,6 +164,8 @@ enum Command {
     ShellCommand(ShellCommandArgs),
     /// Whether a newer Muxin is out, and how to update this copy
     Updates(UpdatesArgs),
+    /// Quit the running Muxin app, wherever its window is (sessions keep running on their machines)
+    Quit(CommonArgs),
 }
 
 #[derive(Args)]
@@ -1542,7 +1546,7 @@ fn main() -> ExitCode {
         .init();
 
     // A share link opened with Muxin: Linux and Windows hand it over as the
-    // argument (macOS through the app, see ui::open_link).
+    // argument (macOS through the app, see ui::run_app).
     let mut argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if let Some(url) = argv.get(1).and_then(|a| a.to_str()).filter(|a| a.starts_with("muxin://join")).map(String::from) {
         argv = vec![argv[0].clone(), "open".into(), "--view".into(), format!("join:{url}").into()];
@@ -1831,6 +1835,19 @@ fn main() -> ExitCode {
             println!("state       {}", display_path(&p.state));
             0
         }
+        Some(Command::Quit(args)) => {
+            let dir = args.paths().dir;
+            if !instance::is_running(&dir) {
+                println!("Muxin isn't running.");
+                0
+            } else if runtime.block_on(instance::tell(&dir, &instance::Request::Quit)) == instance::Told::NoAnswer {
+                eprintln!("error: Muxin didn't answer.");
+                1
+            } else {
+                println!("Muxin is quitting.");
+                0
+            }
+        }
         Some(Command::Updates(args)) => {
             let current = env!("CARGO_PKG_VERSION");
             match (runtime.block_on(update::check()), args.json) {
@@ -1931,7 +1948,30 @@ fn open(args: OpenArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     }
     // The engine runs on tokio; the window runs on GPUI's main-thread executor.
     let _guard = runtime.enter();
-    let engine = Engine::new(args.common.paths(), args.demo);
+    let paths = args.common.paths();
+    // One window per Muxin home: opening it again brings that one forward.
+    #[cfg(feature = "gui")]
+    let listener = if args.demo {
+        None
+    } else {
+        match instance::claim(&paths.dir) {
+            instance::Claim::First(listener) => Some(listener),
+            instance::Claim::Unknown => None,
+            instance::Claim::Taken => {
+                // A test's own `--view` runs beside the app; a share link goes to it.
+                let request = match args.view.as_deref() {
+                    None => Some(instance::Request::Show),
+                    Some(view) => view.strip_prefix("join:").map(|url| instance::Request::Join(url.to_string())),
+                };
+                match request.map(|request| runtime.block_on(instance::tell(&paths.dir, &request))) {
+                    Some(instance::Told::Done) => return 0,
+                    Some(instance::Told::Replacing) => runtime.block_on(instance::claim_when_free(&paths.dir)),
+                    Some(instance::Told::NoAnswer) | None => None,
+                }
+            }
+        }
+    };
+    let engine = Engine::new(paths, args.demo);
     engine.start();
     if engine.is_demo() {
         tracing::info!("demo mode: simulated machines, nothing is read from or written to disk");
@@ -1942,7 +1982,7 @@ fn open(args: OpenArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     {
         // The window is the one process that watches cloud machines for idleness.
         engine.start_cloud_idle_watch();
-        ui::run(engine, args.view);
+        ui::run(engine, args.view, listener);
         0
     }
     #[cfg(not(feature = "gui"))]

@@ -222,6 +222,31 @@ pub fn bind_app_actions(cx: &mut App) {
     cx.on_action(|_: &OpenGitHub, cx| cx.open_url(REPO));
 }
 
+/// What a window that really closed (on Linux, see `ui::run`) comes back to.
+/// Its terminals reattach, and splits come back on their own.
+pub(super) struct Left {
+    route: Route,
+    back: Vec<Route>,
+    forward: Vec<Route>,
+    collapsed: HashSet<String>,
+    pub(super) bounds: Option<gpui::WindowBounds>,
+}
+
+impl Left {
+    /// For a new process (see `ui::start_afresh`): the page, if it's one that
+    /// can be named, and the window's size.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(super) fn as_view(&self) -> Vec<String> {
+        let page = match &self.route {
+            Route::Session(id) => format!("session:{id}"),
+            Route::Machine(id) => format!("machine:{id}"),
+            _ => String::new(),
+        };
+        let size = self.bounds.map(|b| b.get_bounds().size).map(|s| format!("size:{}x{}", f32::from(s.width) as u32, f32::from(s.height) as u32));
+        std::iter::once(page).chain(size).collect()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Route {
     Overview,
@@ -441,7 +466,9 @@ pub struct Root {
     pub(super) joined: Vec<super::share::JoinedShare>,
     pub(super) joined_count: u32,
     /// A share link opened with Muxin, for the Join dialog on the next render.
-    pending_join: Option<String>,
+    pub(super) pending_join: Option<String>,
+    /// The window's place and size, as last moved (see `Left`).
+    bounds: Option<gpui::WindowBounds>,
     _tasks: Vec<Task<()>>,
     pub(super) _subscriptions: Vec<Subscription>,
 }
@@ -518,6 +545,14 @@ impl Root {
                 }
             }
         });
+        // The window really closing, on Linux: what it comes back to, and shares
+        // end (nobody could let a guest in).
+        subscriptions.push(cx.observe_window_bounds(window, |this, window, _| this.bounds = Some(window.window_bounds())));
+        subscriptions.push(cx.on_release(|this: &mut Root, _| {
+            crate::share::host::stop_all();
+            let left = Left { route: this.route.clone(), back: std::mem::take(&mut this.back), forward: std::mem::take(&mut this.forward), collapsed: std::mem::take(&mut this.collapsed), bounds: this.bounds };
+            *super::left_as_it_was().lock().unwrap() = Some(left);
+        }));
 
         // The machine page's "Open a port": a number, then Return.
         let port_input = cx.new(|cx| TextInput::new(cx, "Port, e.g. 3000"));
@@ -621,6 +656,7 @@ impl Root {
             joined: Vec::new(),
             joined_count: 0,
             pending_join: None,
+            bounds: None,
             _tasks: vec![updates, ticker, clipboard_out, clipboard_in],
             _subscriptions: subscriptions,
         };
@@ -647,26 +683,18 @@ impl Root {
             }
         });
         ws._tasks.push(sharing);
-        // Share links opened with Muxin (muxin://join...).
-        if let Some(mut links) = super::take_opened_links() {
-            let opened = cx.spawn(async move |this, cx| {
-                use futures::StreamExt;
-                while let Some(link) = links.next().await {
-                    let _ = this.update(cx, |this, cx| {
-                        this.pending_join = Some(link);
-                        cx.notify()
-                    });
-                    // The window asks about it, so it has to show.
-                    let _ = cx.update(super::show_main_window);
-                }
-            });
-            ws._tasks.push(opened);
-        }
         ws
     }
 
-    /// The window closed but stays alive (on a Mac; see `ui::hide_main_window`).
-    /// Machine checks, links and forwards go on, and sessions stay attached.
+    /// The window comes back after really closing (see `ui::run`).
+    pub(super) fn go_back_to(&mut self, left: Left, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(left.route, window, cx);
+        (self.back, self.forward, self.collapsed) = (left.back, left.forward, left.collapsed);
+    }
+
+    /// The window closed but stays alive (on a Mac, or on Windows with the tray;
+    /// see `ui::hide_main_window`). Machine checks, links and forwards go on, and
+    /// sessions stay attached.
     pub(super) fn window_hidden(&mut self, cx: &mut Context<Self>) {
         // Rendering has stopped, so this wouldn't be noticed: notices for the
         // session that was showing stay unread now.
@@ -957,7 +985,7 @@ impl Root {
                     self.confirm_remove_runner(&r, window, cx);
                 }
             }
-            "size" | "display" => {}
+            "size" | "display" | "tray" => {}
             "session" => self.navigate(Route::Session(arg.into()), window, cx),
             // "new-session:<machine>", or "new-session:<machine>@<folder>".
             "new-session" => match arg.split_once('@') {

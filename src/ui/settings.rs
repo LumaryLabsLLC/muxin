@@ -1060,6 +1060,54 @@ impl SettingsPage {
     }
 
     /// Whether Muxin asks GitHub for its latest release (crate::update).
+    /// The icon. On a Mac it's only that; elsewhere it's what keeps Muxin running.
+    fn tray_section(&self, theme: &Theme, cx: &App) -> impl IntoElement {
+        let on = cx.global::<Appearance>().tray;
+        let (title, label) = if cfg!(target_os = "macos") { ("Menu bar", "Show Muxin in the menu bar") } else { ("Tray", "Keep running in the tray when the window closes") };
+        let hint = if cfg!(target_os = "macos") {
+            "A dot shows when a session is waiting for you. Its menu opens that session or brings the window back."
+        } else if !on {
+            "Closing the window quits Muxin."
+        } else if !super::tray::available() {
+            if cfg!(target_os = "linux") {
+                "This desktop has no tray, so closing the window quits Muxin. On GNOME, the AppIndicator extension adds one."
+            } else {
+                "The icon couldn't be added, so closing the window quits Muxin."
+            }
+        } else {
+            "Machine checks, connections and port forwards carry on. The icon brings the window back, with a dot when a session is waiting for you."
+        };
+        let engine = self.engine.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(section_title(theme, title, None))
+            .child(
+                card(theme)
+                    .px(px(14.))
+                    .py(px(12.))
+                    .gap(px(6.))
+                    .child(kit::checkbox(theme, "tray", on, label, move |on, _, cx| {
+                        let on = *on;
+                        theme_mod::remember(cx, |a| a.tray = on);
+                        if on {
+                            super::tray::start(engine.clone(), cx);
+                        } else {
+                            super::tray::stop();
+                        }
+                        cx.refresh_windows();
+                        // On Linux it takes a moment to hear if it can show.
+                        cx.spawn(async |cx| {
+                            cx.background_executor().timer(Duration::from_millis(600)).await;
+                            let _ = cx.update(|cx| cx.refresh_windows());
+                        })
+                        .detach();
+                    }))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(hint)),
+            )
+    }
+
     fn updates_section(&self, theme: &Theme) -> impl IntoElement {
         let on = self.engine.settings().check_updates;
         let engine = self.engine.clone();
@@ -1203,6 +1251,7 @@ impl Render for SettingsPage {
             SettingsTab::General => body
                 .child(self.shell_section(&theme, cx))
                 .child(self.clipboard_section(&theme))
+                .child(self.tray_section(&theme, cx))
                 .child(self.editor_section(&theme))
                 .child(self.code_folders_section(&theme, cx))
                 .child(self.updates_section(&theme))

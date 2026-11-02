@@ -77,6 +77,18 @@ Filename: "{app}\muxin.exe"; Description: "Open Muxin"; Flags: nowait postinstal
 const
   EnvKey = 'Environment';
 
+// A Muxin kept running by its tray icon has no window to close, and its files
+// are in use: ask it to quit. (One older than this doesn't know `quit`, and has
+// a window for CloseApplications.)
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  if Exec(ExpandConstant('{app}\muxin.exe'), 'quit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Sleep(1000);
+  Result := '';
+end;
+
 function PathHas(Dir: string): Boolean;
 var
   Path: string;

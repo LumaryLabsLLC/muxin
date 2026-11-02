@@ -159,6 +159,9 @@ pub struct Appearance {
     pub shortcuts: std::collections::BTreeMap<String, String>,
     /// How many times an app's window here said how to close it (it stops after a few).
     pub close_hints: u32,
+    /// The icon in the menu bar or tray. On Linux and Windows, it's what keeps
+    /// Muxin running when the window closes (see tray.rs).
+    pub tray: bool,
     /// Where to save; None in demo mode.
     #[serde(skip)]
     pub path: Option<PathBuf>,
@@ -186,6 +189,7 @@ impl Default for Appearance {
             icon_style: super::kit::IconStyle::default().id().into(),
             shortcuts: Default::default(),
             close_hints: 0,
+            tray: true,
             path: None,
         }
     }

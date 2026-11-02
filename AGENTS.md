@@ -226,6 +226,7 @@ The CLI equivalents are `muxin schedule ls|add|rm|run|log`.
 ## Muxin itself
 
 - `muxin updates` (`--json`) says whether a newer Muxin is out and how to update this copy: a command (Homebrew, the AUR) or the file to download. Read-only; installing is the user's call.
+- `muxin quit` quits the running app, whose window may be closed (it keeps running with an icon in the menu bar or tray). Sessions keep running on their machines. Only when asked. Opening `muxin` while it runs only brings its window forward.
 
 ## Don'ts
 

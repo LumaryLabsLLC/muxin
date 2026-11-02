@@ -20,8 +20,12 @@
 //! - `MUXIN_SHARE_TURN`: TURN servers, comma-separated (`turn:host:3478`),
 //!   with `MUXIN_SHARE_TURN_SECRET` (coturn's `static-auth-secret`): each
 //!   side gets short-lived credentials for the relay.
+//!
+//! Alerts for Muxin for iPad (`/push/v1`) take the same requests as on
+//! muxin.dev, which hands them to Apple's push service. This one sends them
+//! nowhere: it keeps the last few to read back (`GET /push/v1/sent`), for tests.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -70,6 +74,8 @@ struct Rooms {
 
 struct App {
     state: Mutex<Rooms>,
+    /// The last alerts sent, newest last.
+    pushes: Mutex<VecDeque<Value>>,
     stun: Vec<String>,
     turn: Vec<String>,
     turn_secret: Option<String>,
@@ -83,6 +89,7 @@ async fn main() {
     let list = |k: &str| -> Vec<String> { std::env::var(k).unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect() };
     let app = Arc::new(App {
         state: Mutex::new(Rooms::default()),
+        pushes: Mutex::new(VecDeque::new()),
         stun: list("MUXIN_SHARE_STUN"),
         turn: list("MUXIN_SHARE_TURN"),
         turn_secret: std::env::var("MUXIN_SHARE_TURN_SECRET").ok().filter(|s| !s.is_empty()),
@@ -114,6 +121,9 @@ async fn main() {
         .route("/share/v1/rooms/{room}/offers", post(offer))
         .route("/share/v1/rooms/{room}/offers/{id}", get(answer_to))
         .route("/share/v1/rooms/{room}/offers/{id}/answer", post(answer))
+        .route("/push/v1/devices", post(push_device))
+        .route("/push/v1/send", post(push_send))
+        .route("/push/v1/sent", get(push_sent))
         .with_state(app);
     let listener = tokio::net::TcpListener::bind(addr).await.expect("can't listen");
     tracing::info!("muxin share server on http://{addr}");
@@ -304,6 +314,50 @@ async fn answer_to(State(app): Shared, Path((room, id)): Path<(String, String)>)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Alerts
+
+/// Alerts kept to read back.
+const MAX_PUSHES: usize = 100;
+
+/// `{"token": "<hex>", "env": "production"|"sandbox"}` gives the id machines
+/// send to. muxin.dev's ids are encrypted; here it's just the two, readable.
+async fn push_device(axum::Json(body): axum::Json<Value>) -> Response {
+    let token = body["token"].as_str().unwrap_or("");
+    let env = body["env"].as_str().unwrap_or("");
+    if !(64..=200).contains(&token.len()) || !token.bytes().all(|b| b.is_ascii_hexdigit()) || !matches!(env, "production" | "sandbox") {
+        return error(StatusCode::UNPROCESSABLE_ENTITY, "That isn't a device token.");
+    }
+    let id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json!({ "token": token, "env": env }).to_string());
+    reply(StatusCode::OK, json!({ "id": id }))
+}
+
+/// `{"to": "<id>", "alert": "<base64>", "collapse": "<optional>"}`: kept, not sent.
+async fn push_send(State(app): Shared, axum::Json(body): axum::Json<Value>) -> Response {
+    let device = body["to"]
+        .as_str()
+        .and_then(|id| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(id).ok())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(|d| d["token"].is_string());
+    let Some(device) = device else {
+        return error(StatusCode::GONE, "That device isn't known here.");
+    };
+    let alert = body["alert"].as_str().unwrap_or("");
+    if alert.is_empty() || alert.len() > 3000 {
+        return error(StatusCode::UNPROCESSABLE_ENTITY, "That isn't an alert.");
+    }
+    let mut pushes = app.pushes.lock().unwrap();
+    pushes.push_back(json!({ "token": device["token"], "env": device["env"], "alert": alert, "collapse": body["collapse"] }));
+    while pushes.len() > MAX_PUSHES {
+        pushes.pop_front();
+    }
+    reply(StatusCode::OK, json!({ "ok": true }))
+}
+
+async fn push_sent(State(app): Shared) -> Response {
+    reply(StatusCode::OK, json!({ "sent": app.pushes.lock().unwrap().iter().cloned().collect::<Vec<_>>() }))
+}
+
 impl App {
     /// The STUN and TURN servers to give a side, with TURN credentials of
     /// its own (coturn's REST scheme: `expiry:room`, HMAC-SHA1 of it).
@@ -340,6 +394,7 @@ mod tests {
     fn turn_credentials_follow_coturn() {
         let app = App {
             state: Mutex::new(Rooms::default()),
+            pushes: Mutex::new(VecDeque::new()),
             stun: vec!["stun:s.example.com:3478".into()],
             turn: vec!["turn:t.example.com:3478".into()],
             turn_secret: Some("secret".into()),

@@ -197,6 +197,8 @@ pub struct NewMachine {
     pub name: String,
     /// An ssh destination ("ci@studio.local", an ~/.ssh/config alias) or "local".
     pub host: String,
+    /// Its ssh port, when no ssh config says it (an iPad adding a machine).
+    pub port: Option<u16>,
 }
 
 impl Engine {
@@ -340,7 +342,7 @@ impl Engine {
 
         let mut new_id = None;
         let edit = |text: &str| {
-            let (out, id) = inventory_edit::add_machine(text, &name, &host)?;
+            let (out, id) = inventory_edit::add_machine_at(text, &name, &host, machine.port)?;
             new_id = Some(id);
             Ok(out)
         };
@@ -1392,7 +1394,7 @@ mod engine_tests {
         assert_eq!(state(&engine, id), "offline");
 
         // Machines can be added and removed without losing the file's comments.
-        let new_id = engine.add_machine(NewMachine { name: "Spare".into(), host: "spare.local".into() }).unwrap();
+        let new_id = engine.add_machine(NewMachine { name: "Spare".into(), host: "spare.local".into(), port: None }).unwrap();
         assert_eq!(new_id, "spare");
         assert!(engine.current().machines.iter().any(|m| m.id == "spare"));
         engine.remove_machine("spare").unwrap();
@@ -1640,7 +1642,7 @@ mod engine_tests {
         assert_eq!(o.status, "failed");
         assert!(o.error.unwrap_or_default().contains("timed out"));
 
-        let id = engine.add_machine(NewMachine { name: "Beelink".into(), host: "beelink".into() }).unwrap();
+        let id = engine.add_machine(NewMachine { name: "Beelink".into(), host: "beelink".into(), port: None }).unwrap();
         engine.run_check(Some(vec![id.clone()])).await;
         let m = engine.current().machines.iter().find(|m| m.id == id).cloned().unwrap();
         assert_eq!(m.status, "online");

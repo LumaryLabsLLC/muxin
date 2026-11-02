@@ -107,9 +107,27 @@ fn build_path(target: &str) -> Result<PathBuf, String> {
 /// The build for `target` and its hash (what `muxen-agent hash` prints).
 fn build(target: &str) -> Result<(Vec<u8>, String), String> {
     let path = build_path(target)?;
-    let bytes = std::fs::read(&path).map_err(|_| format!("Muxin has no agent build for {target} machines yet."))?;
+    let bytes = read_build(&path).ok_or_else(|| format!("Muxin has no agent build for {target} machines yet."))?;
     let hash = format!("{:016x}", fnv(&bytes));
     Ok((bytes, hash))
+}
+
+/// A build's bytes. In the iPad app they're gzipped (`<name>.gz`), as data
+/// rather than programs the App Store would look for a signature on.
+fn read_build(path: &std::path::Path) -> Option<Vec<u8>> {
+    if let Ok(bytes) = std::fs::read(path) {
+        return Some(bytes);
+    }
+    #[cfg(target_os = "ios")]
+    {
+        use std::io::Read;
+        let packed = std::fs::read(format!("{}.gz", path.display())).ok()?;
+        let mut bytes = Vec::new();
+        flate2::read::GzDecoder::new(&packed[..]).read_to_end(&mut bytes).ok()?;
+        return Some(bytes);
+    }
+    #[allow(unreachable_code)]
+    None
 }
 
 fn fnv(bytes: &[u8]) -> u64 {
@@ -167,6 +185,11 @@ fn verified() -> &'static Mutex<HashMap<String, String>> {
 /// not. Cheap after the first time per machine.
 pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(), String> {
     spec.refuse_if_disconnected()?;
+    // An iPad uses the agent a paired machine runs. One it's adding, not
+    // paired yet, gets this build, from the app, over the iPad's own ssh.
+    if cfg!(target_os = "ios") && crate::fleet::direct::paired(&spec.id).is_some() {
+        return running_agent(spec).await;
+    }
     let target = target(probe).ok_or_else(|| match probe {
         Some(p) => format!("Muxin has no agent for {}-{} machines yet.", p.os.as_deref().unwrap_or("?"), p.arch.as_deref().unwrap_or("?")),
         None => format!("Muxin hasn't reached {} yet, so it doesn't know which agent build it needs. Refresh it first.", spec.name),
@@ -195,7 +218,7 @@ pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(
     if installed.trim() != hash {
         tracing::info!("installing muxen-agent ({target}) on {}", spec.name);
         // Boxed: these futures are big, and `ensure` sits inside nearly every request's.
-        let got = if windows { Box::pin(upload_windows(spec, &build_path(&target)?, &hash)).await? } else { Box::pin(upload(spec, bytes, &hash)).await? };
+        let got = if windows { Box::pin(upload_windows(spec, &build_path(&target)?, bytes, &hash)).await? } else { Box::pin(upload(spec, bytes, &hash)).await? };
         if got.trim() != hash {
             return Err(format!("The agent didn't install correctly on {} (got {}).", spec.name, got.trim()));
         }
@@ -208,6 +231,15 @@ pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(
     Ok(())
 }
 
+/// Muxin on an iPad doesn't update a paired machine's agent (Muxin on the Mac
+/// does): it uses the one that machine runs, over its direct link.
+async fn running_agent(spec: &MachineSpec) -> Result<(), String> {
+    match crate::fleet::link::current_or_direct(spec).await {
+        Some(_) => Ok(()),
+        None => Err(format!("Can't reach {}. It may be off, or not paired with this iPad.", spec.name)),
+    }
+}
+
 /// Forget that a machine was verified (after an error, it's checked again).
 pub fn forget(machine_id: &str) {
     verified().lock().unwrap().remove(machine_id);
@@ -216,21 +248,16 @@ pub fn forget(machine_id: &str) {
 /// Copies the build into place atomically and prints its hash.
 async fn upload(spec: &MachineSpec, bytes: Vec<u8>, hash: &str) -> Result<String, String> {
     let script = upload_script(hash);
-    let mut cmd = if spec.is_local() {
+    let mut child = if spec.is_local() {
         let mut c = Command::new("/bin/sh");
         c.args(["-c", &script]);
-        c
+        crate::fleet::child::Child::local(c).map_err(|e| format!("couldn't run sh: {e}"))?
     } else {
-        let mut c = Command::new("ssh");
-        c.args(probe::ssh_args(spec));
-        c.arg(format!("sh -c {}", sh_quote(&script)));
-        c
+        crate::fleet::child::ssh(spec, &format!("sh -c {}", sh_quote(&script))).await?
     };
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| format!("couldn't run ssh: {e}"))?;
-    let mut stdin = child.stdin.take().ok_or("no stdin")?;
-    let mut stdout = child.stdout.take().ok_or("no stdout")?;
-    let mut stderr = child.stderr.take().ok_or("no stderr")?;
+    let mut stdin = child.take_stdin().ok_or("no stdin")?;
+    let mut stdout = child.take_stdout().ok_or("no stdout")?;
+    let mut stderr = child.take_stderr().ok_or("no stderr")?;
     let work = async move {
         stdin.write_all(&bytes).await.map_err(|e| e.to_string())?;
         drop(stdin);
@@ -291,8 +318,20 @@ const SWAP_PS1: &str = "$ErrorActionPreference = 'Stop'\n\
 /// Copies the build into place on Windows and prints its hash: over sftp
 /// (Windows' sshd stalls on a few hundred KB through a program's stdin), or
 /// a copy on this computer; then SWAP_PS1.
-async fn upload_windows(spec: &MachineSpec, build: &std::path::Path, hash: &str) -> Result<String, String> {
+async fn upload_windows(spec: &MachineSpec, build: &std::path::Path, bytes: Vec<u8>, hash: &str) -> Result<String, String> {
     let fail = |e: String| format!("couldn't install the agent on {}: {e}", spec.name);
+    // An iPad: over its own ssh client's sftp.
+    #[cfg(target_os = "ios")]
+    {
+        let _ = build;
+        tokio::time::timeout(UPLOAD_TIMEOUT, crate::fleet::ssh::sftp_put(spec, &bytes, ".muxen/bin/muxen-agent.upload.exe"))
+            .await
+            .map_err(|_| fail("the copy took too long".into()))?
+            .map_err(fail)?;
+        return run_ps(spec, &swap_ps1(hash), CTL_TIMEOUT).await.map_err(fail);
+    }
+    #[cfg(not(target_os = "ios"))]
+    let _ = bytes;
     if spec.is_local() {
         // This computer: a copy, then the same swap.
         let bin = dirs::home_dir().unwrap_or_default().join(".muxen").join("bin");
@@ -426,6 +465,15 @@ pub async fn ctl_reply(spec: &MachineSpec, request: &Value) -> Result<Value, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_ipad_uses_the_running_agent_only_over_a_direct_link() {
+        // Not paired: no link to use, and no ssh tried instead.
+        let mut spec: MachineSpec = toml::from_str("name = \"Beelink\"\nhost = \"beelink.invalid\"").unwrap();
+        spec.id = format!("unpaired-{}", std::process::id());
+        let err = running_agent(&spec).await.unwrap_err();
+        assert!(err.contains("not paired with this iPad"), "{err}");
+    }
 
     #[test]
     fn the_install_scripts_check_the_upload_before_the_swap() {

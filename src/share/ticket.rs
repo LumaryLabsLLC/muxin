@@ -1,7 +1,8 @@
 //! A share's link and what it proves: `https://<server>/s#1.<ticket>`, the
 //! ticket being base64url of the share's id (16 bytes), secret (32) and
 //! certificate fingerprint (32). Muxin also takes `muxin://join?server=
-//! <server>#1.<ticket>` (the link's page opening the app).
+//! <server>#1.<ticket>` (the link's page opening the app), and pairing an
+//! iPad uses `muxin://pair?server=<server>#1.<ticket>` (`pair.rs`).
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -44,6 +45,12 @@ impl Ticket {
         format!("{}/s#{}", self.server, self.fragment())
     }
 
+    /// The link an iPad opens to pair (shown as a QR code): the app's own
+    /// form, so the iPad's camera opens Muxin with it.
+    pub fn pair_link(&self) -> String {
+        format!("muxin://pair?server={}#{}", self.server.replace(':', "%3A").replace('/', "%2F"), self.fragment())
+    }
+
     /// The part after `#`.
     pub fn fragment(&self) -> String {
         let mut bytes = Vec::with_capacity(80);
@@ -57,7 +64,7 @@ impl Ticket {
     pub fn parse(link: &str) -> Result<Ticket, String> {
         let link = link.trim();
         let (before, fragment) = link.split_once('#').ok_or("That isn't a Muxin share link.")?;
-        let server = if let Some(query) = before.strip_prefix("muxin://join") {
+        let server = if let Some(query) = before.strip_prefix("muxin://join").or_else(|| before.strip_prefix("muxin://pair")) {
             let query = query.trim_start_matches('/').trim_start_matches('?');
             let value = query.split('&').find_map(|kv| kv.strip_prefix("server=")).ok_or("That link doesn't say where to connect.")?;
             percent_decode(value)
@@ -109,6 +116,11 @@ impl Ticket {
         let n = u32::from_be_bytes([tag.as_ref()[0], tag.as_ref()[1], tag.as_ref()[2], tag.as_ref()[3]]) % 1_000_000;
         format!("{n:06}")
     }
+}
+
+/// Whether a link is for pairing an iPad (not for joining a share).
+pub fn is_pair_link(link: &str) -> bool {
+    link.trim().starts_with("muxin://pair")
 }
 
 /// `scheme://host[:port]` of a server, refusing plain http except to this
@@ -182,6 +194,10 @@ mod tests {
         assert_eq!(Ticket::parse(&link).unwrap(), t);
         let app = format!("muxin://join?server=https%3A%2F%2Fshare.example.com#{}", t.fragment());
         assert_eq!(Ticket::parse(&app).unwrap(), t);
+        let pair = t.pair_link();
+        assert!(pair.starts_with("muxin://pair?server=https%3A%2F%2Fshare.example.com#1."));
+        assert!(is_pair_link(&pair) && !is_pair_link(&link));
+        assert_eq!(Ticket::parse(&pair).unwrap(), t);
     }
 
     #[test]

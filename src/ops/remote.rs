@@ -124,6 +124,14 @@ pub async fn run_lines(
     timeout: Duration,
 ) -> Result<Vec<String>, String> {
     spec.refuse_if_disconnected()?;
+    if cfg!(target_os = "ios") && !spec.is_local() {
+        let (stdout, stderr, status) = over_link(spec, script, timeout).await?;
+        let (printed, reason) = read_output(&stdout[..], &stderr[..], shell, secrets, |l| engine.op_log(op, l)).await;
+        return match status {
+            Some(0) => Ok(printed),
+            code => Err(reason.unwrap_or_else(|| code.map_or("The script was terminated.".into(), |c| format!("The script exited with status {c}.")))),
+        };
+    }
     let mut cmd = command(spec, shell);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| {
@@ -335,6 +343,17 @@ fn clixml_unescape(s: &str) -> String {
 /// failed (its last `error: ...` line, else its last stderr line).
 pub async fn output(spec: &MachineSpec, shell: Shell, script: String, timeout: Duration) -> Result<String, String> {
     spec.refuse_if_disconnected()?;
+    if cfg!(target_os = "ios") && !spec.is_local() {
+        let (stdout, stderr, status) = over_link(spec, script, timeout).await?;
+        if status == Some(0) {
+            return Ok(String::from_utf8_lossy(&stdout).to_string());
+        }
+        let mut reason = Reason::default();
+        for line in String::from_utf8_lossy(&stderr).lines().flat_map(|l| stderr_lines(shell, l, &[])) {
+            reason.see(shell, &line);
+        }
+        return Err(reason.get().unwrap_or_else(|| format!("It exited with status {}.", status.unwrap_or(-1))));
+    }
     let mut cmd = command(spec, shell);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| format!("Couldn't run ssh: {e}"))?;
@@ -354,6 +373,26 @@ pub async fn output(spec: &MachineSpec, shell: Shell, script: String, timeout: D
         reason.see(shell, &line);
     }
     Err(reason.get().unwrap_or_else(|| format!("It exited with status {}.", out.status.code().unwrap_or(-1))))
+}
+
+/// Muxin on an iPad can't run ssh: a script goes over the machine's direct
+/// link instead, and its output comes when it's done, not line by line. Its
+/// stdout, its stderr, and its exit status (None: terminated). The agent runs
+/// it as ssh would (`sh -s`, PowerShell on Windows), not in the user's login
+/// shell: these scripts are sh, and zsh, say, reads them otherwise (it
+/// doesn't split `$LIST` into words).
+async fn over_link(spec: &MachineSpec, script: String, timeout: Duration) -> Result<(Vec<u8>, Vec<u8>, Option<i32>), String> {
+    let link = crate::fleet::link::current_or_direct(spec).await.ok_or_else(|| format!("Can't reach {}. It may be off, or not paired with this iPad.", spec.name))?;
+    let req = serde_json::json!({ "op": "sh", "script": script, "timeout": timeout.as_secs(), "login": false });
+    let reply = link.request(req, timeout + Duration::from_secs(10)).await?;
+    if reply["ok"].as_bool() != Some(true) {
+        return Err(reply["error"].as_str().unwrap_or("The script couldn't start.").to_string());
+    }
+    if reply["timed_out"].as_bool() == Some(true) {
+        return Err(format!("Gave up after {} minutes.", timeout.as_secs() / 60));
+    }
+    let bytes = |k: &str| reply[k].as_str().unwrap_or("").as_bytes().to_vec();
+    Ok((bytes("stdout"), bytes("stderr"), reply["status"].as_i64().map(|s| s as i32)))
 }
 
 fn command(spec: &MachineSpec, shell: Shell) -> Command {
@@ -379,6 +418,15 @@ fn command(spec: &MachineSpec, shell: Shell) -> Command {
         });
         c
     }
+}
+
+/// Whether a machine answers yet, after it was started: ssh gets in, or on an
+/// iPad (which can't run ssh) its direct link connects.
+pub async fn answers(spec: &MachineSpec) -> bool {
+    if cfg!(target_os = "ios") {
+        return crate::fleet::link::current_or_direct(spec).await.is_some();
+    }
+    Command::new("ssh").args(probe::ssh_args(spec)).arg("exit").output().await.is_ok_and(|o| o.status.success())
 }
 
 /// Masks secrets, drops ANSI escapes and carriage-return progress redraws.

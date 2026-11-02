@@ -164,7 +164,7 @@ impl AddMachineDialog {
             cx.emit(DialogEvent::JoinShare(Some(link)));
             return;
         }
-        let machine = NewMachine { name: self.name.read(cx).text().to_string(), host: self.host.read(cx).text().to_string() };
+        let machine = NewMachine { name: self.name.read(cx).text().to_string(), host: self.host.read(cx).text().to_string(), port: None };
         match self.engine.add_machine(machine) {
             Ok(id) => cx.emit(DialogEvent::MachineAdded(id)),
             Err(e) => {

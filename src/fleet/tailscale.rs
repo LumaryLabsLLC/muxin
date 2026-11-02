@@ -214,6 +214,11 @@ pub async fn status() -> Option<Arc<Tailnet>> {
 }
 
 async fn read() -> Option<Tailnet> {
+    // An iPad can't run Tailscale's CLI: what it knows comes from the direct
+    // link's addresses instead.
+    if cfg!(target_os = "ios") {
+        return None;
+    }
     let cli = cli()?;
     let mut cmd = tokio::process::Command::new(cli);
     cmd.args(["status", "--json"]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).kill_on_drop(true);

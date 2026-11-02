@@ -218,7 +218,8 @@ impl ProbeResult {
 /// Checks one machine. Never fails: problems are reported in `ProbeResult::error`.
 pub async fn probe(spec: &MachineSpec, remembered: Option<Shell>) -> ProbeResult {
     let mut r = check(spec, remembered).await;
-    if spec.is_checkable() && !spec.is_local() {
+    // ssh's route and sign-in only matter where ssh runs (not an iPad).
+    if spec.is_checkable() && !spec.is_local() && !cfg!(target_os = "ios") {
         r.route = ssh_route(spec).await;
         r.refused_user = refused_user(spec, &r).await;
     }
@@ -473,9 +474,10 @@ impl std::fmt::Display for RunError {
 async fn run(spec: &MachineSpec, shell: Shell) -> Result<String, RunError> {
     let script = script_for(spec, shell);
     // Over the machine's live link when one is up (no ssh handshake). A check
-    // doesn't make one: it's also how Muxin first reaches a machine.
+    // doesn't make an ssh link (it's also how Muxin first reaches a machine),
+    // only a direct one to a paired machine.
     if shell == Shell::Sh && !spec.is_local() {
-        if let Some(link) = crate::fleet::link::current(&spec.id) {
+        if let Some(link) = crate::fleet::link::current_or_direct(spec).await {
             let req = serde_json::json!({ "op": "sh", "script": script, "login": false, "timeout": TIMEOUT.as_secs() });
             if let Ok(reply) = link.request(req, TIMEOUT).await {
                 let stdout = reply["stdout"].as_str().unwrap_or("").to_string();
@@ -485,8 +487,8 @@ async fn run(spec: &MachineSpec, shell: Shell) -> Result<String, RunError> {
             }
         }
     }
-    let mut cmd = if spec.is_local() {
-        match shell {
+    let mut child = if spec.is_local() {
+        let c = match shell {
             Shell::Sh => {
                 let mut c = Command::new("/bin/sh");
                 c.arg("-s");
@@ -497,22 +499,21 @@ async fn run(spec: &MachineSpec, shell: Shell) -> Result<String, RunError> {
                 c.args(crate::ops::remote::ps_stdin_args());
                 c
             }
-        }
+        };
+        crate::fleet::child::Child::local(c).map_err(|e| RunError::Spawn(format!("Couldn't start the check: {e}")))?
     } else {
-        let mut c = Command::new("ssh");
-        c.args(ssh_args(spec));
-        c.arg(match shell {
+        let shell = match shell {
             Shell::Sh => "sh -s".to_string(),
             Shell::Powershell => format!("powershell {}", crate::ops::remote::ps_stdin_args().join(" ")),
-        });
-        c
+        };
+        match crate::fleet::child::ssh(spec, &shell).await {
+            Ok(c) => c,
+            // Muxin's own client: it didn't get in (what ssh says on stderr, exiting 255).
+            Err(e) if cfg!(target_os = "ios") => return Err(RunError::Output { code: Some(255), stderr: e }),
+            Err(e) => return Err(RunError::Spawn(e)),
+        }
     };
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-
-    let mut child = cmd.spawn().map_err(|e| {
-        RunError::Spawn(if spec.is_local() { format!("Couldn't start the check: {e}") } else { format!("Couldn't run ssh: {e}") })
-    })?;
-    let mut stdin = child.stdin.take().expect("piped stdin");
+    let mut stdin = child.take_stdin().expect("piped stdin");
     let output = async move {
         // The script is small; ignore write errors (e.g. ssh exiting early) and read why from stderr.
         let script = if shell == Shell::Powershell { crate::ops::remote::ps_sendable(&script) } else { script };

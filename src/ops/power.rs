@@ -78,7 +78,7 @@ impl Engine {
             self.op_log(op, format!("▸ Waiting for {} to answer ssh", spec.name));
             let started = Instant::now();
             loop {
-                let ok = tokio::process::Command::new("ssh").args(crate::probe::ssh_args(spec)).arg("exit").output().await.is_ok_and(|o| o.status.success());
+                let ok = remote::answers(spec).await;
                 if ok {
                     break;
                 }

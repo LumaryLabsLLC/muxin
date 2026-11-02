@@ -77,6 +77,13 @@ pub struct Session {
 }
 
 impl Session {
+    /// A session for an app calling the tools in-process (Muxin for iPad):
+    /// what it makes is the user's, "app", as the Mac app's is.
+    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+    pub fn named(client: &str) -> Session {
+        Session { client: Mutex::new(Some(client.to_string())) }
+    }
+
     /// The MCP client's name from `initialize` (e.g. "claude-code"), else "mcp".
     pub fn owner(&self) -> String {
         self.client.lock().unwrap().clone().unwrap_or_else(|| "mcp".into())
@@ -1196,7 +1203,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "agent_usage",
-            "description": "What the agent CLIs (Claude Code, Codex) used over the last N days (default 7), from their own logs on each machine: tokens (input, output, cache reads and writes) and requests by model and machine, and the cost at Anthropic's and OpenAI's list prices (null for a model whose price isn't known). With a Claude or ChatGPT plan the user doesn't pay per token. Read-only.",
+            "description": "What the agent CLIs (Claude Code, Codex) used over the last N days (default 7), from their own logs on each machine: tokens (input, output, cache reads and writes) and requests by model and machine, each day's cost (daily) and the busiest folders (folders), and the cost at Anthropic's and OpenAI's list prices (null for a model whose price isn't known). With a Claude or ChatGPT plan the user doesn't pay per token. Read-only.",
             "inputSchema": schema(json!({
                 "days": { "type": "integer", "description": "The last N days, 1 to 400. Default 7." },
                 "machine_id": { "type": "string", "description": "One machine; default: all that are online." }

@@ -165,7 +165,7 @@ fn titles_path() -> std::path::PathBuf {
     home_dir().join("titles.json")
 }
 
-fn read_titles() -> serde_json::Map<String, Value> {
+pub(crate) fn read_titles() -> serde_json::Map<String, Value> {
     std::fs::read_to_string(titles_path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v.as_object().cloned()).unwrap_or_default()
 }
 

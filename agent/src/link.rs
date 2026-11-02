@@ -196,7 +196,13 @@ pub fn run() -> i32 {
 }
 
 /// Serves one link until the other side hangs up.
-pub fn serve(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>) -> i32 {
+pub fn serve(input: Box<dyn Read + Send>, output: Box<dyn Write + Send>) -> i32 {
+    serve_for(input, output, None)
+}
+
+/// The same, for the paired app with this certificate fingerprint (a direct
+/// link; over ssh there's no telling which app it is).
+pub fn serve_for(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>, app: Option<String>) -> i32 {
     let out: Out = Arc::new(Mutex::new(BufWriter::new(output)));
     let attached: Attached = Arc::new(Mutex::new(HashMap::new()));
     if send_json(&out, &json!({ "event": "hello", "version": crate::VERSION, "now": now() })).is_err() {
@@ -212,11 +218,11 @@ pub fn serve(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>) -> 
                 continue;
             }
             let Ok(req) = serde_json::from_slice::<Value>(&payload) else { continue };
-            let (out, attached) = (out.clone(), attached.clone());
+            let (out, attached, app) = (out.clone(), attached.clone(), app.clone());
             // Requests run side by side; a slow one doesn't hold up the rest.
             thread::spawn(move || {
                 let id = req["id"].clone();
-                let mut reply = handle(&req, &out, &attached);
+                let mut reply = handle(&req, &out, &attached, app.as_deref());
                 reply["id"] = id;
                 let _ = send_json(&out, &reply);
             });
@@ -259,7 +265,7 @@ pub fn serve(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>) -> 
     0
 }
 
-fn handle(req: &Value, out: &Out, attached: &Attached) -> Value {
+fn handle(req: &Value, out: &Out, attached: &Attached, app: Option<&str>) -> Value {
     match req["op"].as_str().unwrap_or("") {
         "sh" => run_script(req),
         "attach" => attach(req, out, attached),
@@ -277,7 +283,9 @@ fn handle(req: &Value, out: &Out, attached: &Attached) -> Value {
         "ping" => json!({ "ok": true, "version": crate::VERSION, "now": now() }),
         "addresses" => json!({ "ok": true, "addresses": crate::direct::lan_addresses(), "tailnet": crate::direct::tailnet_addresses(), "port": crate::direct::port() }),
         "pair" => crate::direct::pair(req),
+        "trust" => crate::direct::trust(req),
         "unpair" => crate::direct::unpair(req),
+        "push" => crate::push::op(req, app),
         // Everything `muxen-agent ctl` does.
         _ => client::handle(req),
     }

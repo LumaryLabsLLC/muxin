@@ -28,6 +28,11 @@ pub fn edit_file(path: &Path, edit: impl FnOnce(&str) -> Result<String, String>)
 
 /// Appends a `[[machine]]` with `name` and `host`. Returns the new text and the machine's id.
 pub fn add_machine(text: &str, name: &str, host: &str) -> Result<(String, String), String> {
+    add_machine_at(text, name, host, None)
+}
+
+/// The same, with the ssh port when it isn't 22 (no ssh config says it: an iPad).
+pub fn add_machine_at(text: &str, name: &str, host: &str, port: Option<u16>) -> Result<(String, String), String> {
     let name = name.trim();
     let host = host.trim();
     let mut doc = parse(text)?;
@@ -45,6 +50,9 @@ pub fn add_machine(text: &str, name: &str, host: &str) -> Result<(String, String
         let mut table = Table::new();
         table["name"] = value(name);
         table["host"] = value(host);
+        if let Some(port) = port.filter(|p| *p != 22) {
+            table["port"] = value(i64::from(port));
+        }
         // A blank line before the header keeps the file readable.
         table.decor_mut().set_prefix(format!("{attached}\n"));
         machines.push(table);

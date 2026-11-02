@@ -781,6 +781,21 @@ pub fn github_item(d: &crate::github::hub::Detail) -> String {
     out
 }
 
+pub fn ipads(o: &crate::api::IpadsOut) -> String {
+    if o.ipads.is_empty() {
+        return "No iPads are paired. Pair one with `muxin ipad pair`.\n".into();
+    }
+    o.ipads.iter().map(|i| format!("{}  paired {}  with {}\n", i.name, ago(i.paired_at), i.machines.join(", "))).collect()
+}
+
+pub fn ipad_removed(o: &crate::api::IpadRemovedOut) -> String {
+    let mut out = format!("Unpaired {}.\n", o.ipad.name);
+    if !o.kept.is_empty() {
+        out.push_str(&format!("{} couldn't be reached and still trust it; unpair it again once they're on.\n", o.kept.join(", ")));
+    }
+    out
+}
+
 pub fn connection(c: &crate::fleet::connection::Connection) -> String {
     let how = match c.via.as_str() {
         "direct" => "directly (QUIC)".to_string(),

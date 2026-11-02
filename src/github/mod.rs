@@ -857,6 +857,10 @@ impl Client {
             scopes: Option<String>,
         }
         self.configure(settings);
+        // An iPad has no GitHub CLI of its own: it uses a machine's login.
+        if cfg!(target_os = "ios") {
+            return Ok(Vec::new());
+        }
         let host = self.gh_hostname();
         let out = tokio::process::Command::new(gh_program())
             .args(["auth", "status", "--json", "hosts", "--hostname", &host])
@@ -964,6 +968,10 @@ fn env_token(api_url: &str, var: impl Fn(&str) -> Option<String>) -> Option<Toke
 
 /// `gh auth token` here, for `account`, else the GitHub CLI's active account.
 async fn gh_token(hostname: &str, account: &str) -> Option<Token> {
+    // An iPad has no GitHub CLI of its own: it uses a machine's login.
+    if cfg!(target_os = "ios") {
+        return None;
+    }
     let mut cmd = tokio::process::Command::new(gh_program());
     cmd.args(["auth", "token", "--hostname", hostname]).kill_on_drop(true);
     if !account.is_empty() {

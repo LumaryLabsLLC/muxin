@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use gpui::{AnyElement, App, Context, Entity, Focusable, SharedString, Subscription, Task, Window, div, prelude::*, px};
 
 mod cloud;
+mod ipads;
 mod prompts;
 mod shell;
 
@@ -27,12 +28,13 @@ pub enum SettingsTab {
     Terminal,
     GitHub,
     Cloud,
+    Ipads,
     Prompts,
     Keyboard,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 7] = [SettingsTab::General, SettingsTab::Appearance, SettingsTab::Terminal, SettingsTab::GitHub, SettingsTab::Cloud, SettingsTab::Prompts, SettingsTab::Keyboard];
+    const ALL: [SettingsTab; 8] = [SettingsTab::General, SettingsTab::Appearance, SettingsTab::Terminal, SettingsTab::GitHub, SettingsTab::Cloud, SettingsTab::Ipads, SettingsTab::Prompts, SettingsTab::Keyboard];
 
     fn label(self) -> &'static str {
         match self {
@@ -41,6 +43,7 @@ impl SettingsTab {
             SettingsTab::Terminal => "Terminal",
             SettingsTab::GitHub => "GitHub",
             SettingsTab::Cloud => "Cloud",
+            SettingsTab::Ipads => "iPads",
             SettingsTab::Prompts => "Prompts",
             SettingsTab::Keyboard => "Keyboard",
         }
@@ -53,6 +56,7 @@ impl SettingsTab {
             SettingsTab::Terminal => "terminal",
             SettingsTab::GitHub => "agent-github",
             SettingsTab::Cloud => "cloud",
+            SettingsTab::Ipads => "tablet",
             SettingsTab::Prompts => "message-square",
             SettingsTab::Keyboard => "keyboard",
         }
@@ -78,6 +82,8 @@ pub struct SettingsPage {
     pub scroll: gpui::ScrollHandle,
     tab: SettingsTab,
     cloud: cloud::CloudState,
+    /// Pairing an iPad, and the ones paired.
+    ipad: ipads::IpadState,
     /// The `muxin` command in the PATH.
     shell: shell::ShellState,
     /// A shortcut waiting for its new keys, and what catches them before
@@ -164,6 +170,7 @@ impl SettingsPage {
             scroll: gpui::ScrollHandle::new(),
             tab: SettingsTab::default(),
             cloud: cloud_state,
+            ipad: ipads::IpadState::default(),
             shell: shell::ShellState::default(),
             recording: None,
             catch_keys: None,
@@ -194,6 +201,9 @@ impl SettingsPage {
             }
             if tab == SettingsTab::Cloud {
                 self.load_cloud(cx);
+            }
+            if tab == SettingsTab::Ipads {
+                self.load_ipads(cx);
             }
             cx.notify();
         }
@@ -1203,6 +1213,7 @@ impl Render for SettingsPage {
             SettingsTab::Terminal => body.child(self.terminal_section(&theme, super::terminal::font_family(window), super::terminal::monospace_families(window), cx)),
             SettingsTab::GitHub => body.child(self.github_section(&theme, cx)).child(self.checks_section(&theme, true, cx)),
             SettingsTab::Cloud => body.child(self.cloud_usage_section(&theme, cx)).child(self.cloud_section(&theme, cx)),
+            SettingsTab::Ipads => body.child(self.ipads_section(&theme, cx)),
             SettingsTab::Prompts => body.child(self.prompts_section(&theme, cx)),
             SettingsTab::Keyboard => body.child(self.keyboard_section(&theme, cx)),
         };

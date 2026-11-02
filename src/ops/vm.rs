@@ -406,7 +406,7 @@ fn jump(host: &MachineSpec) -> String {
 async fn wait_for_ssh(spec: &MachineSpec, timeout: Duration) -> Result<(), ()> {
     let started = Instant::now();
     loop {
-        let ok = tokio::process::Command::new("ssh").args(crate::probe::ssh_args(spec)).arg("exit").output().await.is_ok_and(|o| o.status.success());
+        let ok = crate::ops::remote::answers(spec).await;
         if ok {
             return Ok(());
         }

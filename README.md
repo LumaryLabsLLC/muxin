@@ -14,7 +14,7 @@
 
 Point it at the machines you own (a Mac Studio under the desk, a NUC, a Linux box, a few MacBooks, a Windows laptop) and Muxin becomes the hub for all of them:
 
-- **Agent sessions:** Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell on any machine, in a real terminal, still running after you close the app.
+- **Agent sessions:** Claude Code, Codex, OpenCode, Gemini CLI, Antigravity, Amp, Pi or a shell on any machine, in a real terminal, still running after you close the app.
 - **Boxes:** hand a task to an agent that works on it by itself, in a container of its own on one of your machines. A box pauses when it's quiet and picks up where it left off when you ask it more.
 - **Desktops:** see a Linux machine's screen live and use it, beside an agent's terminal or in its own window.
 - **Files and clipboard:** copy files and folders between any two machines, and copy on your Mac to paste on a machine (and back).
@@ -105,7 +105,7 @@ muxin status
 - **Overview:** the day in one line (machines online, agents working, runners busy), a few notices for what needs a look (each with a button that fixes or explains it), a card per machine with what's running on it (its agents, desktop and runners) and live CPU, memory and disk, and every agent session across your machines. The Jobs page shows how busy your runners have been over the last few minutes.
 - **Machines and runners:** install runners on a machine, and start, stop, restart, show logs for or remove each one. A machine that's off or out of reach says so in plain words (offline, Remote Login off, ssh key not accepted, Tailscale off on this Mac, …), with when it was last seen and what to do; Muxin picks it back up by itself when it returns.
 - **Adding machines (⌘N):** suggestions from your `~/.ssh/config`, your Tailscale network, and this network (machines advertising ssh over Bonjour, and Macs that would be addable once Remote Login is on).
-- **Agent sessions (⌘T):** a real terminal on any machine running Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell. Sessions are listed under their machine in the sidebar (a spinner while the agent works, a colored dot when it wants you), with its open desktop and one line for its runners, and keep running when you quit the app. Terminal font size, line height and a blinking cursor are in Settings.
+- **Agent sessions (⌘T):** a real terminal on any machine running Claude Code, Codex, OpenCode, Gemini CLI, Antigravity, Amp, Pi or a shell. Sessions are listed under their machine in the sidebar (a spinner while the agent works, a colored dot when it wants you), with its open desktop and one line for its runners, and keep running when you quit the app. Terminal font size, line height and a blinking cursor are in Settings.
 - **Usage (⌃5):** what Claude Code and Codex used on all your machines today or over the last 7, 30 or 90 days, read from their own logs there: tokens and requests by day, model, machine and folder, and what it would cost at Anthropic's and OpenAI's API list prices. With a Claude or ChatGPT plan you don't pay per token; it's what the same use would cost through the API.
 - **Run (⌃6):** one command on several machines at once (`df -h /`, `brew upgrade`, `git -C ~/code/api pull`), each one's output side by side as it comes, and its exit status. It runs in your login shell from your home folder; right-click a machine › **Run a command…** to start with just that one.
 - **Open in your editor:** sessions, workspaces, GitHub checkouts and Compose projects have a button that lists the editors on this computer (Zed, Cursor, VS Code) and opens their folder in the one you pick, over the editor's own ssh support. Settings › General › Editor picks which comes first (and which `muxin edit` uses).
@@ -253,6 +253,25 @@ Every tool returns structured JSON. Failures come back with a `code` an agent ca
 
 Many failures also include a `hint` with the exact command that fixes them. [AGENTS.md](AGENTS.md) has guidance written for agents.
 
+### Agent skill
+
+Agents that load skills (Claude Code, Codex, OpenCode, Gemini CLI, Pi, Hermes, …) can learn Muxin's CLI from the skill in [`skills/muxin`](skills/muxin/SKILL.md), with no MCP server to set up. It has the ground rules (start with `muxin status --json`, confirm before changing things, pass hints on verbatim) and how to work with sessions, boxes, workspaces, runners, machines, cloud machines and VMs. Ask your agent to "review PR 142 in my session on beelink" and it knows what to run.
+
+```sh
+muxin skill install                   # for every agent found on this computer
+muxin skill install --agent hermes    # just one: claude, codex, opencode, gemini, pi, hermes, or agents
+muxin skill install --dir ~/my-agent/skills
+muxin skill remove
+```
+
+The skill is built into Muxin, so `muxin skill install` writes the version that matches yours. Run it again after updating. It goes in `~/.claude/skills/muxin`, `~/.config/opencode/skills/muxin`, `~/.gemini/skills/muxin`, `~/.pi/agent/skills/muxin`, `~/.hermes/skills/muxin`, or for Codex (and `agents`, for any other agent that reads it) the shared `~/.agents/skills/muxin`.
+
+To follow this repository instead, copy or link the folder into your agent's skills folder (`muxin skill install` leaves a link alone):
+
+```sh
+ln -s "$PWD/skills/muxin" ~/.claude/skills/muxin
+```
+
 ### The CLI, for scripts and agents without MCP
 
 Every command takes `--json`. In that mode stdout carries JSON only, and errors are printed as `{"error": {...}}`. Progress and logs go to stderr. Exit codes:
@@ -278,7 +297,7 @@ muxin wake beelink                        # Wake on LAN
 muxin power win11 off                     # a VM in Docker on another machine (or a cloud machine): on or off
 muxin vm create win-test --system windows-11 --on beelink   # a VM on one of your machines
 muxin schedule add beelink --name Tests --every day --at 09:00 --command "make test"
-muxin usage [--days 30] [--machine beelink]   # what the agents used, and the cost at API prices
+muxin usage [--days 30] [beelink]             # what the agents used, and the cost at API prices
 muxin edit beelink:~/code/api [--editor zed] [--print]   # open a folder there in your editor
 muxin disconnect <id>                     # stop connecting to it (its sessions go on there)
 muxin connect <id>                        # connect again, and check it

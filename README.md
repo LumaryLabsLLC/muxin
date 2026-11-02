@@ -263,7 +263,7 @@ muxin skill install --dir ~/my-agent/skills
 muxin skill remove
 ```
 
-The skill is built into Muxin, so `muxin skill install` writes the version that matches yours. Run it again after updating. It goes in `~/.claude/skills/muxin`, `~/.codex/skills/muxin`, `~/.config/opencode/skills/muxin`, `~/.gemini/skills/muxin`, `~/.pi/agent/skills/muxin`, `~/.hermes/skills/muxin`, or for `agents` the shared `~/.agents/skills/muxin`.
+The skill is built into Muxin, so `muxin skill install` writes the version that matches yours. Run it again after updating. It goes in `~/.claude/skills/muxin`, `~/.config/opencode/skills/muxin`, `~/.gemini/skills/muxin`, `~/.pi/agent/skills/muxin`, `~/.hermes/skills/muxin`, or for Codex (and `agents`, for any other agent that reads it) the shared `~/.agents/skills/muxin`.
 
 To follow this repository instead, copy or link the folder into your agent's skills folder (`muxin skill install` leaves a link alone):
 
@@ -296,7 +296,7 @@ muxin wake beelink                        # Wake on LAN
 muxin power win11 off                     # a VM in Docker on another machine (or a cloud machine): on or off
 muxin vm create win-test --system windows-11 --on beelink   # a VM on one of your machines
 muxin schedule add beelink --name Tests --every day --at 09:00 --command "make test"
-muxin usage [--days 30] [--machine beelink]   # what the agents used, and the cost at API prices
+muxin usage [--days 30] [beelink]             # what the agents used, and the cost at API prices
 muxin edit beelink:~/code/api [--editor zed] [--print]   # open a folder there in your editor
 muxin disconnect <id>                     # stop connecting to it (its sessions go on there)
 muxin connect <id>                        # connect again, and check it

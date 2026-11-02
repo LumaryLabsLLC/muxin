@@ -74,7 +74,7 @@ muxin session restart beelink/claude-3f9a --json               # run its agent a
 muxin session stop beelink/claude-3f9a --json
 ```
 
-The agent is `claude`, `codex`, `opencode`, `gemini`, `amp`, `pi` or `shell`. `muxin session attach` opens one in a terminal; it's interactive, for the user, not for you.
+The agent is `claude`, `codex`, `opencode`, `gemini`, `agy`, `amp`, `pi` or `shell`. `muxin session attach` opens one in a terminal; it's interactive, for the user, not for you.
 
 ### Hand a session's work to another agent
 

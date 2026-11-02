@@ -121,7 +121,7 @@ The CLI equivalents are `muxin box new|ls|send|resume|pause|attach|shell|rm`.
 ## Usage and cost
 
 - `agent_usage(days?, machine_id?)` says what Claude Code and Codex used over the last N days (default 7), from their own logs on each machine: tokens (input, output, cache reads and writes) and requests by model and machine, each day's cost (`daily`) and the busiest folders (`folders`), and the cost at Anthropic's and OpenAI's API list prices (`null` for a model whose price isn't known). With a Claude or ChatGPT plan the user doesn't pay per token: say it's what the same use would cost through the API. Read-only.
-- The CLI equivalent is `muxin usage [--days N] [--machine X]`.
+- The CLI equivalent is `muxin usage [--days N] [X]`.
 
 ## GitHub and the user's code
 

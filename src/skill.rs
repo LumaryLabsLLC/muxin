@@ -31,13 +31,14 @@ const MARK: &str = "source: https://github.com/LumaryLabsLLC/muxin/tree/main/ski
 /// that says it's on this computer, and its skills folder.
 const AGENTS: &[(&str, &str, &str)] = &[
     ("claude", ".claude", ".claude/skills"),
-    ("codex", ".codex", ".codex/skills"),
+    // Codex's personal skills are in the folder several agents share.
+    ("codex", ".codex", ".agents/skills"),
     ("opencode", ".config/opencode", ".config/opencode/skills"),
     ("gemini", ".gemini", ".gemini/skills"),
     ("pi", ".pi", ".pi/agent/skills"),
     ("hermes", ".hermes", ".hermes/skills"),
-    // The folder several agents share: only when asked for, so an agent that
-    // reads it and its own doesn't get the skill twice.
+    // That folder for any other agent that reads it: only when asked for, so
+    // one that reads it and its own doesn't get the skill twice.
     ("agents", ".agents", ".agents/skills"),
 ];
 
@@ -70,7 +71,8 @@ pub fn targets(agents: &[String], dir: Option<PathBuf>, installing: bool) -> Res
                 Some((id, _, skills)) => Ok((id.to_string(), home.join(skills))),
                 None => Err(format!("\"{a}\" isn't an agent Muxin knows ({}). Pass --dir for another one's skills folder.", known())),
             })
-            .collect();
+            .collect::<Result<_, String>>()
+            .map(once);
     }
     let found: Vec<_> = AGENTS
         .iter()
@@ -86,7 +88,14 @@ pub fn targets(agents: &[String], dir: Option<PathBuf>, installing: bool) -> Res
     if found.is_empty() && installing {
         return Err(format!("No agent found on this computer. Pass --agent ({}) or --dir.", known()));
     }
-    Ok(found)
+    Ok(once(found))
+}
+
+/// Each folder once: `codex` and `agents` are the same one.
+fn once(mut targets: Vec<(String, PathBuf)>) -> Vec<(String, PathBuf)> {
+    let mut seen = std::collections::HashSet::new();
+    targets.retain(|(_, dir)| seen.insert(dir.clone()));
+    targets
 }
 
 /// Writes the skill into a skills folder, replacing an older version of it.
@@ -250,6 +259,10 @@ mod tests {
         assert_eq!(t.iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>(), ["claude", "hermes"]);
         assert!(t[1].1.ends_with(".hermes/skills"));
         assert!(targets(&["nope".into()], None, true).is_err());
+        // Codex's folder is the shared one, and a folder is used once.
+        let t = targets(&["codex".into(), "agents".into()], None, true).unwrap();
+        assert_eq!(t.len(), 1);
+        assert!(t[0].1.ends_with(".agents/skills"));
         let dir = PathBuf::from("/tmp/skills");
         assert_eq!(targets(&[], Some(dir.clone()), true).unwrap(), vec![("dir".to_string(), dir)]);
     }

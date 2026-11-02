@@ -91,7 +91,7 @@ The CLI equivalents are `muxin workspace create|ls|show|exec|cat|write|files|cha
 
 ## Agent sessions: other agents running on the user's machines
 
-The user runs AI agent CLIs (Claude Code, Codex, OpenCode, Gemini CLI, Amp) or shells in persistent sessions on their machines (held by Muxin's agent there) and watches them in the app. Ids look like `beelink/claude-3f9a`.
+The user runs AI agent CLIs (Claude Code, Codex, OpenCode, Gemini CLI, Antigravity, Amp) or shells in persistent sessions on their machines (held by Muxin's agent there) and watches them in the app. Ids look like `beelink/claude-3f9a`.
 
 - `session_list` shows every session (agent, folder, `status`, `busy` = printed output in the last few seconds) and which agent CLIs each machine has. Its `git` says what the work in a session's folder changed: `branch`, the files, lines and `commits` since the default branch (`base`), `uncommitted` files, whether it's a `worktree`, and the branch's `pull` request with its `checks`.
 - `session_action(id, action)` asks a session's agent to `commit`, `commit_push`, open or update the `pull_request`, `review` its branch, `fix_comments` (the pull request's review comments), resolve `conflicts`, or write a `recap`, by typing that action's prompt (the user can change them in Settings). Only when the user asked for it.
@@ -121,7 +121,7 @@ The CLI equivalents are `muxin box new|ls|send|resume|pause|attach|shell|rm`.
 ## Usage and cost
 
 - `agent_usage(days?, machine_id?)` says what Claude Code and Codex used over the last N days (default 7), from their own logs on each machine: tokens (input, output, cache reads and writes) and requests by model and machine, each day's cost (`daily`) and the busiest folders (`folders`), and the cost at Anthropic's and OpenAI's API list prices (`null` for a model whose price isn't known). With a Claude or ChatGPT plan the user doesn't pay per token: say it's what the same use would cost through the API. Read-only.
-- The CLI equivalent is `muxin usage [--days N] [--machine X]`.
+- The CLI equivalent is `muxin usage [--days N] [X]`.
 
 ## GitHub and the user's code
 

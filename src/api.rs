@@ -2613,7 +2613,7 @@ pub struct SessionListRequest {
 #[serde(deny_unknown_fields)]
 pub struct SessionStartRequest {
     pub machine_id: String,
-    /// "claude", "codex", "opencode", "gemini", "amp", "pi" or "shell".
+    /// "claude", "codex", "opencode", "gemini", "agy", "amp", "pi" or "shell".
     pub agent: String,
     /// Folder on the machine to start in. Default: the home folder.
     #[serde(default)]
@@ -2645,7 +2645,7 @@ pub struct SessionRenameRequest {
 pub struct SessionHandoffRequest {
     /// A session ("<machine-id>/<name>", or a unique name) or a box ("box-7k2m9q").
     pub session_id: String,
-    /// The agent to hand the work to: claude, codex, opencode, gemini, amp or pi.
+    /// The agent to hand the work to: claude, codex, opencode, gemini, agy, amp or pi.
     pub agent: String,
     /// Keep the old session running too. Default false: it ends.
     #[serde(default)]

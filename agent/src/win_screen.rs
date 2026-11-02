@@ -438,11 +438,13 @@ impl WinScreen {
                         }
                         u => {
                             // The key that types it, as a keyboard would, when it takes
-                            // no Shift, Ctrl or Alt; else the character itself (apps
-                            // read Shift as already up in a burst like this one).
+                            // no Shift, Ctrl or Alt and doesn't wait for another key
+                            // (`^` on a German keyboard); else the character itself
+                            // (apps read Shift as already up in a burst like this one).
                             let scan = unsafe { VkKeyScanW(u) };
-                            if scan != -1 && u < 0x80 && scan as u16 & 0x700 == 0 {
-                                let vk = (scan as u16) & 0xff;
+                            let vk = (scan as u16) & 0xff;
+                            let dead = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_CHAR) } & 0x8000_0000 != 0;
+                            if scan != -1 && u < 0x80 && scan as u16 & 0x700 == 0 && !dead {
                                 events.push(key(vk, 0, 0));
                                 events.push(key(vk, 0, KEYEVENTF_KEYUP));
                             } else {

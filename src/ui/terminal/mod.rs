@@ -5,8 +5,8 @@
 
 mod boxdraw;
 mod colors;
-mod ime;
-mod keys;
+pub(super) mod ime;
+pub(super) mod keys;
 mod render;
 
 use std::borrow::Cow;

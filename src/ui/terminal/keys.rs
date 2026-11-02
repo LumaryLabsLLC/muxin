@@ -27,6 +27,11 @@ const OPTION_IS_META: &[&str] = &[
 /// One of those but for `#`, which only Option+3 types there.
 const BRITISH: &str = "com.apple.keylayout.British";
 
+/// Whether a key pressed with Option can be a character on this Mac layout.
+pub fn option_may_type(layout: &str) -> bool {
+    !OPTION_IS_META.contains(&layout)
+}
+
 /// On a Mac, Option is how most layouts type: `@` is Option+L on a German
 /// keyboard, `ą` Option+A on Polish Pro. Such a key is text for the platform
 /// input method, dead keys included (German Option+N, then Space, for `~`).
@@ -278,6 +283,16 @@ mod tests {
             ("org.sil.ukelele.keyboardlayout.custom", "l", "@"),
         ] {
             assert!(option_types_text(&option(key, text), layout), "{layout}");
+        }
+    }
+
+    #[test]
+    fn option_may_type_on_every_layout_that_can() {
+        for layout in [GERMAN, "com.apple.keylayout.British", "com.apple.keylayout.PolishPro", "org.sil.ukelele.keyboardlayout.custom"] {
+            assert!(option_may_type(layout), "{layout}");
+        }
+        for layout in [US, "com.apple.keylayout.ABC", "com.apple.keylayout.Dvorak"] {
+            assert!(!option_may_type(layout), "{layout}");
         }
     }
 

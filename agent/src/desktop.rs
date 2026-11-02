@@ -724,6 +724,9 @@ mod x11 {
         scratch: Vec<u8>,
         /// keysym → (keycode, needs shift)
         keys: HashMap<u32, (u8, bool)>,
+        /// Unused keycodes given a keysym, for characters the keyboard doesn't
+        /// have, oldest first (see `spare_key`). Taken back when the stream ends.
+        spare: Vec<(u8, u32)>,
         /// The monitor shown (None: all of them), and when its place was last checked.
         monitor: Option<String>,
         checked: std::time::Instant,
@@ -1032,6 +1035,73 @@ mod x11 {
         keys
     }
 
+    /// What it takes to type on the desktop's keyboard, as it is right now.
+    #[derive(Default)]
+    struct Typing {
+        /// keysym → (keycode, level): 0 the key alone, 1 with Shift, 2 with
+        /// AltGr, 3 with both. The lowest level that has it.
+        keys: HashMap<u32, (u8, u8)>,
+        /// Keycodes with nothing on them, the highest first.
+        unused: Vec<u8>,
+    }
+
+    impl Typing {
+        /// From the core keyboard mapping: `per` keysyms for each key from `min`.
+        /// A key's columns are its levels 0 and 1, a second layout's two, then levels 2 and 3.
+        fn from_mapping(min: u8, per: usize, syms: &[u32]) -> Self {
+            let mut typing = Typing::default();
+            let keys: Vec<(u8, &[u32])> = syms.chunks(per.max(1)).enumerate().map(|(i, syms)| (min.saturating_add(i as u8), syms)).collect();
+            for (level, column) in [(0, 0), (1, 1), (2, 4), (3, 5)] {
+                for (code, syms) in &keys {
+                    if let Some(sym) = syms.get(column).filter(|sym| **sym != 0) {
+                        typing.keys.entry(*sym).or_insert((*code, level));
+                    }
+                }
+            }
+            typing.unused = keys.iter().rev().filter(|(_, syms)| syms.iter().all(|sym| *sym == 0)).map(|(code, _)| *code).collect();
+            typing
+        }
+
+        fn read(conn: &RustConnection) -> Self {
+            let (min, max) = (conn.setup().min_keycode, conn.setup().max_keycode);
+            match conn.get_keyboard_mapping(min, max - min + 1).map(|c| c.reply()) {
+                Ok(Ok(map)) => Self::from_mapping(min, map.keysyms_per_keycode as usize, &map.keysyms),
+                _ => Self::default(),
+            }
+        }
+    }
+
+    /// The keysym for typing a character.
+    fn char_keysym(c: char) -> u32 {
+        match c {
+            '\n' => 0xff0d,
+            '\t' => 0xff09,
+            // Only the Euro's old keysym matches what keyboards have it as.
+            '€' => 0x20ac,
+            c if matches!(c as u32, 0x20..=0x7e | 0xa0..=0xff) => c as u32,
+            c => 0x0100_0000 + c as u32,
+        }
+    }
+
+    /// A key for a character this keyboard doesn't have: an unused keycode,
+    /// given its keysym (or the one given longest ago, when none is left). It
+    /// keeps it, so typing that character again doesn't make every program on
+    /// the desktop read the keyboard's mapping again.
+    fn spare_key(conn: &RustConnection, spare: &mut Vec<(u8, u32)>, unused: &[u8], sym: u32) -> Option<u8> {
+        let code = match unused.iter().find(|code| !spare.iter().any(|(c, _)| c == *code)) {
+            Some(code) => *code,
+            None if !spare.is_empty() => spare.remove(0).0,
+            None => return None,
+        };
+        conn.change_keyboard_mapping(1, code, 2, &[sym, sym]).ok()?;
+        spare.push((code, sym));
+        // Programs read the new mapping when they hear of it, which comes
+        // before the key does, but give them a moment to.
+        conn.get_input_focus().ok()?.reply().ok()?;
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        Some(code)
+    }
+
     impl Drop for X11 {
         fn drop(&mut self) {
             for code in self.pressed.drain(..) {
@@ -1040,7 +1110,15 @@ mod x11 {
             for b in self.buttons.drain(..) {
                 let _ = self.conn.xtest_fake_input(BUTTON_RELEASE_EVENT, b, 0, self.root, 0, 0, 0);
             }
+            let keep_up = !self.spare.is_empty();
+            for (code, _) in self.spare.drain(..) {
+                let _ = self.conn.change_keyboard_mapping(1, code, 2, &[0, 0]);
+            }
             let _ = self.conn.flush();
+            // The server drops what it hasn't done when a program quits.
+            if keep_up {
+                let _ = self.conn.get_input_focus().map(|c| c.reply());
+            }
         }
     }
 
@@ -1112,7 +1190,7 @@ mod x11 {
             let (ox, oy, sw, sh) = area(&conn, root, monitor.as_deref())?;
             let shm = attach_shm(&conn, sw * sh * 4);
             let keys = keymap(&conn);
-            Ok(X11 { conn, root, ox, oy, sw, sh, shm, scratch: Vec::new(), keys, monitor, checked: std::time::Instant::now(), pressed: Vec::new(), buttons: Vec::new(), window: None, desktop: (dw, dh) })
+            Ok(X11 { conn, root, ox, oy, sw, sh, shm, scratch: Vec::new(), keys, spare: Vec::new(), monitor, checked: std::time::Instant::now(), pressed: Vec::new(), buttons: Vec::new(), window: None, desktop: (dw, dh) })
         }
 
         fn open_window(conn: RustConnection, root: u32, desktop: (usize, usize), id: &str) -> Result<X11, String> {
@@ -1132,7 +1210,7 @@ mod x11 {
             let win = Win { client, frame: frame_of(&conn, root, client), atoms, composite, frame_extents, added, held_at: None, cursor: "", minimized: None, drag: None, ticks: 0, scale, restore: None };
             let shm = attach_shm(&conn, desktop.0 * desktop.1 * 4);
             let keys = keymap(&conn);
-            Ok(X11 { conn, root, ox, oy, sw, sh, shm, scratch: Vec::new(), keys, monitor: None, checked: std::time::Instant::now(), pressed: Vec::new(), buttons: Vec::new(), window: Some(win), desktop })
+            Ok(X11 { conn, root, ox, oy, sw, sh, shm, scratch: Vec::new(), keys, spare: Vec::new(), monitor: None, checked: std::time::Instant::now(), pressed: Vec::new(), buttons: Vec::new(), window: Some(win), desktop })
         }
 
         /// Part of a drawable as BGRA: through shared memory when it fits, else the socket.
@@ -1421,23 +1499,24 @@ mod x11 {
                     }
                 }
                 "text" => {
-                    // Typing, for agents: each character's key, with Shift when it needs it.
-                    let shift = keys.get(&0xffe1).map(|(c, _)| *c);
+                    // Typing, for agents and Option's characters: each one's key on
+                    // this keyboard, with the Shift and AltGr it needs, else a spare key.
+                    let typing = Typing::read(conn);
+                    let modifier = |sym: u32| typing.keys.get(&sym).map(|(code, _)| *code);
+                    let (shift, altgr) = (modifier(0xffe1), modifier(0xfe03));
                     for ch in e["s"].as_str().unwrap_or("").chars() {
-                        let sym = match ch {
-                            '\n' => 0xff0d,
-                            '\t' => 0xff09,
-                            c => c as u32,
-                        };
-                        let Some((code, needs_shift)) = keys.get(&sym).copied() else { continue };
-                        let shifted = needs_shift.then_some(shift).flatten();
-                        if let Some(s) = shifted {
-                            fake(KEY_PRESS_EVENT, s, 0, 0);
+                        let sym = char_keysym(ch);
+                        let key = self.spare.iter().find(|(_, s)| *s == sym).map(|(code, _)| (*code, 0));
+                        let key = key.or_else(|| typing.keys.get(&sym).copied().filter(|(_, level)| *level < 2 || altgr.is_some()));
+                        let Some((code, level)) = key.or_else(|| spare_key(conn, &mut self.spare, &typing.unused, sym).map(|code| (code, 0))) else { continue };
+                        let held: Vec<u8> = [(level & 1 == 1).then_some(shift).flatten(), (level >= 2).then_some(altgr).flatten()].into_iter().flatten().collect();
+                        for m in &held {
+                            fake(KEY_PRESS_EVENT, *m, 0, 0);
                         }
                         fake(KEY_PRESS_EVENT, code, 0, 0);
                         fake(KEY_RELEASE_EVENT, code, 0, 0);
-                        if let Some(s) = shifted {
-                            fake(KEY_RELEASE_EVENT, s, 0, 0);
+                        for m in held.iter().rev() {
+                            fake(KEY_RELEASE_EVENT, *m, 0, 0);
                         }
                         let _ = conn.flush();
                     }
@@ -1457,6 +1536,86 @@ mod x11 {
                 }
                 _ => {}
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const NONE: u32 = 0;
+        const AT: u32 = 0x40;
+        const OMEGA: u32 = 0x07d9;
+        const BRACKET: u32 = 0x5b;
+        const BRACE: u32 = 0x7b;
+        const LEVEL3_SHIFT: u32 = 0xfe03;
+
+        /// As `xmodmap -pke` shows them on a German keyboard, 7 columns a key,
+        /// from keycode 24: q, 7's, 8, one with nothing on it, AltGr.
+        fn german() -> Typing {
+            #[rustfmt::skip]
+            let syms = [
+                'q' as u32, 'Q' as u32, 'q' as u32, 'Q' as u32, AT, OMEGA, AT,
+                '7' as u32, '/' as u32, '7' as u32, '/' as u32, BRACE, 0x2c6, BRACE,
+                '8' as u32, '(' as u32, '8' as u32, '(' as u32, BRACKET, 0xad3, BRACKET,
+                NONE, NONE, NONE, NONE, NONE, NONE, NONE,
+                LEVEL3_SHIFT, NONE, LEVEL3_SHIFT, NONE, NONE, NONE, NONE,
+            ];
+            Typing::from_mapping(24, 7, &syms)
+        }
+
+        #[test]
+        fn finds_what_altgr_types_on_a_german_keyboard() {
+            let typing = german();
+            assert_eq!(typing.keys[&('q' as u32)], (24, 0));
+            assert_eq!(typing.keys[&('Q' as u32)], (24, 1));
+            assert_eq!(typing.keys[&AT], (24, 2));
+            assert_eq!(typing.keys[&OMEGA], (24, 3));
+            assert_eq!(typing.keys[&BRACE], (25, 2));
+            assert_eq!(typing.keys[&BRACKET], (26, 2));
+            assert_eq!(typing.keys[&LEVEL3_SHIFT], (28, 0));
+        }
+
+        #[test]
+        fn a_second_layouts_columns_are_not_levels() {
+            let typing = Typing::from_mapping(10, 4, &['a' as u32, 'A' as u32, 0x6c1, 0x6e1]);
+            assert_eq!(typing.keys[&('A' as u32)], (10, 1));
+            assert!(!typing.keys.contains_key(&0x6c1));
+        }
+
+        #[test]
+        fn the_lowest_level_wins_whichever_key_has_it() {
+            // `<` with AltGr on one key, by itself on a later one.
+            let typing = Typing::from_mapping(10, 6, &['z' as u32, NONE, NONE, NONE, '<' as u32, NONE, '<' as u32, '>' as u32, NONE, NONE, NONE, NONE]);
+            assert_eq!(typing.keys[&('<' as u32)], (11, 0));
+        }
+
+        #[test]
+        fn unused_keycodes_are_those_with_nothing_on_them_highest_first() {
+            assert_eq!(german().unused, vec![27]);
+            let typing = Typing::from_mapping(8, 2, &[NONE, NONE, 'a' as u32, NONE, NONE, NONE]);
+            assert_eq!(typing.unused, vec![10, 8]);
+        }
+
+        #[test]
+        fn a_short_mapping_is_fine() {
+            let typing = Typing::from_mapping(8, 2, &['a' as u32, 'A' as u32]);
+            assert_eq!(typing.keys[&('A' as u32)], (8, 1));
+            assert!(typing.unused.is_empty());
+            assert!(Typing::from_mapping(8, 0, &[]).keys.is_empty());
+        }
+
+        #[test]
+        fn keysyms_of_characters() {
+            assert_eq!(char_keysym('@'), 0x40);
+            assert_eq!(char_keysym('\n'), 0xff0d);
+            assert_eq!(char_keysym('\t'), 0xff09);
+            // Latin-1 is its code point, the rest Unicode keysyms; the Euro's is its own.
+            assert_eq!(char_keysym('«'), 0xab);
+            assert_eq!(char_keysym('€'), 0x20ac);
+            assert_eq!(char_keysym('ƒ'), 0x0100_0192);
+            assert_eq!(char_keysym('ñ'), 0xf1);
+            assert_eq!(char_keysym('😀'), 0x0101_f600);
         }
     }
 }

@@ -8,7 +8,7 @@ use gpui::{App, Bounds, Context, ElementInputHandler, EntityInputHandler, InputH
 use super::{Metrics, TerminalView, render};
 
 #[derive(Clone, Default)]
-pub(super) struct Composition {
+pub(in crate::ui) struct Composition {
     pub text: String,
     /// UTF-8 byte offsets, always on character boundaries.
     pub selected: Range<usize>,

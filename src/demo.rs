@@ -778,7 +778,7 @@ impl World {
         };
         let (agents, sessions): (Vec<&str>, Vec<SessionInfo>) = match machine_id {
             "forge" => (
-                vec!["claude", "codex", "opencode"],
+                vec!["claude", "codex", "opencode", "agy"],
                 vec![
                     session("claude-7f3a", "claude", "Claude Code", "Checkout fix", "/Users/ci/code/checkout", true, 12, 1),
                     session("shell-2b81", "shell", "Shell", "Shell · checkout", "/Users/ci/code/checkout", false, 31, 0),

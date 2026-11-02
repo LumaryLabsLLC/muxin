@@ -586,7 +586,7 @@ pub fn tools() -> Vec<Value> {
                     "days": { "type": "array", "items": { "type": "string" } }
                 }, "required": ["every"] },
                 "command": { "type": "string" },
-                "agent": { "type": "string", "description": "claude, codex, opencode, gemini, amp, pi or shell." },
+                "agent": { "type": "string", "description": "claude, codex, opencode, gemini, agy, amp, pi or shell." },
                 "prompt": { "type": "string" },
                 "folder": { "type": "string", "description": "Default ~." },
                 "enabled": { "type": "boolean", "description": "Default true; false keeps it without running it." }
@@ -889,7 +889,7 @@ pub fn tools() -> Vec<Value> {
             "description": "Start an agent CLI (or a shell) in a new session on a machine, in a folder there, optionally with a first prompt. It keeps running until stopped; the user can watch and type into it from the Muxin app. Returns the session. Only start sessions the user asked for.",
             "inputSchema": schema(json!({
                 "machine_id": { "type": "string", "description": MACHINE_ID },
-                "agent": { "type": "string", "enum": ["claude", "codex", "opencode", "gemini", "amp", "pi", "shell"], "description": "Which CLI to run. session_list shows which are installed on each machine." },
+                "agent": { "type": "string", "enum": ["claude", "codex", "opencode", "gemini", "agy", "amp", "pi", "shell"], "description": "Which CLI to run. session_list shows which are installed on each machine." },
                 "cwd": { "type": "string", "description": "Folder on the machine, e.g. \"~/code/api\". Default: the home folder." },
                 "title": { "type": "string", "description": "Shown in the app's sidebar. Default: agent and folder name." },
                 "prompt": { "type": "string", "description": "First message for the agent." }
@@ -965,7 +965,7 @@ pub fn tools() -> Vec<Value> {
             "description": "Hand a session's work to another agent (Claude Code to Codex, say), or a box's to another agent in the box: Muxin writes .muxin/handoff.md in its folder (where the git work stands, the agent's to-do list, and the conversation so far from the agent's own transcript: Claude Code, Codex, Gemini CLI and Pi; else what its terminal showed), starts the new agent there asked to read it first, and ends the old session unless keep. With machine_id the work moves to that machine first (git checkouts only; the folder it left stays as it was). Returns the new session, the note's path and what it was made from (`source`). Only when the user asked.",
             "inputSchema": schema(json!({
                 "session_id": { "type": "string", "description": "A session id, or a box id (box-7k2m9q)." },
-                "agent": { "type": "string", "description": "The agent to hand it to: claude, codex, opencode, gemini, amp or pi." },
+                "agent": { "type": "string", "description": "The agent to hand it to: claude, codex, opencode, gemini, agy, amp or pi." },
                 "keep": { "type": "boolean", "description": "Keep the old session running too. Default false." },
                 "machine_id": { "type": "string", "description": "Move the work to this machine and continue there: its commits that aren't on origin, uncommitted changes and new files go into a workspace there (a worktree of a checkout of the repository, else a clone). Default: the session's own machine. Not for boxes." }
             }), &["session_id", "agent"]),
@@ -1282,7 +1282,7 @@ pub fn print_config() -> String {
     format!(
         "# Claude Code\nclaude mcp add muxin -- {exe} mcp\n\n\
          # Codex (~/.codex/config.toml)\n[mcp_servers.muxin]\ncommand = \"{exe}\"\nargs = [\"mcp\"]\n\n\
-         # Other MCP clients (Claude Desktop, Cursor, ...)\n{json_block}\n\n\
+         # Other MCP clients (Claude Desktop, Cursor, Antigravity's ~/.gemini/config/mcp_config.json, ...)\n{json_block}\n\n\
          # Try it safely first with simulated machines: add \"--demo\" after \"mcp\".\n"
     )
 }

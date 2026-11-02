@@ -91,7 +91,7 @@ The CLI equivalents are `muxin workspace create|ls|show|exec|cat|write|files|cha
 
 ## Agent sessions: other agents running on the user's machines
 
-The user runs AI agent CLIs (Claude Code, Codex, OpenCode, Gemini CLI, Amp) or shells in persistent sessions on their machines (held by Muxin's agent there) and watches them in the app. Ids look like `beelink/claude-3f9a`.
+The user runs AI agent CLIs (Claude Code, Codex, OpenCode, Gemini CLI, Antigravity, Amp) or shells in persistent sessions on their machines (held by Muxin's agent there) and watches them in the app. Ids look like `beelink/claude-3f9a`.
 
 - `session_list` shows every session (agent, folder, `status`, `busy` = printed output in the last few seconds) and which agent CLIs each machine has. Its `git` says what the work in a session's folder changed: `branch`, the files, lines and `commits` since the default branch (`base`), `uncommitted` files, whether it's a `worktree`, and the branch's `pull` request with its `checks`.
 - `session_action(id, action)` asks a session's agent to `commit`, `commit_push`, open or update the `pull_request`, `review` its branch, `fix_comments` (the pull request's review comments), resolve `conflicts`, or write a `recap`, by typing that action's prompt (the user can change them in Settings). Only when the user asked for it.

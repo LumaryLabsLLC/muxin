@@ -182,6 +182,18 @@ mod tests {
     }
 
     #[test]
+    fn dead_key_accent_is_preedit_until_the_next_key() {
+        // German Option+N and Option+U: the accent waits for the next key.
+        let mut ime = Composition::default();
+        ime.update(None, "~", Some(1..1));
+        assert_eq!((ime.text.as_str(), ime.selected.clone()), ("~", 1..1));
+        ime.clear();
+        ime.update(None, "¨", Some(1..1));
+        assert_eq!((ime.text.as_str(), ime.selected.clone()), ("¨", 2..2));
+        assert_eq!(ime.range_to_utf16(ime.selected.clone()), 1..1);
+    }
+
+    #[test]
     fn selection_is_relative_to_replacement_even_after_multibyte_text() {
         let mut ime = Composition::default();
         ime.update(None, "你hao", None);

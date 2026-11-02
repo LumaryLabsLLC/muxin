@@ -1,9 +1,50 @@
 //! Keystrokes to the bytes a terminal program expects (xterm conventions).
 //! Option/Alt acts as Meta, which is what agent CLIs expect for word motions
-//! and Option+Enter newlines.
+//! and Option+Enter newlines, except for what a Mac layout types with Option
+//! (`option_types_text`).
 
 use alacritty_terminal::term::TermMode;
 use gpui::Keystroke;
+
+/// Mac layouts that don't need Option to type: all of ASCII is there without
+/// it, and their language needs nothing from it, which leaves symbols like ∫
+/// for Option+B. Option is Meta on these.
+const OPTION_IS_META: &[&str] = &[
+    "com.apple.keylayout.ABC",
+    "com.apple.keylayout.Australian",
+    "com.apple.keylayout.British-PC",
+    "com.apple.keylayout.Canadian",
+    "com.apple.keylayout.Colemak",
+    "com.apple.keylayout.DVORAK-QWERTYCMD",
+    "com.apple.keylayout.Dvorak",
+    "com.apple.keylayout.Dvorak-Left",
+    "com.apple.keylayout.Dvorak-Right",
+    "com.apple.keylayout.PinyinKeyboard",
+    "com.apple.keylayout.US",
+    "com.apple.keylayout.USInternational-PC",
+];
+
+/// One of those but for `#`, which only Option+3 types there.
+const BRITISH: &str = "com.apple.keylayout.British";
+
+/// On a Mac, Option is how most layouts type: `@` is Option+L on a German
+/// keyboard, `ą` Option+A on Polish Pro. Such a key is text for the platform
+/// input method, dead keys included (German Option+N, then Space, for `~`).
+/// Off a Mac, Alt is Meta and AltGr doesn't come as Alt, so this is only for Macs.
+pub fn option_types_text(ks: &Keystroke, layout: &str) -> bool {
+    let m = &ks.modifiers;
+    // Enter, Tab and Space have a key_char as well, and keep their sequences.
+    if !m.alt || m.platform || m.control || m.function || matches!(ks.key.as_str(), "enter" | "tab" | "space") {
+        return false;
+    }
+    let Some(text) = ks.key_char.as_deref().filter(|text| !text.is_empty() && !text.chars().any(char::is_control)) else {
+        return false;
+    };
+    match layout {
+        BRITISH => text == "#",
+        _ => !OPTION_IS_META.contains(&layout),
+    }
+}
 
 /// Printable keys belong to the platform input method. Terminal escape
 /// sequences and Control/Meta shortcuts continue through `to_bytes`.
@@ -169,6 +210,109 @@ mod tests {
                 assert_eq!(to_bytes(&stroke, TermMode::empty()).unwrap(), key.as_bytes());
             }
         }
+    }
+
+    const GERMAN: &str = "com.apple.keylayout.German";
+    const US: &str = "com.apple.keylayout.US";
+
+    /// Option+key as GPUI reports it on a Mac: key_char is what the layout
+    /// types there. A dead key's is its accent and a no-break space.
+    fn option(key: &str, text: &str) -> Keystroke {
+        let mut stroke = ks(&format!("alt-{key}"));
+        stroke.key_char = Some(text.into());
+        stroke
+    }
+
+    #[test]
+    fn a_german_keyboard_types_with_option() {
+        // From macOS's own German layout. Option+Shift+7 comes as "/" without
+        // shift, Option+Shift+6 as "&", since Shift+7 and Shift+6 type those.
+        let keys = [("l", "@"), ("5", "["), ("6", "]"), ("7", "|"), ("8", "{"), ("9", "}"), ("/", "\\"), ("e", "€"), ("q", "«"), ("b", "∫")];
+        for (key, text) in keys {
+            assert!(option_types_text(&option(key, text), GERMAN), "{key}");
+        }
+        for (key, text) in [("n", "~\u{a0}"), ("u", "¨\u{a0}"), ("&", "^\u{a0}")] {
+            assert!(option_types_text(&option(key, text), GERMAN), "dead {key}");
+        }
+        let mut shifted = ks("alt-shift-l");
+        shifted.key_char = Some("ﬂ".into());
+        assert!(option_types_text(&shifted, GERMAN));
+    }
+
+    #[test]
+    fn option_stays_meta_on_a_us_keyboard() {
+        // From macOS's own tables, dead keys and all. Option+Shift+` comes as "~".
+        let keys = [("b", "∫"), ("f", "ƒ"), ("d", "∂"), ("l", "¬"), ("5", "∞"), ("n", "˜\u{a0}"), ("e", "´\u{a0}"), ("`", "`\u{a0}"), ("~", "`")];
+        let layouts = ["ABC", "Australian", "British", "British-PC", "Canadian", "Colemak", "Dvorak", "US", "USInternational-PC"];
+        for layout in layouts.map(|l| format!("com.apple.keylayout.{l}")) {
+            for (key, text) in keys {
+                let stroke = option(key, text);
+                assert!(!option_types_text(&stroke, &layout), "{layout} {key}");
+                assert!(!is_text_input(&stroke), "{layout} {key}");
+                assert_eq!(to_bytes(&stroke, TermMode::empty()).unwrap(), format!("\x1b{key}").into_bytes());
+            }
+        }
+        let mut shifted = ks("alt-shift-b");
+        shifted.key_char = Some("ı".into());
+        assert!(!option_types_text(&shifted, US));
+        assert_eq!(to_bytes(&shifted, TermMode::empty()).unwrap(), b"\x1bB");
+    }
+
+    #[test]
+    fn a_british_keyboard_only_types_its_hash_with_option() {
+        let british = "com.apple.keylayout.British";
+        assert!(option_types_text(&option("3", "#"), british));
+        assert!(!option_types_text(&option("b", "∫"), british));
+        assert!(!option_types_text(&option("2", "€"), british));
+    }
+
+    #[test]
+    fn layouts_not_known_to_be_meta_type_with_option() {
+        for (layout, key, text) in [
+            ("com.apple.keylayout.PolishPro", "a", "ą"),
+            ("com.apple.keylayout.Swedish", "\\", "@"),
+            ("com.apple.keylayout.French", "5", "{"),
+            ("com.apple.keylayout.Brazilian-Pro", "c", "ç"),
+            ("com.apple.keylayout.USExtended", "e", "´\u{a0}"),
+            ("com.apple.keylayout.Russian", "2", "@"),
+            ("org.sil.ukelele.keyboardlayout.custom", "l", "@"),
+        ] {
+            assert!(option_types_text(&option(key, text), layout), "{layout}");
+        }
+    }
+
+    #[test]
+    fn named_keys_keep_their_sequences_on_every_layout() {
+        let none = TermMode::empty();
+        for layout in [GERMAN, US] {
+            for (key, text, bytes) in [("enter", "\n", b"\x1b\r".as_slice()), ("tab", "\t", b"\t"), ("space", " ", b"\x1b ")] {
+                let stroke = option(key, text);
+                assert!(!option_types_text(&stroke, layout), "{layout} {key}");
+                assert_eq!(to_bytes(&stroke, none).unwrap(), bytes);
+            }
+            for (key, bytes) in [("backspace", b"\x1b\x7f".as_slice()), ("left", b"\x1b[1;3D"), ("escape", b"\x1b\x1b"), ("f5", b"\x1b[15;3~")] {
+                let stroke = ks(&format!("alt-{key}"));
+                assert!(!option_types_text(&stroke, layout), "{layout} {key}");
+                assert_eq!(to_bytes(&stroke, none).unwrap(), bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn only_option_alone_types() {
+        // GPUI leaves key_char out with these; they stay shortcuts either way.
+        for key in ["ctrl-alt-l", "cmd-alt-l", "fn-alt-l", "l", "shift-l"] {
+            let mut stroke = ks(key);
+            assert!(!option_types_text(&stroke, GERMAN), "{key}");
+            stroke.key_char = Some("@".into());
+            assert!(!option_types_text(&stroke, GERMAN), "{key} with key_char");
+        }
+        assert_eq!(to_bytes(&ks("ctrl-alt-l"), TermMode::empty()).unwrap(), b"\x1b\x0c");
+        assert!(to_bytes(&ks("cmd-alt-l"), TermMode::empty()).is_none());
+        // No character on Option, or a control character: nothing to type.
+        assert!(!option_types_text(&ks("alt-l"), GERMAN));
+        assert!(!option_types_text(&option("l", ""), GERMAN));
+        assert!(!option_types_text(&option("l", "\u{1}"), GERMAN));
     }
 
     #[test]

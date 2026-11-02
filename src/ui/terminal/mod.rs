@@ -524,7 +524,7 @@ impl TerminalView {
         }
         // Let the platform input method compose/commit printable text. Raw
         // key bytes here would swallow the first pinyin key or send it twice.
-        if keys::is_text_input(ks) {
+        if keys::is_text_input(ks) || (cfg!(target_os = "macos") && keys::option_types_text(ks, cx.keyboard_layout().id())) {
             return;
         }
         if let Some(bytes) = keys::to_bytes(ks, self.mode()) {

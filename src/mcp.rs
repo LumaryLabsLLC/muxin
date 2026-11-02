@@ -66,9 +66,10 @@ work. Only make or destroy boxes when the user asked.
 
 GitHub: github_inbox (review requests, assigned issues, the user's PRs), github_repos (favorites first), github_repo \
 (open issues and PRs, Actions runs, and where it's checked out on the machines), github_item (an \
-issue or PR in full, by URL or owner/name#123). local_checkouts lists git checkouts on the machines; \
-git_sync fetches, pulls or pushes one. To fix an issue, start a session in a checkout of its repo \
-with the issue as the prompt.";
+issue or PR in full, by URL or owner/name#123). A fork's `parent` names the repository it came from, \
+often where its issues and PRs are: call github_repo on that. local_checkouts lists git checkouts on \
+the machines; git_sync fetches, pulls or pushes one. To fix an issue, start a session in a checkout of \
+its repo with the issue as the prompt; when `can_push` is false and the user has a fork, in the fork.";
 
 /// Per-connection state: who the client is, so workspaces and commands record their owner.
 #[derive(Default)]
@@ -979,7 +980,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "github_repos",
-            "description": "The user's GitHub repositories (owned, collaborator, and through their orgs): their favorites first (`favorite: true`, the ones they work on most), then most recently pushed, with visibility, default branch, language and open issue count.",
+            "description": "The user's GitHub repositories (owned, collaborator, and through their orgs): their favorites first (`favorite: true`, the ones they work on most), then most recently pushed, with visibility, default branch, language, open issue count and `can_push`. A fork's `parent` names the repository it came from (`full_name`, `private`, `html_url`, `open_issues`), even one the user doesn't otherwise have here: its issues and pull requests are usually there, through github_repo. `parent` is null on a fork when GitHub doesn't name it to this login.",
             "inputSchema": schema(json!({}), &[]),
             "annotations": annotations("GitHub repositories", true, false, true, true),
         }),
@@ -1009,7 +1010,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "github_repo",
-            "description": "One repository: its open issues and pull requests, recent GitHub Actions runs, and where it's checked out on the user's machines (machine, folder, branch, ahead/behind, uncommitted changes). Use the checkouts to pick where to work on it.",
+            "description": "One repository: its open issues and pull requests, recent GitHub Actions runs, and where it's checked out on the user's machines (machine, folder, branch, ahead/behind, uncommitted changes). Use the checkouts to pick where to work on it. Works for any repository this login can read, not only the user's. `repo.parent` names what a fork came from; `repo.can_push` says whether the user can push here. A fork's checkouts are listed under the fork's name, not its parent's.",
             "inputSchema": schema(json!({ "repo": { "type": "string", "description": "\"owner/name\" or a GitHub URL." } }), &["repo"]),
             "annotations": annotations("GitHub repository", true, false, true, true),
         }),

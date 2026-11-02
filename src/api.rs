@@ -3397,7 +3397,8 @@ pub async fn github_repo(engine: &Arc<Engine>, req: RepoRequest) -> ApiResult<Re
     let settings = engine.settings().github;
     let gh = engine.github();
     let (repo, items, runs) = futures::join!(gh.repo(&settings, &name), gh.repo_items(&settings, &name), gh.repo_runs(&settings, &name));
-    let mut repo = repo.map_err(github_error)?;
+    // A fork's parent can be one this login can't read.
+    let mut repo = repo.map_err(|e| if e == "Not Found" { ApiError::not_found(format!("GitHub has no {name} that this login can read. It may be private, or gone.")) } else { github_error(e) })?;
     repo.favorite = engine.settings().favorite_repos.iter().any(|f| f.eq_ignore_ascii_case(&repo.full_name));
     let items = items.map_err(github_error)?;
     let checkouts = engine.current().checkouts.iter().filter(|c| c.repo.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(&name))).cloned().collect();

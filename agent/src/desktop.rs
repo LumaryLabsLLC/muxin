@@ -15,6 +15,9 @@
 //!
 //! Coordinates are in frame pixels; the screen may be scaled down to fit
 //! `max_width`, and input is mapped back onto it.
+//!
+//! A "key" is {"keysym", "down"}, and "char": true when the keysym is the
+//! character the sender's keyboard typed, Shift already counted (see `typed_char`).
 
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
@@ -88,6 +91,155 @@ mod kept_inside_tests {
         assert_eq!(super::kept_inside(screen, (100, 60), (1010, 633)), (100, 60));
         // Bigger than the screen: its top left stays on it.
         assert_eq!(super::kept_inside(screen, (300, 200), (1500, 900)), (0, 0));
+    }
+}
+
+/// The character a "key" event's keysym stands for, as a UTF-16 unit. Not a
+/// lowercase ASCII letter (that's its key: Shift comes on its own), a space or a
+/// named key. It may not be on this keyboard, or not where the sender's has it.
+pub(crate) fn typed_char(sym: u32) -> Option<u16> {
+    matches!(sym, 0x21..=0x60 | 0x7b..=0x7e | 0xa1..=0xff).then_some(sym as u16)
+}
+
+/// What a key needs for the character at its `level` (0 by itself, 1 with
+/// Shift, 2 with AltGr, 3 with both), beyond what's held down there.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct LevelHelp {
+    lift_shift: bool,
+    press_shift: bool,
+    altgr: bool,
+}
+
+/// `exact`: the character is what counts ("char": true), so a held Shift comes
+/// off a key that doesn't want it. Without it, Shift+2 is Shift and that key.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn level_help(level: u8, shift_held: bool, exact: bool) -> LevelHelp {
+    let wants_shift = level & 1 == 1;
+    LevelHelp { lift_shift: exact && shift_held && !wants_shift, press_shift: wants_shift && !shift_held, altgr: level >= 2 }
+}
+
+/// How Windows types a "key" event's character.
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq)]
+pub(crate) enum WinPress {
+    /// Its key, down until it's let go, as the keyboard's own would be.
+    Key(u16),
+    /// Its key pressed and let go, with Shift down (true) or up just for it: a shortcut.
+    Tap(u16, bool),
+    /// The character itself, which needs no key.
+    Char,
+    /// Nothing: a shortcut needs a key, and this keyboard has none for it.
+    Nothing,
+}
+
+/// `scan`: `VkKeyScanExW`'s answer for the character. `dead`: its key waits for
+/// the next one. `shortcut`: Ctrl, Alt or Win is held. `exact`: see `level_help`.
+#[cfg(any(windows, test))]
+pub(crate) fn win_press(scan: i16, dead: bool, shift_held: bool, shortcut: bool, exact: bool) -> WinPress {
+    let char_or_nothing = if shortcut { WinPress::Nothing } else { WinPress::Char };
+    // Ctrl and Alt in its high byte are AltGr: no key a shortcut can use, and
+    // apps read the Alt in it as a shortcut when they're pressed by hand.
+    if scan == -1 || scan as u16 & 0x600 != 0 {
+        return char_or_nothing;
+    }
+    let (vk, wants_shift) = (scan as u16 & 0xff, scan as u16 & 0x100 != 0);
+    if wants_shift == shift_held || (shift_held && !exact) {
+        return if dead && !shortcut { WinPress::Char } else { WinPress::Key(vk) };
+    }
+    if shortcut { WinPress::Tap(vk, wants_shift) } else { WinPress::Char }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn what_stands_for_a_character() {
+        for c in ['@', '/', '2', '`', '{', '~', '!', 'A', 'ö', 'Ö', '§', 'ß'] {
+            assert_eq!(typed_char(c as u32), Some(c as u16), "{c}");
+        }
+        // Letters are keys, Shift comes on its own. So are space and named keys.
+        for sym in ['a' as u32, 'z' as u32, 0x20, 0x7f, 0xa0, 0xff0d, 0xffe1, 0xffbe, 0x0100_0451] {
+            assert_eq!(typed_char(sym), None, "{sym:#x}");
+        }
+    }
+
+    fn help(lift_shift: bool, press_shift: bool, altgr: bool) -> LevelHelp {
+        LevelHelp { lift_shift, press_shift, altgr }
+    }
+
+    #[test]
+    fn levels_on_x11_with_the_character_as_what_counts() {
+        // US Mac's Shift+2 on a US machine: Shift's down already, the key is enough.
+        assert_eq!(level_help(1, true, true), LevelHelp::default());
+        // German Mac's Shift+7 on a US machine: `/` is the key alone, so Shift comes off.
+        assert_eq!(level_help(0, true, true), help(true, false, false));
+        // US Mac's Shift+2 on a German machine: `@` is AltGr, without Shift.
+        assert_eq!(level_help(2, true, true), help(true, false, true));
+        assert_eq!(level_help(3, true, true), help(false, false, true));
+        // A German Mac's `#` or `+`, no Shift there, on a US machine.
+        assert_eq!(level_help(1, false, true), help(false, true, false));
+        assert_eq!(level_help(0, false, true), LevelHelp::default());
+        assert_eq!(level_help(3, false, true), help(false, true, true));
+    }
+
+    #[test]
+    fn levels_on_x11_with_the_key_as_what_counts() {
+        // `muxin desktop input` "shift+2", an iPad's Shift+2: Shift and that key.
+        assert_eq!(level_help(0, true, false), LevelHelp::default());
+        assert_eq!(level_help(1, true, false), LevelHelp::default());
+        // "@" by itself, or an older app, which lets go of Shift first.
+        assert_eq!(level_help(1, false, false), help(false, true, false));
+        assert_eq!(level_help(2, false, false), help(false, false, true));
+    }
+
+    const VK_2: i16 = 0x32;
+    const SHIFT: i16 = 0x100;
+    const ALTGR: i16 = 0x600;
+
+    #[test]
+    fn windows_presses_the_key_when_shift_already_matches() {
+        // US Mac's Shift+2 on a US machine, and a plain 2: real keys, held and repeating.
+        assert_eq!(win_press(SHIFT | VK_2, false, true, false, true), WinPress::Key(0x32));
+        assert_eq!(win_press(VK_2, false, false, false, true), WinPress::Key(0x32));
+        // Ctrl+Shift+2 there.
+        assert_eq!(win_press(SHIFT | VK_2, false, true, true, true), WinPress::Key(0x32));
+    }
+
+    #[test]
+    fn windows_sends_the_character_when_the_keyboards_differ() {
+        // German Mac's Shift+7 (`/`) on a US machine: Shift's down, the key wants it up.
+        assert_eq!(win_press(0xbf, false, true, false, true), WinPress::Char);
+        // A German Mac's `#`, no Shift there, on a US machine.
+        assert_eq!(win_press(SHIFT | 0x33, false, false, false, true), WinPress::Char);
+        // US Mac's Shift+2 (`@`) on a German machine: AltGr+Q.
+        assert_eq!(win_press(ALTGR | 0x51, false, true, false, true), WinPress::Char);
+        // Not on this keyboard, and a key that waits for the next one (German `^`).
+        assert_eq!(win_press(-1, false, true, false, true), WinPress::Char);
+        assert_eq!(win_press(0xdc, true, false, false, true), WinPress::Char);
+    }
+
+    #[test]
+    fn windows_shortcuts_stay_keys_with_shift_corrected_just_for_them() {
+        // German Mac's Ctrl+Shift+7 on a US machine is Ctrl+/.
+        assert_eq!(win_press(0xbf, false, true, true, true), WinPress::Tap(0xbf, false));
+        // A German Mac's Ctrl+# on a US machine is Ctrl+Shift+3.
+        assert_eq!(win_press(SHIFT | 0x33, false, false, true, true), WinPress::Tap(0x33, true));
+        // A dead key isn't waiting when it's a shortcut.
+        assert_eq!(win_press(0xdc, true, false, true, true), WinPress::Key(0xdc));
+        // No key to use: nothing, rather than typing `@` over a shortcut.
+        assert_eq!(win_press(ALTGR | 0x51, false, true, true, true), WinPress::Nothing);
+        assert_eq!(win_press(-1, false, false, true, true), WinPress::Nothing);
+    }
+
+    #[test]
+    fn windows_keeps_shift_and_a_key_when_the_key_is_what_counts() {
+        // `muxin desktop input` "shift+2": Shift and that key, whatever it types.
+        assert_eq!(win_press(VK_2, false, true, false, false), WinPress::Key(0x32));
+        // "@" by itself, or an older app, which lets go of Shift first.
+        assert_eq!(win_press(SHIFT | VK_2, false, false, false, false), WinPress::Char);
+        assert_eq!(win_press(SHIFT | VK_2, false, false, true, false), WinPress::Tap(0x32, true));
     }
 }
 
@@ -722,17 +874,16 @@ mod x11 {
         sh: usize,
         shm: Option<(u32, *mut u8, usize)>,
         scratch: Vec<u8>,
-        /// keysym → (keycode, needs shift)
-        keys: HashMap<u32, (u8, bool)>,
         /// Unused keycodes given a keysym, for characters the keyboard doesn't
         /// have, oldest first (see `spare_key`). Taken back when the stream ends.
         spare: Vec<(u8, u32)>,
         /// The monitor shown (None: all of them), and when its place was last checked.
         monitor: Option<String>,
         checked: std::time::Instant,
-        /// Keys and buttons pressed and not yet let go: let go when the stream
-        /// ends, so none stays held (a key held down freezes the desktop's input).
-        pressed: Vec<u8>,
+        /// Keys (keycode, the keysym that pressed it) and buttons pressed and not yet
+        /// let go: let go when the stream ends, so none stays held (a key held
+        /// down freezes the desktop's input).
+        pressed: Vec<(u8, u32)>,
         buttons: Vec<u8>,
         /// An app's window shown on its own, and the whole desktop's size.
         window: Option<Win>,
@@ -1018,23 +1169,6 @@ mod x11 {
         }
     }
 
-    /// The keysym → (keycode, needs shift) table of the desktop's keyboard.
-    fn keymap(conn: &RustConnection) -> HashMap<u32, (u8, bool)> {
-        let mut keys: HashMap<u32, (u8, bool)> = HashMap::new();
-        let (min, max) = (conn.setup().min_keycode, conn.setup().max_keycode);
-        if let Ok(Ok(map)) = conn.get_keyboard_mapping(min, max - min + 1).map(|c| c.reply()) {
-            let per = map.keysyms_per_keycode.max(1) as usize;
-            for (i, syms) in map.keysyms.chunks(per).enumerate() {
-                for (level, sym) in syms.iter().take(2).enumerate() {
-                    if *sym != 0 {
-                        keys.entry(*sym).or_insert((min + i as u8, level == 1));
-                    }
-                }
-            }
-        }
-        keys
-    }
-
     /// What it takes to type on the desktop's keyboard, as it is right now.
     #[derive(Default)]
     struct Typing {
@@ -1104,7 +1238,7 @@ mod x11 {
 
     impl Drop for X11 {
         fn drop(&mut self) {
-            for code in self.pressed.drain(..) {
+            for (code, _) in self.pressed.drain(..) {
                 let _ = self.conn.xtest_fake_input(KEY_RELEASE_EVENT, code, 0, self.root, 0, 0, 0);
             }
             for b in self.buttons.drain(..) {
@@ -1189,8 +1323,7 @@ mod x11 {
             let monitor = monitor.filter(|m| *m != "all").map(str::to_string);
             let (ox, oy, sw, sh) = area(&conn, root, monitor.as_deref())?;
             let shm = attach_shm(&conn, sw * sh * 4);
-            let keys = keymap(&conn);
-            Ok(X11 { conn, root, ox, oy, sw, sh, shm, scratch: Vec::new(), keys, spare: Vec::new(), monitor, checked: std::time::Instant::now(), pressed: Vec::new(), buttons: Vec::new(), window: None, desktop: (dw, dh) })
+            Ok(X11 { conn, root, ox, oy, sw, sh, shm, scratch: Vec::new(), spare: Vec::new(), monitor, checked: std::time::Instant::now(), pressed: Vec::new(), buttons: Vec::new(), window: None, desktop: (dw, dh) })
         }
 
         fn open_window(conn: RustConnection, root: u32, desktop: (usize, usize), id: &str) -> Result<X11, String> {
@@ -1209,8 +1342,7 @@ mod x11 {
             let scale = desktop_scale(&conn, root);
             let win = Win { client, frame: frame_of(&conn, root, client), atoms, composite, frame_extents, added, held_at: None, cursor: "", minimized: None, drag: None, ticks: 0, scale, restore: None };
             let shm = attach_shm(&conn, desktop.0 * desktop.1 * 4);
-            let keys = keymap(&conn);
-            Ok(X11 { conn, root, ox, oy, sw, sh, shm, scratch: Vec::new(), keys, spare: Vec::new(), monitor: None, checked: std::time::Instant::now(), pressed: Vec::new(), buttons: Vec::new(), window: Some(win), desktop })
+            Ok(X11 { conn, root, ox, oy, sw, sh, shm, scratch: Vec::new(), spare: Vec::new(), monitor: None, checked: std::time::Instant::now(), pressed: Vec::new(), buttons: Vec::new(), window: Some(win), desktop })
         }
 
         /// Part of a drawable as BGRA: through shared memory when it fits, else the socket.
@@ -1464,7 +1596,7 @@ mod x11 {
     impl X11 {
         /// Input on the desktop, with the shown area's top left at (`ox`, `oy`).
         fn apply_input(&mut self, e: &Value, frame: (usize, usize), (ox, oy): (i16, i16)) {
-            let (conn, root, keys) = (&self.conn, self.root, &self.keys);
+            let (conn, root) = (&self.conn, self.root);
             let scale = (self.sw as f64 / frame.0 as f64, self.sh as f64 / frame.1 as f64);
             let at = |e: &Value| ((e["x"].as_f64().unwrap_or(0.) * scale.0) as i16 + ox, (e["y"].as_f64().unwrap_or(0.) * scale.1) as i16 + oy);
             let fake = |kind: u8, detail: u8, x: i16, y: i16| {
@@ -1523,14 +1655,53 @@ mod x11 {
                 }
                 "key" => {
                     let sym = e["keysym"].as_u64().unwrap_or(0) as u32;
-                    // Letters arrive lowercase; shift comes as its own key.
-                    let found = keys.get(&sym).or_else(|| char::from_u32(sym).map(|c| c.to_ascii_lowercase() as u32).and_then(|s| keys.get(&s)));
-                    if let Some(&(code, _)) = found {
-                        let down = e["down"].as_bool().unwrap_or(false);
-                        fake(if down { KEY_PRESS_EVENT } else { KEY_RELEASE_EVENT }, code, 0, 0);
-                        self.pressed.retain(|x| *x != code);
-                        if down {
-                            self.pressed.push(code);
+                    let typed = super::typed_char(sym).is_some();
+                    if !e["down"].as_bool().unwrap_or(false) {
+                        // The key it pressed. A character it typed with help is let go already.
+                        let code = match self.pressed.iter().position(|(_, s)| *s == sym) {
+                            Some(i) => Some(self.pressed.remove(i).0),
+                            None if typed => None,
+                            None => Typing::read(conn).keys.get(&sym).map(|(code, _)| *code),
+                        };
+                        if let Some(code) = code {
+                            fake(KEY_RELEASE_EVENT, code, 0, 0);
+                        }
+                        return;
+                    }
+                    let typing = Typing::read(conn);
+                    let modifier = |sym: u32| typing.keys.get(&sym).map(|(code, _)| *code);
+                    let (shift, altgr) = (modifier(0xffe1), modifier(0xfe03));
+                    let found = typing.keys.get(&sym).copied().filter(|(_, level)| *level < 2 || altgr.is_some());
+                    let found = found.or_else(|| typed.then(|| spare_key(conn, &mut self.spare, &typing.unused, sym)).flatten().map(|code| (code, 0)));
+                    let Some((code, level)) = found else { return };
+                    let shifts: Vec<u8> = self.pressed.iter().filter(|(_, s)| matches!(s, 0xffe1 | 0xffe2)).map(|(code, _)| *code).collect();
+                    // A spare key has the character on both levels: Shift can stay as it is.
+                    let help = if self.spare.iter().any(|(_, s)| *s == sym) { Default::default() } else { super::level_help(level, !shifts.is_empty(), e["char"].as_bool().unwrap_or(false)) };
+                    if help == super::LevelHelp::default() {
+                        // Really held, so the desktop repeats it as it does any key.
+                        fake(KEY_PRESS_EVENT, code, 0, 0);
+                        self.pressed.retain(|(c, _)| *c != code);
+                        self.pressed.push((code, sym));
+                    } else {
+                        // Pressed and let go at once, or the desktop would repeat it
+                        // without its help (`@` then `2222`), and the next key typed
+                        // before this one is let go would get it (`@` then `A`). The
+                        // sender's own repeats type it again.
+                        let lifted: &[u8] = if help.lift_shift { &shifts } else { &[] };
+                        let added: Vec<u8> = [help.press_shift.then_some(shift).flatten(), help.altgr.then_some(altgr).flatten()].into_iter().flatten().collect();
+                        for s in lifted {
+                            fake(KEY_RELEASE_EVENT, *s, 0, 0);
+                        }
+                        for m in &added {
+                            fake(KEY_PRESS_EVENT, *m, 0, 0);
+                        }
+                        fake(KEY_PRESS_EVENT, code, 0, 0);
+                        fake(KEY_RELEASE_EVENT, code, 0, 0);
+                        for m in added.iter().rev() {
+                            fake(KEY_RELEASE_EVENT, *m, 0, 0);
+                        }
+                        for s in lifted {
+                            fake(KEY_PRESS_EVENT, *s, 0, 0);
                         }
                     }
                 }
@@ -2193,12 +2364,25 @@ mod mac {
                             self.flags &= !flag;
                         }
                     }
-                    if let Some(code) = keycode(sym) {
-                        unsafe { muxen_key(code, down as i32, self.flags) };
-                        self.pressed.retain(|x| *x != code);
-                        if down {
+                    if !down {
+                        // A character typed as text has no key to let go.
+                        if let Some(code) = keycode(sym).filter(|code| super::typed_char(sym).is_none() || self.pressed.contains(code)) {
+                            unsafe { muxen_key(code, 0, self.flags) };
+                            self.pressed.retain(|x| *x != code);
+                        }
+                        return;
+                    }
+                    match mac_press(sym, self.flags, e["char"].as_bool().unwrap_or(false)) {
+                        MacPress::Key(code, flags) => {
+                            unsafe { muxen_key(code, 1, flags) };
+                            self.pressed.retain(|x| *x != code);
                             self.pressed.push(code);
                         }
+                        MacPress::Text => {
+                            let unit = sym as u16;
+                            unsafe { muxen_text(&unit, 1) };
+                        }
+                        MacPress::Nothing => {}
                     }
                 }
                 _ => {}
@@ -2226,6 +2410,38 @@ mod mac {
             0xffeb | 0xffec | 0xffe7 => 0x100000, // command
             _ => return None,
         })
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum MacPress {
+        /// A key, with these flags.
+        Key(u16, u64),
+        /// The character itself, whatever this Mac's layout.
+        Text,
+        Nothing,
+    }
+
+    /// How to press a "key" event's keysym. `keycode` knows a US keyboard: a
+    /// character goes as its key when Shift is as that key wants it there (apps
+    /// that read key codes get a real one), or when a shortcut needs a key, with
+    /// Shift corrected; else as text, which needs no key. `exact`: see `level_help`.
+    fn mac_press(sym: u32, flags: u64, exact: bool) -> MacPress {
+        const SHIFT: u64 = 0x20000;
+        const SHORTCUT: u64 = 0x40000 | 0x80000 | 0x100000;
+        let code = keycode(sym);
+        let Some(unit) = super::typed_char(sym) else {
+            return code.map_or(MacPress::Nothing, |code| MacPress::Key(code, flags));
+        };
+        let wants_shift = char::from_u32(unit as u32).is_some_and(|c| c.is_ascii_uppercase() || "!@#$%^&*()_+{}|:\"<>?~".contains(c));
+        let shift_held = flags & SHIFT != 0;
+        if flags & SHORTCUT != 0 {
+            let flags = if wants_shift { flags | SHIFT } else if exact { flags & !SHIFT } else { flags };
+            return code.map_or(MacPress::Nothing, |code| MacPress::Key(code, flags));
+        }
+        match code {
+            Some(code) if wants_shift == shift_held || (shift_held && !exact) => MacPress::Key(code, flags),
+            _ => MacPress::Text,
+        }
     }
 
     /// An X keysym's macOS virtual keycode (a US keyboard's layout).
@@ -2278,6 +2494,61 @@ mod mac {
             assert_eq!(keycode(0xffbe), Some(122));
             assert_eq!(keycode('!' as u32), Some(18));
             assert_eq!(modifier_flag(0xffeb), Some(0x100000));
+        }
+
+        const SHIFT: u64 = 0x20000;
+        const CTRL: u64 = 0x40000;
+        const CMD: u64 = 0x100000;
+
+        #[test]
+        fn a_character_is_its_key_when_shift_matches_a_us_keyboard() {
+            // Shift+2 from a US Mac, and a plain 2: real keys, for apps that read key codes.
+            assert_eq!(mac_press('@' as u32, SHIFT, true), MacPress::Key(19, SHIFT));
+            assert_eq!(mac_press('2' as u32, 0, true), MacPress::Key(19, 0));
+            assert_eq!(mac_press('/' as u32, 0, true), MacPress::Key(44, 0));
+        }
+
+        #[test]
+        fn a_character_is_text_when_a_us_keyboard_wouldnt_type_it_that_way() {
+            // Shift+7 from a German Mac: Shift's down, a US `/` has none.
+            assert_eq!(mac_press('/' as u32, SHIFT, true), MacPress::Text);
+            // `#` from a German Mac, no Shift there.
+            assert_eq!(mac_press('#' as u32, 0, true), MacPress::Text);
+            // Not on a US keyboard at all.
+            for c in ['ö', 'Ö', '§'] {
+                assert_eq!(mac_press(c as u32, SHIFT, true), MacPress::Text, "{c}");
+                assert_eq!(mac_press(c as u32, 0, true), MacPress::Text, "{c}");
+            }
+        }
+
+        #[test]
+        fn shortcuts_keep_their_keys_with_shift_as_a_us_keyboard_has_it() {
+            // ⌘⇧3 and ⌘⇧] from a US Mac.
+            assert_eq!(mac_press('#' as u32, CMD | SHIFT, true), MacPress::Key(20, CMD | SHIFT));
+            assert_eq!(mac_press('}' as u32, CMD | SHIFT, true), MacPress::Key(30, CMD | SHIFT));
+            // ⌘⇧7 from a German Mac is ⌘/.
+            assert_eq!(mac_press('/' as u32, CMD | SHIFT, true), MacPress::Key(44, CMD));
+            // ⌃# from a German Mac, no Shift there.
+            assert_eq!(mac_press('#' as u32, CTRL, true), MacPress::Key(20, CTRL | SHIFT));
+            // Not on a US keyboard: nothing, rather than typing it over a shortcut.
+            assert_eq!(mac_press('§' as u32, CMD | SHIFT, true), MacPress::Nothing);
+        }
+
+        #[test]
+        fn letters_and_named_keys_are_keys() {
+            assert_eq!(mac_press('a' as u32, SHIFT, false), MacPress::Key(0, SHIFT));
+            assert_eq!(mac_press(0xff0d, SHIFT, false), MacPress::Key(36, SHIFT));
+            assert_eq!(mac_press(0xffe1, SHIFT, false), MacPress::Key(56, SHIFT));
+        }
+
+        #[test]
+        fn without_char_shift_and_a_key_stay_that() {
+            // `muxin desktop input` "shift+2" and "2".
+            assert_eq!(mac_press('2' as u32, SHIFT, false), MacPress::Key(19, SHIFT));
+            assert_eq!(mac_press('2' as u32, 0, false), MacPress::Key(19, 0));
+            // "@" by itself, or an older app, which lets go of Shift first.
+            assert_eq!(mac_press('@' as u32, 0, false), MacPress::Text);
+            assert_eq!(mac_press('@' as u32, SHIFT, false), MacPress::Key(19, SHIFT));
         }
     }
 }

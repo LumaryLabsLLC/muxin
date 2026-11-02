@@ -1019,12 +1019,26 @@ impl DesktopView {
             return;
         }
         if let Some(sym) = keysym(key) {
-            self.send(json!({ "t": "key", "keysym": sym, "down": down }));
+            // A key let go that's not down there: its character went as text, or
+            // it was let go when Shift changed (see `let_go_characters`).
+            if down || self.keys_down.contains(&sym) {
+                self.send(key_event(sym, down));
+            }
             self.keys_down.retain(|x| *x != sym);
             if down {
                 self.keys_down.push(sym);
             }
             cx.stop_propagation();
+        }
+    }
+
+    /// Shift changed. A key down that's a character has another name now (`@`
+    /// pressed, `2` let go), so its key-up couldn't be matched: it's let go now.
+    fn let_go_characters(&mut self) {
+        let (characters, rest): (Vec<u32>, Vec<u32>) = std::mem::take(&mut self.keys_down).into_iter().partition(|sym| is_character(*sym));
+        self.keys_down = rest;
+        for sym in characters {
+            self.send(key_event(sym, false));
         }
     }
 
@@ -1407,7 +1421,12 @@ impl Render for DesktopView {
             .on_mouse_up(MouseButton::Right, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.position, false, w, cx)))
             .on_mouse_up(MouseButton::Middle, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.position, false, w, cx)))
             .on_scroll_wheel(cx.listener(Self::scroll))
-            .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, _, cx| this.modifiers(e.modifiers, option_may_type(cx))))
+            .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, _, cx| {
+                if e.modifiers.shift != this.held.shift {
+                    this.let_go_characters();
+                }
+                this.modifiers(e.modifiers, option_may_type(cx))
+            }))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
                 // ⌘W closes an app's window here, as any window here (Ctrl+Shift+W
                 // off a Mac: Ctrl+W is the app's); the app goes on there.
@@ -1433,12 +1452,50 @@ impl Render for DesktopView {
                     }
                     return;
                 }
+                // Whether this key waits for the next is the input method's to know.
+                if cfg!(target_os = "macos") && may_wait_for_next_key(&e.keystroke) {
+                    return;
+                }
                 this.alt_needed();
-                this.modifiers(e.keystroke.modifiers, option_may_type(cx));
+                this.modifiers(modifiers_for_key(&e.keystroke, this.held.shift), option_may_type(cx));
                 this.key(&e.keystroke.key, true, cx)
             }))
             .on_key_up(cx.listener(|this, e: &KeyUpEvent, _, cx| this.key(&e.keystroke.key, false, cx)))
     }
+}
+
+/// A key that is the character it types (`@`, `/`, `ö`): GPUI names it that,
+/// with Shift counted. Not a letter, which Shift comes on top of, or a named key.
+fn is_character(sym: u32) -> bool {
+    matches!(sym, 0x21..=0x60 | 0x7b..=0x7e | 0xa1..=0xff)
+}
+
+/// A key for the machine. With "char", it types that character whatever its own
+/// keyboard needs for it (see `typed_char` in the agent).
+fn key_event(sym: u32, down: bool) -> Value {
+    if down && is_character(sym) {
+        json!({ "t": "key", "keysym": sym, "down": true, "char": true })
+    } else {
+        json!({ "t": "key", "keysym": sym, "down": down })
+    }
+}
+
+/// What a key has down with it. GPUI takes Shift off a character's key, though
+/// it's still down here: the machine isn't told otherwise, so with the same
+/// keyboard it sees just what happened here (Shift, then 2), and nothing that
+/// looks like Shift tapped (it switches some input methods).
+fn modifiers_for_key(stroke: &gpui::Keystroke, shift_told: bool) -> Modifiers {
+    let character = keysym(&stroke.key).is_some_and(is_character);
+    Modifiers { shift: if character { shift_told } else { stroke.modifiers.shift }, ..stroke.modifiers }
+}
+
+/// A character that's a dead key on some Mac layouts, and an ordinary key on
+/// others: German `´` and Shift+`´`, French `^`. Only the input method can tell
+/// (GPUI's key_char is the same either way), so it gets these, and types them
+/// or what they make (`è`) through `DesktopInput`.
+fn may_wait_for_next_key(stroke: &gpui::Keystroke) -> bool {
+    let m = &stroke.modifiers;
+    !m.control && !m.platform && !m.alt && !m.function && matches!(stroke.key.as_str(), "`" | "´" | "^" | "¨" | "~")
 }
 
 fn option_may_type(cx: &App) -> bool {
@@ -1792,6 +1849,65 @@ mod tests {
 
     const GERMAN: &str = "com.apple.keylayout.German";
     const US: &str = "com.apple.keylayout.US";
+
+    /// As GPUI reports it on a Mac: Shift taken off, the key named what it types.
+    fn stroke(key: &str, control: bool, platform: bool) -> gpui::Keystroke {
+        gpui::Keystroke { modifiers: Modifiers { control, platform, ..Default::default() }, key: key.into(), key_char: None }
+    }
+
+    #[test]
+    fn characters_are_told_apart_from_keys() {
+        for key in ["@", "/", "2", "#", "+", "ö", "Ö", "§", "ß", "\\", "}"] {
+            assert!(is_character(keysym(key).unwrap()), "{key}");
+        }
+        for key in ["a", "z", "space", "enter", "tab", "left", "f4", "shift", "backspace"] {
+            assert!(!is_character(keysym(key).unwrap()), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_characters_key_says_so_only_when_it_goes_down() {
+        assert_eq!(key_event(0x40, true), json!({ "t": "key", "keysym": 0x40, "down": true, "char": true }));
+        assert_eq!(key_event(0x40, false), json!({ "t": "key", "keysym": 0x40, "down": false }));
+        assert_eq!(key_event('a' as u32, true), json!({ "t": "key", "keysym": 'a' as u32, "down": true }));
+        assert_eq!(key_event(0xff0d, true), json!({ "t": "key", "keysym": 0xff0d, "down": true }));
+    }
+
+    #[test]
+    fn shift_stays_as_the_machine_knows_it_for_a_character() {
+        // Shift+2 on a US keyboard, Shift+7 on a German one: GPUI says `@` and `/`, no Shift.
+        for key in ["@", "/"] {
+            assert!(modifiers_for_key(&stroke(key, false, false), true).shift, "{key}");
+            assert!(!modifiers_for_key(&stroke(key, false, false), false).shift, "{key}");
+        }
+        // With a shortcut too: ⌃⇧2, ⌘⇧3. The rest stays.
+        let m = modifiers_for_key(&stroke("@", true, false), true);
+        assert!(m.shift && m.control);
+        let m = modifiers_for_key(&stroke("#", false, true), true);
+        assert!(m.shift && m.platform);
+    }
+
+    #[test]
+    fn shift_is_what_gpui_says_for_letters_and_named_keys() {
+        let mut upper = stroke("a", false, false);
+        upper.modifiers.shift = true;
+        assert!(modifiers_for_key(&upper, false).shift);
+        assert!(!modifiers_for_key(&stroke("a", false, false), true).shift);
+        assert!(!modifiers_for_key(&stroke("tab", false, false), true).shift);
+    }
+
+    #[test]
+    fn only_the_input_method_knows_a_dead_key() {
+        for key in ["`", "´", "^", "¨", "~"] {
+            assert!(may_wait_for_next_key(&stroke(key, false, false)), "{key}");
+            // A shortcut is a key: ⌃` opens VS Code's terminal.
+            assert!(!may_wait_for_next_key(&stroke(key, true, false)), "{key}");
+            assert!(!may_wait_for_next_key(&stroke(key, false, true)), "{key}");
+        }
+        for key in ["@", "/", "a", "2", "enter"] {
+            assert!(!may_wait_for_next_key(&stroke(key, false, false)), "{key}");
+        }
+    }
 
     fn option(key: &str, text: Option<&str>) -> gpui::Keystroke {
         let mut stroke = gpui::Keystroke::parse(&format!("alt-{key}")).unwrap();

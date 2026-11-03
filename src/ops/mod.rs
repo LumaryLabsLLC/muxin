@@ -168,6 +168,8 @@ pub enum RunnerAction {
     Logs,
     /// Stop, uninstall the service, deregister from GitHub, and drop it from config.toml.
     Remove { delete_files: bool },
+    /// Replace its programs with the latest release's, between jobs. Its registration stays.
+    Update,
 }
 
 impl RunnerAction {
@@ -178,6 +180,7 @@ impl RunnerAction {
             RunnerAction::Restart => "Restart",
             RunnerAction::Logs => "Logs",
             RunnerAction::Remove { .. } => "Remove",
+            RunnerAction::Update => "Update",
         }
     }
 
@@ -188,6 +191,7 @@ impl RunnerAction {
             RunnerAction::Restart => "restart",
             RunnerAction::Logs => "logs",
             RunnerAction::Remove { .. } => "remove",
+            RunnerAction::Update => "update",
         }
     }
 }
@@ -235,6 +239,9 @@ impl Engine {
             .is_some_and(|m| m.status == "online");
         let dir = runner.local.as_ref().map(|l| l.dir.clone());
         let container = runner.local.as_ref().and_then(|l| l.container.clone());
+        if action == RunnerAction::Update && runner.state == "working" {
+            return Err(format!("{} is running a job. Update it when it's idle.", runner.name));
+        }
 
         let plan = match action {
             // The last check may be stale (one that ran while the machine
@@ -788,15 +795,31 @@ async fn run_action(engine: &Arc<Engine>, op: u64, runner: &Runner, action: Runn
                     secrets.push(token.clone());
                 }
             }
+            let release = match action {
+                RunnerAction::Update => {
+                    step(engine, op, "Looking up the latest runner release");
+                    let release = engine.github().latest_runner_release(&settings.github).await.ok_or("Muxin couldn't look up the latest runner release on GitHub. Try again.")?;
+                    if runner.local.as_ref().and_then(|l| l.version.as_deref()) == Some(release.version.as_str()) {
+                        engine.op_log(op, format!("✓ {} already runs {}", runner.name, release.version));
+                        return Ok(());
+                    }
+                    release
+                }
+                _ => RunnerRelease { version: String::new(), sha256: Vec::new() },
+            };
+            // Every package's, as "<platform>=<hex>": the script works out which one it needs.
+            let sha256: Vec<String> = release.sha256.iter().map(|(platform, hex)| format!("{platform}={hex}")).collect();
             step(engine, op, format!("{} {} on {}", verb(action), runner.name, spec.name));
             let script = match &container {
-                Some(c) => control_docker_script(action, c, &token, delete_files),
+                Some(c) => control_docker_script(action, c, &token, delete_files, &release.version, &sha256),
                 None => {
                     let params = [
                         ("OR_ACTION", Param::Str(action.kind())),
                         ("OR_DIR", Param::Str(&dir)),
                         ("OR_TOKEN", Param::Str(&token)),
                         ("OR_DELETE", Param::Bool(delete_files)),
+                        ("OR_VERSION", Param::Str(&release.version)),
+                        ("OR_SHA256", Param::List(&sha256)),
                     ];
                     match shell {
                         Shell::Sh => with_params(shell, &params, CONTROL_SH),
@@ -804,7 +827,8 @@ async fn run_action(engine: &Arc<Engine>, op: u64, runner: &Runner, action: Runn
                     }
                 }
             };
-            remote::run(engine, op, &spec, shell, script, &secrets, CONTROL_TIMEOUT).await?;
+            let timeout = if action == RunnerAction::Update { INSTALL_TIMEOUT } else { CONTROL_TIMEOUT };
+            remote::run(engine, op, &spec, shell, script, &secrets, timeout).await?;
             if let RunnerAction::Remove { .. } = action {
                 // A folder deleted by hand leaves the runner registered: finish that through the API.
                 if let Some(gh) = runner.github.as_ref() {
@@ -843,12 +867,14 @@ async fn run_action(engine: &Arc<Engine>, op: u64, runner: &Runner, action: Runn
     }
 }
 
-fn control_docker_script(action: RunnerAction, container: &str, token: &str, delete_files: bool) -> String {
+fn control_docker_script(action: RunnerAction, container: &str, token: &str, delete_files: bool, version: &str, sha256: &[String]) -> String {
     let params = [
         ("OR_ACTION", Param::Str(action.kind())),
         ("OR_CONTAINER", Param::Str(container)),
         ("OR_TOKEN", Param::Str(token)),
         ("OR_DELETE", Param::Bool(delete_files)),
+        ("OR_VERSION", Param::Str(version)),
+        ("OR_SHA256", Param::List(sha256)),
     ];
     with_params(Shell::Sh, &params, CONTROL_DOCKER_SH)
 }
@@ -884,6 +910,7 @@ fn verb(action: RunnerAction) -> &'static str {
         RunnerAction::Restart => "Restarting",
         RunnerAction::Logs => "Reading the log of",
         RunnerAction::Remove { .. } => "Removing",
+        RunnerAction::Update => "Updating",
     }
 }
 
@@ -1024,6 +1051,9 @@ async fn demo_action(engine: &Arc<Engine>, op: u64, runner: &Runner, action: Run
         None => format!("service actions.runner.acme.{}", runner.name),
     };
     match action {
+        RunnerAction::Update => {
+            engine.op_log(op, "The demo doesn't change its runners.");
+        }
         RunnerAction::Start => {
             engine.op_log(op, format!("Starting {service}…"));
             pause(700).await;

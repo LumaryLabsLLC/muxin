@@ -514,10 +514,10 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "runner_action",
-            "description": "Control one runner on its machine: start, stop or restart its service; logs (read-only tail of its newest _diag log); or remove (stop, uninstall the service, deregister from GitHub, drop it from config.toml, optionally delete its folder). For a runner no machine lists (\"github/<name>\"), remove deregisters it on GitHub. stop and remove take the runner offline; confirm with the user first.",
+            "description": "Control one runner on its machine: start, stop or restart its service; logs (read-only tail of its newest _diag log); update (replace its programs with the latest release's, checked against GitHub's SHA-256, keeping its registration; refused while it runs a job); or remove (stop, uninstall the service, deregister from GitHub, drop it from config.toml, optionally delete its folder). For a runner no machine lists (\"github/<name>\"), remove deregisters it on GitHub. stop and remove take the runner offline; confirm with the user first.",
             "inputSchema": schema(json!({
                 "runner_id": { "type": "string", "description": RUNNER_ID },
-                "action": { "type": "string", "enum": ["start", "stop", "restart", "logs", "remove"] },
+                "action": { "type": "string", "enum": ["start", "stop", "restart", "logs", "remove", "update"] },
                 "delete_files": { "type": "boolean", "description": "With remove: also delete the runner's folder. Default false." },
                 "wait": { "type": "boolean", "description": "Wait for it to finish. Default true." },
                 "timeout_secs": { "type": "integer", "minimum": 1, "description": "How long to wait. Default 180." }

@@ -222,7 +222,7 @@ The MCP server has these tools:
 | `schedule_list`, `schedule_save`, `schedule_delete`, `schedule_run`, `schedule_log` | Commands and agent sessions that run on a machine at set times, run there by its own scheduler. |
 | `agent_usage` | What Claude Code and Codex used over the last N days: tokens, requests and cost at API prices, by model and machine. |
 | `install_runners` | Downloads, registers and starts runners on a machine. |
-| `runner_action` | Starts, stops, restarts or removes a runner, or reads its logs. |
+| `runner_action` | Starts, stops, restarts, updates or removes a runner, or reads its logs. |
 | `get_operation`, `list_operations` | Progress and output of long operations. |
 | `github_scopes` | Watches or unwatches orgs and repos, with access checks. |
 | `get_settings`, `update_settings` | Settings. |

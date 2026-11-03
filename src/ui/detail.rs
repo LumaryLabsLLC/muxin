@@ -312,7 +312,7 @@ impl Root {
 
         // Being unreachable has its own card above.
         let diags: Vec<Diagnostic> = m.diagnostics.iter().filter(|d| d.code != "unreachable").cloned().collect();
-        body = body.child(diagnostics_section(&theme, &diags, &s));
+        body = body.child(diagnostics_section(&theme, &diags, &s, &m.id, cx));
         if !m.host.is_empty() {
             body = body.child(self.machine_workspaces(&theme, &s, &m, cx));
         }
@@ -652,7 +652,7 @@ impl Root {
 
         let diags: Vec<Diagnostic> =
             machine.iter().flat_map(|m| m.diagnostics.iter()).filter(|d| d.runner_id.as_deref() == Some(id)).cloned().collect();
-        body = body.child(diagnostics_section(&theme, &diags, &s));
+        body = body.child(diagnostics_section(&theme, &diags, &s, r.machine_id.as_deref().unwrap_or_default(), cx));
         let rid = r.id.clone();
         body = body.child(self.operations_section(&theme, &s, move |o| o.runner_id.as_deref() == Some(&rid), cx));
         body.into_any_element()
@@ -703,7 +703,9 @@ pub(super) fn op_status_icon(theme: &Theme, o: &Operation) -> AnyElement {
     }
 }
 
-fn diagnostics_section(theme: &Theme, diags: &[Diagnostic], _s: &Snapshot) -> AnyElement {
+fn diagnostics_section(theme: &Theme, diags: &[Diagnostic], s: &Snapshot, machine: &str, cx: &mut Context<Root>) -> AnyElement {
+    // What changes the machine waits for what's already changing it; opening a page doesn't.
+    let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(machine) && o.kind != "logs");
     let rows: Vec<AnyElement> = diags
         .iter()
         .enumerate()
@@ -731,8 +733,19 @@ fn diagnostics_section(theme: &Theme, diags: &[Diagnostic], _s: &Snapshot) -> An
                         .min_w(px(0.))
                         .gap(px(4.))
                         .child(div().text_size(px(12.5)).child(d.message.clone()))
-                        .children(d.hint.clone().map(|h| copyable(theme, i, h))),
+                        // The hint says how to do it by hand: a button does it.
+                        .children(d.hint.clone().filter(|_| d.actions.is_empty()).map(|h| copyable(theme, i, h))),
                 )
+                .children((!d.actions.is_empty()).then(|| {
+                    div().flex().flex_none().items_center().gap(px(6.)).children(d.actions.iter().enumerate().map(|(n, a)| {
+                        let (kind, machine, runner) = (a.kind.clone(), machine.to_string(), d.runner_id.clone());
+                        let changes = !matches!(kind.as_str(), "runner_logs" | "open_services" | "open_processes" | "open_files" | "open_settings");
+                        Button::new(SharedString::from(format!("diag-{i}-{n}")), a.label.clone())
+                            .style(ButtonStyle::Outlined)
+                            .disabled(changes && busy)
+                            .on_click(cx.listener(move |this, _, window, cx| this.run_diagnostic_action(&kind, &machine, runner.as_deref(), window, cx)))
+                    }))
+                }))
                 .into_any_element()
         })
         .collect();
@@ -747,7 +760,7 @@ fn diagnostics_section(theme: &Theme, diags: &[Diagnostic], _s: &Snapshot) -> An
 
 /// A hint line; commands get a copy button.
 fn copyable(theme: &Theme, i: usize, text: String) -> impl IntoElement {
-    let looks_like_command = ["gh ", "ssh ", "ssh-", "sudo ", "cd ", "Start-Service", "systemctl", "launchctl"].iter().any(|p| text.starts_with(p));
+    let looks_like_command = ["gh ", "ssh ", "ssh-", "sudo ", "cd ", "docker ", "Start-Service", "systemctl", "launchctl"].iter().any(|p| text.starts_with(p));
     let copy = text.clone();
     div()
         .flex()

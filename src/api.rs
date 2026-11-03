@@ -232,6 +232,7 @@ pub enum ActionName {
     Restart,
     Logs,
     Remove,
+    Update,
 }
 
 impl std::str::FromStr for ActionName {
@@ -244,7 +245,8 @@ impl std::str::FromStr for ActionName {
             "restart" => Ok(ActionName::Restart),
             "logs" | "log" => Ok(ActionName::Logs),
             "remove" | "rm" | "delete" => Ok(ActionName::Remove),
-            other => Err(ApiError::invalid(format!("Unknown action \"{other}\". Use start, stop, restart, logs or remove."))),
+            "update" => Ok(ActionName::Update),
+            other => Err(ApiError::invalid(format!("Unknown action \"{other}\". Use start, stop, restart, logs, remove or update."))),
         }
     }
 }
@@ -499,6 +501,9 @@ pub struct DiagnosticOut {
     pub hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_id: Option<String>,
+    /// What Muxin can do about it, the likely fix first (see AGENTS.md).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<crate::fleet::model::DiagnosticAction>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -555,7 +560,7 @@ pub struct JobsResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct OperationOut {
     pub id: u64,
-    /// "install" | "start" | "stop" | "restart" | "remove" | "logs"
+    /// "install" | "start" | "stop" | "restart" | "remove" | "logs" | "update"
     pub kind: String,
     pub title: String,
     /// "running" | "succeeded" | "failed"
@@ -752,6 +757,7 @@ fn machine_detail(s: &Snapshot, m: &Machine) -> MachineDetail {
                 message: d.message.clone(),
                 hint: d.hint.clone(),
                 runner_id: d.runner_id.clone(),
+                actions: d.actions.clone(),
             })
             .collect(),
     }
@@ -1317,6 +1323,7 @@ pub async fn runner_action(engine: &Arc<Engine>, req: RunnerActionRequest, surfa
         ActionName::Restart => RunnerAction::Restart,
         ActionName::Logs => RunnerAction::Logs,
         ActionName::Remove => RunnerAction::Remove { delete_files: req.delete_files },
+        ActionName::Update => RunnerAction::Update,
     };
     let op = engine.runner_action(&runner.id, action).map_err(op_error)?;
     let tail = if req.action == ActionName::Logs { LOGS_TAIL } else { DEFAULT_TAIL };

@@ -686,7 +686,15 @@ fn summarize<'a>(runners: impl Iterator<Item = &'a Runner>) -> RunnerSummary {
 }
 
 fn diag(level: &str, code: &str, message: String, hint: Option<String>, runner_id: Option<&str>) -> Diagnostic {
-    Diagnostic { level: level.into(), code: code.into(), message, hint, runner_id: runner_id.map(str::to_string) }
+    Diagnostic { level: level.into(), code: code.into(), message, hint, runner_id: runner_id.map(str::to_string), actions: Vec::new() }
+}
+
+impl Diagnostic {
+    /// Adds a button: the first one is the likely fix.
+    fn act(mut self, label: &str, kind: &str) -> Self {
+        self.actions.push(crate::fleet::model::DiagnosticAction { label: label.into(), kind: kind.into() });
+        self
+    }
 }
 
 fn level_rank(level: &str) -> u8 {
@@ -716,14 +724,14 @@ fn runner_diagnostics(
             None if declared => out.push(diag(
                 "warning",
                 "runner-missing",
-                format!("{name} isn't installed here: no runner folder with that name was found."),
-                Some(if p.os.as_deref() == Some("windows") {
-                    "If it lives somewhere unusual, add its folder to runner_dirs in config.toml.".into()
-                } else {
-                    "If it lives somewhere unusual, add its folder to runner_dirs in config.toml (globs work).".into()
-                }),
+                format!(
+                    "{name} isn't installed here: no runner folder with that name was found. If it lives somewhere unusual, add its folder to runner_dirs in config.toml{}.",
+                    if p.os.as_deref() == Some("windows") { "" } else { " (globs work)" }
+                ),
+                None,
                 rid,
-            )),
+            )
+            .act("Install runner", "runner_install")),
             Some(l) if l.container.is_some() && (l.container_state.as_deref() == Some("restarting") || l.restarts.unwrap_or(0) >= CRASH_LOOP_RESTARTS) => {
                 let c = l.container.as_deref().unwrap_or_default();
                 out.push(diag(
@@ -732,12 +740,14 @@ fn runner_diagnostics(
                     format!("{name}'s container keeps restarting ({} restarts).", l.restarts.unwrap_or(0)),
                     Some(format!("docker logs --tail 50 {c}")),
                     rid,
-                ));
+                )
+                .act("Show logs", "runner_logs")
+                .act("Restart", "runner_restart"));
             }
             Some(l) if l.container.is_some() && l.listener_pid.is_none() => {
                 let c = l.container.as_deref().unwrap_or_default();
                 let state = l.container_state.as_deref().unwrap_or("stopped");
-                out.push(diag("warning", "runner-stopped", format!("{name}'s container is {state}."), Some(format!("docker start {c}")), rid));
+                out.push(diag("warning", "runner-stopped", format!("{name}'s container is {state}."), Some(format!("docker start {c}")), rid).act("Start", "runner_start"));
             }
             Some(l) if l.listener_pid.is_none() => {
                 let hint = match (l.service.is_some(), p.os.as_deref()) {
@@ -747,7 +757,7 @@ fn runner_diagnostics(
                     (false, Some("windows")) => format!("cd {}; .\\run.cmd", l.dir),
                     (false, _) => format!("cd {} && ./run.sh", l.dir),
                 };
-                out.push(diag("warning", "runner-stopped", format!("{name} is installed but not running."), Some(hint), rid));
+                out.push(diag("warning", "runner-stopped", format!("{name} is installed but not running."), Some(hint), rid).act("Start", "runner_start"));
             }
             Some(l) if gh.is_some_and(|g| g.status == "offline") => out.push(diag(
                 "warning",
@@ -758,13 +768,15 @@ fn runner_diagnostics(
                     None => format!("Check the newest log in {}/_diag", l.dir),
                 }),
                 rid,
-            )),
+            )
+            .act("Show logs", "runner_logs")
+            .act("Restart", "runner_restart")),
             _ => {}
         }
         if let (Some(l), Some(latest)) = (local, latest_version) {
             if let Some(v) = l.version.as_deref() {
                 if version_lt(v, latest) {
-                    out.push(diag("info", "update-available", format!("{name} runs {v}; {latest} is available."), None, rid));
+                    out.push(diag("info", "update-available", format!("{name} runs {v}; {latest} is available."), None, rid).act("Update", "runner_update"));
                 }
             }
         }
@@ -776,13 +788,14 @@ fn runner_diagnostics(
         out.push(diag(
             "unknown",
             "not-on-github",
-            format!("{name} wasn't found in the GitHub orgs and repos you watch."),
-            local
-                .and_then(|l| l.url.as_deref())
-                .and_then(scope_from_runner_url)
-                .map(|s| format!("It's registered to {s}. Add it in Settings.")),
+            match local.and_then(|l| l.url.as_deref()).and_then(scope_from_runner_url) {
+                Some(s) => format!("{name} wasn't found in the GitHub orgs and repos you watch. It's registered to {s}."),
+                None => format!("{name} wasn't found in the GitHub orgs and repos you watch."),
+            },
+            None,
             rid,
-        ));
+        )
+        .act("Open Settings", "open_settings"));
     }
 }
 
@@ -815,14 +828,17 @@ fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Opt
             out.push(diag(
                 "warning",
                 "low-disk",
-                format!("Low disk space: {} free of {}.", util::bytes(free), util::bytes(total)),
-                Some("Runner _work folders and toolcaches grow over time; clean them up or add space.".into()),
+                format!("Low disk space: {} free of {}. Runner _work folders and toolcaches grow over time.", util::bytes(free), util::bytes(total)),
                 None,
-            ));
+                None,
+            )
+            .act("Open Files", "open_files"));
         }
     }
     if p.reboot_required {
-        out.push(diag("warning", "reboot-required", "Updates are waiting for a reboot.".into(), Some("sudo reboot  # its sessions end; Muxin reconnects when it's back".into()), None));
+        let d = diag("warning", "reboot-required", "Updates are waiting for a reboot.".into(), Some("sudo reboot  # its sessions end; Muxin reconnects when it's back".into()), None);
+        // This computer restarts from its own menu.
+        out.push(if spec.is_local() { d } else { d.act("Restart…", "machine_restart") });
     }
     if !p.failed_units.is_empty() {
         let n = p.failed_units.len();
@@ -832,7 +848,8 @@ fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Opt
             format!("{} service{} failed: {}.", n, if n == 1 { "" } else { "s" }, p.failed_units.join(", ")),
             Some("Machine › Services shows them, with their logs.".into()),
             None,
-        ));
+        )
+        .act("Open Services", "open_services"));
     }
     if let Some(err) = &p.docker_error {
         out.push(diag(
@@ -851,7 +868,8 @@ fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Opt
                 format!("Memory is nearly full: {} of {} used.", util::bytes(used), util::bytes(total)),
                 None,
                 None,
-            ));
+            )
+            .act("Open Processes", "open_processes"));
         }
     }
 }
@@ -1241,6 +1259,44 @@ mod tests {
     }
 
     #[test]
+    fn a_runner_behind_can_update_and_a_machine_can_restart_unless_its_this_one() {
+        let mut out = Vec::new();
+        let mut runner = local("s-01", true, false);
+        runner.version = Some("2.338.0".into());
+        let probe = probe_with(vec![runner.clone()]);
+        runner_diagnostics(&mut out, "studio/s-01", "s-01", false, Some(&runner), Some(&probe), None, false, Some("2.338.2"));
+        let d = out.iter().find(|d| d.code == "update-available").expect("it's behind");
+        assert_eq!(d.message, "s-01 runs 2.338.0; 2.338.2 is available.");
+        assert_eq!(d.actions[0].kind, "runner_update");
+        out.clear();
+        runner_diagnostics(&mut out, "studio/s-01", "s-01", false, Some(&runner), Some(&probe), None, false, Some("2.338.0"));
+        assert!(out.iter().all(|d| d.code != "update-available"), "{out:?}");
+
+        let inv = inventory(
+            r#"
+            [[machine]]
+            name = "Studio"
+            host = "studio"
+
+            [[machine]]
+            name = "Here"
+            host = "local"
+            "#,
+        );
+        let mut waiting = probe_with(Vec::new());
+        waiting.reboot_required = true;
+        let reboot = |spec: &MachineSpec| {
+            let mut out = Vec::new();
+            machine_diagnostics(&mut out, spec, Some(&waiting), None);
+            out.into_iter().find(|d| d.code == "reboot-required").expect("it wants a reboot")
+        };
+        assert_eq!(reboot(&inv.machines[0]).actions[0].kind, "machine_restart");
+        let here = reboot(&inv.machines[1]);
+        assert!(here.actions.is_empty(), "this computer restarts from its own menu");
+        assert!(here.hint.is_some(), "and the hint stays");
+    }
+
+    #[test]
     fn probe_only_states_and_missing_runners() {
         let inv = inventory(
             r#"
@@ -1270,6 +1326,11 @@ mod tests {
         assert!(codes.contains(&"runner-missing"));
         assert!(codes.contains(&"runner-stopped"));
         assert_eq!(snap.counts.working, 1);
+        let kinds = |code: &str| -> Vec<String> {
+            snap.machines[0].diagnostics.iter().find(|d| d.code == code).map(|d| d.actions.iter().map(|a| a.kind.clone()).collect()).unwrap_or_default()
+        };
+        assert_eq!(kinds("runner-missing"), ["runner_install"]);
+        assert_eq!(kinds("runner-stopped"), ["runner_start"]);
         // Not watching GitHub yet, and the runner config names the org.
         assert_eq!(snap.github.detected, vec!["acme"]);
         assert!(snap.attention.iter().any(|a| a.id == "github-setup" && a.title.contains("acme")));

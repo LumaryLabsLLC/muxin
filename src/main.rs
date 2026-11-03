@@ -376,8 +376,8 @@ struct RunnerArgs {
     #[command(flatten)]
     agent: AgentArgs,
 
-    /// start, stop, restart, logs or remove
-    #[arg(value_parser = ["start", "stop", "restart", "logs", "remove"])]
+    /// start, stop, restart, logs, remove or update
+    #[arg(value_parser = ["start", "stop", "restart", "logs", "remove", "update"])]
     action: String,
 
     /// Runner id (<machine-id>/<name>, github/<name>) or a unique runner name

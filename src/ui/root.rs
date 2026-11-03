@@ -1627,6 +1627,28 @@ impl Root {
         self.track(task);
     }
 
+    /// A diagnostic's button (`DiagnosticAction::kind`).
+    pub(super) fn run_diagnostic_action(&mut self, kind: &str, machine: &str, runner: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        match (kind, runner) {
+            ("runner_update", Some(r)) => self.runner_action(r, RunnerAction::Update, cx),
+            ("runner_start", Some(r)) => self.runner_action(r, RunnerAction::Start, cx),
+            ("runner_restart", Some(r)) => self.runner_action(r, RunnerAction::Restart, cx),
+            ("runner_logs", Some(r)) => self.runner_action(r, RunnerAction::Logs, cx),
+            ("runner_install", _) => self.show_install_dialog(machine, window, cx),
+            ("machine_restart", _) => self.show_os_power(machine.to_string(), crate::ops::OsPower::Restart, window, cx),
+            ("open_services", _) => self.navigate(Route::Services(machine.to_string()), window, cx),
+            ("open_processes", _) => {
+                self.navigate(Route::Services(machine.to_string()), window, cx);
+                if let Some(view) = self.service_pages.get(machine).cloned() {
+                    view.update(cx, |v, cx| v.show_tab("processes", window, cx));
+                }
+            }
+            ("open_files", _) => self.show_copy_files(Some(machine.to_string()), None, window, cx),
+            ("open_settings", _) => self.open_settings_tab(super::settings::SettingsTab::GitHub, window, cx),
+            _ => {}
+        }
+    }
+
     /// Asks before a machine shuts down or restarts.
     pub(super) fn show_os_power(&mut self, machine: String, action: crate::ops::OsPower, window: &mut Window, cx: &mut Context<Self>) {
         let engine = self.engine.clone();

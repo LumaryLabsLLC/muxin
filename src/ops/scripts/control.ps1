@@ -1,6 +1,7 @@
 # Muxin: control one installed runner (Windows).
-# Muxin prepends: $OR_ACTION (start|stop|restart|logs|remove), $OR_DIR,
-# $OR_TOKEN (remove only), $OR_DELETE (bool).
+# Muxin prepends: $OR_ACTION (start|stop|restart|logs|remove|update), $OR_DIR,
+# $OR_TOKEN (remove only), $OR_DELETE (bool), and for update $OR_VERSION and
+# $OR_SHA256 (array of "<platform>=<hex>": each package's SHA-256).
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -127,6 +128,52 @@ switch ($OR_ACTION) {
       Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $log) { say "No runner logs yet in $OR_DIR\_diag." }
     else { say "==> $($log.FullName) (last 200 lines)"; Get-Content -Path $log.FullName -Tail 200 }
+  }
+  'update' {
+    if (-not $OR_VERSION) { throw 'No version to update to.' }
+    if (-not (Test-Path (Join-Path $OR_DIR 'config.cmd')) -or -not (Test-Path (Join-Path $OR_DIR 'bin'))) { throw "$OR_DIR doesn't look like a runner folder." }
+    if (Get-RunnerProcesses | Where-Object { $_.Name -eq 'Runner.Worker.exe' }) { throw "It's running a job. Update it when it's idle." }
+    $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
+      'AMD64' { 'x64' }
+      'ARM64' { 'arm64' }
+      default { throw "Unsupported CPU architecture: $env:PROCESSOR_ARCHITECTURE" }
+    }
+    $pkg = "actions-runner-win-$arch-$OR_VERSION.zip"
+    $url = "https://github.com/actions/runner/releases/download/v$OR_VERSION/$pkg"
+    $sha = $null
+    foreach ($entry in $OR_SHA256) {
+      if ($entry.StartsWith("win-$arch=", [StringComparison]::Ordinal)) { $sha = $entry.Substring("win-$arch=".Length) }
+    }
+    if (-not $sha) { throw "GitHub's release notes for actions-runner $OR_VERSION don't list a SHA-256 for $pkg, so it can't be checked. Not updating." }
+    # Everything that can fail by itself comes first, with the runner still running.
+    $new = Join-Path $OR_DIR '.muxin-update'
+    $unpacked = Join-Path $new 'unpacked'
+    if (Test-Path $new) { Remove-Item -LiteralPath $new -Recurse -Force }
+    New-Item -ItemType Directory -Path $unpacked -Force | Out-Null
+    $zip = Join-Path $new $pkg
+    say "Downloading actions-runner $OR_VERSION for win-$arch…"
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+    $got = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($got -ne $sha) {
+      Remove-Item -LiteralPath $new -Recurse -Force
+      throw "The downloaded $pkg doesn't match the SHA-256 GitHub published for it (expected $sha, got $got), so it was deleted. Nothing changed."
+    }
+    say "Checked $pkg against GitHub's SHA-256"
+    Expand-Archive -Path $zip -DestinationPath $unpacked -Force
+    if (-not (Test-Path (Join-Path $unpacked 'bin\Runner.Listener.exe'))) {
+      Remove-Item -LiteralPath $new -Recurse -Force
+      throw "$pkg has no runner in it. Nothing changed."
+    }
+    $wasRunning = [bool](Get-RunnerProcesses)
+    if ($wasRunning) { Stop-Runner; Start-Sleep -Seconds 1 }
+    say "Replacing the runner's programs (its registration and work folder stay)…"
+    # bin.* and externals.*: left by the runner's own updates.
+    Get-ChildItem -LiteralPath $OR_DIR -Directory -Force | Where-Object { $_.Name -in 'bin', 'externals' -or $_.Name -like 'bin.*' -or $_.Name -like 'externals.*' } | Remove-Item -Recurse -Force
+    Copy-Item -Path (Join-Path $unpacked '*') -Destination $OR_DIR -Recurse -Force
+    Remove-Item -LiteralPath $new -Recurse -Force
+    if ($wasRunning) { Start-Runner }
+    say "✓ Updated to $OR_VERSION"
   }
   'remove' {
     Stop-Runner

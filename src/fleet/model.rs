@@ -404,6 +404,20 @@ pub struct Diagnostic {
     pub message: String,
     pub hint: Option<String>,
     pub runner_id: Option<String>,
+    /// What Muxin can do about it, the likely fix first. The apps show these
+    /// instead of the hint, which says how to do it by hand.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<DiagnosticAction>,
+}
+
+/// A button on a diagnostic.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DiagnosticAction {
+    pub label: String,
+    /// "runner_update" | "runner_start" | "runner_restart" | "runner_logs" |
+    /// "runner_install" | "machine_restart" | "open_services" | "open_processes" |
+    /// "open_files" | "open_settings"
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

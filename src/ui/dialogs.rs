@@ -16,7 +16,7 @@ use crate::fleet::files::Listing;
 use crate::fleet::sessions::{AGENTS, StartSession};
 use crate::fleet::workspaces::{CreateWorkspace, DEFAULT_IMAGE, WorkspaceIsolation};
 use crate::fleet::model::Snapshot;
-use crate::ops::{InstallRequest, NewMachine, ssh_hosts};
+use crate::ops::{InstallRequest, NewMachine, OsPower, ssh_hosts};
 
 pub enum DialogEvent {
     Dismissed,
@@ -1142,6 +1142,113 @@ impl Render for ConfirmDialog {
                     .style(ButtonStyle::Outlined)
                     .icon("trash-2")
                     .on_click(cx.listener(|this, _, _, cx| this.confirm(cx)))
+                    .into_any_element(),
+            ]))
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+/// Shutting down or restarting a machine: says what ends with it, and asks for
+/// the user's password there only when the machine wants it (sudo).
+pub struct PowerDialog {
+    engine: Arc<Engine>,
+    machine: String,
+    machine_name: String,
+    action: OsPower,
+    detail: String,
+    password: Entity<TextInput>,
+    asking: bool,
+    busy: bool,
+    error: Option<String>,
+    focus: FocusHandle,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl EventEmitter<DialogEvent> for PowerDialog {}
+
+impl PowerDialog {
+    pub fn new(engine: Arc<Engine>, machine: String, action: OsPower, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let machine_name = engine.current().machines.iter().find(|m| m.id == machine).map(|m| m.name.clone()).unwrap_or_else(|| machine.clone());
+        let detail = engine.os_power_detail(&machine, action);
+        let password = cx.new(|cx| TextInput::new(cx, "Password").secret());
+        let sub = cx.subscribe_in(&password, window, |this: &mut Self, _, e: &InputEvent, window, cx| match e {
+            InputEvent::Submit => this.submit(window, cx),
+            InputEvent::Cancel => cx.emit(DialogEvent::Dismissed),
+            InputEvent::Changed => {
+                this.error = None;
+                cx.notify()
+            }
+        });
+        PowerDialog { engine, machine, machine_name, action, detail, password, asking: false, busy: false, error: None, focus: cx.focus_handle(), _subscriptions: vec![sub] }
+    }
+
+    pub fn first_focus(&self, _: &App) -> FocusHandle {
+        // Not a field: Return alone doesn't take a machine down.
+        self.focus.clone()
+    }
+
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        if self.asking {
+            // Read once, cleared from the field, kept only in memory while Muxin runs.
+            let typed = self.password.read(cx).text().to_string();
+            if typed.is_empty() {
+                self.error = Some(format!("Type your password on {}.", self.machine_name));
+                cx.notify();
+                return;
+            }
+            self.password.update(cx, |i, cx| i.set_text("", cx));
+            self.engine.remember_password(&self.machine, typed);
+        }
+        self.busy = true;
+        self.error = None;
+        cx.notify();
+        let (engine, machine, action) = (self.engine.clone(), self.machine.clone(), self.action);
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.machine_os_power(&machine, action).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(crate::fleet::desktop::AddDisplayError::Failed(e.to_string())));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy = false;
+                match result {
+                    Ok(op) => cx.emit(DialogEvent::OperationStarted(op)),
+                    Err(crate::fleet::desktop::AddDisplayError::NeedsPassword(why)) => {
+                        // Asked for the first time, or the one given didn't work.
+                        if this.asking {
+                            this.error = Some(why);
+                        }
+                        this.asking = true;
+                        window.focus(&this.password.focus_handle(cx));
+                    }
+                    Err(e) => this.error = Some(e.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+impl Render for PowerDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let help = "It goes to sudo there over Muxin's encrypted connection, and stays in memory only until Muxin quits.";
+        frame(&theme, format!("{} {}?", self.action.label(), self.machine_name), Some(self.detail.clone().into()))
+            .track_focus(&self.focus)
+            .when(self.asking, |d| d.child(field(&theme, "Your password there", self.password.clone(), Some(help))))
+            .children(error_line(&theme, &self.error))
+            .child(footer(vec![
+                Button::new("power-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                Button::new("power-go", self.action.label())
+                    .style(ButtonStyle::Danger)
+                    .icon(if self.action == OsPower::Shutdown { "power" } else { "rotate-ccw" })
+                    .loading(self.busy)
+                    .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
                     .into_any_element(),
             ]))
     }

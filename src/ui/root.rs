@@ -10,7 +10,7 @@ use gpui::{
     MenuItem, MouseButton, ScrollHandle, SharedString, Subscription, SystemMenuType, Task, Window, actions, div, prelude::*, px,
 };
 
-use super::dialogs::{AddDisplayDialog, MonitorPasswordDialog, AddMachineDialog, ConfirmDialog, DialogEvent, InstallDialog, NewSessionDialog, NewWorkspaceDialog, RenameDialog, RenameTarget};
+use super::dialogs::{AddDisplayDialog, MonitorPasswordDialog, PowerDialog, AddMachineDialog, ConfirmDialog, DialogEvent, InstallDialog, NewSessionDialog, NewWorkspaceDialog, RenameDialog, RenameTarget};
 use super::terminal::TerminalView;
 use super::format;
 use super::input::{InputEvent, TextInput};
@@ -316,6 +316,7 @@ pub enum Modal {
     Rename(Entity<RenameDialog>),
     AddDisplay(Entity<AddDisplayDialog>),
     MonitorPassword(Entity<MonitorPasswordDialog>),
+    Power(Entity<PowerDialog>),
     Share(Entity<super::share::ShareDialog>),
     Join(Entity<super::share::JoinDialog>),
 }
@@ -1626,6 +1627,14 @@ impl Root {
         self.track(task);
     }
 
+    /// Asks before a machine shuts down or restarts.
+    pub(super) fn show_os_power(&mut self, machine: String, action: crate::ops::OsPower, window: &mut Window, cx: &mut Context<Self>) {
+        let engine = self.engine.clone();
+        let dialog = cx.new(|cx| PowerDialog::new(engine, machine, action, window, cx));
+        self.show_modal(Modal::Power(dialog.clone()), window, cx);
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+    }
+
     /// Asks for a machine's or a session's new name.
     pub(super) fn show_rename(&mut self, target: RenameTarget, window: &mut Window, cx: &mut Context<Self>) {
         let s = &self.snapshot;
@@ -1916,6 +1925,7 @@ impl Root {
             Modal::Rename(d) => d.read(cx).first_focus(cx),
             Modal::AddDisplay(d) => d.read(cx).first_focus(cx),
             Modal::MonitorPassword(d) => d.read(cx).first_focus(cx),
+            Modal::Power(d) => d.read(cx).first_focus(cx),
             Modal::Share(d) => d.read(cx).first_focus(cx),
             Modal::Join(d) => d.read(cx).first_focus(cx),
             Modal::Licenses(d) => d.focus_handle(cx),
@@ -3628,6 +3638,7 @@ impl Render for Root {
             Modal::Rename(d) => d.clone().into_any_element(),
             Modal::AddDisplay(d) => d.clone().into_any_element(),
             Modal::MonitorPassword(d) => d.clone().into_any_element(),
+            Modal::Power(d) => d.clone().into_any_element(),
             Modal::Share(d) => d.clone().into_any_element(),
             Modal::Join(d) => d.clone().into_any_element(),
             Modal::Licenses(d) => d.clone().into_any_element(),

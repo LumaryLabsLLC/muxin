@@ -16,6 +16,12 @@ pub fn wants_password(error: &str) -> bool {
 pub fn as_root(script: &str, args: &[&str], password: Option<&str>) -> Result<(), String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
+    // Root already, with or without a sudo here.
+    #[cfg(unix)]
+    if unsafe { libc::geteuid() } == 0 {
+        let out = Command::new("sh").args(["-c", script, "muxen"]).args(args).stdin(Stdio::null()).stdout(Stdio::null()).output().map_err(|e| e.to_string())?;
+        return if out.status.success() { Ok(()) } else { Err(last_line(&String::from_utf8_lossy(&out.stderr))) };
+    }
     // Whether sudo needs a password here at all (its wording differs between versions).
     let free = Command::new("sudo").args(["-n", "true"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     if free {

@@ -77,6 +77,8 @@ enum Action {
     CloudPower(String, bool),
     /// Start (true) or stop a VM or container that runs on another machine.
     MachinePower(String, bool),
+    /// Asks first, then shuts a machine down or restarts it.
+    OsPower(String, crate::ops::OsPower),
     /// The New VM dialog, for this machine.
     NewVm(String),
     /// The New schedule dialog, for this machine.
@@ -176,6 +178,23 @@ fn editor_items(chosen: &str, machine: &str, path: &str, long: bool) -> Vec<Item
         .collect()
 }
 
+/// Restart and Shut down, for a machine that's up (this computer has its own
+/// menu for that). A cloud machine powers off, and a VM stops, through their own items.
+fn os_power_items(m: &crate::fleet::model::Machine, busy: bool) -> Vec<Item> {
+    if m.local || m.status != "online" {
+        return Vec::new();
+    }
+    let item = |label: &str, icon: &'static str, action: crate::ops::OsPower, danger: bool| match busy {
+        true => Item::Off { label: label.into(), glyph: Glyph::Icon(icon) },
+        false => Item::Action { label: label.into(), glyph: Glyph::Icon(icon), action: Action::OsPower(m.id.clone(), action), danger },
+    };
+    let mut items = vec![item("Restart…", "rotate-ccw", crate::ops::OsPower::Restart, false)];
+    if m.cloud.is_none() && !m.parent.as_ref().is_some_and(|p| p.container.is_some()) {
+        items.push(item("Shut down…", "power", crate::ops::OsPower::Shutdown, true));
+    }
+    items
+}
+
 impl Root {
     /// The editors to open a machine's folder in, as a menu where the click was
     /// (or straight in the only one there is).
@@ -257,6 +276,7 @@ impl Root {
                     let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(id.as_str()) && o.kind != "logs");
                     let label = if off { "Power on" } else { "Power off" };
                     items.push(if busy { Item::Off { label: label.into(), glyph: Glyph::Icon("power") } } else { act(label, "power", Action::CloudPower(id.clone(), off)) });
+                    items.extend(os_power_items(m, busy));
                     items.push(Item::Action { label: "Destroy…".into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
                 } else {
                     // A VM or container on another machine: started and stopped there.
@@ -273,6 +293,8 @@ impl Root {
                     if self.engine.vm_options().hosts.iter().any(|h| &h.machine_id == id && !h.systems.is_empty()) {
                         items.push(act("New VM here…", "box", Action::NewVm(id.clone())));
                     }
+                    let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(id.as_str()) && o.kind != "logs");
+                    items.extend(os_power_items(m, busy));
                     // A VM Muxin made goes with its container and disk.
                     let label = if m.vm.is_some() { "Destroy…" } else { "Remove from Muxin…" };
                     items.push(Item::Action { label: label.into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
@@ -288,6 +310,11 @@ impl Root {
                     false => act(install, "plus", Action::InstallRunner(id.clone())),
                 }];
                 items.push(Item::Separator);
+                let power = os_power_items(m, busy);
+                if !power.is_empty() {
+                    items.extend(power);
+                    items.push(Item::Separator);
+                }
                 // A cloud machine or a VM Muxin made goes with its disk.
                 let label = if m.cloud.is_some() || m.vm.is_some() { "Destroy…" } else { "Remove from Muxin…" };
                 items.push(Item::Action { label: label.into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
@@ -664,6 +691,7 @@ impl Root {
             Action::EditPrompts => self.open_settings_tab(super::settings::SettingsTab::Prompts, window, cx),
             Action::CloudPower(id, on) => self.cloud_power(&id, on, cx),
             Action::MachinePower(id, on) => self.machine_power(&id, on, cx),
+            Action::OsPower(id, action) => self.show_os_power(id, action, window, cx),
             Action::NewVm(id) => self.show_vm_dialog(Some(id), window, cx),
             Action::NewSchedule(id) => self.show_schedule_dialog(Some(id), window, cx),
             Action::ShowRunner(id) => self.navigate(Route::Runner(id), window, cx),

@@ -166,7 +166,7 @@ Muxin can make a VM on one of the user's machines and add it to them, shown unde
 
 - `vm_options` lists the machines that can run VMs (and which systems, or why not), the system ids and the defaults.
 - `vm_create(name, system, host?, cpus?, memory_gb?, disk_gb?)` makes one; the result names the new `machine_id`. Linux is ready in under a minute. Windows downloads and installs itself, 15-30 minutes the first time: pass `wait: false` and poll `get_operation`. Until it answers, its `unreachable.kind` is `"installing"`.
-- `machine_power(machine_id, "on"|"off")` starts or stops it (Windows gets two minutes to shut down cleanly); `vm_destroy(machine_id)` deletes its container and disk and removes it from Muxin. A machine's `vm` field says Muxin made it (and so can destroy it).
+- `machine_power(machine_id, "on"|"off"|"restart")` starts, stops or restarts it (Windows gets two minutes to shut down cleanly); `vm_destroy(machine_id)` deletes its container and disk and removes it from Muxin. A machine's `vm` field says Muxin made it (and so can destroy it).
 - It uses the user's machine, memory and disk: make one when asked, or when a task needs a fresh machine (a clean Windows to test an installer on, say), and destroy it when the task is done unless the user wants it kept. Copy out anything worth keeping first.
 - Each VM gets a UDP port on its host forwarded to it (its `direct_address`), so `direct_connection(machine_id, true)` works for it like for any machine. A Linux VM's CPU, memory and uptime are its container's own limits.
 - A Windows VM's account password is in the user's Keychain (the app's Copy password button); you don't need it: ssh uses the key.
@@ -178,7 +178,7 @@ Muxin can make a VM on one of the user's machines and add it to them, shown unde
 3. Work there: `workspace_create(machine_id: "win-test")` and `workspace_exec`, or `copy_files` and `session_start`.
 4. `vm_destroy("win-test")` when you're done, unless the user wants it kept.
 
-The CLI equivalents are `muxin vm options|create|destroy` and `muxin power <machine> on|off`.
+The CLI equivalents are `muxin vm options|create|destroy` and `muxin power <machine> on|off|restart`.
 
 ## Schedules
 
@@ -197,9 +197,9 @@ The CLI equivalents are `muxin schedule ls|add|rm|run|log`.
 - `run_on_machines(machine_ids, command, timeout_secs?)` runs one shell command on each machine, in its login shell from the home folder, without a terminal (nothing interactive). It waits for all of them and returns each one's `exit_code`, `error` and `operation.log_tail`. It runs as the user on their real machines: only when asked, and show the command first.
 - `status.attention` and `get_machine`'s diagnostics include `reboot-required` (a Linux machine's updates want a restart) and `failed-services` (systemd units that failed, by name). Read their logs (`logs_read(kind: "service")`) before suggesting a fix.
 - A machine can run on another of the user's machines: `get_machine`'s `parent` names that machine, with `relation` `"vm"`, `"container"` or `"inside"` (kind unknown), or `"through"` when ssh only goes through it (a jump host). `container` is the Docker container it runs in there, and `containerState` that container's state. When it can't be reached because of that, `unreachable.kind` is `"host-down"` (the machine it's on is off) or `"stopped"` (its container isn't running): start that machine, or its container.
-- `machine_power(machine_id, "on"|"off")` starts or stops the container a VM runs in (stopping gives it two minutes to shut down cleanly), or powers a cloud machine. It changes the user's machines: only when asked.
+- `machine_power(machine_id, "on"|"off"|"restart")` starts, stops or restarts the container a VM runs in (stopping gives it two minutes to shut down cleanly), or powers a cloud machine. On any other machine, `off` and `restart` ask its own system, through its agent, and the operation follows it going down and coming back; `on` can't turn one on, so use `wake_machine`. They end its agent sessions and running jobs, and they don't act on this computer. When sudo wants a password it fails with a hint to use the Muxin app, which asks for it. A Mac with FileVault waits for its password at its own screen after a restart. It changes the user's machines: only when asked.
 - `wake_machine(machine_id)` sends Wake on LAN to a machine that's asleep or off, from this computer and from online machines on its network. It works once Muxin has seen the machine's network card (while it was on) and when the machine is set up to wake that way. Muxin checks it again after 20 and 40 seconds.
-- The CLI equivalents are `muxin run --on a,b -- <command>` (`--all` for every machine online; it exits 1 when any failed), `muxin wake <machine>` and `muxin power <machine> on|off`.
+- The CLI equivalents are `muxin run --on a,b -- <command>` (`--all` for every machine online; it exits 1 when any failed), `muxin wake <machine>` and `muxin power <machine> on|off|restart`.
 
 ## Logs
 

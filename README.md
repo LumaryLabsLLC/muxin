@@ -217,7 +217,7 @@ The MCP server has these tools:
 | `machine_processes`, `process_signal` | A machine's busiest processes and its GPUs; stop or kill one. |
 | `run_on_machines` | Runs one shell command on several machines at once, with each one's output and exit status. |
 | `wake_machine` | Wakes a machine that's asleep or off (Wake on LAN). |
-| `machine_power` | Powers a machine on or off: a cloud machine, or a VM in a Docker container on another machine. |
+| `machine_power` | Powers a machine on or off, or restarts it: a cloud machine, a VM in a Docker container on another of your machines, or any other machine through its own system (off and restart) |
 | `vm_options`, `vm_create`, `vm_destroy` | VMs on your machines: Windows (Docker with KVM) or Linux containers, added to your machines. |
 | `schedule_list`, `schedule_save`, `schedule_delete`, `schedule_run`, `schedule_log` | Commands and agent sessions that run on a machine at set times, run there by its own scheduler. |
 | `agent_usage` | What Claude Code and Codex used over the last N days: tokens, requests and cost at API prices, by model and machine. |
@@ -298,7 +298,7 @@ muxin run --on beelink,mac-studio -- df -h /   # one command on several machines
 muxin ps beelink [-n 20]                  # its busiest processes and its GPUs
 muxin kill beelink 4242 [--force]         # stop a process (--force: SIGKILL)
 muxin wake beelink                        # Wake on LAN
-muxin power win11 off                     # a VM in Docker on another machine (or a cloud machine): on or off
+muxin power win11 off                     # shut a machine down (or restart it); a VM or cloud machine also turns on
 muxin vm create win-test --system windows-11 --on beelink   # a VM on one of your machines
 muxin schedule add beelink --name Tests --every day --at 09:00 --command "make test"
 muxin usage [--days 30] [beelink]             # what the agents used, and the cost at API prices

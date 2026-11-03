@@ -563,9 +563,9 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "machine_power",
-            "description": "Power a machine on or off. A cloud machine: through its provider (as cloud_power). A VM or container that runs in Docker on another of the user's machines (get_machine's `parent` names the machine and its `container`): starts or stops that container there; stopping gives it two minutes to shut down cleanly, and starting waits until it answers ssh. It changes the user's machines: only when asked.",
-            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID }, "power": { "type": "string", "enum": ["on", "off"] }, "wait": { "type": "boolean" } }), &["machine_id", "power"]),
-            "annotations": annotations("Power a machine on or off", false, false, true, true),
+            "description": "Power a machine on or off, or restart it. A cloud machine: on and off go through its provider (as cloud_power), restart through its own system. A VM or container that runs in Docker on another of the user's machines (get_machine's `parent` names the machine and its `container`): starts, stops or restarts that container there; stopping gives it two minutes to shut down cleanly, and starting or restarting waits until it answers ssh. Any other machine: off and restart ask its own system (they may need sudo: when it wants a password, this fails with a hint to use the Muxin app, which asks for it), and the operation follows it going down and coming back; `on` isn't possible, so use wake_machine. Its agent sessions and running jobs end. A shut-down machine stays off until someone is at it or it wakes over the network. It doesn't act on this computer. It changes the user's machines: only when asked.",
+            "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID }, "power": { "type": "string", "enum": ["on", "off", "restart"] }, "wait": { "type": "boolean" } }), &["machine_id", "power"]),
+            "annotations": annotations("Power a machine on or off, or restart it", false, true, true, true),
         }),
         json!({
             "name": "schedule_list",

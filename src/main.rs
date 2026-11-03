@@ -129,8 +129,8 @@ enum Command {
     Run(FleetRunArgs),
     /// Wake a machine that's asleep or off (Wake on LAN)
     Wake(MachineArgs),
-    /// Power a machine on or off: a cloud machine, or a VM in Docker on another machine
-    Power(CloudPowerArgs),
+    /// Power a machine on or off, or restart it. Ordinary machines can shut down and restart, not turn on (see wake)
+    Power(PowerArgs),
     /// VMs on your machines: Windows (Docker with KVM) and Linux containers
     #[command(subcommand)]
     Vm(VmCommand),
@@ -659,6 +659,17 @@ struct CloudMachineArgs {
     agent: AgentArgs,
     /// Machine id or name
     machine: String,
+}
+
+#[derive(Args)]
+struct PowerArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// on, off or restart
+    #[arg(value_parser = ["on", "off", "restart"])]
+    state: String,
 }
 
 #[derive(Args)]

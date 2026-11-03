@@ -27,6 +27,7 @@ mod desktop;
 mod displays;
 mod logs;
 mod ports;
+mod power;
 mod procs;
 mod usage;
 mod wake;

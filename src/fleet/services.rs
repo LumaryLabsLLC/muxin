@@ -349,6 +349,24 @@ impl Engine {
         }
         Ok(())
     }
+
+    /// Asks a machine's agent to shut down or restart ("shutdown", "restart").
+    /// It answers, then goes a moment later.
+    pub(crate) async fn ask_agent_for_power(self: &Arc<Self>, machine_id: &str, action: &str) -> Result<(), AddDisplayError> {
+        let (spec, probe) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
+        super::sessions::agent::ensure(&spec, probe.as_ref()).await?;
+        let password = password_for(&spec.id);
+        let request = json!({ "op": "machine_power", "action": action, "password": password.as_deref().unwrap_or("") });
+        let reply = super::sessions::agent::ctl_reply(&spec, &request).await?;
+        if reply["ok"].as_bool() == Some(true) {
+            return Ok(());
+        }
+        // An iPad uses the agent a paired machine already has.
+        if reply["error"].as_str().is_some_and(|e| e.contains("unknown request")) {
+            return Err(format!("{} runs an older Muxin agent that can't do this. Connect to it from Muxin on a Mac to update it, or remove it from this iPad and add it again.", spec.name).into());
+        }
+        Err(refusal(&spec.id, &reply, "The machine couldn't do that."))
+    }
 }
 
 fn demo() -> ServiceList {

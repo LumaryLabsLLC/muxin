@@ -1371,7 +1371,7 @@ pub async fn cloud_create(engine: &Arc<Engine>, req: CloudCreateRequest, surface
 #[serde(deny_unknown_fields)]
 pub struct CloudMachineRequest {
     pub machine_id: String,
-    /// For power: "on" or "off".
+    /// For power: "on" or "off"; for machine_power also "restart".
     #[serde(default)]
     pub power: Option<String>,
     #[serde(default = "yes")]
@@ -1522,19 +1522,28 @@ pub async fn vm_destroy(engine: &Arc<Engine>, req: CloudMachineRequest, surface:
     finish_action(engine, op, req.wait, 300, DEFAULT_TAIL, None, Vec::new(), surface, on_line).await
 }
 
-/// Powers a machine on or off: a cloud machine through its provider, or a VM
-/// (or container) in Docker on another of the user's machines by starting or
-/// stopping that container there.
+/// Powers a machine on, off or restarts it. A cloud machine goes through its
+/// provider, a VM (or container) in Docker on another of the user's machines
+/// by that container there, and any other machine by asking its own system.
 pub async fn machine_power(engine: &Arc<Engine>, req: CloudMachineRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<ActionResponse> {
     let s = freshen(engine).await;
     let m = find_machine(&s, &req.machine_id)?.clone();
-    let on = match req.power.as_deref() {
-        Some("on") => true,
-        Some("off") => false,
-        _ => return Err(ApiError::invalid("power must be \"on\" or \"off\".")),
+    let action = match req.power.as_deref() {
+        Some("on") => None,
+        Some("off") => Some(crate::ops::OsPower::Shutdown),
+        Some("restart") => Some(crate::ops::OsPower::Restart),
+        _ => return Err(ApiError::invalid("power must be \"on\", \"off\" or \"restart\".")),
     };
-    let op = engine.machine_power(&m.id, on).map_err(op_error)?;
-    finish_action(engine, op, req.wait, 420, DEFAULT_TAIL, Some(m.id), Vec::new(), surface, on_line).await
+    let op = match action {
+        None => engine.machine_power(&m.id, true).map_err(op_error)?,
+        Some(action) => engine.machine_os_power(&m.id, action).await.map_err(|e| match e {
+            crate::fleet::desktop::AddDisplayError::NeedsPassword(_) => {
+                ApiError::new("invalid", format!("{} wants the user's password for that (sudo).", m.name)).with_hint("Do it from the Muxin app (the machine's menu), which asks for it.")
+            }
+            crate::fleet::desktop::AddDisplayError::Failed(why) => op_error(why),
+        })?,
+    };
+    finish_action(engine, op, req.wait, 480, DEFAULT_TAIL, Some(m.id), Vec::new(), surface, on_line).await
 }
 
 /// Cancels the workflow run a queued or running job belongs to.

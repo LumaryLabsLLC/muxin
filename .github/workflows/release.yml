@@ -33,7 +33,7 @@ jobs:
   # The agent for every platform: the app ships them all and installs the right
   # one on each machine. Built on a Mac, which signs the macOS ones.
   agents:
-    runs-on: macos-15
+    runs-on: macos-15-intel
     # The signing secrets belong in this environment. No rust-cache: see the top.
     environment: release
     steps:
@@ -70,7 +70,7 @@ jobs:
 
   macos:
     needs: agents
-    runs-on: macos-15
+    runs-on: macos-15-intel
     # The signing secrets belong in this environment. No rust-cache: see the top.
     environment: release
     # Whether it signed, for the release job: that job can't see the secrets.

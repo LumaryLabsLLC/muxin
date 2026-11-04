@@ -55,6 +55,12 @@ scripts/aur.sh 0.2.0 --push                   # and the AUR package
 
 If a job fails for a reason outside the code, like a dropped connection to
 Apple's servers, run just the failed jobs again: `gh run rerun <run id> --failed`.
+
+A Mac job cancelled after about 15 minutes with no steps means GitHub had no
+Mac for it ("The job was not acquired by Runner"). Run it again, or if that keeps
+happening, set the two Mac jobs in `release.yml` to `macos-15-intel`, commit that,
+delete the tag here and on GitHub, and run `scripts/release.sh` again. The app stays
+universal. Intel takes longer: 0.9.0's run took about 85 minutes.
 The draft is made once every platform has built.
 
 Published releases are public: anyone can download them from the repository's

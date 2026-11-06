@@ -206,6 +206,42 @@ pub fn text<T>(term: &Term<T>, history: usize) -> String {
     lines.join("\n")
 }
 
+/// What the screen says, as a number: equal when only animation changed.
+/// Braille dots count as blanks (spinners, and the starry backdrop some
+/// Codex models draw on empty cells while they wait) and each run of blanks
+/// as one, so dots moving between words change nothing. Lines scrolling into
+/// the history change it, so a program that keeps printing the same lines
+/// still counts as printing.
+pub fn signature<T>(term: &Term<T>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let grid = term.grid();
+    let cols = grid.columns();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    grid.history_size().hash(&mut h);
+    for l in 0..grid.screen_lines() as i32 {
+        let row = &grid[Line(l)];
+        let mut gap = false;
+        for i in 0..cols {
+            let cell = &row[Column(i)];
+            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let c = cell.c;
+            if c.is_whitespace() || ('\u{2800}'..='\u{28ff}').contains(&c) {
+                gap = true;
+                continue;
+            }
+            if gap {
+                ' '.hash(&mut h);
+                gap = false;
+            }
+            c.hash(&mut h);
+        }
+        '\n'.hash(&mut h);
+    }
+    h.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +316,29 @@ mod tests {
         let original = term(lines.as_bytes());
         let copy = term(&redraw(&original));
         assert!(text(&copy, 100).contains("line 3"));
+    }
+
+    #[test]
+    fn moving_dots_dont_change_the_signature() {
+        let mut term = Term::new(Config::default(), &Size(40, 5), VoidListener);
+        let mut parser = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+        let mut feed = |term: &mut Term<VoidListener>, s: &str| parser.advance(term, s.as_bytes());
+        feed(&mut term, "\u{2801}   \u{2802}\r\n> Ask Codex\u{2804} to do anything");
+        let idle = signature(&term);
+        // The backdrop's dots move (cursor home, new dots, the prompt redrawn).
+        feed(&mut term, "\x1b[H\u{2808}  \u{2810} \u{2820}\r\n> Ask Codex  \u{2840}to do anything");
+        assert_eq!(signature(&term), idle);
+        // New words do change it.
+        feed(&mut term, "\x1b[H\r\n> Ask Codex to do anything\r\n\u{2022} Working (3s)");
+        assert_ne!(signature(&term), idle);
+        let working = signature(&term);
+        // So do the same lines scrolling into the history.
+        for _ in 0..6 {
+            feed(&mut term, "\r\ny");
+        }
+        let scrolled = signature(&term);
+        feed(&mut term, "\r\ny");
+        assert_ne!(signature(&term), scrolled);
+        assert_ne!(scrolled, working);
     }
 }

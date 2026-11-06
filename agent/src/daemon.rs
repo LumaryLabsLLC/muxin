@@ -126,7 +126,11 @@ struct Inner {
     cols: u16,
     rows: u16,
     exit: Option<i32>,
+    /// When the screen's text last changed (`screen::signature`): what makes
+    /// a session look busy. Animation alone isn't output: Codex keeps
+    /// redrawing a starry backdrop while it waits.
     last_output: i64,
+    screen_sig: u64,
     /// The last keys or size change from someone at the terminal: what the
     /// program prints right after is an echo or a redraw, not work (alerts).
     last_input: i64,
@@ -407,6 +411,7 @@ fn new_session(state: &State, name: String, agent: String, title: String, cwd: P
             rows,
             exit: None,
             last_output: now(),
+            screen_sig: 0,
             last_input: 0,
             generation: 0,
             command: run.clone(),
@@ -529,8 +534,12 @@ fn pump(state: &State, s: &Session, mut reader: Box<dyn Read + Send>, generation
         let i = &mut *guard;
         let bells = i.listener.bells.load(Ordering::Relaxed);
         i.parser.advance(&mut i.term, bytes);
-        i.last_output = now();
-        i.unsaved = true;
+        let sig = crate::screen::signature(&i.term);
+        if sig != i.screen_sig {
+            i.screen_sig = sig;
+            i.last_output = now();
+            i.unsaved = true;
+        }
         // Attached terminals answer queries themselves; without one that
         // can (watchers' answers are ignored), answer here so programs
         // waiting on a reply don't hang.

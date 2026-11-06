@@ -2916,6 +2916,11 @@ async fn find_parent(engine: &Arc<Engine>, name: &str, target: Option<&str>) -> 
         look.push(t);
     }
     for id in look {
+        // Never checked (a Muxin just installed on the machine the agent runs
+        // on): its sessions can't be listed until Muxin knows the machine.
+        if engine.machine(&id).is_some_and(|(_, probe)| probe.is_none()) {
+            engine.run_check(Some(vec![id.clone()])).await;
+        }
         if let Ok(found) = engine.refresh_sessions(&id).await
             && let Some(p) = found.sessions.into_iter().find(|x| x.name == name)
         {
@@ -2943,10 +2948,13 @@ pub async fn session_start(engine: &Arc<Engine>, req: SessionStartRequest) -> Ap
     if here.is_some() && !engine.settings().agents.helpers {
         return Err(helpers_off());
     }
-    let machine_id = match (&req.machine_id, &parent) {
-        (Some(m), _) => m.clone(),
-        (None, Some(p)) => p.machine_id.clone(),
-        (None, None) => return Err(ApiError::invalid("Say which machine: machine_id is missing.").with_hint("List machines with status (`muxin status`).")),
+    let machine_id = match (&req.machine_id, &parent, &here) {
+        (Some(m), _, _) => m.clone(),
+        (None, Some(p), _) => p.machine_id.clone(),
+        (None, None, Some(name)) => {
+            return Err(ApiError::invalid(format!("This runs in Muxin's session {name}, but Muxin here can't find that session on this computer, so it doesn't know which machine to start the helper on.")).with_hint("Say which machine (machine_id), from status (`muxin status`)."));
+        }
+        (None, None, None) => return Err(ApiError::invalid("Say which machine: machine_id is missing.").with_hint("List machines with status (`muxin status`).")),
     };
     let m = find_machine(&engine.current(), &machine_id)?.clone();
     // Beside it: same machine, same folder, unless asked otherwise.

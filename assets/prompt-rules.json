@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "enter_phrases": [
     "press enter to",
     "enter to confirm",
@@ -69,7 +69,9 @@
   ],
   "hint_words": [
     " to select",
-    " to confirm"
+    " to confirm",
+    " to submit",
+    "esc to cancel"
   ],
   "bullets": [
     "⏺",

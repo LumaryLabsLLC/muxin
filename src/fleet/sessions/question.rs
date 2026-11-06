@@ -50,9 +50,10 @@ fn strings(list: &[&str]) -> Vec<String> {
 
 impl Default for Rules {
     /// Muxin's own, as read off Claude Code 2.1 and Codex 0.163 screens.
+    /// Raise `version` with any change, and copy it to assets/prompt-rules.json.
     fn default() -> Rules {
         Rules {
-            version: 1,
+            version: 2,
             enter_phrases: strings(&["press enter to", "enter to confirm", "enter to continue", "enter continue", "enter confirm"]),
             selected_marks: strings(&["❯", "›", ">", "▶", "→", "●"]),
             menu_marks: strings(&["❯", "›"]),
@@ -62,7 +63,7 @@ impl Default for Rules {
             rule_marks: strings(&["─", "━", "═", "-", "╌", "┄", "▔", "▁"]),
             status_marks: strings(&["✻", "✽", "✶", "✳", "✢", "✺", "⏵", "·", "*"]),
             status_words: strings(&["esc to interrupt", "for shortcuts"]),
-            hint_words: strings(&[" to select", " to confirm"]),
+            hint_words: strings(&[" to select", " to confirm", " to submit", "esc to cancel"]),
             bullets: strings(&["⏺", "●", "•"]),
         }
     }
@@ -274,7 +275,9 @@ fn is_status(r: &Rules, line: &str) -> bool {
     Rules::starts_with_any(&r.status_marks, line) || r.status_words.iter().any(|w| line.contains(w.as_str()))
 }
 
-/// "❯ 1. Yes" → (selected, "1", "Yes").
+/// "❯ 1. Yes" → (selected, "1", "Yes"). A label in two columns, the
+/// choice and what it does ("Allow     Run the tool and continue.", as
+/// Codex asks before a tool call), reads "Allow · Run the tool and continue.".
 fn option(r: &Rules, line: &str) -> Option<(bool, String, String)> {
     let t = clean(r, line);
     let first = t.chars().next()?;
@@ -288,7 +291,12 @@ fn option(r: &Rules, line: &str) -> Option<(bool, String, String)> {
     }
     let after = &rest[digits.len()..];
     let label = after.strip_prefix(". ").or_else(|| after.strip_prefix(") ")).or_else(|| after.strip_prefix(".")).map(str::trim)?;
-    (!label.is_empty()).then(|| (selected, digits, label.to_string()))
+    // Columns are two spaces apart or more; sentences don't have two.
+    let label = match label.split_once("  ") {
+        Some((choice, what)) if !what.trim().is_empty() => format!("{} · {}", choice.trim_end(), what.trim()),
+        _ => label.to_string(),
+    };
+    (!label.is_empty()).then(|| (selected, digits, label))
 }
 
 /// Reads a waiting session's screen. `screen` is its text, bottom last.
@@ -550,6 +558,24 @@ mod tests {
         assert_eq!(q.options.len(), 3, "{q:?}");
         assert_eq!(q.options[2].label, "No, and tell Copilot what to do differently (Esc to stop)");
         assert!(q.text.iter().any(|l| l.contains("Do you want to run this command?")), "{:?}", q.text);
+    }
+
+    #[test]
+    fn reads_codexs_tool_approval_in_two_columns() {
+        let screen = "› Call the muxin MCP tool named status\n\n  Allow the muxin MCP server to run tool \"status\"?\n\n› 1. Allow                   Run the tool and continue.\n  2. Allow for this session  Run the tool and remember this choice for this session.\n  3. Always allow            Run the tool and remember this choice for future tool calls.\n  4. Cancel                  Cancel this tool call\n  enter to submit | esc to cancel\n";
+        let q = read(screen);
+        let labels: Vec<&str> = q.options.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Allow · Run the tool and continue.",
+                "Allow for this session · Run the tool and remember this choice for this session.",
+                "Always allow · Run the tool and remember this choice for future tool calls.",
+                "Cancel · Cancel this tool call",
+            ]
+        );
+        assert_eq!(q.selected.as_deref(), Some("1"));
+        assert_eq!(q.text, ["Allow the muxin MCP server to run tool \"status\"?"]);
     }
 
     #[test]

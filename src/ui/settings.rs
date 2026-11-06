@@ -1104,7 +1104,9 @@ impl SettingsPage {
                         let _ = engine.update_settings(s);
                         cx.refresh_windows();
                     }))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Claude Code, Codex, Copilot CLI, Qwen Code and Kimi Code. Muxin adds a small hook to their settings on your machines. Turning this off takes it out."))
+                    // Short lines: text in Settings doesn't wrap (GPUI measures it before the card has a width).
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Claude Code, Codex, Copilot CLI, Qwen Code and Kimi Code."))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Muxin adds a small hook to their settings on your machines. Turning this off takes it out."))
                     .child(div().text_size(px(11.5)).text_color(theme.text_muted).child(status))
                     .children(trouble.into_iter().take(3).map(|t| div().text_size(px(11.5)).text_color(theme.warning).child(t)))
                     .child(div().h(px(6.)))
@@ -1124,9 +1126,8 @@ impl SettingsPage {
                         let _ = engine3.update_settings(s);
                         cx.refresh_windows();
                     }))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(
-                        "An agent in a session can start another one to help with its task, and wait for its answer. Helpers show under it and end when it does. Off, Muxin says no when an agent asks.",
-                    )),
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("An agent in a session can start another one to help with its task, and wait for its answer."))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Helpers show under it and end when it does. Off, Muxin says no when an agent asks.")),
             )
     }
 

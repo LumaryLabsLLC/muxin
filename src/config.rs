@@ -583,12 +583,13 @@ pub struct Settings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AgentSettings {
-    /// Muxin's hooks in Claude Code's and Codex's settings, so they say when
-    /// they work, need you or are done (see fleet::sessions). Off takes them out.
+    /// Muxin's hooks in the agent CLIs' settings (Claude Code, Codex, Copilot
+    /// CLI, Qwen Code, Kimi Code), so they say when they work, need you or
+    /// are done (see fleet::sessions). Off takes them out.
     pub hooks: bool,
     /// Sessions come back after a restart (a reboot, the machine's agent
-    /// restarting) either way; with this, Claude Code and Codex continue
-    /// their conversations there. Off, they start fresh.
+    /// restarting) either way; with this, the agents whose hooks say their
+    /// conversation continue it there. Off, they start fresh.
     pub resume: bool,
     /// Agents in Muxin's sessions may start other sessions (helpers) through
     /// Muxin's MCP server or CLI; they end with the session that started them

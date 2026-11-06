@@ -150,7 +150,7 @@ enum Command {
     Boxes(BoxCommand),
     /// Run the MCP server on stdio for AI agents (Claude Code, Codex, ...)
     Mcp(McpArgs),
-    /// The Muxin skill that teaches agents (Claude Code, Codex, Hermes, ...) this CLI: put it in their skills folders
+    /// The Muxin skill that teaches agents (Claude Code, Codex, Hermes, ...) this CLI: its guide, and a stub in their skills folders that reads it
     #[command(subcommand)]
     Skill(SkillCommand),
     /// Check every machine once and print a report
@@ -496,7 +496,7 @@ struct ScheduleAddArgs {
     /// A shell command to run
     #[arg(long)]
     command: Option<String>,
-    /// Or an agent session: claude, codex, opencode, gemini, agy, amp, pi
+    /// Or an agent session: claude, codex, opencode, gemini, agy, amp, pi, copilot, cursor, qwen, droid, kimi
     #[arg(long = "agent")]
     cli: Option<String>,
     /// What the agent is asked
@@ -1038,7 +1038,7 @@ enum SessionCommand {
     /// List sessions (and which agents each machine has)
     #[command(alias = "list")]
     Ls(SessionLsArgs),
-    /// Start an agent (claude, codex, opencode, gemini, agy, amp, pi) or a shell on a machine
+    /// Start an agent (claude, codex, opencode, gemini, agy, amp, pi, copilot, cursor, qwen, droid, kimi) or a shell on a machine
     Start(SessionStartArgs),
     /// Print a session's screen and recent scrollback
     Read(SessionReadArgs),
@@ -1167,7 +1167,7 @@ struct SessionStartArgs {
     /// Machine id or name (from inside a session, it can be left out: a helper starts on that session's machine)
     #[arg(value_name = "MACHINE")]
     machine: String,
-    /// claude, codex, opencode, gemini, agy, amp, pi or shell
+    /// claude, codex, opencode, gemini, agy, amp, pi, copilot, cursor, qwen, droid, kimi or shell
     #[arg(value_name = "AGENT")]
     kind: Option<String>,
     /// Folder on the machine (default: home; for a helper, its parent's folder)
@@ -1228,7 +1228,7 @@ struct SessionHandoffArgs {
     agent: AgentArgs,
     /// Session id (<machine-id>/<name>), unique name, or a box id
     session_id: String,
-    /// The agent to hand it to: claude, codex, opencode, gemini, agy, amp or pi
+    /// The agent to hand it to: claude, codex, opencode, gemini, agy, amp, pi, copilot, cursor, qwen, droid or kimi
     to: String,
     /// Keep the old session running too
     #[arg(long)]
@@ -1510,15 +1510,29 @@ struct McpArgs {
 
 #[derive(Subcommand)]
 enum SkillCommand {
-    /// Write the skill into agents' skills folders (every agent found here, or --agent)
+    /// Print the guide for agents (the installed skill runs this), or one of its topics
+    Show(SkillShowArgs),
+    /// Put the skill in agents' skills folders (every agent found here, or --agent): a stub that runs `muxin skill show`
     Install(SkillArgs),
     /// Take it out of those folders again
     Remove(SkillArgs),
 }
 
 #[derive(Args)]
+struct SkillShowArgs {
+    /// A topic the guide names: sessions-and-boxes, github, workspaces, runners, machines, cloud-and-vms
+    topic: Option<String>,
+    /// The guide and every topic, one after another
+    #[arg(long, conflicts_with = "topic")]
+    all: bool,
+    /// Print machine-readable JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
 struct SkillArgs {
-    /// claude, codex, opencode, gemini, pi, hermes, or agents (~/.agents/skills); repeat for several
+    /// claude, codex, opencode, gemini, pi, hermes, copilot, cursor, qwen, droid, kimi, or agents (~/.agents/skills); repeat for several
     /// [default: every agent found on this computer]
     #[arg(long = "agent", value_name = "AGENT")]
     agents: Vec<String>,
@@ -2906,6 +2920,7 @@ fn mcp(args: McpArgs, runtime: &tokio::runtime::Runtime) -> u8 {
 
 fn skill(cmd: SkillCommand) -> u8 {
     let (args, installing) = match cmd {
+        SkillCommand::Show(a) => return skill_show(a),
         SkillCommand::Install(a) => (a, true),
         SkillCommand::Remove(a) => (a, false),
     };
@@ -2941,6 +2956,35 @@ fn skill(cmd: SkillCommand) -> u8 {
         }
     }
     if results.iter().any(|r| r.result == "failed") { 1 } else { 0 }
+}
+
+fn skill_show(args: SkillShowArgs) -> u8 {
+    let text = if args.all {
+        let mut parts = vec![skill::guide(None)];
+        parts.extend(skill::topics().into_iter().map(|t| skill::guide(Some(t))));
+        parts.into_iter().collect::<Result<Vec<_>, _>>().map(|p| p.join("\n\n"))
+    } else {
+        skill::guide(args.topic.as_deref())
+    };
+    match text {
+        Ok(text) if args.json => {
+            let out = serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "topic": args.topic, "text": text, "topics": skill::topics() });
+            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+            0
+        }
+        Ok(text) => {
+            print!("{}", if text.ends_with('\n') { text } else { format!("{text}\n") });
+            0
+        }
+        Err(e) if args.json => {
+            println!("{}", serde_json::json!({ "error": { "code": "not_found", "message": e } }));
+            2
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            2
+        }
+    }
 }
 
 fn init(args: InitArgs) -> u8 {

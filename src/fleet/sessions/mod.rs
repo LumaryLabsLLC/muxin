@@ -44,7 +44,7 @@ pub struct AgentKind {
     pub command: &'static str,
     /// Accepts an initial prompt on its command line.
     pub prompt_arg: bool,
-    /// The flag before that prompt (`-i` for `agy`); none when it's positional.
+    /// The flag before that prompt (`-i` for `agy`, `copilot`, `qwen`); none when it's positional.
     pub prompt_flag: Option<&'static str>,
 }
 
@@ -56,6 +56,13 @@ pub const AGENTS: &[AgentKind] = &[
     AgentKind { id: "agy", name: "Antigravity", command: "agy", prompt_arg: true, prompt_flag: Some("-i") },
     AgentKind { id: "amp", name: "Amp", command: "amp", prompt_arg: false, prompt_flag: None },
     AgentKind { id: "pi", name: "Pi", command: "pi", prompt_arg: true, prompt_flag: None },
+    AgentKind { id: "copilot", name: "Copilot CLI", command: "copilot", prompt_arg: true, prompt_flag: Some("-i") },
+    // Its command is `agent` now; `cursor-agent` stays, and says which agent it is.
+    AgentKind { id: "cursor", name: "Cursor Agent", command: "cursor-agent", prompt_arg: true, prompt_flag: None },
+    AgentKind { id: "qwen", name: "Qwen Code", command: "qwen", prompt_arg: true, prompt_flag: Some("-i") },
+    AgentKind { id: "droid", name: "Droid", command: "droid", prompt_arg: true, prompt_flag: None },
+    // Kimi Code: its prompt flag doesn't open its screen, so the prompt is typed in.
+    AgentKind { id: "kimi", name: "Kimi Code", command: "kimi", prompt_arg: false, prompt_flag: None },
     AgentKind { id: "shell", name: "Shell", command: "", prompt_arg: false, prompt_flag: None },
 ];
 
@@ -1188,6 +1195,17 @@ mod tests {
         assert_eq!(launch_line(agent("agy").unwrap(), None, false).0, "agy");
         assert_eq!(launch_line(agent("agy").unwrap(), Some("fix tests"), false).0, "agy -i 'fix tests'");
         assert_eq!(launch_line(agent("claude").unwrap(), Some("fix tests"), false).0, "claude 'fix tests'");
+        assert_eq!(launch_line(agent("copilot").unwrap(), Some("fix tests"), false).0, "copilot -i 'fix tests'");
+        assert_eq!(launch_line(agent("cursor").unwrap(), Some("fix tests"), false).0, "cursor-agent 'fix tests'");
+        assert_eq!(launch_line(agent("qwen").unwrap(), Some("fix tests"), false).0, "qwen -i 'fix tests'");
+        assert_eq!(launch_line(agent("droid").unwrap(), Some("fix tests"), false).0, "droid 'fix tests'");
+        assert_eq!(launch_line(agent("kimi").unwrap(), Some("fix tests"), false), ("kimi".to_string(), Some("fix tests".to_string())));
+        assert_eq!(default_title(agent("cursor").unwrap(), "~/code/api"), "Cursor Agent · api");
+        // Every agent's session ids are found in terminal text (`cursor-3f9a`).
+        for a in AGENTS {
+            assert!(looks_like_session_id(&format!("beelink/{}-3f9a", a.id)), "{}", a.id);
+            assert!(!a.id.contains('-'), "{}: a session name is <agent>-<id>", a.id);
+        }
         assert_eq!(default_title(agent("shell").unwrap(), "~"), "Shell · home");
         assert!(split_id("beelink/claude-1").is_ok());
         assert!(split_id("claude-1").is_err());

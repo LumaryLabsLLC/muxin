@@ -284,6 +284,11 @@ pub fn agent_look(agent: &str) -> (&'static str, (u32, u32)) {
         "agy" => ("agent-agy", (0x5e5ce6, 0x3f3d99)),
         "amp" => ("agent-amp", (0xf2704f, 0xc9352b)),
         "pi" => ("agent-pi", (0x5aa6cf, 0x3a7fa6)),
+        "copilot" => ("agent-copilot", (0x8534f3, 0x5a1fb3)),
+        "cursor" => ("agent-cursor", (0x3a3a40, 0x0e0e10)),
+        "qwen" => ("agent-qwen", (0x6f69f7, 0x4532c9)),
+        "droid" => ("agent-droid", (0xec7a3a, 0xd15010)),
+        "kimi" => ("agent-kimi", (0x2b8cff, 0x1060d6)),
         "shell" => ("terminal", (0x8f95ff, 0x5057e0)),
         _ => ("bot", (0xa7aebb, 0x5f6673)),
     }

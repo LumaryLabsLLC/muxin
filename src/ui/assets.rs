@@ -22,7 +22,7 @@ icons!(
     "triangle-alert", "x", "zap", "arrow-left", "arrow-right", "gauge", "radio", "workflow",
     "bot", "square-terminal", "power", "plug", "unplug",
     "eye", "link", "users", "user-x", "user-check",
-    "agent-claude", "agent-codex", "agent-gemini", "agent-opencode", "agent-agy", "agent-amp", "agent-pi", "agent-github",
+    "agent-claude", "agent-codex", "agent-gemini", "agent-opencode", "agent-agy", "agent-amp", "agent-pi", "agent-copilot", "agent-cursor", "agent-qwen", "agent-droid", "agent-kimi", "agent-github",
     "circle-dot", "git-pull-request", "git-pull-request-draft", "git-merge", "message-square", "lock", "star",
     "arrow-down", "arrow-up", "book-open", "star-filled", "maximize", "minimize", "panel-right", "panel-left", "columns-2", "rows-2", "pause", "circle-stop",
     "folder", "file", "sliders-horizontal", "palette", "keyboard", "cloud", "tablet", "brand-digitalocean", "pencil", "code", "corner-down-right", "arrow-right-left",
@@ -189,3 +189,19 @@ pub fn set_dock_icon() {
 
 #[cfg(not(target_os = "macos"))]
 pub fn set_dock_icon() {}
+
+#[cfg(test)]
+mod tests {
+    use super::ICONS;
+
+    /// Every agent CLI a session can run has its own logo in the app.
+    #[test]
+    fn every_agent_has_its_logo() {
+        for a in crate::fleet::sessions::AGENTS.iter().filter(|a| a.id != "shell") {
+            let (icon, _) = crate::ui::kit::agent_look(a.id);
+            assert_eq!(icon, format!("agent-{}", a.id), "{} has no look of its own", a.id);
+            let svg = ICONS.iter().find(|(n, _)| *n == icon).map(|(_, b)| String::from_utf8_lossy(b).to_string());
+            assert!(svg.as_deref().is_some_and(|s| s.contains("<svg")), "{icon} isn't bundled");
+        }
+    }
+}

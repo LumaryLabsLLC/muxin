@@ -50,7 +50,7 @@ done: nothing is deleted automatically. Commands run as the user on a real machi
 anything there you wouldn't do in their own terminal without asking.
 
 Agent sessions: long-running terminals on the user's machines, each running an AI agent CLI (Claude \
-Code, Codex, OpenCode, Gemini CLI, Amp, Pi) or a plain shell, kept alive by Muxin's agent on \
+Code, Codex, OpenCode, Gemini CLI, Copilot CLI, Cursor Agent, ...) or a plain shell, kept alive by Muxin's agent on \
 the machine so they survive disconnects. The user watches and types into them in the Muxin app. session_list shows them \
 (and which agents each machine has); session_start starts one, optionally with a first prompt; \
 session_read returns its screen as text; session_send types into it; session_stop ends it. \
@@ -448,6 +448,11 @@ const RUNNER_ID: &str = "Runner id: \"<machine-id>/<runner-name>\", or \"github/
 
 /// The tool catalog. Descriptions are written for a model deciding what to call.
 pub fn tools() -> Vec<Value> {
+    // The agent CLIs sessions run (fleet::sessions::AGENTS), by id and by name.
+    let agent_ids: Vec<&str> = crate::fleet::sessions::AGENTS.iter().map(|a| a.id).collect();
+    let agent_list = agent_ids.join(", ");
+    let agent_names = crate::fleet::sessions::AGENTS.iter().filter(|a| a.id != "shell").map(|a| a.name).collect::<Vec<_>>().join(", ");
+    let handoff_list = agent_ids.iter().filter(|a| **a != "shell").copied().collect::<Vec<_>>().join(", ");
     vec![
         json!({
             "name": "status",
@@ -612,7 +617,7 @@ pub fn tools() -> Vec<Value> {
                     "days": { "type": "array", "items": { "type": "string" } }
                 }, "required": ["every"] },
                 "command": { "type": "string" },
-                "agent": { "type": "string", "description": "claude, codex, opencode, gemini, agy, amp, pi or shell." },
+                "agent": { "type": "string", "description": format!("{agent_list}.") },
                 "prompt": { "type": "string" },
                 "folder": { "type": "string", "description": "Default ~." },
                 "enabled": { "type": "boolean", "description": "Default true; false keeps it without running it." }
@@ -906,7 +911,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "session_list",
-            "description": "Agent sessions on the user's machines: terminals running Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell, kept alive by Muxin's agent on the machine. Each has an id (<machine-id>/<name>), agent, title, folder, status (running/exited), state (working; needs_you: a question or an approval waits, see session_question; done: it finished its turn; idle), stateSource (hook or escape: the agent said so; screen: a known question is on its screen; output: a guess from its output), conversationId (the agent's own session id, when its hooks said), restored (it came back after its machine or the machine's agent restarted: resumed, its agent continues its conversation; fresh, its agent started again without it; shell, a new shell; exited, it had exited) with restoredAt, busy (state is working; kept for older clients), attention (an unread notice: waiting, bell or exited) and the command a human can paste to attach. Also lists, per machine, the agent CLIs installed. Reads the machines over ssh, so it's always current (and sets up Muxin's agent on a machine the first time).",
+            "description": format!("Agent sessions on the user's machines: terminals running {agent_names} or a shell, kept alive by Muxin's agent on the machine. Each has an id (<machine-id>/<name>), agent, title, folder, status (running/exited), state (working; needs_you: a question or an approval waits, see session_question; done: it finished its turn; idle), stateSource (hook or escape: the agent said so; screen: a known question is on its screen; output: a guess from its output), conversationId (the agent's own session id, when its hooks said), restored (it came back after its machine or the machine's agent restarted: resumed, its agent continues its conversation; fresh, its agent started again without it; shell, a new shell; exited, it had exited) with restoredAt, busy (state is working; kept for older clients), attention (an unread notice: waiting, bell or exited) and the command a human can paste to attach. Also lists, per machine, the agent CLIs installed. Reads the machines over ssh, so it's always current (and sets up Muxin's agent on a machine the first time)."),
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &[]),
             "annotations": annotations("List agent sessions", true, false, true, true),
         }),
@@ -915,7 +920,7 @@ pub fn tools() -> Vec<Value> {
             "description": "Start an agent CLI (or a shell) in a new session on a machine, in a folder there, optionally with a first prompt. It keeps running until stopped; the user can watch and type into it from the Muxin app. Returns the session. Only start sessions the user asked for, with one exception: when you run in one of Muxin's sessions yourself, you may start helpers for your own task. A helper starts beside you (your machine and folder, unless you pass machine_id or cwd), shows under your session, and ends when your session ends unless keep is true; its `parent` is your session. Wait for its answer with session_wait. It's refused when the user turned helpers off in Muxin (Settings › Agents).",
             "inputSchema": schema(json!({
                 "machine_id": { "type": "string", "description": format!("{MACHINE_ID} Can be left out from inside a session: a helper starts on its machine.") },
-                "agent": { "type": "string", "enum": ["claude", "codex", "opencode", "gemini", "agy", "amp", "pi", "shell"], "description": "Which CLI to run. session_list shows which are installed on each machine." },
+                "agent": { "type": "string", "enum": agent_ids, "description": "Which CLI to run. session_list shows which are installed on each machine." },
                 "cwd": { "type": "string", "description": "Folder on the machine, e.g. \"~/code/api\". Default: a helper's parent's folder, else the home folder." },
                 "title": { "type": "string", "description": "Shown in the app's sidebar. Default: agent and folder name." },
                 "prompt": { "type": "string", "description": "First message for the agent: a helper's task." },
@@ -1001,7 +1006,7 @@ pub fn tools() -> Vec<Value> {
             "description": "Hand a session's work to another agent (Claude Code to Codex, say), or a box's to another agent in the box: Muxin writes .muxin/handoff.md in its folder (where the git work stands, the agent's to-do list, and the conversation so far from the agent's own transcript: Claude Code, Codex, Gemini CLI and Pi; else what its terminal showed), starts the new agent there asked to read it first, and ends the old session unless keep. With machine_id the work moves to that machine first (git checkouts only; the folder it left stays as it was). Returns the new session, the note's path and what it was made from (`source`). Only when the user asked.",
             "inputSchema": schema(json!({
                 "session_id": { "type": "string", "description": "A session id, or a box id (box-7k2m9q)." },
-                "agent": { "type": "string", "description": "The agent to hand it to: claude, codex, opencode, gemini, agy, amp or pi." },
+                "agent": { "type": "string", "description": format!("The agent to hand it to: {handoff_list}.") },
                 "keep": { "type": "boolean", "description": "Keep the old session running too. Default false." },
                 "machine_id": { "type": "string", "description": "Move the work to this machine and continue there: its commits that aren't on origin, uncommitted changes and new files go into a workspace there (a worktree of a checkout of the repository, else a clone). Default: the session's own machine. Not for boxes." }
             }), &["session_id", "agent"]),

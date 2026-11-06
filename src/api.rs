@@ -2668,7 +2668,7 @@ pub struct SessionStartRequest {
     /// helper): that session's machine.
     #[serde(default)]
     pub machine_id: Option<String>,
-    /// "claude", "codex", "opencode", "gemini", "agy", "amp", "pi" or "shell".
+    /// An id from fleet::sessions::AGENTS: "claude", "codex", ..., "kimi" or "shell".
     pub agent: String,
     /// Folder on the machine to start in. Default: the folder of the session
     /// it's started from (a helper beside it), else the home folder.

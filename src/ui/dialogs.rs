@@ -2265,8 +2265,13 @@ impl Render for NewSessionDialog {
                     cx.notify()
                 }))
         };
+        // The ones this machine has first (and the shell), so the rest can sit below.
+        let mut kinds: Vec<&'static crate::fleet::sessions::AgentKind> = AGENTS.iter().collect();
+        if checked && self.new_vm.is_none() {
+            kinds.sort_by_key(|k| !(k.id == "shell" || installed.iter().any(|a| a == k.id)));
+        }
         let mut rows = Vec::new();
-        for (r, chunk) in AGENTS.chunks(3).enumerate() {
+        for (r, chunk) in kinds.chunks(3).enumerate() {
             let cards: Vec<AnyElement> = chunk.iter().enumerate().map(|(c, k)| card(r * 3 + c, k, cx).into_any_element()).collect();
             rows.push(div().flex().gap(px(8.)).children(cards).into_any_element());
         }

@@ -2,7 +2,7 @@
 
 ## Agent sessions
 
-The user runs agent CLIs (Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi) and shells in sessions that keep running on their machines, held by Muxin's agent there. They watch them in the app. These are the user's sessions: start one, type into it, answer it or stop it only when they asked. Reading is always fine.
+The user runs agent CLIs (Claude Code, Codex, OpenCode, Gemini CLI, Antigravity, Amp, Pi, Copilot CLI, Cursor Agent, Qwen Code, Droid, Kimi Code) and shells in sessions that keep running on their machines, held by Muxin's agent there. They watch them in the app. These are the user's sessions: start one, type into it, answer it or stop it only when they asked. Reading is always fine.
 
 ### See them
 
@@ -16,7 +16,7 @@ Session, box and checkout JSON uses camelCase keys (`machineId`, `agentName`, `s
 - `id`, `agent` (`claude`, `codex`, ..., `shell`), `title`, `cwd`.
 - `status`: `running` or `exited` (with `exitCode`).
 - `state`: what its agent is doing. `working`; `needs_you` (a question or an approval waits: see `question` below); `done` (it finished its turn); `idle`.
-- `stateSource`: how that's known. `hook` or `escape`: the agent said so (Claude Code and Codex through Muxin's hooks; any program with an escape code). `screen`: a question Muxin knows is on its screen. `output`: a guess (printing is working, quiet after working is done).
+- `stateSource`: how that's known. `hook` or `escape`: the agent said so (Claude Code, Codex, Copilot CLI, Qwen Code and Kimi Code through Muxin's hooks; any program with an escape code). `screen`: a question Muxin knows is on its screen. `output`: a guess (printing is working, quiet after working is done).
 - `conversationId`: the agent's own id for its conversation, when its hooks said.
 - `parent`: the session that started this one, a helper (see below), and `keep` when it goes on after that session ends.
 - `restored`: it came back after its machine, or Muxin's agent there, restarted. `resumed`: its agent continues its conversation. `fresh`: its agent started again without it. `shell`: a new shell. `exited`: it had exited and is as it was. `restoredAt` says when. It goes when the session is restarted.
@@ -83,7 +83,7 @@ muxin session stop beelink/claude-3f9a --json
 
 The agent is `claude`, `codex`, `opencode`, `gemini`, `agy`, `amp`, `pi` or `shell`. `muxin session attach` opens one in a terminal; it's interactive, for the user, not for you.
 
-`restart` continues a Claude Code or Codex conversation when its id is known, rather than giving the agent its first task again.
+`restart` continues the conversation of an agent whose hooks gave its id (Claude Code, Codex, Copilot CLI, Qwen Code, Kimi Code), rather than giving the agent its first task again.
 
 ### Helpers: start one from your own session, then wait for it
 
@@ -110,7 +110,7 @@ In the app, a session id printed in a terminal is a link: ⌘-click it on the Ma
 
 ### After a restart
 
-Sessions survive a reboot, a crash of Muxin's agent, or `muxin power <machine> restart`. The agent on each machine saves them as they go, and brings them back the next time Muxin looks at the machine: the same id, title, folder and recent scrollback, with their programs started again. Claude Code and Codex continue their conversation; their first task is never sent again. Other agents start fresh, and a shell is a new shell. `restored` in `session ls` says which. A box pauses instead (`muxin box resume` continues it).
+Sessions survive a reboot, a crash of Muxin's agent, or `muxin power <machine> restart`. The agent on each machine saves them as they go, and brings them back the next time Muxin looks at the machine: the same id, title, folder and recent scrollback, with their programs started again. Claude Code, Codex, Copilot CLI, Qwen Code and Kimi Code continue their conversation; their first task is never sent again. Other agents start fresh, and a shell is a new shell. `restored` in `session ls` says which. A box pauses instead (`muxin box resume` continues it).
 
 The user can turn off continuing conversations in Settings › General › Agents, on the Mac or the iPad. Sessions still come back, with their agents started fresh.
 

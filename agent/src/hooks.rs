@@ -12,6 +12,15 @@
 //! - Codex: `hooks.json` in `CODEX_HOME` (else `~/.codex`). Codex runs a
 //!   user's hook only once it's trusted, by its hash under `[hooks.state]` in
 //!   `config.toml`; Muxin trusts its own there, as `/hooks` would.
+//! - Copilot CLI: a file of Muxin's own, `hooks/muxin.json` in `COPILOT_HOME`
+//!   (else `~/.copilot`).
+//! - Qwen Code: `settings.json` in `QWEN_HOME` (else `~/.qwen`), in Claude
+//!   Code's format.
+//! - Kimi Code: `[[hooks]]` tables in `config.toml` in `KIMI_CODE_HOME` (else
+//!   `~/.kimi-code`).
+//!
+//! Droid and Cursor Agent have hooks too, but they weren't tried yet (both
+//! need an account to run a turn), so they're left to the screen guess.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -29,23 +38,37 @@ fn timeout(event: &str) -> u64 {
 const CLAUDE_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop", "SessionEnd"];
 /// Codex's; it skips names it doesn't know.
 const CODEX_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop", "Interrupt", "SessionEnd"];
+/// Copilot CLI's, by their Claude Code names: those get Claude Code's fields
+/// (its camelCase ones get others). The event rides along in the command, as
+/// its PermissionRequest doesn't say which it is.
+const COPILOT_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Notification", "Stop", "SessionEnd"];
+/// Qwen Code's (tried with 0.26).
+const QWEN_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Notification", "Stop", "SessionEnd"];
+/// Kimi Code's (tried with 2.5).
+const KIMI_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Notification", "Stop", "Interrupt", "SessionEnd"];
 
 /// Where the agent CLIs keep their settings, as the user's sessions see it.
 #[derive(Debug, Clone, Default)]
 pub struct Dirs {
     pub claude: Option<PathBuf>,
     pub codex: Option<PathBuf>,
+    pub copilot: Option<PathBuf>,
+    pub qwen: Option<PathBuf>,
+    pub kimi: Option<PathBuf>,
 }
 
 impl Dirs {
-    /// From the login shell's `CLAUDE_CONFIG_DIR` and `CODEX_HOME` (empty:
-    /// not set), else the defaults under `home`.
-    pub fn new(home: &Path, claude: Option<&str>, codex: Option<&str>) -> Dirs {
-        let set = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(crate::sys::expand_home);
+    /// From the login shell's variables (`var`: `CLAUDE_CONFIG_DIR`,
+    /// `CODEX_HOME`, ...; empty is not set), else the defaults under `home`.
+    pub fn new(home: &Path, var: impl Fn(&str) -> Option<String>) -> Dirs {
+        let set = |name: &str| var(name).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).map(|v| crate::sys::expand_home(&v));
         Dirs {
-            claude: Some(set(claude).unwrap_or_else(|| home.join(".claude"))),
+            claude: Some(set("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"))),
             // Codex itself resolves a CODEX_HOME it's given (its trust keys use that path).
-            codex: Some(set(codex).map(|p| std::fs::canonicalize(&p).unwrap_or(p)).unwrap_or_else(|| home.join(".codex"))),
+            codex: Some(set("CODEX_HOME").map(|p| std::fs::canonicalize(&p).unwrap_or(p)).unwrap_or_else(|| home.join(".codex"))),
+            copilot: Some(set("COPILOT_HOME").unwrap_or_else(|| home.join(".copilot"))),
+            qwen: Some(set("QWEN_HOME").unwrap_or_else(|| home.join(".qwen"))),
+            kimi: Some(set("KIMI_CODE_HOME").unwrap_or_else(|| home.join(".kimi-code"))),
         }
     }
 }
@@ -58,9 +81,16 @@ fn agent_path() -> PathBuf {
 /// The hook's command for `agent`: nothing outside a Muxin session, never a
 /// failure, never a word on stdout.
 fn command(agent: &str, agent_path: &Path) -> String {
+    command_for(agent, agent_path, None)
+}
+
+/// `command`, naming `event` for a CLI whose hooks don't always say which
+/// event they are.
+fn command_for(agent: &str, agent_path: &Path, event: Option<&str>) -> String {
     let path = agent_path.display().to_string();
     let quoted = if path.chars().any(|c| matches!(c, '"' | '$' | '`' | '\\' | '\'' | '!')) { sh_quote(&path) } else { format!("\"{path}\"") };
-    let inner = format!("[ -z \"$MUXEN_SESSION\" ] || {quoted} report {agent} 2>/dev/null || true");
+    let event = event.map(|e| format!(" {e}")).unwrap_or_default();
+    let inner = format!("[ -z \"$MUXEN_SESSION\" ] || {quoted} report {agent}{event} 2>/dev/null || true");
     format!("/bin/sh -c {}", sh_quote(&inner))
 }
 
@@ -82,27 +112,169 @@ fn handler(event: &str, command: &str) -> Value {
 /// "none" (not set up here) or what went wrong.
 pub fn apply(on: bool, dirs: &Dirs) -> Value {
     if cfg!(windows) {
-        return json!({ "claude": "none", "codex": "none" });
+        return json!({ "claude": "none", "codex": "none", "copilot": "none", "qwen": "none", "kimi": "none" });
     }
     let agent = agent_path();
-    let mut out = Map::new();
-    let claude = match &dirs.claude {
-        Some(dir) if dir.is_dir() => match edit_json(&dir.join("settings.json"), false, |root| set_hooks(root, CLAUDE_EVENTS, &command("claude", &agent), on)) {
-            Ok(_) => if on { "on" } else { "off" }.to_string(),
-            Err(e) => e,
-        },
-        _ => "none".to_string(),
-    };
-    out.insert("claude".into(), json!(claude));
-    let codex = match &dirs.codex {
-        Some(dir) if dir.is_dir() => match codex(dir, &command("codex", &agent), on) {
+    let each = |dir: &Option<PathBuf>, change: &dyn Fn(&Path) -> Result<(), String>| match dir {
+        Some(dir) if dir.is_dir() => match change(dir) {
             Ok(()) => if on { "on" } else { "off" }.to_string(),
             Err(e) => e,
         },
         _ => "none".to_string(),
     };
-    out.insert("codex".into(), json!(codex));
+    let json_hooks = |agent_id: &str, events: &'static [&'static str]| {
+        let command = command(agent_id, &agent);
+        move |dir: &Path| edit_json(&dir.join("settings.json"), false, |root| set_hooks(root, events, &command, on)).map(|_| ())
+    };
+    let mut out = Map::new();
+    out.insert("claude".into(), json!(each(&dirs.claude, &json_hooks("claude", CLAUDE_EVENTS))));
+    out.insert("codex".into(), json!(each(&dirs.codex, &|dir| codex(dir, &command("codex", &agent), on))));
+    out.insert("copilot".into(), json!(each(&dirs.copilot, &|dir| copilot(dir, &agent, on))));
+    out.insert("qwen".into(), json!(each(&dirs.qwen, &json_hooks("qwen", QWEN_EVENTS))));
+    out.insert("kimi".into(), json!(each(&dirs.kimi, &|dir| kimi(dir, &command("kimi", &agent), on))));
     Value::Object(out)
+}
+
+/// Copilot CLI: a hooks file of Muxin's own, or none.
+fn copilot(dir: &Path, agent: &Path, on: bool) -> Result<(), String> {
+    let file = dir.join("hooks").join("muxin.json");
+    let before = std::fs::read_to_string(&file).ok();
+    if let Some(text) = &before {
+        let commands = serde_json::from_str::<Value>(text).map(|v| copilot_commands(&v)).unwrap_or_default();
+        if commands.is_empty() || !commands.iter().all(|c| is_ours(c)) {
+            return Err(format!("{} isn't Muxin's, so it was left alone", file.display()));
+        }
+    }
+    if !on {
+        if before.is_some() {
+            std::fs::remove_file(&file).map_err(|e| format!("couldn't remove {}: {e}", file.display()))?;
+        }
+        return Ok(());
+    }
+    let hooks: Map<String, Value> = COPILOT_EVENTS
+        .iter()
+        .map(|e| (e.to_string(), json!([{ "type": "command", "bash": command_for("copilot", agent, Some(e)), "timeoutSec": timeout(e) }])))
+        .collect();
+    let text = serde_json::to_string_pretty(&json!({ "version": 1, "hooks": hooks })).unwrap_or_default() + "\n";
+    if before.as_deref() == Some(text.as_str()) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir.join("hooks")).map_err(|e| format!("couldn't make {}: {e}", dir.join("hooks").display()))?;
+    write_keeping(&file, &text)
+}
+
+/// The commands in a Copilot CLI hooks file.
+fn copilot_commands(v: &Value) -> Vec<String> {
+    let lists: Vec<&Value> = v["hooks"].as_object().map(|h| h.values().collect()).unwrap_or_default();
+    lists
+        .iter()
+        .flat_map(|l| l.as_array().into_iter().flatten())
+        .flat_map(|h| [&h["bash"], &h["command"], &h["powershell"]])
+        .filter_map(|c| c.as_str().map(str::to_string))
+        .collect()
+}
+
+/// Kimi Code: Muxin's `[[hooks]]` tables in its config.toml.
+fn kimi(dir: &Path, command: &str, on: bool) -> Result<(), String> {
+    let config = dir.join("config.toml");
+    let text = match std::fs::read_to_string(&config) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("couldn't read {}: {e}", config.display())),
+    };
+    match kimi_hooks(&text, command, on)? {
+        // Only ours were in it (Muxin made it): none, as before.
+        Some(new) if new.trim().is_empty() => {
+            let real = std::fs::canonicalize(&config).unwrap_or(config);
+            std::fs::remove_file(&real).map_err(|e| format!("couldn't remove {}: {e}", real.display()))
+        }
+        Some(new) => write_keeping(&config, &new),
+        None => Ok(()),
+    }
+}
+
+/// Kimi Code's config.toml with Muxin's `[[hooks]]` tables for `KIMI_EVENTS`
+/// at its end (or none) and everything else as it was; `None` when it's
+/// right already. Kimi refuses a hook with any other field, so they hold
+/// only `event`, `command` and `timeout`. Leaves a file alone that sets its
+/// hooks another way (`hooks = [...]`).
+fn kimi_hooks(text: &str, command: &str, on: bool) -> Result<Option<String>, String> {
+    let lines: Vec<&str> = text.lines().collect();
+    // The lines inside a multi-line string, where `[` starts no table.
+    let mut in_string = vec![false; lines.len()];
+    let mut open: Option<&str> = None;
+    for (i, l) in lines.iter().enumerate() {
+        in_string[i] = open.is_some();
+        let mut rest = *l;
+        loop {
+            let next = match open {
+                Some(q) => rest.find(q).map(|at| (at, q)),
+                None => ["\"\"\"", "'''"].into_iter().filter_map(|q| rest.find(q).map(|at| (at, q))).min_by_key(|(at, _)| *at),
+            };
+            let Some((at, q)) = next else { break };
+            open = if open.is_some() { None } else { Some(q) };
+            rest = &rest[at + 3..];
+        }
+    }
+    let header = |i: usize| !in_string[i] && lines[i].trim_start().starts_with('[');
+    for (i, l) in lines.iter().enumerate() {
+        if header(i) {
+            break;
+        }
+        let t = l.trim_start();
+        if !in_string[i] && t.strip_prefix("hooks").is_some_and(|r| r.trim_start().starts_with(['=', '.'])) {
+            return Err("Kimi Code's config.toml sets its hooks in a way Muxin doesn't change, so it was left alone".into());
+        }
+    }
+    // Each [[hooks]] table of ours goes: its header and its lines up to the next header.
+    let mut kept: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if !header(i) {
+            kept.push(lines[i]);
+            i += 1;
+            continue;
+        }
+        let mut end = i + 1;
+        while end < lines.len() && !header(end) {
+            end += 1;
+        }
+        // Blank lines and comments at its end belong to what follows.
+        let mut body_end = end;
+        while body_end > i + 1 && (lines[body_end - 1].trim().is_empty() || lines[body_end - 1].trim_start().starts_with('#')) {
+            body_end -= 1;
+        }
+        let ours = lines[i].trim() == "[[hooks]]" && lines[i + 1..body_end].iter().any(|l| l.trim_start().starts_with("command") && is_ours(l));
+        kept.extend(&lines[if ours { body_end } else { i }..end]);
+        i = end;
+    }
+    // Don't leave a run of blank lines where tables went.
+    let mut out: Vec<String> = Vec::new();
+    for l in kept {
+        if l.trim().is_empty() && out.last().is_some_and(|p| p.trim().is_empty()) {
+            continue;
+        }
+        out.push(l.to_string());
+    }
+    while out.last().is_some_and(|l| l.trim().is_empty()) {
+        out.pop();
+    }
+    if on {
+        for event in KIMI_EVENTS {
+            if !out.is_empty() {
+                out.push(String::new());
+            }
+            out.push("[[hooks]]".into());
+            out.push(format!("event = {}", toml_string(event)));
+            out.push(format!("command = {}", toml_string(command)));
+            out.push(format!("timeout = {}", timeout(event)));
+        }
+    }
+    let mut new = out.join("\n");
+    if !new.is_empty() {
+        new.push('\n');
+    }
+    Ok((new != text).then_some(new))
 }
 
 /// Codex: the hooks, then their trust.
@@ -441,7 +613,7 @@ fn trust(text: &str, prefix: &str, wanted: &[(String, String)], ours: &HashSet<S
 
 /// `muxen-agent hooks on|off|status`, for trying them by hand.
 pub fn run(args: &[String]) -> i32 {
-    let dirs = Dirs::new(&crate::sys::user_home(), std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(), std::env::var("CODEX_HOME").ok().as_deref());
+    let dirs = Dirs::new(&crate::sys::user_home(), |name| std::env::var(name).ok());
     match args.first().map(String::as_str) {
         Some("on") => println!("{}", apply(true, &dirs)),
         Some("off") => println!("{}", apply(false, &dirs)),
@@ -466,7 +638,28 @@ pub fn status(dirs: &Dirs) -> Value {
         Some(d) if d.is_dir() => has(d.join(file), events),
         _ => "none",
     };
-    json!({ "claude": one(&dirs.claude, "settings.json", CLAUDE_EVENTS), "codex": one(&dirs.codex, "hooks.json", CODEX_EVENTS) })
+    let copilot = match &dirs.copilot {
+        Some(d) if d.is_dir() => {
+            let v = std::fs::read_to_string(d.join("hooks").join("muxin.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+            if v.is_some_and(|v| COPILOT_EVENTS.iter().all(|e| v["hooks"][*e].as_array().is_some_and(|l| !l.is_empty()))) { "on" } else { "off" }
+        }
+        _ => "none",
+    };
+    let kimi = match &dirs.kimi {
+        Some(d) if d.is_dir() => {
+            let text = std::fs::read_to_string(d.join("config.toml")).unwrap_or_default();
+            let ours = text.lines().filter(|l| l.trim_start().starts_with("command") && is_ours(l)).count();
+            if ours >= KIMI_EVENTS.len() { "on" } else { "off" }
+        }
+        _ => "none",
+    };
+    json!({
+        "claude": one(&dirs.claude, "settings.json", CLAUDE_EVENTS),
+        "codex": one(&dirs.codex, "hooks.json", CODEX_EVENTS),
+        "copilot": copilot,
+        "qwen": one(&dirs.qwen, "settings.json", QWEN_EVENTS),
+        "kimi": kimi,
+    })
 }
 
 #[cfg(test)]
@@ -638,21 +831,115 @@ mod tests {
         std::os::unix::fs::symlink(&real, claude.join("settings.json")).unwrap();
         let config = "model = \"gpt-5\"\n";
         std::fs::write(codex.join("config.toml"), config).unwrap();
-        let dirs = Dirs { claude: Some(claude.clone()), codex: Some(codex.clone()) };
-        assert_eq!(apply(true, &dirs), json!({ "claude": "on", "codex": "on" }));
-        assert_eq!(status(&dirs), json!({ "claude": "on", "codex": "on" }));
+        let dirs = Dirs { claude: Some(claude.clone()), codex: Some(codex.clone()), ..Default::default() };
+        let none = json!({ "copilot": "none", "qwen": "none", "kimi": "none" });
+        let with = |a: &str, b: &str| {
+            let mut v = none.clone();
+            v["claude"] = json!(a);
+            v["codex"] = json!(b);
+            v
+        };
+        assert_eq!(apply(true, &dirs), with("on", "on"));
+        assert_eq!(status(&dirs), with("on", "on"));
         assert!(std::fs::symlink_metadata(claude.join("settings.json")).unwrap().file_type().is_symlink());
         let toml = std::fs::read_to_string(codex.join("config.toml")).unwrap();
         assert_eq!(toml.matches("trusted_hash").count(), CODEX_EVENTS.len(), "{toml}");
         assert!(toml.contains(&format!("{}:stop:0:0", codex.join("hooks.json").display())));
-        assert_eq!(apply(false, &dirs), json!({ "claude": "off", "codex": "off" }));
+        assert_eq!(apply(false, &dirs), with("off", "off"));
         assert_eq!(std::fs::read_to_string(&real).unwrap(), original);
         assert_eq!(std::fs::read_to_string(codex.join("config.toml")).unwrap(), config);
         // Codex's hooks.json had nothing else: none is left.
         assert!(!codex.join("hooks.json").exists());
         // Not set up: nothing made.
-        let missing = Dirs { claude: Some(root.join("nope")), codex: None };
-        assert_eq!(apply(true, &missing), json!({ "claude": "none", "codex": "none" }));
+        let missing = Dirs { claude: Some(root.join("nope")), ..Default::default() };
+        assert_eq!(apply(true, &missing), with("none", "none"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copilot_gets_a_file_of_its_own_naming_each_event() {
+        let root = std::env::temp_dir().join(format!("muxin-hooks-copilot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let agent = Path::new("/home/adib/.muxen/bin/muxen-agent");
+        copilot(&root, agent, true).unwrap();
+        let file = root.join("hooks").join("muxin.json");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(v["version"], 1);
+        for e in COPILOT_EVENTS {
+            let h = &v["hooks"][*e][0];
+            assert_eq!((h["type"].as_str(), h["timeoutSec"].as_u64()), (Some("command"), Some(timeout(e))));
+            let bash = h["bash"].as_str().unwrap();
+            assert!(is_ours(bash) && bash.contains(&format!(" report copilot {e} ")), "{bash}");
+        }
+        // Again: the same file.
+        let before = std::fs::metadata(&file).unwrap().modified().unwrap();
+        copilot(&root, agent, true).unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), before);
+        // Off: gone, and the folder Copilot made stays.
+        copilot(&root, agent, false).unwrap();
+        assert!(!file.exists() && root.join("hooks").is_dir());
+        copilot(&root, agent, false).unwrap();
+        // A file of the user's own with that name stays.
+        std::fs::write(&file, r#"{"version":1,"hooks":{"Stop":[{"type":"command","bash":"say done"}]}}"#).unwrap();
+        assert!(copilot(&root, agent, true).is_err());
+        assert!(copilot(&root, agent, false).is_err());
+        assert!(std::fs::read_to_string(&file).unwrap().contains("say done"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn kimi_tables_go_at_the_end_and_leave_again() {
+        let cmd = command("kimi", Path::new("/home/adib/.muxen/bin/muxen-agent"));
+        let theirs = "default_model = \"kimi-k3\"\n\n[providers.kimi]\ntype = \"kimi\"\napi_key = \"sk-x\"\n\n[[hooks]]\nevent = \"Stop\"\ncommand = \"notify-send done\"\ntimeout = 5\n# their note\n\n[tui]\nprompt = \"\"\"\n[[hooks]]\nnot a table\n\"\"\"\n";
+        let on = kimi_hooks(theirs, &cmd, true).unwrap().unwrap();
+        assert!(on.starts_with(theirs.trim_end()), "{on}");
+        assert_eq!(on.matches("[[hooks]]").count(), 2 + KIMI_EVENTS.len());
+        let ours = &on[theirs.trim_end().len()..];
+        for e in KIMI_EVENTS {
+            assert!(ours.contains(&format!("[[hooks]]\nevent = \"{e}\"\ncommand = {}\ntimeout = {}\n", toml_string(&cmd), timeout(e))), "{e}:\n{ours}");
+        }
+        // Only the three fields Kimi allows.
+        assert!(ours.lines().filter(|l| !l.is_empty() && *l != "[[hooks]]").all(|l| ["event = ", "command = ", "timeout = "].iter().any(|k| l.starts_with(k))));
+        // Again: nothing to do.
+        assert_eq!(kimi_hooks(&on, &cmd, true).unwrap(), None);
+        // Off: as it was. And the hooks of an older agent path go too.
+        assert_eq!(kimi_hooks(&on, &cmd, false).unwrap().unwrap(), theirs);
+        let old = on.replace("/home/adib/.muxen/bin", "/old/.muxen/bin");
+        let moved = kimi_hooks(&old, &cmd, true).unwrap().unwrap();
+        assert_eq!(moved, on);
+        // Ours in the middle (Kimi wrote the file again): moved to the end.
+        let middle = format!("{}\n[tui]\ntheme = \"dark\"\n", on.trim_end());
+        let tidied = kimi_hooks(&middle, &cmd, true).unwrap().unwrap();
+        assert!(tidied.ends_with(&format!("command = {}\ntimeout = 3\n", toml_string(&cmd))), "{tidied}");
+        assert!(tidied.contains("[tui]\ntheme = \"dark\""));
+        // An empty file gets ours alone; hooks as a key are left alone.
+        assert!(kimi_hooks("", &cmd, true).unwrap().unwrap().starts_with("[[hooks]]\nevent = \"SessionStart\""));
+        assert!(kimi_hooks("hooks = []\n", &cmd, true).is_err());
+        assert!(kimi_hooks("[tui]\nhooks = 1\n", &cmd, true).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn qwen_and_kimi_in_scratch_folders() {
+        let root = std::env::temp_dir().join(format!("muxin-hooks-qk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (qwen, kimi_dir, copilot_dir) = (root.join("qwen"), root.join("kimi"), root.join("copilot"));
+        for d in [&qwen, &kimi_dir, &copilot_dir] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let settings = "{\n  \"model\": {\n    \"name\": \"qwen3-coder\"\n  }\n}\n";
+        std::fs::write(qwen.join("settings.json"), settings).unwrap();
+        let dirs = Dirs { qwen: Some(qwen.clone()), kimi: Some(kimi_dir.clone()), copilot: Some(copilot_dir.clone()), ..Default::default() };
+        assert_eq!(apply(true, &dirs), json!({ "claude": "none", "codex": "none", "copilot": "on", "qwen": "on", "kimi": "on" }));
+        assert_eq!(status(&dirs), json!({ "claude": "none", "codex": "none", "copilot": "on", "qwen": "on", "kimi": "on" }));
+        let s: Value = serde_json::from_str(&std::fs::read_to_string(qwen.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(s["model"]["name"], "qwen3-coder");
+        assert!(s["hooks"]["PermissionRequest"][0]["hooks"][0]["command"].as_str().is_some_and(|c| c.contains(" report qwen ")));
+        assert_eq!(apply(false, &dirs), json!({ "claude": "none", "codex": "none", "copilot": "off", "qwen": "off", "kimi": "off" }));
+        assert_eq!(std::fs::read_to_string(qwen.join("settings.json")).unwrap(), settings);
+        // Kimi had no config.toml: none is left.
+        assert!(!kimi_dir.join("config.toml").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

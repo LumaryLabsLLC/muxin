@@ -131,7 +131,13 @@ pub fn annotate(sessions: &mut Value, reports: &Map<String, Value>, now: i64) {
 /// the state" (the conversation id may still be news), `None` to ignore it.
 fn meaning(input: &Value) -> Option<Option<&'static str>> {
     // A subagent's own events (Claude Code's Task tool) aren't the session's.
-    if input.get("agent_id").is_some_and(|a| !a.is_null()) {
+    // Kimi Code calls the session's own agent "main".
+    let subagent = match input.get("agent_id") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(a)) => !a.is_empty() && a != "main",
+        Some(_) => true,
+    };
+    if subagent {
         return None;
     }
     let event = input["hook_event_name"].as_str().unwrap_or("");
@@ -275,12 +281,31 @@ pub fn report(args: &[String]) -> i32 {
     let agent = args.first().map(String::as_str).unwrap_or("").chars().filter(char::is_ascii_alphanumeric).take(20).collect::<String>();
     let mut text = String::new();
     let _ = std::io::stdin().take(32 << 20).read_to_string(&mut text);
-    let Ok(input) = serde_json::from_str::<Value>(&text) else { return 0 };
+    let Ok(mut input) = serde_json::from_str::<Value>(&text) else { return 0 };
+    normalize(&mut input, args.get(1).map(String::as_str));
     let before = read(&session);
     if let Some(report) = from_hook(&agent, &input, before.as_ref(), hook_owner(), now(), alive) {
         let _ = write(&session, &report);
     }
     0
+}
+
+/// A hook's input in Claude Code's terms, which the others mostly use too:
+/// Copilot CLI says `sessionId` in some, and names no event in its
+/// PermissionRequest (its hooks name it on their command line: `event`).
+fn normalize(input: &mut Value, event: Option<&str>) {
+    let Some(obj) = input.as_object_mut() else { return };
+    if !obj.get("hook_event_name").is_some_and(Value::is_string) {
+        let named = obj.get("hookEventName").and_then(Value::as_str).map(str::to_string).or_else(|| event.map(str::to_string));
+        if let Some(e) = named.filter(|e| !e.is_empty() && e.len() <= 64) {
+            obj.insert("hook_event_name".into(), json!(e));
+        }
+    }
+    if !obj.get("session_id").is_some_and(Value::is_string)
+        && let Some(id) = obj.get("sessionId").and_then(Value::as_str).map(str::to_string)
+    {
+        obj.insert("session_id".into(), json!(id));
+    }
 }
 
 // MARK: The escape code
@@ -431,6 +456,29 @@ mod tests {
         assert_eq!(state(json!({ "hook_event_name": "Stop", "agent_id": "a1" })), None);
         assert_eq!(state(hook("SubagentStop")), None);
         assert_eq!(state(hook("Bogus")), None);
+    }
+
+    #[test]
+    fn other_agents_hooks_read_as_claude_codes() {
+        let state = |mut input: Value, event: Option<&str>| {
+            normalize(&mut input, event);
+            from_hook("copilot", &input, None, Some(10), 100, |_| true).map(|r| (r["state"].as_str().unwrap_or("").to_string(), r["conversation"].as_str().unwrap_or("").to_string()))
+        };
+        // Copilot CLI 1.0's PermissionRequest and Notification, as they came.
+        let want = Some(("needs_you".to_string(), "320d".to_string()));
+        assert_eq!(state(json!({ "toolName": "bash", "sessionId": "320d" }), Some("PermissionRequest")), want);
+        assert_eq!(state(json!({ "hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Run command: touch x", "sessionId": "320d" }), Some("Notification")), want);
+        // What an event says of itself wins over the name on the command line.
+        assert_eq!(state(json!({ "hook_event_name": "Stop", "session_id": "320d" }), Some("PermissionRequest")), Some(("done".to_string(), "320d".to_string())));
+        // Qwen Code's idle notice right after a tool call is no question.
+        assert_eq!(state(json!({ "hook_event_name": "Notification", "notification_type": "idle_prompt", "message": "Qwen Code is waiting for your input", "session_id": "q" }), None), None);
+        // Kimi Code's PermissionRequest names its own agent "main".
+        assert_eq!(state(json!({ "hook_event_name": "PermissionRequest", "session_id": "session_6c29", "agent_id": "main", "tool_name": "Bash" }), None), Some(("needs_you".to_string(), "session_6c29".to_string())));
+        // Kimi Code's ids.
+        assert_eq!(state(json!({ "hook_event_name": "SessionStart", "source": "resume", "session_id": "session_671af367" }), None), Some(("idle".to_string(), "session_671af367".to_string())));
+        let mut odd = json!("not an object");
+        normalize(&mut odd, Some("Stop"));
+        assert_eq!(odd, json!("not an object"));
     }
 
     #[test]

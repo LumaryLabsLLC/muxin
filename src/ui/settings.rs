@@ -1060,7 +1060,7 @@ impl SettingsPage {
     }
 
     /// What the agents on the machines may do (config::AgentSettings):
-    /// Muxin's hooks in Claude Code's and Codex's settings, so they say when
+    /// Muxin's hooks in the agent CLIs' settings (Claude Code, Codex, ...), so they say when
     /// they work, need you or are done (fleet::sessions), whether they
     /// continue their conversations when sessions come back after a restart,
     /// and whether they may start helper sessions.
@@ -1080,7 +1080,7 @@ impl SettingsPage {
         let status = match (on, with.as_slice()) {
             (false, []) => "Off.".to_string(),
             (false, names) => format!("Taking them out on {}…", names.join(", ")),
-            (true, []) => "On. No machine has Claude Code or Codex set up yet.".to_string(),
+            (true, []) => "On. None of your machines has one of these agents yet.".to_string(),
             (true, names) => format!("On for {}.", names.join(", ")),
         };
         let resume = self.engine.settings().agents.resume;
@@ -1098,13 +1098,13 @@ impl SettingsPage {
                     .px(px(14.))
                     .py(px(12.))
                     .gap(px(6.))
-                    .child(kit::checkbox(theme, "agent-hooks", on, "Let Claude Code and Codex say when they need you", move |on, _, cx| {
+                    .child(kit::checkbox(theme, "agent-hooks", on, "Let agents say when they need you", move |on, _, cx| {
                         let mut s = engine.settings();
                         s.agents.hooks = *on;
                         let _ = engine.update_settings(s);
                         cx.refresh_windows();
                     }))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Muxin adds a small hook to their settings on your machines. Turning this off takes it out."))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Claude Code, Codex, Copilot CLI, Qwen Code and Kimi Code. Muxin adds a small hook to their settings on your machines. Turning this off takes it out."))
                     .child(div().text_size(px(11.5)).text_color(theme.text_muted).child(status))
                     .children(trouble.into_iter().take(3).map(|t| div().text_size(px(11.5)).text_color(theme.warning).child(t)))
                     .child(div().h(px(6.)))
@@ -1115,7 +1115,7 @@ impl SettingsPage {
                         cx.refresh_windows();
                     }))
                     .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(
-                        "Sessions come back after a machine restarts. With this on, Claude Code and Codex continue their conversation. Off, they start a new one.",
+                        "Sessions come back after a machine restarts. With this on, those agents continue their conversation. Off, they start a new one.",
                     ))
                     .child(div().h(px(6.)))
                     .child(kit::checkbox(theme, "agent-helpers", helpers, "Agents may start helper sessions", move |on, _, cx| {

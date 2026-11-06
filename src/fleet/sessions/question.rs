@@ -529,6 +529,29 @@ mod tests {
         assert_eq!(q.text.last().map(String::as_str), Some("2. Deploy to staging"));
     }
 
+    /// As Qwen Code 0.26, Kimi Code 2.5 and Copilot CLI 1.0 asked, in a Muxin session.
+    #[test]
+    fn reads_the_newer_agents_prompts() {
+        let qwen = "  > run it muxin-ask\n  ? Shell touch muxin-made.txt (print a word) ←\n\n     touch muxin-made.txt\n\n   Allow execution of: 'touch'?\n\n   › 1. Yes, allow once\n     2. Always allow run 'touch *' commands in this project\n     3. Always allow run 'touch *' commands for this user\n     4. No, suggest changes (esc)\n\n\n  ⠏ Waiting for user confirmation...\n";
+        let q = read(qwen);
+        assert_eq!(q.options.len(), 4, "{q:?}");
+        assert_eq!(q.options[0].label, "Yes, allow once");
+        assert_eq!(q.selected.as_deref(), Some("1"));
+        assert!(q.text.iter().any(|l| l.contains("Allow execution of: 'touch'?")), "{:?}", q.text);
+
+        let kimi = " ● Running a command · $ touch muxin-made.txt\n ────────────────────────────────────────\n   ▶ Run this command?\n\n   cwd: /home/t/w\n   $ touch muxin-made.txt\n     print a word\n\n   ▶ 1. Approve once\n     2. Approve for this session\n     3. Reject\n     4. Reject with feedback\n\n   ↑/↓ select · 1/2/3/4 choose · ↵ confirm\n ────────────────────────────────────────\n stub thinking  ~/w  master [±]\n";
+        let q = read(kimi);
+        assert_eq!(q.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Approve once", "Approve for this session", "Reject", "Reject with feedback"]);
+        assert_eq!(q.selected.as_deref(), Some("1"));
+        assert!(q.text.iter().any(|l| l.contains("Run this command?")), "{:?}", q.text);
+
+        let copilot = "│ print a word                                   │\n│ ────────────────────────────────────────────── │\n│ ╭────────────────────────────────────────────╮ │\n│ │ touch muxin-made.txt                       │ │\n│ ╰────────────────────────────────────────────╯ │\n│                                                │\n│ Do you want to run this command?               │\n│                                                │\n│ ❯ 1. Yes                                       │\n│   2. Yes, and don't ask again for `touch` in this repo (~/w) │\n│   3. No, and tell Copilot what to do differently (Esc to stop) │\n│                                                │\n│ ↑/↓ to navigate · enter to select · esc to cancel │\n╰────────────────────────────────────────────────╯\n";
+        let q = read(copilot);
+        assert_eq!(q.options.len(), 3, "{q:?}");
+        assert_eq!(q.options[2].label, "No, and tell Copilot what to do differently (Esc to stop)");
+        assert!(q.text.iter().any(|l| l.contains("Do you want to run this command?")), "{:?}", q.text);
+    }
+
     #[test]
     fn codex_menus_wait_for_enter() {
         let screen = "> You are in /home/adib/muxen/workspaces/ws-cqp5kr\n\n  Do you trust the contents of this directory?\n\n› 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue\n";

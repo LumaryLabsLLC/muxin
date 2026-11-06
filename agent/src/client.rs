@@ -275,7 +275,7 @@ fn discover(req: &Value) -> Value {
     let settings = req.get("settings").filter(|s| s.is_object()).map(crate::settings::merge);
     let hooks = match &settings {
         Some(s) if !names.is_empty() => {
-            let dirs = crate::hooks::Dirs::new(&sys::user_home(), env.claude_config_dir.as_deref(), env.codex_home.as_deref());
+            let dirs = crate::hooks::Dirs::new(&sys::user_home(), |name| env.var(name).map(str::to_string));
             crate::hooks::apply(crate::settings::on(s, "hooks", true), &dirs)
         }
         _ => Value::Null,

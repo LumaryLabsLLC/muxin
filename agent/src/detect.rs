@@ -39,24 +39,31 @@ pub fn user_shell() -> String {
     "/bin/sh".into()
 }
 
-/// What the user's sessions see: the PATH folders, and where Claude Code and
-/// Codex keep their settings (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`; None when
-/// not set).
+/// Where the agent CLIs keep their settings when the user moved them, by
+/// variable (see hooks::Dirs).
+pub const DIR_VARS: &[&str] = &["CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "QWEN_HOME", "KIMI_CODE_HOME"];
+
+/// What the user's sessions see: the PATH folders, and `DIR_VARS` as set
+/// (an empty value when not).
 #[derive(Debug, Default)]
 pub struct ShellEnv {
     pub path: Vec<String>,
-    pub claude_config_dir: Option<String>,
-    pub codex_home: Option<String>,
+    pub vars: Vec<(String, String)>,
+}
+
+impl ShellEnv {
+    /// One of `DIR_VARS`, when it's set.
+    pub fn var(&self, name: &str) -> Option<&str> {
+        self.vars.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str()).filter(|v| !v.is_empty())
+    }
 }
 
 /// Windows keeps the user's in the environment (no rc files).
 #[cfg(windows)]
 pub fn shell_env() -> ShellEnv {
-    let var = |n: &str| std::env::var(n).ok().filter(|v| !v.is_empty());
     ShellEnv {
         path: std::env::var("PATH").map(|p| p.split(';').filter(|d| !d.is_empty()).map(String::from).collect()).unwrap_or_default(),
-        claude_config_dir: var("CLAUDE_CONFIG_DIR"),
-        codex_home: var("CODEX_HOME"),
+        vars: DIR_VARS.iter().filter_map(|n| std::env::var(n).ok().map(|v| (n.to_string(), v))).collect(),
     }
 }
 
@@ -76,7 +83,7 @@ pub fn shell_env() -> ShellEnv {
         false => get(k),
     }
     .filter(|v| !v.is_empty());
-    ShellEnv { path, claude_config_dir: var("CLAUDE_CONFIG_DIR"), codex_home: var("CODEX_HOME") }
+    ShellEnv { path, vars: DIR_VARS.iter().filter_map(|k| var(k).map(|v| (k.to_string(), v))).collect() }
 }
 
 /// The commands among `names` found on those PATH folders.
@@ -121,17 +128,26 @@ fn interactive_env() -> Vec<(String, String)> {
 /// `__OR_<name>=<value>` lines, as the shell printed them (rc files may print too).
 #[cfg(unix)]
 fn parse_env(out: &str) -> Vec<(String, String)> {
-    ["PATH", "CLAUDE_CONFIG_DIR", "CODEX_HOME"]
-        .iter()
+    std::iter::once(&"PATH")
+        .chain(DIR_VARS)
         .filter_map(|k| out.lines().rev().find_map(|l| l.strip_prefix(&format!("__OR_{k}="))).map(|v| (k.to_string(), v.to_string())))
         .collect()
+}
+
+/// Prints PATH and `DIR_VARS` as `__OR_<name>=<value>` lines.
+#[cfg(unix)]
+fn interactive_script() -> String {
+    let names: Vec<&str> = std::iter::once("PATH").chain(DIR_VARS.iter().copied()).collect();
+    let format: String = names.iter().map(|n| format!("__OR_{n}=%s\\n")).collect();
+    let args: Vec<String> = names.iter().map(|n| format!("\"${n}\"")).collect();
+    format!("printf '{format}' {}", args.join(" "))
 }
 
 #[cfg(unix)]
 fn interactive_output() -> Option<String> {
     let mut cmd = Command::new(user_shell());
-    let script = "printf '__OR_PATH=%s\\n__OR_CLAUDE_CONFIG_DIR=%s\\n__OR_CODEX_HOME=%s\\n' \"$PATH\" \"$CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\"";
-    cmd.args(["-l", "-i", "-c", script]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let script = interactive_script();
+    cmd.args(["-l", "-i", "-c", script.as_str()]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     // In a session of its own, without a terminal: an interactive shell takes
     // over the terminal it finds (and stops its process group with SIGTTIN when
     // that's not in front), which is the one Muxin was started from when the
@@ -161,4 +177,10 @@ fn reads_what_the_shell_printed() {
     let out = "Welcome!\n__OR_PATH=/usr/bin:/bin\n__OR_CLAUDE_CONFIG_DIR=\n__OR_CODEX_HOME=/home/a/.codex-work\n";
     let env = parse_env(out);
     assert_eq!(env, vec![("PATH".into(), "/usr/bin:/bin".into()), ("CLAUDE_CONFIG_DIR".into(), "".into()), ("CODEX_HOME".into(), "/home/a/.codex-work".into())]);
+    // What a shell prints for the script comes back.
+    let out = Command::new("/bin/sh").arg("-c").arg(interactive_script()).env("QWEN_HOME", "/q").env("PATH", "/usr/bin:/bin").output().unwrap();
+    let env = parse_env(&String::from_utf8_lossy(&out.stdout));
+    assert!(env.contains(&("QWEN_HOME".to_string(), "/q".to_string())), "{env:?}");
+    assert!(env.contains(&("PATH".to_string(), "/usr/bin:/bin".to_string())));
+    assert_eq!(env.len(), 1 + DIR_VARS.len());
 }

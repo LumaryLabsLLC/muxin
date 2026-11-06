@@ -802,15 +802,15 @@ impl World {
                     session("shell-2b81", "shell", "Shell", "Shell · checkout", "/Users/ci/code/checkout", false, 31, 0),
                 ],
             ),
-            "orbit" => (vec!["claude", "codex"], vec![session("codex-19be", "codex", "Codex", "Codex · ios-app", "/Users/ci/code/ios-app", false, 48, 0)]),
+            "orbit" => (vec!["claude", "codex", "cursor"], vec![session("codex-19be", "codex", "Codex", "Codex · ios-app", "/Users/ci/code/ios-app", false, 48, 0)]),
             "beacon" => (
-                vec!["claude", "opencode"],
+                vec!["claude", "opencode", "copilot", "qwen", "droid"],
                 vec![
                     session("opencode-c40d", "opencode", "OpenCode", "OpenCode · api", "/home/ci/api", true, 5, 0),
                     SessionInfo { box_id: Some("box-7k2m9q".into()), ..session("box-7k2m9q", "claude", "Claude Code", "Add rate limit headers", "/home/ci/muxen/boxes/box-7k2m9q/repo", true, 9, 0) },
                 ],
             ),
-            "pebble" => (vec!["claude", "codex"], vec![session("claude-5d2e", "claude", "Claude Code", "Docs refresh", "/home/ci/docs", false, 26, 0)]),
+            "pebble" => (vec!["claude", "codex", "kimi"], vec![session("claude-5d2e", "claude", "Claude Code", "Docs refresh", "/home/ci/docs", false, 26, 0)]),
             "dev-1" | "sandbox" => (vec!["claude", "codex"], Vec::new()),
             "win-test" => (vec!["claude"], Vec::new()),
             _ => (Vec::new(), Vec::new()),

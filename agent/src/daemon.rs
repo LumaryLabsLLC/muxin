@@ -754,12 +754,16 @@ fn next_run(agent: &str, run: &str, conversation: Option<&str>, resume: bool) ->
 }
 
 /// The command that continues an agent CLI's conversation, for the ones
-/// whose hooks say which it is (hooks.rs): Claude Code and Codex.
+/// whose hooks say which it is (hooks.rs): Claude Code, Codex, Copilot CLI,
+/// Qwen Code and Kimi Code.
 fn resume_line(agent: &str, conversation: &str) -> Option<String> {
     let id_like = !conversation.is_empty() && conversation.len() <= 100 && conversation.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     match agent {
         "claude" if id_like => Some(format!("claude --resume {conversation}")),
         "codex" if id_like => Some(format!("codex resume {conversation}")),
+        "copilot" if id_like => Some(format!("copilot --resume={conversation}")),
+        "qwen" if id_like => Some(format!("qwen --resume {conversation}")),
+        "kimi" if id_like => Some(format!("kimi --session {conversation}")),
         _ => None,
     }
 }
@@ -1131,6 +1135,11 @@ mod tests {
         assert_eq!(next_run("claude", "claude", None, true), ("claude".to_string(), "fresh"));
         assert_eq!(next_run("codex", "codex", Some("x; rm -rf ~"), true), ("codex".to_string(), "fresh"));
         assert_eq!(next_run("opencode", "opencode", Some("abc"), true), ("opencode".to_string(), "fresh"));
+        // Ids as their hooks said them (tried with Copilot CLI 1.0, Qwen Code 0.26, Kimi Code 2.5).
+        assert_eq!(next_run("copilot", "copilot", Some("320d40dc-1c11-4d16-bc64-b3a02c2fee33"), true).0, "copilot --resume=320d40dc-1c11-4d16-bc64-b3a02c2fee33");
+        assert_eq!(next_run("qwen", "qwen", Some("3139440b-bae7"), true).0, "qwen --resume 3139440b-bae7");
+        assert_eq!(next_run("kimi", "kimi", Some("session_671af367-6584"), true).0, "kimi --session session_671af367-6584");
+        assert_eq!(next_run("droid", "droid", Some("abc"), true), ("droid".to_string(), "fresh"));
         assert_eq!(next_run("shell", "", Some("abc"), true), (String::new(), "shell"));
         // The command on its own, from what an older app started it with.
         assert_eq!(fresh_line("claude", "claude 'fix the login bug'"), "claude");

@@ -1,7 +1,12 @@
 //! The agent skill for Muxin (skills/muxin): instructions that teach agents
-//! (Claude Code, Codex, Hermes, ...) to drive the `muxin` command. It's built
-//! into the binary, so `muxin skill install` writes the version that matches
-//! this copy of Muxin.
+//! (Claude Code, Codex, Hermes, ...) to drive the `muxin` command.
+//!
+//! `muxin skill install` puts a stub in the agents' skills folders: the
+//! skill's description, so agents load it for the same requests, and a few
+//! lines that ask `muxin skill show` for the guide. The guide is built into
+//! the binary, so it always matches the Muxin installed, and an update never
+//! leaves an old copy behind. (Muxin before 0.10 copied the whole folder;
+//! installing again replaces that copy with the stub.)
 
 use std::path::{Path, PathBuf};
 
@@ -9,7 +14,7 @@ use serde::Serialize;
 
 use crate::config::display_path;
 
-/// The skill's files, by their path in its folder.
+/// The skill's files, by their path in its folder: the guide.
 pub const FILES: &[(&str, &str)] = &[
     ("SKILL.md", include_str!("../skills/muxin/SKILL.md")),
     ("references/sessions-and-boxes.md", include_str!("../skills/muxin/references/sessions-and-boxes.md")),
@@ -27,6 +32,17 @@ const NAME: &str = "muxin";
 /// the user's own that happens to have the name.
 const MARK: &str = "source: https://github.com/LumaryLabsLLC/muxin/tree/main/skills/muxin";
 
+/// In the stub's metadata, after `MARK`: it's a stub, of this format.
+const STUB: &str = "muxin-stub: \"1\"";
+
+/// What the stub says, under the skill's frontmatter.
+const STUB_BODY: &str = "<!-- Installed by \"muxin skill install\". Remove it with \"muxin skill remove\". -->
+
+Run `muxin skill show` and follow the guide it prints. The guide comes from the Muxin installed here, so it matches the commands this version has. It names more topics, each with its own command, such as `muxin skill show sessions-and-boxes`.
+
+If there's no `muxin` command, ask the user to turn it on in Muxin (Settings › General › Command line). If `muxin skill show` fails, this Muxin is older than the guide: start with `muxin status --json`, then `muxin --help`.
+";
+
 /// Where agents look for skills, under the home folder: the agent, the folder
 /// that says it's on this computer, and its skills folder.
 const AGENTS: &[(&str, &str, &str)] = &[
@@ -37,6 +53,12 @@ const AGENTS: &[(&str, &str, &str)] = &[
     ("gemini", ".gemini", ".gemini/skills"),
     ("pi", ".pi", ".pi/agent/skills"),
     ("hermes", ".hermes", ".hermes/skills"),
+    // These read the shared folder too: one copy there, not one each.
+    ("copilot", ".copilot", ".agents/skills"),
+    ("cursor", ".cursor", ".agents/skills"),
+    ("qwen", ".qwen", ".agents/skills"),
+    ("droid", ".factory", ".agents/skills"),
+    ("kimi", ".kimi-code", ".agents/skills"),
     // That folder for any other agent that reads it: only when asked for, so
     // one that reads it and its own doesn't get the skill twice.
     ("agents", ".agents", ".agents/skills"),
@@ -98,13 +120,18 @@ fn once(mut targets: Vec<(String, PathBuf)>) -> Vec<(String, PathBuf)> {
     targets
 }
 
-/// Writes the skill into a skills folder, replacing an older version of it.
+/// Writes the stub into a skills folder, replacing an older copy of the skill.
 pub fn install(agent: String, skills: &Path) -> Outcome {
     let dir = skills.join(NAME);
     let mut out = Outcome { agent, path: display_path(&dir), result: "installed", note: None };
     match state(&dir) {
         State::Absent => {}
-        State::Ours => out.result = "updated",
+        State::Ours => {
+            out.result = "updated";
+            if !is_stub(&dir) {
+                out.note = Some("It was a full copy, which goes out of date. Now it asks muxin for the guide.".into());
+            }
+        }
         State::Link(to) => return out.skipped(format!("It's a link to {}; left as it is.", display_path(&to))),
         State::Other => return out.skipped("Something else is there (a skill of your own?); left as it is.".into()),
     }
@@ -116,17 +143,78 @@ pub fn install(agent: String, skills: &Path) -> Outcome {
 }
 
 fn write(dir: &Path, replacing: bool) -> Result<(), String> {
-    // A fresh copy, so files an older version had and this one doesn't go.
+    // Only the stub: the files of an older copy go.
     if replacing {
         std::fs::remove_dir_all(dir).map_err(|e| format!("{}: {e}", display_path(dir)))?;
     }
-    for (path, text) in FILES {
-        let file = dir.join(path);
-        std::fs::create_dir_all(file.parent().unwrap_or(dir))
-            .and_then(|()| std::fs::write(&file, text))
-            .map_err(|e| format!("{}: {e}", display_path(&file)))?;
+    let file = dir.join("SKILL.md");
+    std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&file, stub())).map_err(|e| format!("{}: {e}", display_path(&file)))
+}
+
+fn is_stub(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("SKILL.md")).is_ok_and(|s| s.contains(STUB))
+}
+
+/// SKILL.md's frontmatter with `STUB` in its metadata, and `STUB_BODY`.
+pub fn stub() -> String {
+    let (front, _) = split(FILES[0].1);
+    let front = front.replacen(MARK, &format!("{MARK}\n  {STUB}"), 1);
+    format!("---\n{front}\n---\n{STUB_BODY}")
+}
+
+/// A skill file's frontmatter and the rest.
+fn split(text: &str) -> (&str, &str) {
+    text.strip_prefix("---\n").and_then(|s| s.split_once("\n---\n")).unwrap_or(("", text))
+}
+
+/// The guide's topics, by name (`references/github.md` is `github`).
+pub fn topics() -> Vec<&'static str> {
+    FILES.iter().filter_map(|(path, _)| path.strip_prefix("references/")?.strip_suffix(".md")).collect()
+}
+
+/// What `muxin skill show` prints: the guide (SKILL.md without its
+/// frontmatter), or one of its topics. Links to other files become the
+/// command that shows them.
+pub fn guide(topic: Option<&str>) -> Result<String, String> {
+    let Some(topic) = topic.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(unlink(split(FILES[0].1).1.trim_start()));
+    };
+    let wanted = topic.trim_end_matches(".md").rsplit('/').next().unwrap_or(topic).to_ascii_lowercase();
+    match FILES.iter().find(|(path, _)| path.strip_prefix("references/").and_then(|p| p.strip_suffix(".md")) == Some(wanted.as_str())) {
+        Some((_, text)) => Ok(unlink(text)),
+        None if wanted == "skill" || wanted == "muxin" => Ok(unlink(split(FILES[0].1).1.trim_start())),
+        None => Err(format!("There's no topic \"{topic}\". Topics: {}.", topics().join(", "))),
     }
-    Ok(())
+}
+
+/// `[sessions and boxes](references/sessions-and-boxes.md#x)` as
+/// "sessions and boxes (`muxin skill show sessions-and-boxes`)". Web links stay.
+fn unlink(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("](") {
+        let (before, after) = rest.split_at(at);
+        let open = before.rfind('[').filter(|&i| !before[i..].contains('\n'));
+        let close = after[2..].find(')').map(|i| i + 2).filter(|&i| !after[..i].contains('\n'));
+        let (Some(open), Some(close)) = (open, close) else {
+            out.push_str(&rest[..at + 2]);
+            rest = &rest[at + 2..];
+            continue;
+        };
+        let target = &after[2..close];
+        let file = target.split('#').next().unwrap_or("");
+        if target.contains("://") || !file.ends_with(".md") {
+            out.push_str(&rest[..at + close + 1]);
+        } else {
+            let stem = file.rsplit('/').next().unwrap_or(file).trim_end_matches(".md");
+            let command = if stem == "SKILL" { "muxin skill show".to_string() } else { format!("muxin skill show {stem}") };
+            out.push_str(&before[..open]);
+            out.push_str(&format!("{} (`{command}`)", &before[open + 1..]));
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Takes the skill out of a skills folder.
@@ -157,7 +245,7 @@ impl Outcome {
 
 enum State {
     Absent,
-    /// A copy `install` wrote.
+    /// The stub, or a copy an older `install` wrote.
     Ours,
     /// A link, such as one to a checkout's skills/muxin: the user's to change.
     Link(PathBuf),
@@ -168,6 +256,7 @@ fn state(dir: &Path) -> State {
     match std::fs::symlink_metadata(dir) {
         Err(_) => State::Absent,
         Ok(m) if m.file_type().is_symlink() => State::Link(std::fs::read_link(dir).unwrap_or_default()),
+        // The stub, or a full copy an older Muxin wrote.
         Ok(m) if m.is_dir() && std::fs::read_to_string(dir.join("SKILL.md")).is_ok_and(|s| s.contains(MARK)) => State::Ours,
         Ok(_) => State::Other,
     }
@@ -202,8 +291,8 @@ mod tests {
 
     #[test]
     fn frontmatter_is_valid() {
-        let skill = FILES[0].1;
-        let front = skill.strip_prefix("---\n").and_then(|s| s.split_once("\n---\n")).map(|(f, _)| f).expect("SKILL.md starts with frontmatter");
+        let (front, _) = split(FILES[0].1);
+        assert!(!front.is_empty(), "SKILL.md starts with frontmatter");
         assert!(front.lines().any(|l| l == format!("name: {NAME}")));
         let description = front.lines().find_map(|l| l.strip_prefix("description: ")).expect("a description");
         assert!(!description.is_empty() && description.chars().count() <= 1024, "a description of at most 1024 characters");
@@ -232,16 +321,26 @@ mod tests {
         let dir = skills.join(NAME);
 
         assert_eq!(install("dir".into(), &skills).result, "installed");
-        for (path, text) in FILES {
-            assert_eq!(std::fs::read_to_string(dir.join(path)).unwrap(), *text);
-        }
-        std::fs::write(dir.join("references").join("old.md"), "from an older version").unwrap();
-        assert_eq!(install("dir".into(), &skills).result, "updated");
-        assert!(!dir.join("references").join("old.md").exists(), "an update leaves no stale files");
+        assert_eq!(std::fs::read_to_string(dir.join("SKILL.md")).unwrap(), stub());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "only the stub");
+        let again = install("dir".into(), &skills);
+        assert_eq!((again.result, again.note), ("updated", None));
 
         assert_eq!(remove("dir".into(), &skills).result, "removed");
         assert!(!dir.exists());
         assert!(remove("dir".into(), &skills).note.is_some(), "removing it again says it wasn't there");
+
+        // A full copy, as Muxin before the stub wrote it, becomes the stub.
+        for (path, text) in FILES {
+            std::fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(path), text).unwrap();
+        }
+        let replaced = install("dir".into(), &skills);
+        assert_eq!(replaced.result, "updated");
+        assert!(replaced.note.is_some_and(|n| n.contains("full copy")));
+        assert_eq!(std::fs::read_to_string(dir.join("SKILL.md")).unwrap(), stub());
+        assert!(!dir.join("references").exists(), "the old copy's files go");
+        assert_eq!(remove("dir".into(), &skills).result, "removed");
 
         // A skill of the user's own with the same name stays.
         std::fs::create_dir_all(&dir).unwrap();
@@ -254,13 +353,44 @@ mod tests {
     }
 
     #[test]
+    fn the_stub_keeps_the_description_and_asks_for_the_guide() {
+        let stub = stub();
+        let (front, body) = split(&stub);
+        let (full, _) = split(FILES[0].1);
+        for line in full.lines() {
+            assert!(front.lines().any(|l| l == line), "the stub's frontmatter lacks `{line}`");
+        }
+        assert!(front.contains(&format!("  {MARK}\n  {STUB}")), "marked as a stub under metadata:\n{front}");
+        assert!(body.contains("`muxin skill show`"));
+        assert!(stub.lines().count() < 20, "a stub, not the guide");
+    }
+
+    #[test]
+    fn shows_the_guide_and_its_topics() {
+        let main = guide(None).unwrap();
+        assert!(main.starts_with("# Muxin"), "no frontmatter: {}", &main[..40]);
+        assert!(!main.contains("](references/"), "links to files it can't open");
+        assert!(main.contains("Sessions and boxes (`muxin skill show sessions-and-boxes`)"));
+        assert!(!main.contains("[sessions and boxes]"));
+        assert_eq!(topics(), ["sessions-and-boxes", "github", "workspaces", "runners", "machines", "cloud-and-vms"]);
+        for t in topics() {
+            let text = guide(Some(t)).unwrap();
+            assert!(!text.contains(".md)") && !text.contains(".md#"), "{t} still links a file");
+        }
+        assert!(guide(Some("github")).unwrap().contains("sessions and boxes (`muxin skill show sessions-and-boxes`)"));
+        assert_eq!(guide(Some("references/github.md")), guide(Some("GitHub")));
+        assert!(guide(Some("nope")).unwrap_err().contains("sessions-and-boxes"));
+        assert_eq!(unlink("see [the docs](https://muxin.dev/docs) and [x](y)"), "see [the docs](https://muxin.dev/docs) and [x](y)");
+    }
+
+    #[test]
     fn knows_the_agents_asked_for() {
         let t = targets(&["Claude".into(), "hermes".into()], None, true).unwrap();
         assert_eq!(t.iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>(), ["claude", "hermes"]);
         assert!(t[1].1.ends_with(".hermes/skills"));
         assert!(targets(&["nope".into()], None, true).is_err());
         // Codex's folder is the shared one, and a folder is used once.
-        let t = targets(&["codex".into(), "agents".into()], None, true).unwrap();
+        let t = targets(&["codex".into(), "agents".into(), "qwen".into(), "kimi".into()], None, true).unwrap();
         assert_eq!(t.len(), 1);
         assert!(t[0].1.ends_with(".agents/skills"));
         let dir = PathBuf::from("/tmp/skills");

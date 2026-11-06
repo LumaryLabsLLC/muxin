@@ -1,6 +1,7 @@
 //! What the user chose for the agents on this machine, in Settings › Agents
-//! of any of their Muxins: `hooks` now (hooks.rs); continuing after a restart
-//! and starting helpers later. Each app sends its own choices with when they
+//! of any of their Muxins: `hooks` (hooks.rs) and `resume`, whether agents
+//! continue their conversations after a restart (daemon.rs); starting
+//! helpers later. Each app sends its own choices with when they
 //! were made, `{"hooks": {"on": false, "at": 1793979274}}` (0: a default
 //! nobody changed). The newest wins and is kept here, `~/.muxen/settings.json`,
 //! and goes back in `discover`'s reply: so a Mac and an iPad agree, and a
@@ -42,10 +43,19 @@ fn merge_with(kept: &Map<String, Value>, sent: &Map<String, Value>) -> (Map<Stri
     (out, changed.then_some(now))
 }
 
+/// The choices kept here (what the user chose in any of their Muxins).
+pub fn kept() -> Value {
+    Value::Object(read_kept())
+}
+
+fn read_kept() -> Map<String, Value> {
+    std::fs::read_to_string(path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v.as_object().cloned()).unwrap_or_default()
+}
+
 /// Merges an app's choices (`discover`'s `"settings"`) into the kept ones; the
 /// choices in effect.
 pub fn merge(sent: &Value) -> Value {
-    let kept = std::fs::read_to_string(path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v.as_object().cloned()).unwrap_or_default();
+    let kept = read_kept();
     let sent = sent.as_object().cloned().unwrap_or_default();
     let (out, keep) = merge_with(&kept, &sent);
     if let Some(keep) = keep {

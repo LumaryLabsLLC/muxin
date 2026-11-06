@@ -43,6 +43,7 @@ mod link;
 mod proto;
 mod push;
 mod repos;
+mod saved;
 mod schedules;
 mod screen;
 mod settings;

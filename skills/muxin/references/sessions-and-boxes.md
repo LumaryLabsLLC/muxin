@@ -18,6 +18,7 @@ Session, box and checkout JSON uses camelCase keys (`machineId`, `agentName`, `s
 - `state`: what its agent is doing. `working`; `needs_you` (a question or an approval waits: see `question` below); `done` (it finished its turn); `idle`.
 - `stateSource`: how that's known. `hook` or `escape`: the agent said so (Claude Code and Codex through Muxin's hooks; any program with an escape code). `screen`: a question Muxin knows is on its screen. `output`: a guess (printing is working, quiet after working is done).
 - `conversationId`: the agent's own id for its conversation, when its hooks said.
+- `restored`: it came back after its machine, or Muxin's agent there, restarted. `resumed`: its agent continues its conversation. `fresh`: its agent started again without it. `shell`: a new shell. `exited`: it had exited and is as it was. `restoredAt` says when. It goes when the session is restarted.
 - `busy`: `state` is `working` (kept for older scripts).
 - `attention`: `waiting` (it came to need you, or finished), `bell` or `exited`, until the user opens it.
 - `git`: what the work in its folder changed. `branch`; `base` (the default branch it's compared with); `files`, `added`, `removed` and `commits` since the base; `uncommitted` files; `ahead` and `behind` its upstream; `worktree`; and `pull`, the branch's pull request (`number`, `state`, `url`, and `checks` with `passed`, `failed`, `pending` and the `failing` ones).
@@ -79,6 +80,14 @@ muxin session stop beelink/claude-3f9a --json
 ```
 
 The agent is `claude`, `codex`, `opencode`, `gemini`, `agy`, `amp`, `pi` or `shell`. `muxin session attach` opens one in a terminal; it's interactive, for the user, not for you.
+
+`restart` continues a Claude Code or Codex conversation when its id is known, rather than giving the agent its first task again.
+
+### After a restart
+
+Sessions survive a reboot, a crash of Muxin's agent, or `muxin power <machine> restart`. The agent on each machine saves them as they go, and brings them back the next time Muxin looks at the machine: the same id, title, folder and recent scrollback, with their programs started again. Claude Code and Codex continue their conversation; their first task is never sent again. Other agents start fresh, and a shell is a new shell. `restored` in `session ls` says which. A box pauses instead (`muxin box resume` continues it).
+
+The user can turn off continuing conversations in Settings › General › Agents, on the Mac or the iPad. Sessions still come back, with their agents started fresh.
 
 ### Hand a session's work to another agent
 

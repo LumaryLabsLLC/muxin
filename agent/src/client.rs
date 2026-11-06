@@ -192,9 +192,8 @@ fn apply_titles(sessions: &mut Value, titles: &serde_json::Map<String, Value>) {
     }
 }
 
-/// Forgets the titles of sessions that are gone. True when any were.
-fn prune_titles(sessions: &Value, titles: &mut serde_json::Map<String, Value>) -> bool {
-    let names: Vec<&str> = sessions.as_array().into_iter().flatten().filter_map(|s| s["name"].as_str()).collect();
+/// Forgets the titles of sessions that are gone (`names`: the ones there are). True when any were.
+fn prune_titles(names: &[&str], titles: &mut serde_json::Map<String, Value>) -> bool {
     let before = titles.len();
     titles.retain(|name, _| names.contains(&name.as_str()));
     titles.len() != before
@@ -223,7 +222,8 @@ fn rename(req: &Value) -> Value {
 }
 
 /// Everything Muxen wants to know about this machine's sessions. Doesn't
-/// start the server just to look. `"settings"`: the app's choices for the
+/// start the server just to look, unless it has sessions saved to bring back
+/// (it stopped: a crash, a reboot). `"settings"`: the app's choices for the
 /// agents here (settings.rs), merged with those kept and said back. With the
 /// installed tools (`agents`), it also puts Muxin's hooks in or takes them
 /// out as they say (hooks.rs): that's when it knows where the agents keep
@@ -243,26 +243,28 @@ fn discover(req: &Value) -> Value {
         }
         _ => Value::Null,
     };
-    let running = sys::connect().is_ok();
+    let saved = crate::saved::Store::home().names();
+    let running = sys::connect().is_ok() || (!saved.is_empty() && connect(true).is_ok());
     let list = if running { request(&json!({ "op": "list" }), false) } else { json!({}) };
     let mut sessions = list.get("sessions").cloned().unwrap_or_else(|| json!([]));
     // What their agents said they're doing (hooks, escape codes).
     let answered = !running || list["ok"].as_bool() == Some(true);
+    // Saved ones are there too, should the server not have brought them back yet.
+    let present: Vec<String> = sessions.as_array().into_iter().flatten().filter_map(|s| s["name"].as_str().map(str::to_string)).chain(saved).collect();
+    let present: Vec<&str> = present.iter().map(String::as_str).collect();
     let reports = crate::states::all();
     if !reports.is_empty() {
         crate::states::annotate(&mut sessions, &reports, now());
         if answered {
-            let names: Vec<&str> = sessions.as_array().into_iter().flatten().filter_map(|s| s["name"].as_str()).collect();
-            crate::states::prune(&names);
+            crate::states::prune(&present);
         }
     }
     let boxes = crate::boxes::list_with(sessions.as_array().map(Vec::as_slice).unwrap_or_default());
     let mut titles = read_titles();
     if !titles.is_empty() {
         apply_titles(&mut sessions, &titles);
-        // Only a real answer says which sessions are gone (no server: all of them).
-        let answered = !running || list["ok"].as_bool() == Some(true);
-        if answered && prune_titles(&sessions, &mut titles) {
+        // Only a real answer says which sessions are gone (no server: all of them but the saved).
+        if answered && prune_titles(&present, &mut titles) {
             let _ = write_titles(&titles);
         }
     }
@@ -505,8 +507,9 @@ mod tests {
         apply_titles(&mut sessions, &titles);
         assert_eq!(sessions[0]["title"], "API server");
         assert_eq!(sessions[1]["title"], "Claude Code · api");
-        assert!(prune_titles(&sessions, &mut titles));
+        let names = ["shell-ab12", "claude-3f9a"];
+        assert!(prune_titles(&names, &mut titles));
         assert_eq!(titles.keys().collect::<Vec<_>>(), ["shell-ab12"]);
-        assert!(!prune_titles(&sessions, &mut titles));
+        assert!(!prune_titles(&names, &mut titles));
     }
 }

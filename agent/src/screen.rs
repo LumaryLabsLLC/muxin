@@ -85,6 +85,28 @@ pub fn redraw<T: alacritty_terminal::event::EventListener>(term: &Term<T>) -> Ve
     out.into_bytes()
 }
 
+/// Up to `history` lines of scrollback and the screen (to its last line with
+/// something on it), as plain lines with their colors: what a session saves
+/// (saved.rs) and prints again into a new terminal when it comes back.
+pub fn saved<T: alacritty_terminal::event::EventListener>(term: &Term<T>, history: usize) -> Vec<u8> {
+    let grid = term.grid();
+    let cols = grid.columns();
+    let first = -(history.min(grid.history_size()) as i32);
+    let mut lines: Vec<String> = (first..grid.screen_lines() as i32)
+        .map(|line| {
+            let mut s = String::new();
+            row(&grid[Line(line)], cols, &mut s);
+            s
+        })
+        .collect();
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    let mut out = lines.join("\r\n");
+    out.push_str("\x1b[0m");
+    out.into_bytes()
+}
+
 /// One grid row with its colors, trailing blanks dropped.
 fn row(cells: &alacritty_terminal::grid::Row<Cell>, cols: usize, out: &mut String) {
     let blank = |c: &Cell| c.c == ' ' && c.bg == Color::Named(NamedColor::Background) && !c.flags.intersects(STYLE);
@@ -236,6 +258,20 @@ mod tests {
         assert_eq!((row(&client, 0), row(&client, 2), row(&client, 4)), ("~".into(), "hi".into(), ">".into()));
         let (a, b) = (session.grid().cursor.point, client.grid().cursor.point);
         assert_eq!((a.line, a.column), (b.line, b.column));
+    }
+
+    #[test]
+    fn a_saved_screen_prints_back_with_its_scrollback_and_colors() {
+        let lines: String = (0..30).map(|i| format!("line {i}\r\n")).collect();
+        let original = term(format!("{lines}\x1b[1;32mgreen\x1b[0m end\r\n\r\n").as_bytes());
+        let saved = saved(&original, 1000);
+        let copy = term(&saved);
+        assert_eq!(text(&copy, 1000), text(&original, 1000));
+        let green = &copy.grid()[Line(copy.grid().cursor.point.line.0)][Column(0)];
+        assert!(green.flags.contains(Flags::BOLD) && green.fg == Color::Named(NamedColor::Green));
+        // Only as much scrollback as asked for, and no blank rows at the end.
+        assert!(!text(&term(&self::saved(&original, 5)), 1000).contains("line 10"));
+        assert!(saved.ends_with(b"end\x1b[0m"));
     }
 
     #[test]

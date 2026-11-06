@@ -3,6 +3,11 @@
 //! a client attaching later gets the current screen, and streamed live to every
 //! attached client. Sessions stay until stopped; an exited program leaves its
 //! last screen up (like tmux's remain-on-exit) until it's restarted or stopped.
+//!
+//! Each session is also saved to disk as it goes (saved.rs), so a server
+//! that stops (a crash, a reboot) brings them back when it starts again, with
+//! their programs started fresh: an agent whose conversation is known
+//! continues it (see `restore`).
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -20,6 +25,7 @@ use alacritty_terminal::vte::ansi::{Processor, Rgb};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde_json::{Value, json};
 
+use crate::saved::Store;
 use crate::sys::{self, Stream};
 use crate::{detect, now, proto, screen};
 
@@ -32,6 +38,16 @@ const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Input waiting for the program (chunks as they came): typing faster than it
 /// reads waits here, with the session free (see `feed`).
 const INPUT_QUEUE: usize = 256;
+/// How often sessions are saved (what changed since), and the longest a
+/// printing session's saved screen lags behind what it shows.
+const SAVE_EVERY: Duration = Duration::from_secs(2);
+const SCREEN_EVERY: i64 = 10;
+/// Scrollback saved with a session's screen (what an attach sends, too).
+const SAVED_HISTORY: usize = 2000;
+/// A session's program that ended this recently may have been ended by the
+/// machine shutting down, a moment before this server is: what's saved of
+/// it changes only after this long, so it comes back as it was.
+const GRACE: i64 = 3;
 
 /// A color query's answer, once its color is known (see `answers`).
 type ColorReply = Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>;
@@ -81,8 +97,16 @@ struct Session {
     agent: String,
     title: String,
     cwd: PathBuf,
+    /// What it runs (the user's shell on its own when empty). After it came
+    /// back from a restart, its agent's command on its own (`fresh`): the
+    /// task it was started with isn't given again.
     run: String,
+    /// Its agent's command without a task, for coming back without its conversation.
+    fresh: String,
     created: i64,
+    /// Saved to disk as it goes. A box's sessions aren't: a box pauses when
+    /// its machine restarts, and its agent continues when it's resumed.
+    saves: bool,
     inner: Mutex<Inner>,
 }
 
@@ -108,6 +132,18 @@ struct Inner {
     last_input: i64,
     /// Bumped on every (re)start so an old reader thread stops quietly.
     generation: u64,
+    /// The command line running now: `run`, or what continues its agent's conversation.
+    command: String,
+    /// How it came back after the session server restarted ("resumed",
+    /// "fresh", "shell" or "exited"), and when. Until it's restarted.
+    restored: Option<(&'static str, i64)>,
+    /// It printed since its screen was saved, last at `screen_saved`.
+    unsaved: bool,
+    screen_saved: i64,
+    /// What it is changed since `session.json` was saved.
+    meta_unsaved: bool,
+    /// When its program exited.
+    exited_at: i64,
 }
 
 /// An attached terminal.
@@ -129,6 +165,7 @@ impl Inner {
         self.cols = cols;
         self.rows = rows;
         self.last_input = now();
+        self.meta_unsaved = true;
         self.term.resize(Dims { cols: cols as usize, rows: rows as usize });
         if let Some(m) = &self.master {
             let _ = m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
@@ -153,6 +190,10 @@ struct State {
     connections: AtomicUsize,
     next_client: AtomicU64,
     last_activity: Mutex<Instant>,
+    /// Where sessions are saved (none in tests that don't look).
+    store: Option<Store>,
+    /// Sessions whose program ended on its own, and when: what's saved of them goes after `GRACE`.
+    closing: Mutex<Vec<(String, i64)>>,
 }
 
 impl State {
@@ -171,6 +212,14 @@ impl State {
 
 pub fn serve() -> i32 {
     sys::ignore_hangup();
+    // One server at a time, even when two start at once: both would bring
+    // the saved sessions back, each running their programs.
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(crate::home_dir().join("serve.lock"));
+    if let Ok(f) = &lock
+        && matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+    {
+        return 0; // another is starting
+    }
     if sys::connect().is_ok() {
         return 0; // already running
     }
@@ -188,6 +237,15 @@ pub fn serve() -> i32 {
         connections: AtomicUsize::new(0),
         next_client: AtomicU64::new(1),
         last_activity: Mutex::new(Instant::now()),
+        store: Some(Store::home()),
+        closing: Mutex::new(Vec::new()),
+    });
+    // What the last server here had (clients wait meanwhile: it's listening).
+    restore(&state, resume_on(), conversation_of);
+    let saver = state.clone();
+    thread::spawn(move || loop {
+        thread::sleep(SAVE_EVERY);
+        save(&saver, now());
     });
 
     // Exit once nothing has been running or connected for a while.
@@ -262,6 +320,28 @@ fn session_json(s: &Session) -> Value {
         "last_output": i.last_output,
         "last_input": i.last_input,
         "clients": i.clients.len(),
+        "restored": i.restored.map(|r| r.0),
+        "restored_at": i.restored.map(|r| r.1),
+    })
+}
+
+/// What's saved of a session (saved.rs: fields are only ever added).
+fn meta_json(s: &Session, i: &Inner) -> Value {
+    json!({
+        "v": crate::saved::VERSION,
+        "name": s.name,
+        "agent": s.agent,
+        "title": s.title,
+        "cwd": s.cwd.display().to_string(),
+        "run": s.run,
+        "fresh": s.fresh,
+        "created": s.created,
+        "cols": i.cols,
+        "rows": i.rows,
+        "exit": i.exit,
+        "restored": i.restored.map(|r| r.0),
+        "restored_at": i.restored.map(|r| r.1),
+        "saved": now(),
     })
 }
 
@@ -285,15 +365,34 @@ fn start(state: &Arc<State>, req: &Value) -> Result<Value, String> {
     }
     let cols = req["cols"].as_u64().unwrap_or(120).clamp(10, 1000) as u16;
     let rows = req["rows"].as_u64().unwrap_or(40).clamp(4, 500) as u16;
+    let (agent, run) = (str_of(req, "agent").to_string(), str_of(req, "run").to_string());
+    // Apps before this didn't say; for their agents, the command's first word is it.
+    let fresh = req["fresh"].as_str().map(str::to_string).unwrap_or_else(|| fresh_line(&agent, &run));
+    let session = new_session(state, name, agent, str_of(req, "title").to_string(), cwd, run, fresh, now(), cols, rows);
+    launch(state, &session).map_err(|e| format!("couldn't start it: {e}"))?;
+    state.sessions.lock().unwrap().push(session.clone());
+    // Saved at once: a server that stops a moment later brings it back.
+    if let (Some(store), true) = (&state.store, session.saves) {
+        let mut i = session.inner.lock().unwrap();
+        if store.write_meta(&session.name, &meta_json(&session, &i)).is_ok() {
+            i.meta_unsaved = false;
+        }
+    }
+    Ok(json!({ "session": session_json(&session) }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn new_session(state: &State, name: String, agent: String, title: String, cwd: PathBuf, run: String, fresh: String, created: i64, cols: u16, rows: u16) -> Arc<Session> {
     let listener = Listener::default();
     let config = Config { scrolling_history: SCROLLBACK, ..Config::default() };
-    let session = Arc::new(Session {
+    Arc::new(Session {
+        saves: state.store.is_some() && !name.starts_with("box-"),
         name,
-        agent: str_of(req, "agent").to_string(),
-        title: str_of(req, "title").to_string(),
+        agent,
+        title,
         cwd,
-        run: str_of(req, "run").to_string(),
-        created: now(),
+        fresh,
+        created,
         inner: Mutex::new(Inner {
             term: Term::new(config, &Dims { cols: cols as usize, rows: rows as usize }, listener.clone()),
             parser: Processor::new(),
@@ -310,18 +409,22 @@ fn start(state: &Arc<State>, req: &Value) -> Result<Value, String> {
             last_output: now(),
             last_input: 0,
             generation: 0,
+            command: run.clone(),
+            restored: None,
+            unsaved: false,
+            screen_saved: 0,
+            meta_unsaved: true,
+            exited_at: 0,
         }),
-    });
-    launch(state, &session).map_err(|e| format!("couldn't start it: {e}"))?;
-    state.sessions.lock().unwrap().push(session.clone());
-    Ok(json!({ "session": session_json(&session) }))
+        run,
+    })
 }
 
 /// Starts (or restarts) the session's program in a new PTY.
 fn launch(state: &Arc<State>, s: &Arc<Session>) -> anyhow::Result<()> {
-    let (cols, rows) = {
+    let (cols, rows, run) = {
         let i = s.inner.lock().unwrap();
-        (i.cols, i.rows)
+        (i.cols, i.rows, i.command.clone())
     };
     let pair = native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
     // The user's own shell as an interactive login shell, so the agent sees
@@ -331,14 +434,14 @@ fn launch(state: &Arc<State>, s: &Arc<Session>) -> anyhow::Result<()> {
     let mut cmd = CommandBuilder::new(&shell);
     if cfg!(windows) {
         cmd.arg("-NoLogo");
-        if !s.run.is_empty() {
-            cmd.args(["-Command", s.run.as_str()]);
+        if !run.is_empty() {
+            cmd.args(["-Command", run.as_str()]);
         }
     } else {
-        if s.run.is_empty() {
+        if run.is_empty() {
             cmd.arg("-l");
         } else {
-            cmd.args(["-l", "-i", "-c", s.run.as_str()]);
+            cmd.args(["-l", "-i", "-c", run.as_str()]);
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("SHELL", &shell);
@@ -427,6 +530,7 @@ fn pump(state: &State, s: &Session, mut reader: Box<dyn Read + Send>, generation
         let bells = i.listener.bells.load(Ordering::Relaxed);
         i.parser.advance(&mut i.term, bytes);
         i.last_output = now();
+        i.unsaved = true;
         // Attached terminals answer queries themselves; without one that
         // can (watchers' answers are ignored), answer here so programs
         // waiting on a reply don't hang.
@@ -466,16 +570,19 @@ fn pump(state: &State, s: &Session, mut reader: Box<dyn Read + Send>, generation
         return;
     }
     i.exit = Some(code);
+    i.exited_at = now();
+    i.meta_unsaved = true;
     i.writer = None;
     i.master = None;
     // A shell that exits, or an agent that quits cleanly, was closed on
-    // purpose: the session goes away like a closed terminal tab.
+    // purpose: the session goes away like a closed terminal tab. (What's
+    // saved of it, and its agent's report, go a moment later: see `GRACE`.)
     if s.agent == "shell" || code == 0 {
         i.broadcast(proto::EXIT, &code.to_be_bytes());
         i.clients.clear();
         drop(i);
         state.sessions.lock().unwrap().retain(|x| x.name != s.name);
-        crate::states::remove(&s.name);
+        state.closing.lock().unwrap().push((s.name.clone(), now()));
         state.event("closed", &s.name, code.to_string());
         return;
     }
@@ -548,12 +655,17 @@ fn stop(state: &State, req: &Value) -> Result<Value, String> {
     }
     state.sessions.lock().unwrap().retain(|x| x.name != name);
     crate::states::remove(name);
+    if let Some(store) = &state.store {
+        store.remove(name);
+    }
     Ok(json!({}))
 }
 
 fn restart(state: &Arc<State>, req: &Value) -> Result<Value, String> {
     let name = str_of(req, "name");
     let s = state.find(name).ok_or_else(|| format!("no session called {name}"))?;
+    // Its agent continues its conversation rather than starting the task again.
+    let (command, how) = next_run(&s.agent, &s.run, conversation_of(name, &s.agent).as_deref(), resume_on());
     {
         let mut i = s.inner.lock().unwrap();
         i.generation += 1;
@@ -563,15 +675,201 @@ fn restart(state: &Arc<State>, req: &Value) -> Result<Value, String> {
         parser.advance(&mut i.term, b"\x1bc");
         i.broadcast(proto::DATA, b"\x1bc");
         i.escapes = Default::default();
+        i.command = command;
+        i.restored = None;
+        i.meta_unsaved = true;
     }
-    // A new run: what the last one said is over (its conversation id stays, for resuming).
-    if let Some(mut r) = crate::states::read(name) {
-        r["state"] = serde_json::Value::Null;
-        r.as_object_mut().map(|o| o.remove("pid"));
-        let _ = crate::states::replace(name, &r);
-    }
+    new_run(name, how == "resumed");
     launch(state, &s).map_err(|e| format!("couldn't restart it: {e}"))?;
     Ok(json!({ "session": session_json(&s) }))
+}
+
+/// A new run of a session's program: what the last one said it was doing is
+/// over. Its conversation id stays when it continues that conversation; one
+/// that starts a new conversation forgets it, so it isn't the one continued
+/// next time.
+fn new_run(name: &str, continues: bool) {
+    if let Some(mut r) = crate::states::read(name) {
+        r["state"] = serde_json::Value::Null;
+        if let Some(o) = r.as_object_mut() {
+            o.remove("pid");
+            if !continues {
+                o.remove("conversation");
+            }
+        }
+        let _ = crate::states::replace(name, &r);
+    }
+}
+
+/// Whether agents continue their conversations after a restart (Settings ›
+/// Agents in the user's Muxins, kept here by settings.rs). On unless turned off.
+fn resume_on() -> bool {
+    crate::settings::on(&crate::settings::kept(), "resume", true)
+}
+
+/// The conversation a session's agent last reported (states.rs), when it was
+/// that agent's own.
+fn conversation_of(name: &str, agent: &str) -> Option<String> {
+    let r = crate::states::read(name)?;
+    let by = r["agent"].as_str().unwrap_or("");
+    if !by.is_empty() && by != agent {
+        return None;
+    }
+    r["conversation"].as_str().filter(|c| !c.is_empty()).map(str::to_string)
+}
+
+/// What a session runs when it comes back after a restart, or is restarted,
+/// and which that is: its agent continuing its conversation ("resumed") when
+/// that's known and `resume` allows it; else `run` ("fresh", or "shell"),
+/// which after a restart is the agent on its own or a new shell.
+fn next_run(agent: &str, run: &str, conversation: Option<&str>, resume: bool) -> (String, &'static str) {
+    if agent == "shell" || agent.is_empty() {
+        return (run.to_string(), "shell");
+    }
+    match conversation.filter(|_| resume).and_then(|c| resume_line(agent, c)) {
+        Some(line) => (line, "resumed"),
+        None => (run.to_string(), "fresh"),
+    }
+}
+
+/// The command that continues an agent CLI's conversation, for the ones
+/// whose hooks say which it is (hooks.rs): Claude Code and Codex.
+fn resume_line(agent: &str, conversation: &str) -> Option<String> {
+    let id_like = !conversation.is_empty() && conversation.len() <= 100 && conversation.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    match agent {
+        "claude" if id_like => Some(format!("claude --resume {conversation}")),
+        "codex" if id_like => Some(format!("codex resume {conversation}")),
+        _ => None,
+    }
+}
+
+/// An agent's command on its own, from the command line it started with, for
+/// apps that don't say (`fresh` in `start`): its first word, when that's the
+/// agent's own name (`claude 'fix it'` → `claude`). None for a shell, or a
+/// command that isn't its agent's (it comes back as the user's shell).
+fn fresh_line(agent: &str, run: &str) -> String {
+    match run.split_whitespace().next() {
+        Some(word) if agent != "shell" && !agent.is_empty() && word.eq_ignore_ascii_case(agent) => word.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Saves what changed in each session (saved.rs), and forgets the ones that
+/// closed a while ago. Cheap when nothing did: it only looks.
+fn save(state: &State, now: i64) {
+    let Some(store) = &state.store else { return };
+    let sessions: Vec<Arc<Session>> = state.sessions.lock().unwrap().clone();
+    for s in sessions.iter().filter(|s| s.saves) {
+        let (meta, screen) = {
+            let mut i = s.inner.lock().unwrap();
+            // Its program just ended: perhaps the machine is shutting down.
+            if i.exit.is_some() && now - i.exited_at < GRACE {
+                continue;
+            }
+            let meta = std::mem::take(&mut i.meta_unsaved).then(|| meta_json(s, &i));
+            let screen = (i.unsaved && now - i.screen_saved >= SCREEN_EVERY).then(|| {
+                i.unsaved = false;
+                i.screen_saved = now;
+                screen::saved(&i.term, SAVED_HISTORY)
+            });
+            (meta, screen)
+        };
+        // Written outside the lock; tried again next time when they fail (a full disk).
+        if let Some(bytes) = screen
+            && store.write_screen(&s.name, &bytes).is_err()
+        {
+            s.inner.lock().unwrap().unsaved = true;
+        }
+        if let Some(meta) = meta
+            && store.write_meta(&s.name, &meta).is_err()
+        {
+            s.inner.lock().unwrap().meta_unsaved = true;
+        }
+    }
+    let due: Vec<String> = {
+        let mut closing = state.closing.lock().unwrap();
+        let (due, waiting): (Vec<_>, Vec<_>) = closing.drain(..).partition(|(_, at)| now - at >= GRACE);
+        *closing = waiting;
+        due.into_iter().map(|(name, _)| name).collect()
+    };
+    for name in due.iter().filter(|n| state.find(n).is_none()) {
+        store.remove(name);
+        crate::states::remove(name);
+    }
+}
+
+/// Brings back the sessions a session server here saved before it stopped
+/// (this build or another's): the list, titles, folders and screens, with
+/// their programs started again. An agent whose conversation is known
+/// continues it when `resume` says so (Settings › Agents); others start
+/// fresh, without the task they were first given, and a shell is a new
+/// shell. One whose program had exited comes back as it was.
+fn restore(state: &Arc<State>, resume: bool, conversation: impl Fn(&str, &str) -> Option<String>) {
+    let Some(store) = state.store.clone() else { return };
+    for meta in store.all() {
+        let name = str_of(&meta, "name").to_string();
+        if state.find(&name).is_some() {
+            continue;
+        }
+        // A box's (no build saves those): it pauses instead.
+        if name.starts_with("box-") {
+            store.remove(&name);
+            continue;
+        }
+        let agent = str_of(&meta, "agent").to_string();
+        let fresh = meta["fresh"].as_str().map(str::to_string).unwrap_or_else(|| fresh_line(&agent, str_of(&meta, "run")));
+        let run = if agent == "shell" || agent.is_empty() { String::new() } else { fresh.clone() };
+        let cwd = sys::expand_home(str_of(&meta, "cwd"));
+        let size = |key: &str, default: u64, max: u64| meta[key].as_u64().unwrap_or(default).clamp(4, max) as u16;
+        let created = meta["created"].as_i64().unwrap_or_else(now);
+        let session = new_session(state, name.clone(), agent.clone(), str_of(&meta, "title").to_string(), cwd.clone(), run.clone(), fresh, created, size("cols", 120, 1000).max(10), size("rows", 40, 500));
+        let exited = meta["exit"].as_i64().map(|c| c as i32);
+        let (command, how) = match exited {
+            Some(_) => (String::new(), "exited"),
+            None => next_run(&agent, &run, conversation(&name, &agent).as_deref(), resume),
+        };
+        let mut note = match how {
+            "resumed" => "[After a restart: continuing the conversation]".to_string(),
+            "fresh" => "[After a restart: a new conversation]".to_string(),
+            "shell" => "[After a restart: a new shell]".to_string(),
+            _ => String::new(),
+        };
+        if exited.is_none() && !cwd.is_dir() {
+            note = format!("[After a restart: {} isn't there any more]", cwd.display());
+        }
+        {
+            let mut i = session.inner.lock().unwrap();
+            let mut screen = store.screen(&name);
+            if !note.is_empty() {
+                if !screen.is_empty() {
+                    screen.extend_from_slice(b"\r\n");
+                }
+                screen.extend_from_slice(format!("\x1b[0;2m{note}\x1b[0m\r\n").as_bytes());
+            }
+            Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new().advance(&mut i.term, &screen);
+            i.command = command;
+            i.restored = Some((how, now()));
+            i.unsaved = true;
+            if let Some(code) = exited {
+                i.exit = Some(code);
+                i.exited_at = meta["saved"].as_i64().unwrap_or(0);
+                i.last_output = i.exited_at;
+            }
+        }
+        if exited.is_none() {
+            new_run(&name, how == "resumed");
+            let failed = if cwd.is_dir() { launch(state, &session).err().map(|e| format!("[It didn't start again: {e}]")) } else { Some(String::new()) };
+            if let Some(why) = failed {
+                let mut i = session.inner.lock().unwrap();
+                if !why.is_empty() {
+                    Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new().advance(&mut i.term, format!("\x1b[0;2m{why}\x1b[0m\r\n").as_bytes());
+                }
+                i.exit = Some(-1);
+                i.restored = Some(("exited", now()));
+            }
+        }
+        state.sessions.lock().unwrap().push(session);
+    }
 }
 
 fn send(state: &State, req: &Value) -> Result<Value, String> {
@@ -723,6 +1021,8 @@ mod tests {
             connections: AtomicUsize::new(0),
             next_client: AtomicU64::new(1),
             last_activity: Mutex::new(Instant::now()),
+            store: None,
+            closing: Mutex::new(Vec::new()),
         })
     }
 
@@ -771,6 +1071,147 @@ mod tests {
         assert!(answers_within(Duration::from_secs(3), move || drop(read(&st, &json!({ "name": "flood", "lines": 5 })))), "reading the session hangs");
         let st = state.clone();
         assert!(answers_within(Duration::from_secs(3), move || drop(stop(&st, &json!({ "name": "flood" })))), "stopping the session hangs");
+    }
+
+    fn saving_state(store: &Store) -> Arc<State> {
+        let state = test_state();
+        Arc::new(State { store: Some(store.clone()), ..Arc::try_unwrap(state).ok().unwrap() })
+    }
+
+    /// Waits for `text` on a session's screen.
+    fn shows(s: &Session, text: &str) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(20) {
+            if screen::text(&s.inner.lock().unwrap().term, 3000).contains(text) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// The session server dies (its programs with it), leaving what it saved.
+    fn dies(state: &State) {
+        for s in state.sessions.lock().unwrap().drain(..) {
+            let mut i = s.inner.lock().unwrap();
+            i.generation += 1;
+            kill(&mut i);
+        }
+    }
+
+    #[test]
+    fn agents_continue_their_conversation_when_allowed_and_never_get_their_task_again() {
+        assert_eq!(next_run("claude", "claude", Some("0b5e-41"), true), ("claude --resume 0b5e-41".to_string(), "resumed"));
+        assert_eq!(next_run("codex", "codex", Some("019a_ff"), true), ("codex resume 019a_ff".to_string(), "resumed"));
+        // Off, unknown, not an id, an agent that can't say: its own command.
+        assert_eq!(next_run("claude", "claude", Some("0b5e-41"), false), ("claude".to_string(), "fresh"));
+        assert_eq!(next_run("claude", "claude", None, true), ("claude".to_string(), "fresh"));
+        assert_eq!(next_run("codex", "codex", Some("x; rm -rf ~"), true), ("codex".to_string(), "fresh"));
+        assert_eq!(next_run("opencode", "opencode", Some("abc"), true), ("opencode".to_string(), "fresh"));
+        assert_eq!(next_run("shell", "", Some("abc"), true), (String::new(), "shell"));
+        // The command on its own, from what an older app started it with.
+        assert_eq!(fresh_line("claude", "claude 'fix the login bug'"), "claude");
+        assert_eq!(fresh_line("agy", "agy -i 'task'"), "agy");
+        assert_eq!(fresh_line("codex", "codex"), "codex");
+        assert_eq!(fresh_line("claude", "docker exec -it c claude"), "");
+        assert_eq!(fresh_line("shell", "gh auth login"), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_session_comes_back_after_its_server_stops_with_its_screen_and_without_its_task() {
+        let store = crate::saved::scratch("restore");
+        let dir = std::env::temp_dir().join(format!("muxen-restore-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.canonicalize().unwrap().display().to_string();
+        let a = saving_state(&store);
+        // As an app starts an agent with its task: `run` has it, `fresh` doesn't.
+        let req = json!({ "name": "codex-t1", "agent": "codex", "title": "Codex · t1", "cwd": cwd, "cols": 90, "rows": 20,
+            "run": "echo first $((6*7)) run; exec sleep 30", "fresh": "echo fresh $((6*8)) run; exec sleep 30" });
+        start(&a, &req).unwrap();
+        let s = a.find("codex-t1").unwrap();
+        assert!(shows(&s, "first 42 run"));
+        // Saved at once, the screen once it printed.
+        assert_eq!(store.all().len(), 1);
+        save(&a, now());
+        assert!(String::from_utf8_lossy(&store.screen("codex-t1")).contains("first 42 run"));
+        a.find("codex-t1").unwrap().inner.lock().unwrap().resize(100, 24);
+        save(&a, now());
+        assert_eq!(store.all()[0]["cols"], 100);
+        dies(&a);
+
+        let b = saving_state(&store);
+        restore(&b, false, |_, _| Some("abc-123".into()));
+        let s = b.find("codex-t1").expect("it came back");
+        assert_eq!((s.title.as_str(), s.cwd.display().to_string(), s.agent.as_str()), ("Codex · t1", cwd.clone(), "codex"));
+        assert!(shows(&s, "fresh 48 run"), "its agent started again on its own");
+        let text = screen::text(&s.inner.lock().unwrap().term, 3000);
+        assert!(text.contains("first 42 run") && text.contains("[After a restart: a new conversation]"), "{text}");
+        assert_eq!(text.matches("first 42 run").count(), 1, "the task isn't given again: {text}");
+        let listed = session_json(&s);
+        assert_eq!((listed["status"].as_str(), listed["restored"].as_str()), (Some("running"), Some("fresh")));
+        let size = { let i = s.inner.lock().unwrap(); (i.cols, i.rows) };
+        assert_eq!(size, (100, 24));
+        // What's saved now runs its agent on its own, should it come back again.
+        save(&b, now());
+        assert_eq!(store.all()[0]["run"], "echo fresh $((6*8)) run; exec sleep 30");
+        assert_eq!(store.all()[0]["restored"], "fresh");
+        stop(&b, &json!({ "name": "codex-t1" })).unwrap();
+        assert!(store.all().is_empty(), "stopping it forgets it");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn what_ends_as_the_machine_shuts_down_still_comes_back() {
+        let store = crate::saved::scratch("grace");
+        let a = saving_state(&store);
+        let tmp = std::env::temp_dir().display().to_string();
+        // A crash, and an agent that quit cleanly (closed on purpose).
+        start(&a, &json!({ "name": "codex-crash", "agent": "codex", "cwd": tmp, "run": "sleep 0.3; exit 3" })).unwrap();
+        start(&a, &json!({ "name": "codex-quit", "agent": "codex", "cwd": tmp, "run": "sleep 0.3; exit 0" })).unwrap();
+        let ended = Instant::now();
+        while a.find("codex-quit").is_some() || a.find("codex-crash").is_some_and(|s| s.inner.lock().unwrap().exit.is_none()) {
+            assert!(ended.elapsed() < Duration::from_secs(20), "they didn't end");
+            thread::sleep(Duration::from_millis(50));
+        }
+        // A moment later it's all as it was: the server may be next.
+        save(&a, now());
+        let saved = store.all();
+        assert_eq!(saved.len(), 2);
+        assert!(saved.iter().all(|m| m["exit"].is_null()), "{saved:?}");
+        // After the grace, it was real.
+        save(&a, now() + GRACE + 1);
+        let saved = store.all();
+        assert_eq!(saved.len(), 1);
+        assert_eq!((saved[0]["name"].as_str(), saved[0]["exit"].as_i64()), (Some("codex-crash"), Some(3)));
+        dies(&a);
+        // A crashed one comes back as it was: exited, nothing started.
+        let b = saving_state(&store);
+        restore(&b, true, |_, _| None);
+        let s = b.find("codex-crash").unwrap();
+        let listed = session_json(&s);
+        assert_eq!((listed["status"].as_str(), listed["exit_code"].as_i64(), listed["restored"].as_str()), (Some("exited"), Some(3), Some("exited")));
+        assert!(s.inner.lock().unwrap().child.is_none());
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    #[test]
+    fn a_folder_thats_gone_or_a_box_doesnt_start_anything() {
+        let store = crate::saved::scratch("gone");
+        store.write_meta("claude-gone", &json!({ "v": 1, "name": "claude-gone", "agent": "claude", "cwd": "/nonexistent/muxen-test", "run": "claude", "created": 5 })).unwrap();
+        store.write_meta("box-7k2m9q", &json!({ "v": 1, "name": "box-7k2m9q", "agent": "claude", "cwd": "/tmp", "run": "docker start c", "created": 6 })).unwrap();
+        let b = saving_state(&store);
+        restore(&b, true, |_, _| Some("abc".into()));
+        assert!(b.find("box-7k2m9q").is_none(), "a box pauses instead");
+        assert_eq!(store.names(), vec!["claude-gone".to_string()]);
+        let s = b.find("claude-gone").unwrap();
+        let exit = s.inner.lock().unwrap().exit;
+        assert_eq!(exit, Some(-1));
+        let text = screen::text(&s.inner.lock().unwrap().term, 100);
+        assert!(text.contains("isn't there any more"), "{text}");
+        let _ = std::fs::remove_dir_all(store.root());
     }
 
     /// What the terminal answers to `printed`, as a session with no window would.

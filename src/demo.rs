@@ -786,6 +786,9 @@ impl World {
             persistent: true,
             git: None,
             box_id: None,
+            // Pebble restarted for an update; Claude continued its conversation there.
+            restored: (name == "claude-5d2e").then(|| "resumed".to_string()),
+            restored_at: (name == "claude-5d2e").then(|| now - chrono::Duration::minutes(25)),
         };
         let (agents, sessions): (Vec<&str>, Vec<SessionInfo>) = match machine_id {
             "forge" => (
@@ -963,6 +966,8 @@ impl World {
             persistent: true,
             git: None,
             box_id: None,
+            restored: None,
+            restored_at: None,
         }
     }
 

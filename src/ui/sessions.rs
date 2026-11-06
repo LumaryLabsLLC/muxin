@@ -585,6 +585,18 @@ impl Root {
                                 )
                             }),
                     )
+                    // Its machine (or the agent there) restarted, and the session came back.
+                    .children(info.restored_text().map(|text| {
+                        let at = info.restored_at.map(|t| format!(" · {}", format::ago(Some(t)))).unwrap_or_default();
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .text_size(px(12.))
+                            .text_color(theme.text_muted)
+                            .child(kit::icon("rotate-ccw", 12., theme.text_muted))
+                            .child(format!("{text}{at}"))
+                    }))
                     .children(info.git.as_ref().map(|g| git_line(&theme, &info.id, g, true).mt(px(2.)))),
             )
             .when(!info.persistent, |d| d.child(kit::pill("Ends when you close Muxin", theme.warning)))
@@ -1071,7 +1083,8 @@ impl Root {
                             .child("·")
                             .child(div().font_family(mono_font()).child(x.cwd.clone()))
                             .child("·")
-                            .child(format!("started {}", format::ago(x.created_at))),
+                            .child(format!("started {}", format::ago(x.created_at)))
+                            .children(x.restored_text().map(|t| div().child("·").child(t.to_string()).flex().gap(px(6.)))),
                     )
                     .children(x.git.as_ref().map(|g| git_line(theme, &format!("row-{}", x.id), g, false).mt(px(3.)))),
             )

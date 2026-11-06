@@ -586,25 +586,31 @@ pub struct AgentSettings {
     /// Muxin's hooks in Claude Code's and Codex's settings, so they say when
     /// they work, need you or are done (see fleet::sessions). Off takes them out.
     pub hooks: bool,
-    /// When each was last changed (unix seconds), by name ("hooks").
+    /// Sessions come back after a restart (a reboot, the machine's agent
+    /// restarting) either way; with this, Claude Code and Codex continue
+    /// their conversations there. Off, they start fresh.
+    pub resume: bool,
+    /// When each was last changed (unix seconds), by name ("hooks", "resume").
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub changed: std::collections::BTreeMap<String, i64>,
 }
 
 impl Default for AgentSettings {
     fn default() -> Self {
-        AgentSettings { hooks: true, changed: Default::default() }
+        AgentSettings { hooks: true, resume: true, changed: Default::default() }
     }
 }
 
 impl AgentSettings {
-    fn choices(&self) -> [(&'static str, bool); 1] {
-        [("hooks", self.hooks)]
+    fn choices(&self) -> [(&'static str, bool); 2] {
+        [("hooks", self.hooks), ("resume", self.resume)]
     }
 
     fn set(&mut self, name: &str, on: bool) {
-        if name == "hooks" {
-            self.hooks = on;
+        match name {
+            "hooks" => self.hooks = on,
+            "resume" => self.resume = on,
+            _ => {}
         }
     }
 
@@ -907,9 +913,12 @@ mod tests {
         use super::*;
         // On by default, never changed: sent with 0, nothing in the file.
         let mut a = AgentSettings::default();
-        assert_eq!(a.for_machines(), serde_json::json!({ "hooks": { "on": true, "at": 0 } }));
+        assert_eq!(a.for_machines(), serde_json::json!({ "hooks": { "on": true, "at": 0 }, "resume": { "on": true, "at": 0 } }));
         let text = toml::to_string(&Settings::default()).unwrap();
-        assert!(text.contains("[agents]\nhooks = true\n") && !text.contains("changed"), "{text}");
+        assert!(text.contains("[agents]\nhooks = true\nresume = true\n") && !text.contains("changed"), "{text}");
+        // A config.toml from before resume: on.
+        let old: Settings = toml::from_str("[agents]\nhooks = false\n").unwrap();
+        assert!(!old.agents.hooks && old.agents.resume);
         // Turned off here: when goes with it.
         let before = a.clone();
         a.hooks = false;
@@ -926,6 +935,14 @@ mod tests {
         let same = a.clone();
         a.stamp(&same, 300);
         assert_eq!(a.changed["hooks"], 200);
+        // Each choice on its own: continuing after a restart turned off.
+        let before = a.clone();
+        a.resume = false;
+        a.stamp(&before, 400);
+        assert_eq!((a.changed["hooks"], a.changed["resume"]), (200, 400));
+        assert_eq!(a.for_machines()["resume"], serde_json::json!({ "on": false, "at": 400 }));
+        assert!(a.adopt(&serde_json::json!({ "resume": { "on": true, "at": 500 }, "hooks": { "on": false, "at": 100 } })));
+        assert!(a.resume && a.hooks);
     }
 
     #[test]

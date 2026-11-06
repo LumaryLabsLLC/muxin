@@ -127,6 +127,15 @@ pub struct SessionInfo {
     /// The box whose agent this is (see fleet::boxes).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub box_id: Option<String>,
+    /// It came back after its machine or the machine's agent restarted (the
+    /// agent saves each session as it goes), until it's restarted: "resumed"
+    /// (its agent continues its conversation), "fresh" (its agent started
+    /// again without it), "shell" (a new shell) or "exited" (it had exited,
+    /// and is as it was). Agents from 0.6 do this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restored: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restored_at: Option<DateTime<Utc>>,
 }
 
 /// What a session shows beside it, the most urgent last: a machine or a list
@@ -158,6 +167,16 @@ impl Mark {
 }
 
 impl SessionInfo {
+    /// How it came back after a restart, in a few words; none when it didn't.
+    pub fn restored_text(&self) -> Option<&'static str> {
+        Some(match self.restored.as_deref()? {
+            "resumed" => "Continued after a restart",
+            "fresh" => "Started again after a restart",
+            "shell" => "A new shell after a restart",
+            _ => "Back after a restart",
+        })
+    }
+
     /// What to show beside it. "Done" lasts until it's opened (its unread
     /// notice), "needs you" as long as it does.
     pub fn mark(&self) -> Mark {
@@ -446,6 +465,8 @@ impl Engine {
             "title": title,
             "cwd": cwd,
             "run": run_line,
+            // What it runs when it comes back after a restart without its conversation: never the task again.
+            "fresh": if req.command.is_some() { "" } else { kind.command },
             "cols": req.cols.clamp(40, 500),
             "rows": req.rows.clamp(10, 200),
         });
@@ -629,6 +650,8 @@ impl Engine {
             persistent: false,
             git: None,
             box_id: None,
+            restored: None,
+            restored_at: None,
             name,
         };
         self.add_direct(DirectSession { info: info.clone(), run, windows });
@@ -850,6 +873,8 @@ pub(crate) fn parse_discovery(spec: &MachineSpec, reply: &Value) -> MachineSessi
             persistent: true,
             git: None,
             box_id: crate::fleet::boxes::box_of_session(&name, &found.boxes).map(|b| b.id.clone()),
+            restored: s["restored"].as_str().filter(|r| !r.is_empty()).map(str::to_string),
+            restored_at: ts(&s["restored_at"]),
             name,
         });
     }
@@ -927,6 +952,23 @@ mod tests {
         assert_eq!(notices[1].3, "Claude Code · app · Beelink");
         // Once: still done is no news.
         assert!(new_notices(&after, &after, 1050, "Beelink").is_empty());
+    }
+
+    #[test]
+    fn a_session_back_after_a_restart_says_so() {
+        let mut r = reply(1000, 900, json!([]));
+        r["sessions"][0]["restored"] = json!("resumed");
+        r["sessions"][0]["restored_at"] = json!(990);
+        let found = parse_discovery(&spec("beelink"), &r);
+        let claude = found.sessions.iter().find(|s| s.name == "claude-ab12").unwrap();
+        assert_eq!((claude.restored.as_deref(), claude.restored_at.map(|t| t.timestamp())), (Some("resumed"), Some(990)));
+        assert_eq!(claude.restored_text(), Some("Continued after a restart"));
+        let json = serde_json::to_value(claude).unwrap();
+        assert_eq!((json["restored"].as_str(), json["restoredAt"].is_string()), (Some("resumed"), true));
+        // One that didn't come back says nothing (an older agent's either).
+        let shell = found.sessions.iter().find(|s| s.name == "shell-cd34").unwrap();
+        assert!(shell.restored.is_none() && shell.restored_text().is_none());
+        assert!(serde_json::to_value(shell).unwrap().get("restored").is_none());
     }
 
     #[test]

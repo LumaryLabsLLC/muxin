@@ -1059,9 +1059,10 @@ impl SettingsPage {
             )
     }
 
-    /// What the agents on the machines may do (config::AgentSettings): for
-    /// now, Muxin's hooks in Claude Code's and Codex's settings, so they say
-    /// when they work, need you or are done (fleet::sessions).
+    /// What the agents on the machines may do (config::AgentSettings):
+    /// Muxin's hooks in Claude Code's and Codex's settings, so they say when
+    /// they work, need you or are done (fleet::sessions), and whether they
+    /// continue their conversations when sessions come back after a restart.
     fn agents_section(&self, theme: &Theme) -> impl IntoElement {
         let on = self.engine.settings().agents.hooks;
         let mut with: Vec<String> = Vec::new();
@@ -1081,7 +1082,9 @@ impl SettingsPage {
             (true, []) => "On. No machine has Claude Code or Codex set up yet.".to_string(),
             (true, names) => format!("On for {}.", names.join(", ")),
         };
+        let resume = self.engine.settings().agents.resume;
         let engine = self.engine.clone();
+        let engine2 = self.engine.clone();
         div()
             .flex()
             .flex_col()
@@ -1100,7 +1103,17 @@ impl SettingsPage {
                     }))
                     .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Muxin adds a small hook to their settings on your machines. Turning this off takes it out."))
                     .child(div().text_size(px(11.5)).text_color(theme.text_muted).child(status))
-                    .children(trouble.into_iter().take(3).map(|t| div().text_size(px(11.5)).text_color(theme.warning).child(t))),
+                    .children(trouble.into_iter().take(3).map(|t| div().text_size(px(11.5)).text_color(theme.warning).child(t)))
+                    .child(div().h(px(6.)))
+                    .child(kit::checkbox(theme, "agent-resume", resume, "Continue agents' conversations after a restart", move |on, _, cx| {
+                        let mut s = engine2.settings();
+                        s.agents.resume = *on;
+                        let _ = engine2.update_settings(s);
+                        cx.refresh_windows();
+                    }))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(
+                        "Sessions come back after a machine restarts. With this on, Claude Code and Codex continue their conversation. Off, they start a new one.",
+                    )),
             )
     }
 

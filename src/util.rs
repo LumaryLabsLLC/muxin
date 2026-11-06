@@ -110,3 +110,22 @@ pub fn open_url(url: &str) {
     };
     let _ = cmd.arg(url).spawn();
 }
+
+/// An HTTP client made by `builder`. Making one fails on a machine without
+/// CA certificates (a bare container: rustls's platform verifier finds none),
+/// so then it's one that trusts no certificate: HTTPS requests there fail
+/// with an error, rather than Muxin stopping before it does anything.
+pub fn http_client(builder: impl Fn() -> reqwest::ClientBuilder) -> reqwest::Client {
+    match builder().build() {
+        Ok(client) => client,
+        Err(e) => {
+            // reqwest's own words are "builder error"; the reason is under it.
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                let why = std::error::Error::source(&e).map(|s| s.to_string()).unwrap_or_else(|| e.to_string());
+                tracing::warn!("HTTPS requests won't work on this machine: {why}");
+            });
+            builder().tls_certs_only(Vec::<reqwest::Certificate>::new()).build().expect("an HTTP client with no certificates")
+        }
+    }
+}

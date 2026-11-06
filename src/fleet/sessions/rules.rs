@@ -42,7 +42,7 @@ pub async fn refresh(dir: &Path) -> Result<bool, String> {
 }
 
 async fn refresh_from(url: &str, dir: &Path) -> Result<bool, String> {
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).user_agent(concat!("Muxin/", env!("CARGO_PKG_VERSION"))).build().map_err(|e| e.to_string())?;
+    let client = crate::util::http_client(|| reqwest::Client::builder().timeout(Duration::from_secs(15)).user_agent(concat!("Muxin/", env!("CARGO_PKG_VERSION"))));
     let reply = client.get(url).send().await.map_err(|e| e.to_string())?;
     if !reply.status().is_success() {
         return Err(format!("{url} answered {}", reply.status()));

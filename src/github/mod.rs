@@ -296,11 +296,7 @@ pub struct Client {
 
 impl Client {
     pub fn new() -> Client {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .connect_timeout(Duration::from_secs(8))
-            .build()
-            .expect("building HTTP client");
+        let http = crate::util::http_client(|| reqwest::Client::builder().timeout(Duration::from_secs(20)).connect_timeout(Duration::from_secs(8)));
         Client {
             http,
             api_url: Mutex::new("https://api.github.com".into()),

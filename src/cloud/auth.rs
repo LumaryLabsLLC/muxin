@@ -197,7 +197,7 @@ async fn exchange(params: &[(&str, &str)]) -> Result<OAuthTokens, String> {
         #[serde(default)]
         scope: String,
     }
-    let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
+    let http = crate::util::http_client(|| reqwest::Client::builder().timeout(Duration::from_secs(30)));
     let url = reqwest::Url::parse_with_params("https://cloud.digitalocean.com/v1/oauth/token", params).map_err(|e| e.to_string())?;
     let resp = http.post(url).send().await.map_err(|e| format!("Couldn't reach DigitalOcean: {e}"))?;
     if !resp.status().is_success() {

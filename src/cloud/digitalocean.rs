@@ -78,7 +78,7 @@ pub struct SshKey {
 
 impl Client {
     pub fn new(token: String) -> Client {
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().unwrap_or_default();
+        let http = crate::util::http_client(|| reqwest::Client::builder().timeout(Duration::from_secs(30)));
         Client { http, token }
     }
 

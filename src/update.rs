@@ -27,11 +27,7 @@ pub struct Update {
 
 /// Asks GitHub. None when this is the latest (or newer: a build from source).
 pub async fn check() -> Result<Option<Update>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .user_agent(concat!("muxin/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = crate::util::http_client(|| reqwest::Client::builder().timeout(Duration::from_secs(10)).user_agent(concat!("muxin/", env!("CARGO_PKG_VERSION"))));
     let reply = client.get(LATEST).header("Accept", "application/vnd.github+json").send().await.map_err(|e| format!("Couldn't reach GitHub: {e}"))?;
     if !reply.status().is_success() {
         return Err(format!("GitHub answered {}.", reply.status()));

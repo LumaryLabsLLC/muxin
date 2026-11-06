@@ -58,7 +58,7 @@ pub fn host_key() -> String {
 impl Server {
     /// The server at `origin` (`https://muxin.dev`).
     pub fn new(origin: &str) -> Server {
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(15)).connect_timeout(Duration::from_secs(8)).build().unwrap_or_default();
+        let http = crate::util::http_client(|| reqwest::Client::builder().timeout(Duration::from_secs(15)).connect_timeout(Duration::from_secs(8)));
         Server { base: format!("{}/share/v1", origin.trim_end_matches('/')), http }
     }
 

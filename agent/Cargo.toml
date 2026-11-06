@@ -1,6 +1,6 @@
 [package]
 name = "muxen-agent"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "Runs on each machine Muxen manages: keeps agent sessions alive and lets the app attach to them"
 license = "Apache-2.0"
@@ -12,7 +12,8 @@ anyhow = "1"
 base64 = "0.22"
 libc = "0.2"
 portable-pty = "0.9"
-serde_json = "1"
+# preserve_order: settings files Muxin edits (hooks.rs) keep their order.
+serde_json = { version = "1", features = ["preserve_order"] }
 # Direct connections (`listen`): QUIC with mutually pinned certificates.
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 socket2 = "0.6"

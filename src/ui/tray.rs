@@ -1,6 +1,6 @@
 //! The icon in the menu bar or the system tray: the way back to a closed window,
-//! with a dot while a session is waiting for you (never a notification from the
-//! system), and those sessions in its menu.
+//! with a dot while a session needs you or is done (never a notification from
+//! the system), and those sessions in its menu.
 //!
 //! On a Mac and Windows it's `tray-icon`, on the main thread. On Linux it's a
 //! StatusNotifierItem over D-Bus, and outlives the app's windows (see `ui::run`).
@@ -27,24 +27,30 @@ const ICON: &[u8] = include_bytes!("../../assets/brand/menu-bar.png");
 #[cfg(not(target_os = "macos"))]
 const ICON: &[u8] = include_bytes!("../../assets/brand/icon-128.png");
 
-/// A session waiting for you, for the menu.
+/// A session that needs you (or ended with an error) or is done, for the menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Waiting {
     id: String,
     label: String,
+    /// Needs you (or exited with an error); else it's done.
+    needs_you: bool,
 }
 
+/// Those that need you first, then those that are done.
 fn waiting_sessions(snapshot: &Snapshot) -> Vec<Waiting> {
-    snapshot
+    use crate::fleet::sessions::Mark;
+    let mut out: Vec<Waiting> = snapshot
         .sessions
         .iter()
-        .filter(|s| s.attention.is_some())
+        .filter(|s| matches!(s.mark(), Mark::NeedsYou | Mark::Failed | Mark::Done))
         .map(|s| {
             let machine = snapshot.machines.iter().find(|m| m.id == s.machine_id).map_or(s.machine_id.as_str(), |m| m.name.as_str());
             let title = if s.title.trim().is_empty() { &s.agent_name } else { &s.title };
-            Waiting { id: s.id.clone(), label: format!("{} · {machine}", short_title(title)) }
+            Waiting { id: s.id.clone(), label: format!("{} · {machine}", short_title(title)), needs_you: s.mark() != Mark::Done }
         })
-        .collect()
+        .collect();
+    out.sort_by_key(|w| !w.needs_you);
+    out
 }
 
 /// A session's title can be anything a program set: one short line for a menu.
@@ -70,8 +76,14 @@ enum Entry {
 fn menu_entries(waiting: &[Waiting]) -> Vec<Entry> {
     let mut entries = Vec::new();
     if !waiting.is_empty() {
-        entries.push(Entry::Note("Waiting for you".into()));
-        entries.extend(waiting.iter().take(MOST_LISTED).cloned().map(Entry::Session));
+        let mut heading = None;
+        for w in waiting.iter().take(MOST_LISTED) {
+            if heading != Some(w.needs_you) {
+                heading = Some(w.needs_you);
+                entries.push(Entry::Note(if w.needs_you { "Needs you" } else { "Done" }.into()));
+            }
+            entries.push(Entry::Session(w.clone()));
+        }
         if waiting.len() > MOST_LISTED {
             entries.push(Entry::Note(format!("and {} more", waiting.len() - MOST_LISTED)));
         }
@@ -379,7 +391,7 @@ mod tests {
     use super::*;
 
     fn waiting(n: usize) -> Vec<Waiting> {
-        (0..n).map(|i| Waiting { id: format!("m/s{i}"), label: format!("Session {i} · m") }).collect()
+        (0..n).map(|i| Waiting { id: format!("m/s{i}"), label: format!("Session {i} · m"), needs_you: true }).collect()
     }
 
     #[test]
@@ -390,10 +402,16 @@ mod tests {
     #[test]
     fn waiting_sessions_come_first() {
         let entries = menu_entries(&waiting(2));
-        assert_eq!(entries[0], Entry::Note("Waiting for you".into()));
+        assert_eq!(entries[0], Entry::Note("Needs you".into()));
         assert!(matches!(&entries[1], Entry::Session(w) if w.id == "m/s0"));
         assert!(matches!(&entries[2], Entry::Session(w) if w.id == "m/s1"));
         assert_eq!(entries[3..], [Entry::Separator, Entry::Show, Entry::Quit]);
+        // Then the ones that are done, under their own heading.
+        let mut both = waiting(1);
+        both.push(Waiting { id: "m/d".into(), label: "Done one · m".into(), needs_you: false });
+        let entries = menu_entries(&both);
+        assert_eq!(entries[2], Entry::Note("Done".into()));
+        assert!(matches!(&entries[3], Entry::Session(w) if w.id == "m/d"));
     }
 
     #[test]
@@ -405,33 +423,33 @@ mod tests {
 
     #[test]
     fn only_sessions_that_want_you_are_listed() {
-        let session = |id: &str, title: &str, attention: Option<&str>| {
-            crate::fleet::sessions::SessionInfo {
-                id: id.into(),
-                machine_id: "mac-studio".into(),
-                name: id.into(),
-                agent: "codex".into(),
-                agent_name: "Codex".into(),
-                title: title.into(),
-                cwd: "/".into(),
-                status: "running".into(),
-                exit_code: None,
-                busy: false,
-                attention: attention.map(str::to_string),
-                clients: 0,
-                created_at: None,
-                last_output_at: None,
-                attach_command: String::new(),
-                persistent: true,
-                git: None,
-                box_id: None,
-            }
+        let session = |id: &str, title: &str, state: &str, attention: Option<&str>| crate::fleet::sessions::SessionInfo {
+            id: id.into(),
+            machine_id: "mac-studio".into(),
+            name: id.into(),
+            agent: "codex".into(),
+            agent_name: "Codex".into(),
+            title: title.into(),
+            status: "running".into(),
+            state: state.into(),
+            attention: attention.map(str::to_string),
+            ..Default::default()
         };
-        let snapshot = Snapshot { sessions: vec![session("a", "fix login", Some("waiting")), session("b", "busy", None), session("c", " ", Some("bell"))], ..Default::default() };
+        let snapshot = Snapshot {
+            sessions: vec![
+                session("a", "fix login", "done", Some("waiting")),
+                session("b", "busy", "working", None),
+                session("c", " ", "idle", Some("bell")),
+                session("d", "seen", "done", None),
+                session("e", "asks", "needs_you", None),
+            ],
+            ..Default::default()
+        };
         let listed = waiting_sessions(&snapshot);
-        assert_eq!(listed.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(), ["a", "c"]);
-        assert_eq!(listed[0].label, "fix login · mac-studio", "a machine not in the list goes by its id");
-        assert_eq!(listed[1].label, "Codex · mac-studio", "no title: the agent's name");
+        // Needs you first (asked, or rang); done until it's opened.
+        assert_eq!(listed.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(), ["c", "e", "a"]);
+        assert_eq!(listed[2].label, "fix login · mac-studio", "a machine not in the list goes by its id");
+        assert_eq!(listed[0].label, "Codex · mac-studio", "no title: the agent's name");
     }
 
     #[test]

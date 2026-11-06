@@ -122,6 +122,10 @@ impl Engine {
         for (id, p) in &persisted.probes {
             crate::fleet::sessions::agent::note_os(id, p.os.as_deref());
         }
+        // Prompt rules fetched before (sessions::rules).
+        if world.is_none() {
+            sessions::rules::load(&paths.dir);
+        }
         let state = State {
             inventory,
             inventory_info,
@@ -242,6 +246,8 @@ impl Engine {
         let me = self.clone();
         self.rt.spawn(async move { me.tailnet_loop().await });
         let me = self.clone();
+        self.rt.spawn(async move { me.rules_loop().await });
+        let me = self.clone();
         self.rt.spawn(async move { me.network_loop().await });
         // Monitors aren't kept between runs: ask the machines with a desktop
         // now, not at the next check (which may be minutes away).
@@ -275,7 +281,10 @@ impl Engine {
     }
 
     pub fn update_settings(&self, new: Settings) -> Result<Settings, String> {
-        let new = new.normalized()?;
+        let mut new = new.normalized()?;
+        // When each agent choice changed: machines keep the newest (config::AgentSettings).
+        let before = self.settings().agents;
+        new.agents.stamp(&before, Utc::now().timestamp());
         if self.demo.is_none() {
             new.save(&self.paths.settings).map_err(|e| format!("Couldn't save settings: {e:#}"))?;
         }
@@ -599,6 +608,25 @@ impl Engine {
         self.publish(&mut st);
     }
 
+    /// Takes newer agent choices a machine kept (made in another of the
+    /// user's Muxins), so this one shows and sends them too.
+    pub(crate) fn adopt_agent_settings(&self, kept: &serde_json::Value) {
+        let mut st = self.state.lock().unwrap();
+        let mut settings = st.settings.clone();
+        if !settings.agents.adopt(kept) {
+            return;
+        }
+        if self.demo.is_none() {
+            if let Err(e) = settings.save(&self.paths.settings) {
+                tracing::warn!("couldn't save settings: {e:#}");
+                return;
+            }
+            st.settings_mtime = mtime(&self.paths.settings);
+        }
+        st.settings = settings;
+        self.publish(&mut st);
+    }
+
     pub(crate) fn git_looked_at(&self, machine_id: &str) -> Option<Instant> {
         self.state.lock().unwrap().git_looked.get(machine_id).copied()
     }
@@ -682,11 +710,19 @@ impl Engine {
         }
     }
 
-    /// The user looked at the session: clear its unread notice.
-    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    /// The user looked at the session: clear its unread notice (a "done"
+    /// goes with it). The demo's sessions come with theirs.
+    #[cfg_attr(not(any(feature = "gui", target_os = "ios")), allow(dead_code))]
     pub fn ack_session(&self, session_id: &str) {
         let mut st = self.state.lock().unwrap();
-        if st.attention.remove(session_id).is_some() {
+        let mut changed = st.attention.remove(session_id).is_some();
+        for found in st.sessions.values_mut() {
+            for s in found.sessions.iter_mut().filter(|s| s.id == session_id && s.attention.is_some()) {
+                s.attention = None;
+                changed = true;
+            }
+        }
+        if changed {
             self.publish(&mut st);
         }
     }
@@ -855,6 +891,23 @@ impl Engine {
         if !link.retired() {
             tracing::debug!("lost the link to {}; checking it", link.machine);
             self.run_check(Some(vec![link.machine.clone()])).await;
+        }
+    }
+
+    /// Newer prompt rules from muxin.dev, at most once a day (sessions::rules).
+    async fn rules_loop(self: Arc<Self>) {
+        if self.demo.is_some() {
+            return;
+        }
+        loop {
+            if sessions::rules::due(&self.paths.dir) {
+                match sessions::rules::refresh(&self.paths.dir).await {
+                    Ok(true) => tracing::info!("using newer prompt rules from muxin.dev"),
+                    Ok(false) => {}
+                    Err(e) => tracing::debug!("prompt rules: {e}"),
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
         }
     }
 
@@ -1202,6 +1255,7 @@ impl Engine {
                 m.agents = found.agents.clone();
                 m.agent_version = found.agent_version.clone();
                 m.gh = found.gh.clone();
+                m.agent_hooks = found.hooks.clone();
                 m.sessions_error = found.error.clone();
                 // What we last saw there; nothing is working while it's offline
                 // (or disconnected: nothing we can see).
@@ -1209,6 +1263,9 @@ impl Engine {
                 let git = st.git.get(&m.id);
                 snapshot.sessions.extend(found.sessions.iter().cloned().map(|mut s| {
                     s.attention = st.attention.get(&s.id).cloned().or(s.attention);
+                    if offline && s.state == "working" {
+                        s.state = "idle".into();
+                    }
                     s.busy &= !offline;
                     s.git = git.and_then(|g| g.iter().find(|(path, _)| *path == s.cwd)).map(|(_, status)| status.clone());
                     s
@@ -1218,6 +1275,7 @@ impl Engine {
                     let session = found.sessions.iter().find(|s| s.name == b.id && s.status == "running");
                     b.session_id = session.map(|s| s.id.clone());
                     b.busy = session.is_some_and(|s| s.busy) && !offline;
+                    b.agent_state = session.map(|s| if offline && s.state == "working" { "idle".to_string() } else { s.state.clone() });
                     b.attention = session.and_then(|s| st.attention.get(&s.id).cloned());
                     b.git = git.and_then(|g| g.iter().find(|(path, _)| *path == b.path)).map(|(_, status)| status.clone());
                     b

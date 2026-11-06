@@ -15,8 +15,11 @@ Session, box and checkout JSON uses camelCase keys (`machineId`, `agentName`, `s
 
 - `id`, `agent` (`claude`, `codex`, ..., `shell`), `title`, `cwd`.
 - `status`: `running` or `exited` (with `exitCode`).
-- `busy`: it printed something in the last few seconds, so it's working.
-- `attention`: `waiting`, `bell` or `exited`, until the user opens it.
+- `state`: what its agent is doing. `working`; `needs_you` (a question or an approval waits: see `question` below); `done` (it finished its turn); `idle`.
+- `stateSource`: how that's known. `hook` or `escape`: the agent said so (Claude Code and Codex through Muxin's hooks; any program with an escape code). `screen`: a question Muxin knows is on its screen. `output`: a guess (printing is working, quiet after working is done).
+- `conversationId`: the agent's own id for its conversation, when its hooks said.
+- `busy`: `state` is `working` (kept for older scripts).
+- `attention`: `waiting` (it came to need you, or finished), `bell` or `exited`, until the user opens it.
 - `git`: what the work in its folder changed. `branch`; `base` (the default branch it's compared with); `files`, `added`, `removed` and `commits` since the base; `uncommitted` files; `ahead` and `behind` its upstream; `worktree`; and `pull`, the branch's pull request (`number`, `state`, `url`, and `checks` with `passed`, `failed`, `pending` and the `failing` ones).
 
 `machines` lists which agent CLIs each machine has.
@@ -32,6 +35,7 @@ muxin session send beelink/claude-3f9a "Yes, and add a test" --json   # type it,
 ```
 
 - `question` returns the question as `text` and its `options`, each with a `key` (and the `selected` one). Empty `options` means it's simply done or waiting for a message: `text` has the end of what it said. Reply to that with `send`.
+- A session whose `state` is `needs_you` is the one to ask `question` about. `muxin status --json` lists them in `agents.needs_you_ids` (with `--refresh` it reads them first).
 - `answer` approves or refuses what the agent asked. Only when the user told you to, and say which option you picked.
 - `send --no-enter` types without pressing Enter.
 
@@ -104,7 +108,7 @@ muxin box rm box-7k2m9q --json
 
 - `box new` takes `owner/name`, a git URL, or a checkout's folder on the `--on` machine. `--agent` is `claude` (the default), `codex`, `amp`, `opencode`, `gemini` or `pi`. Without `--on` it goes on the online machine with Docker and the most free memory. `--ref` is what it starts from (a branch, tag, commit or `pull/<n>/head`); `--branch` is the branch it works on (default `box/<name>`).
 - The first box on a machine builds Muxin's image there, which takes a few minutes. The repository's `.agents/setup` runs first.
-- `box ls` gives each box's `state` (`running`, `starting`, `paused`), `busy`, `attention` (`waiting`: it asks something), `sessionId` while it runs, its `task`, and `git` (what it changed, its pull request).
+- `box ls` gives each box's `state` (`running`, `starting`, `paused`), `agentState` while it runs (`working`, `needs_you`, `done`, `idle`, as sessions say it), `busy`, `attention`, `sessionId` while it runs, its `task`, and `git` (what it changed, its pull request).
 - `muxin session read`, `question` and `answer` work on its `sessionId`.
 - It pauses by itself after 15 minutes without output from its agent (`--idle <minutes>` on `box new`; 0 never), or when its agent quits. Its files and conversation stay; dev servers and shells it ran end.
 - `box rm` deletes the container and the checkout, with any work that wasn't pushed. Check its `git` (`ahead`, `uncommitted`) and confirm with the user first, unless they asked for it.

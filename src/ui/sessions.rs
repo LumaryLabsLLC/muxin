@@ -17,7 +17,7 @@ use super::theme::{ActiveTheme, Theme, mono_font};
 use crate::fleet::model::{Machine, Snapshot};
 use crate::fleet::model::Machine as FleetMachine;
 use crate::fleet::sessions::git::GitStatus;
-use crate::fleet::sessions::{AGENTS, Control, SessionInfo, StartSession};
+use crate::fleet::sessions::{AGENTS, Control, Mark, SessionInfo, StartSession};
 
 /// Toolbar plus the session header, subtracted when sizing a new session.
 const CHROME_HEIGHT: f32 = 52. + 60.;
@@ -501,18 +501,15 @@ impl Root {
             kit::pill(format!("Exited{}", info.exit_code.map(|c| format!(" ({c})")).unwrap_or_default()), theme.text_placeholder).into_any_element()
         } else if let Some(m) = &offline {
             kit::pill(format::unreachable_word(m), theme.machine_status(m)).into_any_element()
-        } else if info.busy {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_size(px(12.))
-                .text_color(theme.text_accent)
-                .child(spinner("session-busy", 12., theme.accent))
-                .child("Working")
-                .into_any_element()
         } else {
-            div().text_size(px(12.)).text_color(theme.text_placeholder).child(if info.agent == "shell" { "Idle" } else { "Waiting for you" }).into_any_element()
+            // What it's doing, as its agent says (it's open, so "done" isn't news any more).
+            let mark = match info.state.as_str() {
+                "needs_you" => Mark::NeedsYou,
+                "working" => Mark::Working,
+                "done" => Mark::Done,
+                _ => Mark::Idle,
+            };
+            state_label(&theme, "session-busy", mark)
         };
 
         let attach = info.attach_command.clone();
@@ -942,8 +939,11 @@ impl Root {
         let shared = self.share_of(&s.id);
         let knocking = shared.is_some_and(|sh| sh.guests.iter().any(|g| g.state == "waiting"));
         let watched = shared.is_some_and(|sh| sh.guests.iter().any(|g| g.state == "in"));
-        let trailing = if exited { 40. } else if s.busy || s.attention.is_some() { 20. } else { 0. } + if knocking || watched { 18. } else { 0. };
-        let trailing = trailing + if exited && s.attention.is_some() { 14. } else { 0. };
+        let mark = s.mark();
+        // While it's open, only working shows (it's in front of you).
+        let shown = if selected && mark != Mark::Working { Mark::Idle } else { mark };
+        let trailing = if exited { 40. } else if shown != Mark::Idle { 20. } else { 0. } + if knocking || watched { 18. } else { 0. };
+        let trailing = trailing + if exited && shown != Mark::Idle { 14. } else { 0. };
         let text_w = (self.row_width() - 20. - 22. - 8. - 16. - 8. - trailing).max(40.);
         div()
             .id(SharedString::from(format!("side-s-{}", s.id)))
@@ -971,9 +971,8 @@ impl Root {
             // Shared: someone's asking to join, or watching.
             .when(watched && !knocking, |d| d.child(kit::icon("eye", 12., theme.text_accent)))
             .when(knocking, |d| d.child(div().size(px(8.)).rounded_full().bg(theme.accent)))
-            .when(s.busy && !exited, |d| d.child(spinner(SharedString::from(format!("side-s-spin-{}", s.id)), 11., theme.accent)))
-            // Unread: it finished, rang the bell, or exited. Cleared by opening it.
-            .when(!s.busy && !selected, |d| d.children(s.attention.as_deref().map(|kind| attention_dot(theme, kind, s.exit_code))))
+            // Working, needs you, done (until it's opened), exited with an error.
+            .children(mark_view(theme, format!("side-s-spin-{}", s.id), shown, 8.))
             .when(exited, |d| d.child(div().text_size(px(11.)).text_color(theme.text_placeholder).child("exited")))
             .on_mouse_down(gpui::MouseButton::Right, {
                 let sid = s.id.clone();
@@ -1038,28 +1037,8 @@ impl Root {
             div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!("Exited{}", x.exit_code.map(|c| format!(" ({c})")).unwrap_or_default())).into_any_element()
         } else if offline {
             div().text_size(px(12.)).text_color(theme.text_placeholder).child(if self.snapshot.machines.iter().any(|m| m.id == x.machine_id && m.is_disconnected()) { "Disconnected" } else { "Machine offline" }).into_any_element()
-        } else if x.busy {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_size(px(12.))
-                .text_color(theme.text_accent)
-                .child(spinner(SharedString::from(format!("ms-spin-{}", x.id)), 12., theme.accent))
-                .child("Working")
-                .into_any_element()
-        } else if let Some(kind) = x.attention.as_deref() {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_size(px(12.))
-                .text_color(theme.text)
-                .child(attention_dot(theme, kind, x.exit_code))
-                .child(if kind == "bell" { "Needs you" } else { "Waiting for you" })
-                .into_any_element()
         } else {
-            div().text_size(px(12.)).text_color(theme.text_placeholder).child(if x.agent == "shell" { "Idle" } else { "Waiting for you" }).into_any_element()
+            state_label(theme, format!("ms-spin-{}", x.id), x.mark())
         };
         div()
             .id(SharedString::from(format!("ms-{}", x.id)))
@@ -1113,16 +1092,36 @@ pub(super) fn runs_in_app(m: &FleetMachine) -> bool {
     m.agent_version.is_none() && m.sessions_error.as_deref().is_some_and(|e| e.contains("no agent"))
 }
 
-/// The unread marker: amber when the agent rang for you, the accent when it
-/// finished and is waiting, red when it exited with an error.
-pub(super) fn attention_dot(theme: &Theme, kind: &str, exit_code: Option<i32>) -> gpui::Div {
-    let color = match kind {
-        "bell" => theme.warning,
-        "exited" if exit_code.is_some_and(|c| c != 0) => theme.error,
-        "exited" => theme.text_placeholder,
-        _ => theme.accent,
+/// A mark's color: amber when it needs you (a question, an approval, the
+/// bell), red when it exited with an error, the accent when it's done.
+pub(super) fn mark_color(theme: &Theme, mark: Mark) -> gpui::Hsla {
+    match mark {
+        Mark::NeedsYou => theme.warning,
+        Mark::Failed => theme.error,
+        Mark::Working | Mark::Done => theme.accent,
+        Mark::Idle => theme.text_placeholder,
+    }
+}
+
+/// The mark beside a session (or a machine, for its sessions): a spinner
+/// while it works, a dot when it needs you, exited with an error or is done.
+/// Nothing when it's idle. `dot` is the dot's size.
+pub(super) fn mark_view(theme: &Theme, id: impl Into<SharedString>, mark: Mark, dot: f32) -> Option<gpui::AnyElement> {
+    match mark {
+        Mark::Idle => None,
+        Mark::Working => Some(spinner(id.into(), dot + 3., theme.accent).into_any_element()),
+        m => Some(kit::dot(mark_color(theme, m), dot).flex_none().into_any_element()),
+    }
+}
+
+/// The mark with its words, for a list's row or a page: "Working", "Needs you", "Done", "Idle".
+pub(super) fn state_label(theme: &Theme, id: impl Into<SharedString>, mark: Mark) -> gpui::AnyElement {
+    let color = match mark {
+        Mark::Working => theme.text_accent,
+        Mark::Idle => theme.text_placeholder,
+        _ => theme.text,
     };
-    kit::dot(color, 8.).flex_none()
+    div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(color).children(mark_view(theme, id, mark, 8.)).child(mark.label()).into_any_element()
 }
 
 fn looking(theme: &Theme) -> AnyElement {

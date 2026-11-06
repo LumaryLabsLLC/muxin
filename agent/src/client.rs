@@ -223,16 +223,39 @@ fn rename(req: &Value) -> Value {
 }
 
 /// Everything Muxen wants to know about this machine's sessions. Doesn't
-/// start the server just to look.
+/// start the server just to look. `"settings"`: the app's choices for the
+/// agents here (settings.rs), merged with those kept and said back. With the
+/// installed tools (`agents`), it also puts Muxin's hooks in or takes them
+/// out as they say (hooks.rs): that's when it knows where the agents keep
+/// their settings.
 fn discover(req: &Value) -> Value {
     let names: Vec<String> = req["agents"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
     // Installed tools are looked up only when asked (it starts an interactive shell).
-    let dirs = if names.is_empty() { Vec::new() } else { detect::path_dirs() };
-    let agents = if names.is_empty() { Vec::new() } else { detect::agents(&names, &dirs) };
-    let gh = if names.is_empty() { Value::Null } else { crate::repos::gh_status(&dirs) };
+    let env = if names.is_empty() { detect::ShellEnv::default() } else { detect::shell_env() };
+    let dirs = &env.path;
+    let agents = if names.is_empty() { Vec::new() } else { detect::agents(&names, dirs) };
+    let gh = if names.is_empty() { Value::Null } else { crate::repos::gh_status(dirs) };
+    let settings = req.get("settings").filter(|s| s.is_object()).map(crate::settings::merge);
+    let hooks = match &settings {
+        Some(s) if !names.is_empty() => {
+            let dirs = crate::hooks::Dirs::new(&sys::user_home(), env.claude_config_dir.as_deref(), env.codex_home.as_deref());
+            crate::hooks::apply(crate::settings::on(s, "hooks", true), &dirs)
+        }
+        _ => Value::Null,
+    };
     let running = sys::connect().is_ok();
     let list = if running { request(&json!({ "op": "list" }), false) } else { json!({}) };
     let mut sessions = list.get("sessions").cloned().unwrap_or_else(|| json!([]));
+    // What their agents said they're doing (hooks, escape codes).
+    let answered = !running || list["ok"].as_bool() == Some(true);
+    let reports = crate::states::all();
+    if !reports.is_empty() {
+        crate::states::annotate(&mut sessions, &reports, now());
+        if answered {
+            let names: Vec<&str> = sessions.as_array().into_iter().flatten().filter_map(|s| s["name"].as_str()).collect();
+            crate::states::prune(&names);
+        }
+    }
     let boxes = crate::boxes::list_with(sessions.as_array().map(Vec::as_slice).unwrap_or_default());
     let mut titles = read_titles();
     if !titles.is_empty() {
@@ -252,6 +275,8 @@ fn discover(req: &Value) -> Value {
         "server": running,
         "now": now(),
         "sessions": sessions,
+        "hooks": hooks,
+        "settings": settings,
         "boxes": boxes,
         "events": list.get("events").cloned().unwrap_or_else(|| json!([])),
     })

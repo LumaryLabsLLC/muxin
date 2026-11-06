@@ -13,6 +13,7 @@ pub(crate) mod agent;
 pub mod git;
 pub mod handoff;
 pub mod question;
+pub mod rules;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,7 +77,7 @@ pub fn launch_line(kind: &AgentKind, prompt: Option<&str>, windows: bool) -> (St
 }
 
 /// One session, as listed in the snapshot.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
     /// `<machine-id>/<name>`.
@@ -92,9 +93,23 @@ pub struct SessionInfo {
     /// "running" or "exited".
     pub status: String,
     pub exit_code: Option<i32>,
-    /// Printed output within the last few seconds of the last check: the agent is working.
+    /// What its agent is doing: "working", "needs_you" (a question or an
+    /// approval waits), "done" (it finished its turn; the app shows it until
+    /// the session is opened) or "idle". See `state_source` for how it's known.
+    pub state: String,
+    /// How `state` is known: "hook" or "escape" (the agent said so, see
+    /// agent/src/states.rs), "screen" (a question Muxin knows is on its
+    /// screen), "output" (a guess from its output: printing is working,
+    /// quiet after working is done).
+    pub state_source: String,
+    /// The agent's own id for its conversation (Claude Code's or Codex's
+    /// session id), from its hooks. For resuming it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    /// It's working (`state` is "working"). Kept for older clients.
     pub busy: bool,
-    /// Unread notice ("waiting", "bell" or "exited") until the session is opened.
+    /// Unread notice ("waiting", "bell" or "exited") until the session is
+    /// opened. "waiting": it went to needs_you or done.
     pub attention: Option<String>,
     /// Terminals attached right now.
     pub clients: u32,
@@ -112,6 +127,56 @@ pub struct SessionInfo {
     /// The box whose agent this is (see fleet::boxes).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub box_id: Option<String>,
+}
+
+/// What a session shows beside it, the most urgent last: a machine or a list
+/// of sessions shows its most urgent one's (see `rollup`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mark {
+    Idle,
+    /// It finished its turn, and nobody opened it since.
+    Done,
+    Working,
+    /// It exited with an error, and nobody opened it since.
+    Failed,
+    /// A question or an approval waits (or it rang the bell).
+    NeedsYou,
+}
+
+impl Mark {
+    /// A few words for it: "Needs you", "Working", ...
+    pub fn label(self) -> &'static str {
+        match self {
+            Mark::NeedsYou => "Needs you",
+            Mark::Failed => "Exited",
+            Mark::Working => "Working",
+            Mark::Done => "Done",
+            Mark::Idle => "Idle",
+        }
+    }
+}
+
+impl SessionInfo {
+    /// What to show beside it. "Done" lasts until it's opened (its unread
+    /// notice), "needs you" as long as it does.
+    pub fn mark(&self) -> Mark {
+        if self.status == "exited" {
+            return if self.attention.is_some() && self.exit_code.is_some_and(|c| c != 0) { Mark::Failed } else { Mark::Idle };
+        }
+        match self.state.as_str() {
+            "needs_you" => Mark::NeedsYou,
+            _ if self.attention.as_deref() == Some("bell") => Mark::NeedsYou,
+            "working" => Mark::Working,
+            "done" if self.attention.is_some() => Mark::Done,
+            _ => Mark::Idle,
+        }
+    }
+}
+
+/// The most urgent mark among sessions: needs you, then an error, working, done.
+pub fn rollup<'a>(sessions: impl IntoIterator<Item = &'a SessionInfo>) -> Mark {
+    sessions.into_iter().map(SessionInfo::mark).max().unwrap_or(Mark::Idle)
 }
 
 /// What the last discovery found on one machine.
@@ -132,6 +197,10 @@ pub struct MachineSessions {
     /// Recent bells and exits the agent saw, oldest first.
     pub events: Vec<RawEvent>,
     pub error: Option<String>,
+    /// Muxin's hooks there, per agent CLI ("on", "off", "none" or what went
+    /// wrong), as the agent last applied them; and whether that was for on.
+    pub hooks: Option<Value>,
+    pub hooks_sent: Option<bool>,
 }
 
 /// A bell or an exit, as the agent reports it.
@@ -230,10 +299,16 @@ impl Engine {
         }
         spec.refuse_if_disconnected()?;
         let previous = self.sessions_of(&spec.id);
-        let detect = tools || previous.as_ref().and_then(|p| p.agents_checked_at).is_none_or(|t| Utc::now() - t > AGENTS_EVERY);
+        // Hooks go in (or out) with the look at the installed tools: also
+        // when the setting changed since this machine last had them applied.
+        let choices = self.settings().agents;
+        let hooks_due = previous.as_ref().is_none_or(|p| p.hooks_sent != Some(choices.hooks));
+        let detect = tools || hooks_due || previous.as_ref().and_then(|p| p.agents_checked_at).is_none_or(|t| Utc::now() - t > AGENTS_EVERY);
         let agents: Vec<&str> = if detect { AGENTS.iter().map(|a| a.command).filter(|c| !c.is_empty()).collect() } else { Vec::new() };
+        // The choices go with when they were made: the machine keeps the newest (agent/src/settings.rs).
+        let request = json!({ "op": "discover", "agents": agents, "settings": choices.for_machines() });
         let result = match agent::ensure(&spec, probe.as_ref()).await {
-            Ok(()) => agent::ctl(&spec, &json!({ "op": "discover", "agents": agents })).await,
+            Ok(()) => agent::ctl(&spec, &request).await,
             Err(e) => Err(e),
         };
         let found = match result {
@@ -252,8 +327,18 @@ impl Engine {
                         found.agents = p.agents.clone();
                         found.agents_checked_at = p.agents_checked_at;
                         found.gh = p.gh.clone();
+                        found.hooks = p.hooks.clone();
+                        found.hooks_sent = p.hooks_sent;
                     }
+                } else {
+                    // What the machine went by (agents before 0.6 ignore it all).
+                    found.hooks_sent = Some(reply["settings"]["hooks"]["on"].as_bool().unwrap_or(choices.hooks));
                 }
+                // A newer choice made in another Muxin: this one takes it.
+                if reply["settings"].is_object() {
+                    self.adopt_agent_settings(&reply["settings"]);
+                }
+                self.guess_states(&spec, previous.as_ref(), &mut found).await;
                 found
             }
             Err(e) => MachineSessions {
@@ -273,6 +358,33 @@ impl Engine {
             self.settle_sessions(&spec.id);
         }
         Ok(found)
+    }
+
+    /// The states of sessions whose agent doesn't say (no hooks, an older
+    /// agent): one that went quiet after working is done, or needs you when a
+    /// question Muxin knows is on its screen (question.rs). It stays so until
+    /// it works again.
+    async fn guess_states(&self, spec: &MachineSpec, previous: Option<&MachineSessions>, found: &mut MachineSessions) {
+        for s in found.sessions.iter_mut().filter(|s| s.state_source == "output" && s.status == "running" && s.state == "idle") {
+            let Some(b) = previous.and_then(|p| p.sessions.iter().find(|b| b.name == s.name)) else { continue };
+            if s.agent.is_empty() || s.agent == "shell" {
+                continue;
+            }
+            let guessed = matches!(b.state.as_str(), "needs_you" | "done") && matches!(b.state_source.as_str(), "output" | "screen");
+            let printed = b.last_output_at != s.last_output_at;
+            // Quiet as it was: as it was.
+            if guessed && !printed {
+                (s.state, s.state_source) = (b.state.clone(), b.state_source.clone());
+                continue;
+            }
+            // Working, then quiet (or it printed since the last guess): its screen says which.
+            if b.state == "working" || guessed {
+                let read = agent::ctl(spec, &json!({ "op": "read", "name": s.name, "lines": 60 })).await;
+                let screen = read.ok().and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default();
+                let asks = !screen.is_empty() && question::read(&screen).options.len() >= 2;
+                (s.state, s.state_source) = if asks { ("needs_you".into(), "screen".into()) } else { ("done".into(), "output".into()) };
+            }
+        }
     }
 
     /// One more look at a machine's sessions a moment after a busy one should
@@ -505,6 +617,9 @@ impl Engine {
             cwd,
             status: "running".into(),
             exit_code: None,
+            state: "idle".into(),
+            state_source: "output".into(),
+            conversation_id: None,
             busy: false,
             attention: None,
             clients: 1,
@@ -528,8 +643,8 @@ impl Engine {
     }
 }
 
-/// Notices from a new discovery: events logged since `since`, and sessions that
-/// went quiet after working. `before` is the previous discovery.
+/// Notices from a new discovery: events logged since `since`, and sessions
+/// that came to need you or finished. `before` is the previous discovery.
 pub(crate) fn new_notices(before: &MachineSessions, after: &MachineSessions, since: i64, machine: &str) -> Vec<(String, String, String, String)> {
     let mut out = Vec::new();
     let find = |name: &str| after.sessions.iter().chain(before.sessions.iter()).find(|s| s.name == name);
@@ -546,12 +661,20 @@ pub(crate) fn new_notices(before: &MachineSessions, after: &MachineSessions, sin
         };
         out.push((s.id.clone(), kind.to_string(), title, format!("{} · {machine}", s.title)));
     }
-    // Working, then quiet: the agent finished or is waiting for an answer. Shells don't count.
-    for s in &after.sessions {
-        let was_busy = before.sessions.iter().any(|b| b.name == s.name && b.busy);
-        if was_busy && !s.busy && s.status == "running" && !s.agent.is_empty() && s.agent != "shell" {
-            out.push((s.id.clone(), "waiting".into(), format!("{} is waiting for you", s.agent_name), format!("{} · {machine}", s.title)));
+    // It came to need you, or finished its turn (a shell only when it says so).
+    for s in after.sessions.iter().filter(|s| s.status == "running") {
+        let Some(b) = before.sessions.iter().find(|b| b.name == s.name) else { continue };
+        let said = matches!(s.state_source.as_str(), "hook" | "escape");
+        let who = if s.agent_name.is_empty() || (s.agent == "shell" && said) { "The session".to_string() } else { s.agent_name.clone() };
+        if s.state == b.state || (s.agent == "shell" && !said) {
+            continue;
         }
+        let title = match s.state.as_str() {
+            "needs_you" => format!("{who} needs you"),
+            "done" => format!("{who} is done"),
+            _ => continue,
+        };
+        out.push((s.id.clone(), "waiting".into(), title, format!("{} · {machine}", s.title)));
     }
     out
 }
@@ -687,6 +810,7 @@ pub(crate) fn parse_discovery(spec: &MachineSpec, reply: &Value) -> MachineSessi
             path: reply["gh"]["path"].as_str().map(str::to_string),
         }),
         boxes: crate::fleet::boxes::parse(&spec.id, reply),
+        hooks: reply.get("hooks").filter(|h| h.is_object()).cloned(),
         ..Default::default()
     };
     for s in reply["sessions"].as_array().into_iter().flatten() {
@@ -697,6 +821,14 @@ pub(crate) fn parse_discovery(spec: &MachineSpec, reply: &Value) -> MachineSessi
         let kind = s["agent"].as_str().and_then(agent).or_else(|| name.split('-').next().and_then(agent));
         let running = s["status"].as_str() == Some("running");
         let last_output = s["last_output"].as_i64();
+        // The same rule as the agent's (its "sessions" event comes when this turns false).
+        let printing = running && last_output.is_some_and(|a| now - a < BUSY_WINDOW_SECS);
+        // What its agent says (agents from 0.6, with hooks), else what its output says.
+        let reported = s["state"].as_str().filter(|st| running && ["working", "needs_you", "done", "idle"].contains(st));
+        let (state, state_source) = match reported {
+            Some(st) => (st.to_string(), s["state_source"].as_str().filter(|x| !x.is_empty()).unwrap_or("hook").to_string()),
+            None => (if printing { "working" } else { "idle" }.to_string(), "output".to_string()),
+        };
         found.sessions.push(SessionInfo {
             id: format!("{}/{name}", spec.id),
             machine_id: spec.id.clone(),
@@ -706,8 +838,10 @@ pub(crate) fn parse_discovery(spec: &MachineSpec, reply: &Value) -> MachineSessi
             cwd: s["cwd"].as_str().unwrap_or("").to_string(),
             status: if running { "running".into() } else { "exited".into() },
             exit_code: s["exit_code"].as_i64().map(|c| c as i32),
-            // The same rule as the agent's (its "sessions" event comes when this turns false).
-            busy: running && last_output.is_some_and(|a| now - a < BUSY_WINDOW_SECS),
+            busy: state == "working",
+            state,
+            state_source,
+            conversation_id: s["conversation"].as_str().filter(|c| !c.is_empty()).map(str::to_string),
             attention: None,
             clients: s["clients"].as_u64().unwrap_or(0) as u32,
             created_at: ts(&s["created"]),
@@ -780,13 +914,59 @@ mod tests {
                 { "at": 1050, "kind": "exited", "session": "shell-cd34", "detail": "2" }
             ])),
         );
+        // Working, then quiet: the guess (guess_states) says it's done.
+        assert_eq!((before.sessions[1].state.as_str(), after.sessions[1].state.as_str()), ("working", "idle"));
+        let mut after = after;
+        after.sessions[1].state = "done".into();
         let notices = new_notices(&before, &after, 950, "Beelink");
         let kinds: Vec<(&str, &str)> = notices.iter().map(|(id, kind, _, _)| (id.as_str(), kind.as_str())).collect();
-        // The old bell doesn't repeat; the exit is new; Claude went quiet.
+        // The old bell doesn't repeat; the exit is new; Claude finished.
         assert_eq!(kinds, vec![("beelink/shell-cd34", "exited"), ("beelink/claude-ab12", "waiting")]);
         assert_eq!(notices[0].2, "Shell exited with code 2");
-        assert_eq!(notices[1].2, "Claude Code is waiting for you");
+        assert_eq!(notices[1].2, "Claude Code is done");
         assert_eq!(notices[1].3, "Claude Code · app · Beelink");
+        // Once: still done is no news.
+        assert!(new_notices(&after, &after, 1050, "Beelink").is_empty());
+    }
+
+    #[test]
+    fn what_agents_report_is_their_state() {
+        let mut r = reply(1000, 900, json!([]));
+        r["sessions"][0]["state"] = json!("needs_you");
+        r["sessions"][0]["state_source"] = json!("hook");
+        r["sessions"][0]["conversation"] = json!("5f0c-conv");
+        let found = parse_discovery(&spec("beelink"), &r);
+        let claude = &found.sessions[1];
+        assert_eq!((claude.state.as_str(), claude.state_source.as_str(), claude.busy), ("needs_you", "hook", false));
+        assert_eq!(claude.conversation_id.as_deref(), Some("5f0c-conv"));
+        // Without a report (an older agent, no hooks): the output says.
+        let busy = parse_discovery(&spec("beelink"), &reply(1000, 999, json!([])));
+        assert_eq!((busy.sessions[1].state.as_str(), busy.sessions[1].state_source.as_str(), busy.sessions[1].busy), ("working", "output", true));
+        // A state on an exited session means nothing.
+        let mut gone = reply(1000, 900, json!([]));
+        gone["sessions"][1]["state"] = json!("working");
+        assert_eq!(parse_discovery(&spec("beelink"), &gone).sessions[0].state, "idle");
+        // Needing you is news; so is a hook-reporting shell finishing (a program in it said).
+        let before = parse_discovery(&spec("beelink"), &reply(1000, 999, json!([])));
+        let notices = new_notices(&before, &found, 1000, "Beelink");
+        assert_eq!(notices.iter().map(|n| n.2.as_str()).collect::<Vec<_>>(), vec!["Claude Code needs you"]);
+    }
+
+    #[test]
+    fn marks_and_their_rollup() {
+        let s = |state: &str, attention: Option<&str>| SessionInfo { status: "running".into(), state: state.into(), attention: attention.map(str::to_string), ..Default::default() };
+        assert_eq!(s("working", None).mark(), Mark::Working);
+        assert_eq!(s("needs_you", None).mark(), Mark::NeedsYou, "needs you as long as it does, opened or not");
+        assert_eq!(s("idle", Some("bell")).mark(), Mark::NeedsYou);
+        assert_eq!(s("done", Some("waiting")).mark(), Mark::Done);
+        assert_eq!(s("done", None).mark(), Mark::Idle, "done until it's opened");
+        let failed = SessionInfo { status: "exited".into(), exit_code: Some(1), attention: Some("exited".into()), ..Default::default() };
+        assert_eq!(failed.mark(), Mark::Failed);
+        let all = [s("done", Some("waiting")), s("working", None), s("idle", None)];
+        assert_eq!(rollup(&all), Mark::Working);
+        assert_eq!(rollup(&[s("done", Some("waiting")), failed.clone(), s("needs_you", None)]), Mark::NeedsYou);
+        assert_eq!(rollup(&[failed, s("working", None)]), Mark::Failed);
+        assert_eq!(rollup(&[]), Mark::Idle);
     }
 
     #[test]

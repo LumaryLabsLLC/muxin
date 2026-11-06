@@ -39,20 +39,44 @@ pub fn user_shell() -> String {
     "/bin/sh".into()
 }
 
-/// The PATH folders (Windows keeps the user's in the environment, no rc files).
-#[cfg(windows)]
-pub fn path_dirs() -> Vec<String> {
-    std::env::var("PATH").map(|p| p.split(';').filter(|d| !d.is_empty()).map(String::from).collect()).unwrap_or_default()
+/// What the user's sessions see: the PATH folders, and where Claude Code and
+/// Codex keep their settings (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`; None when
+/// not set).
+#[derive(Debug, Default)]
+pub struct ShellEnv {
+    pub path: Vec<String>,
+    pub claude_config_dir: Option<String>,
+    pub codex_home: Option<String>,
 }
 
-/// The PATH an interactive login shell sets up, then this process's own.
-#[cfg(unix)]
-pub fn path_dirs() -> Vec<String> {
-    let mut dirs: Vec<String> = interactive_path().map(|p| p.split(':').map(String::from).collect()).unwrap_or_default();
-    if let Ok(p) = std::env::var("PATH") {
-        dirs.extend(p.split(':').map(String::from));
+/// Windows keeps the user's in the environment (no rc files).
+#[cfg(windows)]
+pub fn shell_env() -> ShellEnv {
+    let var = |n: &str| std::env::var(n).ok().filter(|v| !v.is_empty());
+    ShellEnv {
+        path: std::env::var("PATH").map(|p| p.split(';').filter(|d| !d.is_empty()).map(String::from).collect()).unwrap_or_default(),
+        claude_config_dir: var("CLAUDE_CONFIG_DIR"),
+        codex_home: var("CODEX_HOME"),
     }
-    dirs
+}
+
+/// The PATH an interactive login shell sets up, then this process's own;
+/// the settings folders as that shell has them.
+#[cfg(unix)]
+pub fn shell_env() -> ShellEnv {
+    let found = interactive_env();
+    let get = |k: &str| found.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let mut path: Vec<String> = get("PATH").map(|p| p.split(':').map(String::from).collect()).unwrap_or_default();
+    if let Ok(p) = std::env::var("PATH") {
+        path.extend(p.split(':').map(String::from));
+    }
+    let var = |k: &str| match found.is_empty() {
+        // The shell didn't answer: this process's own.
+        true => std::env::var(k).ok(),
+        false => get(k),
+    }
+    .filter(|v| !v.is_empty());
+    ShellEnv { path, claude_config_dir: var("CLAUDE_CONFIG_DIR"), codex_home: var("CODEX_HOME") }
 }
 
 /// The commands among `names` found on those PATH folders.
@@ -87,11 +111,27 @@ fn runnable(f: &std::path::Path) -> bool {
     })
 }
 
-/// Asks an interactive login shell for its PATH, giving up after a few seconds.
+/// Asks an interactive login shell for its PATH and the agents' settings
+/// folders, giving up after a few seconds.
 #[cfg(unix)]
-fn interactive_path() -> Option<String> {
+fn interactive_env() -> Vec<(String, String)> {
+    interactive_output().map(|out| parse_env(&out)).unwrap_or_default()
+}
+
+/// `__OR_<name>=<value>` lines, as the shell printed them (rc files may print too).
+#[cfg(unix)]
+fn parse_env(out: &str) -> Vec<(String, String)> {
+    ["PATH", "CLAUDE_CONFIG_DIR", "CODEX_HOME"]
+        .iter()
+        .filter_map(|k| out.lines().rev().find_map(|l| l.strip_prefix(&format!("__OR_{k}="))).map(|v| (k.to_string(), v.to_string())))
+        .collect()
+}
+
+#[cfg(unix)]
+fn interactive_output() -> Option<String> {
     let mut cmd = Command::new(user_shell());
-    cmd.args(["-l", "-i", "-c", "printf '__OR_PATH=%s\\n' \"$PATH\""]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let script = "printf '__OR_PATH=%s\\n__OR_CLAUDE_CONFIG_DIR=%s\\n__OR_CODEX_HOME=%s\\n' \"$PATH\" \"$CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\"";
+    cmd.args(["-l", "-i", "-c", script]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     // In a session of its own, without a terminal: an interactive shell takes
     // over the terminal it finds (and stops its process group with SIGTTIN when
     // that's not in front), which is the one Muxin was started from when the
@@ -112,5 +152,13 @@ fn interactive_path() -> Option<String> {
     }
     let mut out = String::new();
     child.stdout.take()?.read_to_string(&mut out).ok()?;
-    out.lines().rev().find_map(|l| l.strip_prefix("__OR_PATH=").map(str::to_string))
+    Some(out)
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn reads_what_the_shell_printed() {
+    let out = "Welcome!\n__OR_PATH=/usr/bin:/bin\n__OR_CLAUDE_CONFIG_DIR=\n__OR_CODEX_HOME=/home/a/.codex-work\n";
+    let env = parse_env(out);
+    assert_eq!(env, vec![("PATH".into(), "/usr/bin:/bin".into()), ("CLAUDE_CONFIG_DIR".into(), "".into()), ("CODEX_HOME".into(), "/home/a/.codex-work".into())]);
 }

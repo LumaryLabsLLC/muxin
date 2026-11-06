@@ -12,6 +12,8 @@
 //! muxen-agent listen          the same over QUIC, for paired apps (a user service)
 //! muxen-agent attach <name>   connect this terminal to a session
 //! muxen-agent serve           the session server (started on demand)
+//! muxen-agent report <agent>  a hook tells the session what its agent is doing (stdin: the hook's JSON)
+//! muxen-agent hooks on|off|status   Muxin's hooks in Claude Code's and Codex's settings
 //! ```
 
 mod boxes;
@@ -22,6 +24,7 @@ mod crash;
 mod daemon;
 mod detect;
 mod handoff;
+mod hooks;
 mod desktop;
 #[cfg(unix)]
 mod displays;
@@ -42,6 +45,8 @@ mod push;
 mod repos;
 mod schedules;
 mod screen;
+mod settings;
+mod states;
 mod sys;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod win;
@@ -95,6 +100,8 @@ fn main() {
             None => usage(),
         },
         Some("serve") => daemon::serve(),
+        Some("report") => states::report(&args[1..]),
+        Some("hooks") => hooks::run(&args[1..]),
         _ => usage(),
     };
     std::process::exit(code);

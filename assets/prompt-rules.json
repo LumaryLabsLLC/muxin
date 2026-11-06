@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "enter_phrases": [
+    "press enter to",
+    "enter to confirm",
+    "enter to continue",
+    "enter continue",
+    "enter confirm"
+  ],
+  "selected_marks": [
+    "❯",
+    "›",
+    ">",
+    "▶",
+    "→",
+    "●"
+  ],
+  "menu_marks": [
+    "❯",
+    "›"
+  ],
+  "input_marks": [
+    "›",
+    "❯",
+    ">"
+  ],
+  "box_sides": [
+    "│",
+    "┃",
+    "║"
+  ],
+  "border_marks": [
+    "│",
+    "┃",
+    "║",
+    "╭",
+    "╮",
+    "╰",
+    "╯",
+    "┌",
+    "┐",
+    "└",
+    "┘"
+  ],
+  "rule_marks": [
+    "─",
+    "━",
+    "═",
+    "-",
+    "╌",
+    "┄",
+    "▔",
+    "▁"
+  ],
+  "status_marks": [
+    "✻",
+    "✽",
+    "✶",
+    "✳",
+    "✢",
+    "✺",
+    "⏵",
+    "·",
+    "*"
+  ],
+  "status_words": [
+    "esc to interrupt",
+    "for shortcuts"
+  ],
+  "hint_words": [
+    " to select",
+    " to confirm"
+  ],
+  "bullets": [
+    "⏺",
+    "●",
+    "•"
+  ]
+}

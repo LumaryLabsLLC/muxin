@@ -1059,13 +1059,58 @@ impl SettingsPage {
             )
     }
 
+    /// What the agents on the machines may do (config::AgentSettings): for
+    /// now, Muxin's hooks in Claude Code's and Codex's settings, so they say
+    /// when they work, need you or are done (fleet::sessions).
+    fn agents_section(&self, theme: &Theme) -> impl IntoElement {
+        let on = self.engine.settings().agents.hooks;
+        let mut with: Vec<String> = Vec::new();
+        let mut trouble: Vec<String> = Vec::new();
+        for m in &self.snapshot.machines {
+            let Some(h) = m.agent_hooks.as_ref().and_then(|h| h.as_object()) else { continue };
+            if h.values().any(|v| v == "on") {
+                with.push(m.name.clone());
+            }
+            if let Some(e) = h.values().filter_map(|v| v.as_str()).find(|v| !matches!(*v, "on" | "off" | "none")) {
+                trouble.push(format!("{}: {e}", m.name));
+            }
+        }
+        let status = match (on, with.as_slice()) {
+            (false, []) => "Off.".to_string(),
+            (false, names) => format!("Taking them out on {}…", names.join(", ")),
+            (true, []) => "On. No machine has Claude Code or Codex set up yet.".to_string(),
+            (true, names) => format!("On for {}.", names.join(", ")),
+        };
+        let engine = self.engine.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(section_title(theme, "Agents", None))
+            .child(
+                card(theme)
+                    .px(px(14.))
+                    .py(px(12.))
+                    .gap(px(6.))
+                    .child(kit::checkbox(theme, "agent-hooks", on, "Let Claude Code and Codex say when they need you", move |on, _, cx| {
+                        let mut s = engine.settings();
+                        s.agents.hooks = *on;
+                        let _ = engine.update_settings(s);
+                        cx.refresh_windows();
+                    }))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Muxin adds a small hook to their settings on your machines. Turning this off takes it out."))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_muted).child(status))
+                    .children(trouble.into_iter().take(3).map(|t| div().text_size(px(11.5)).text_color(theme.warning).child(t))),
+            )
+    }
+
     /// Whether Muxin asks GitHub for its latest release (crate::update).
     /// The icon. On a Mac it's only that; elsewhere it's what keeps Muxin running.
     fn tray_section(&self, theme: &Theme, cx: &App) -> impl IntoElement {
         let on = cx.global::<Appearance>().tray;
         let (title, label) = if cfg!(target_os = "macos") { ("Menu bar", "Show Muxin in the menu bar") } else { ("Tray", "Keep running in the tray when the window closes") };
         let hint = if cfg!(target_os = "macos") {
-            "A dot shows when a session is waiting for you. Its menu opens that session or brings the window back."
+            "A dot shows when a session needs you or is done. Its menu opens that session or brings the window back."
         } else if !on {
             "Closing the window quits Muxin."
         } else if !super::tray::available() {
@@ -1075,7 +1120,7 @@ impl SettingsPage {
                 "The icon couldn't be added, so closing the window quits Muxin."
             }
         } else {
-            "Machine checks, connections and port forwards carry on. The icon brings the window back, with a dot when a session is waiting for you."
+            "Machine checks, connections and port forwards carry on. The icon brings the window back, with a dot when a session needs you or is done."
         };
         let engine = self.engine.clone();
         div()
@@ -1250,6 +1295,7 @@ impl Render for SettingsPage {
         let body = match self.tab {
             SettingsTab::General => body
                 .child(self.shell_section(&theme, cx))
+                .child(self.agents_section(&theme))
                 .child(self.clipboard_section(&theme))
                 .child(self.tray_section(&theme, cx))
                 .child(self.editor_section(&theme))

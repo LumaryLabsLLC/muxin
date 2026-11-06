@@ -1,5 +1,6 @@
-//! Alerts for Muxin for iPad. When an agent session here goes quiet after
-//! working (it's waiting for you), rings the bell, or exits with an error,
+//! Alerts for Muxin for iPad. When an agent session here needs you or is
+//! done (its hooks say so, see states.rs; or, without them, it went quiet
+//! after working), rings the bell, or exits with an error,
 //! `listen` tells each iPad that asked for it, even while that iPad's app is
 //! in the background: the alert goes to a relay (muxin.dev), which hands it to
 //! Apple's push service. It's encrypted with a key only that iPad has, so the
@@ -197,6 +198,8 @@ struct Seen {
     screen: Option<u64>,
     /// It started after the first look, so its first screen is news too.
     new: bool,
+    /// What its agent last said it's doing (hooks, escape codes).
+    reported: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -206,6 +209,9 @@ struct Alert {
     agent: String,
     title: String,
     code: Option<i64>,
+    /// For "waiting", when its agent said which: "needs_you" or "done".
+    /// (Still "waiting": that's what iPads ask for, older ones included.)
+    state: Option<&'static str>,
 }
 
 /// Turns the session server's lists, one a second, into alerts, by the Mac
@@ -246,9 +252,9 @@ impl Watch {
             let s = find(session);
             let (agent, title) = (s.and_then(|s| s["agent"].as_str()).unwrap_or(""), s.and_then(|s| s["title"].as_str()).unwrap_or(session));
             match kind {
-                "bell" => out.push(Alert { kind: "bell", session: session.into(), agent: agent.into(), title: title.into(), code: None }),
+                "bell" => out.push(Alert { kind: "bell", session: session.into(), agent: agent.into(), title: title.into(), code: None, state: None }),
                 "exited" if !matches!(detail, "" | "0") => {
-                    out.push(Alert { kind: "exited", session: session.into(), agent: agent.into(), title: title.into(), code: detail.parse().ok() })
+                    out.push(Alert { kind: "exited", session: session.into(), agent: agent.into(), title: title.into(), code: detail.parse().ok(), state: None })
                 }
                 _ => {}
             }
@@ -279,6 +285,24 @@ impl Watch {
                 seen.work = Some(last_output);
             }
             seen.last_output = last_output;
+            // Its agent says what it's doing: that, rather than a guess.
+            let reported = s["state"].as_str().filter(|_| running).map(str::to_string);
+            if reported.is_some() || seen.reported.is_some() {
+                let before = std::mem::replace(&mut seen.reported, reported.clone());
+                if let Some(now_state) = reported {
+                    seen.work = None;
+                    let news = match now_state.as_str() {
+                        "needs_you" => Some("needs_you"),
+                        "done" => Some("done"),
+                        _ => None,
+                    };
+                    if let Some(state) = news.filter(|_| before.as_deref() != Some(now_state.as_str()) && (!first || seen.new)) {
+                        let title = s["title"].as_str().unwrap_or(name);
+                        out.push(Alert { kind: "waiting", session: name.into(), agent: agent.into(), title: title.into(), code: None, state: Some(state) });
+                    }
+                    continue;
+                }
+            }
             let Some(end) = seen.work else { continue };
             // Someone typed since: they're there already.
             if !running || last_input > end {
@@ -287,7 +311,7 @@ impl Watch {
                 seen.work = None;
                 if is_agent {
                     let title = s["title"].as_str().unwrap_or(name);
-                    out.push(Alert { kind: "waiting", session: name.into(), agent: agent.into(), title: title.into(), code: None });
+                    out.push(Alert { kind: "waiting", session: name.into(), agent: agent.into(), title: title.into(), code: None, state: None });
                 }
             }
         }
@@ -333,7 +357,11 @@ pub fn start() {
             }
             // No session server: no sessions. Don't start one just to look.
             let Ok(mut server) = sys::connect() else { continue };
-            let Ok(list) = proto::write_line(&mut server, &json!({ "op": "list" })).and_then(|_| proto::read_line(&mut server)) else { continue };
+            let Ok(mut list) = proto::write_line(&mut server, &json!({ "op": "list" })).and_then(|_| proto::read_line(&mut server)) else { continue };
+            let at = list["now"].as_i64().unwrap_or_else(now);
+            if let Some(sessions) = list.get_mut("sessions") {
+                crate::states::annotate(sessions, &crate::states::all(), at);
+            }
             let alerts = watch.observe(&list, screen);
             if alerts.is_empty() {
                 continue;
@@ -353,6 +381,7 @@ pub fn start() {
                         "machine_id": e.machine_id,
                         "machine": e.machine,
                         "code": alert.code,
+                        "state": alert.state,
                         "at": now(),
                     });
                     let (app, e, collapse) = (app.clone(), e.clone(), alert.session.clone());
@@ -544,6 +573,35 @@ mod tests {
     }
 
     #[test]
+    fn what_hooks_report_alerts_at_once_and_says_which() {
+        let mut w = Watch::default();
+        let session = |state: Option<&str>, out: i64| {
+            let mut s = agent(out, 0, 0);
+            if let Some(st) = state {
+                s[0]["state"] = json!(st);
+            }
+            s
+        };
+        assert!(w.observe_plain(&list(100, session(Some("working"), 100), json!([]))).is_empty());
+        assert!(w.observe_plain(&list(101, session(Some("working"), 101), json!([]))).is_empty());
+        // No waiting for quiet: the hook said so.
+        let alerts = w.observe_plain(&list(102, session(Some("needs_you"), 102), json!([])));
+        assert_eq!(alerts.iter().map(|a| (a.kind, a.state)).collect::<Vec<_>>(), vec![("waiting", Some("needs_you"))]);
+        // It stays that way: once.
+        assert!(w.observe_plain(&list(110, session(Some("needs_you"), 102), json!([]))).is_empty());
+        assert!(w.observe_plain(&list(111, session(Some("working"), 111), json!([]))).is_empty());
+        let alerts = w.observe_plain(&list(112, session(Some("done"), 112), json!([])));
+        assert_eq!(alerts.iter().map(|a| a.state).collect::<Vec<_>>(), vec![Some("done")]);
+        // Quiet after a report: no guess on top of it.
+        assert!((113..130).flat_map(|t| w.observe_plain(&list(t, session(Some("done"), 112), json!([])))).next().is_none());
+        // A report that stopped holding: back to guessing, with no alert of its own.
+        assert!(w.observe_plain(&list(131, session(None, 112), json!([]))).is_empty());
+        // What was there at the first look is only the baseline.
+        let mut fresh = Watch::default();
+        assert!(fresh.observe_plain(&list(100, session(Some("needs_you"), 100), json!([]))).is_empty());
+    }
+
+    #[test]
     fn an_agent_that_worked_then_went_quiet_is_waiting() {
         let mut w = Watch::default();
         let alerts = run(&mut w, 100, 120, 101, 108, 0, 0);
@@ -658,7 +716,7 @@ mod tests {
     #[test]
     fn alerts_are_rationed() {
         let mut w = Watch::default();
-        let alert = |s: &str| Alert { kind: "bell", session: s.into(), agent: String::new(), title: String::new(), code: None };
+        let alert = |s: &str| Alert { kind: "bell", session: s.into(), agent: String::new(), title: String::new(), code: None, state: None };
         assert!(w.allow(&alert("a"), 1000));
         assert!(!w.allow(&alert("a"), 1010));
         assert!(w.allow(&alert("a"), 1031));

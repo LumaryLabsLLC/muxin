@@ -92,6 +92,8 @@ struct Inner {
     listener: Listener,
     /// The end of the last output, for a query split across two reads.
     tail: Vec<u8>,
+    /// State escape codes (OSC 7501) in the output, across reads.
+    escapes: crate::states::Escapes,
     /// Input for the program, written to its terminal by `feed`.
     writer: Option<SyncSender<Vec<u8>>>,
     master: Option<Box<dyn MasterPty + Send>>,
@@ -296,6 +298,7 @@ fn start(state: &Arc<State>, req: &Value) -> Result<Value, String> {
             term: Term::new(config, &Dims { cols: cols as usize, rows: rows as usize }, listener.clone()),
             parser: Processor::new(),
             tail: Vec::new(),
+            escapes: Default::default(),
             listener,
             writer: None,
             master: None,
@@ -349,7 +352,10 @@ fn launch(state: &Arc<State>, s: &Arc<Session>) -> anyhow::Result<()> {
     }
     cmd.cwd(&s.cwd);
     cmd.env("COLORTERM", "truecolor");
+    // Which session this is, for hooks and helpers (states.rs). MUXEN_ is
+    // what older session servers set, and what Muxin's hooks look for.
     cmd.env("MUXEN_SESSION", &s.name);
+    cmd.env("MUXIN_SESSION", &s.name);
     cmd.env_remove("TMUX");
     // Started from inside an agent (Muxin's CLI run by Claude Code, say), the
     // server has that agent's session in its environment: a session here isn't
@@ -435,9 +441,14 @@ fn pump(state: &State, s: &Session, mut reader: Box<dyn Read + Send>, generation
         }
         i.broadcast(proto::DATA, bytes);
         let rang = i.listener.bells.load(Ordering::Relaxed) != bells;
+        let said = i.escapes.feed(bytes);
         drop(guard);
         if rang {
             state.event("bell", &s.name, String::new());
+        }
+        // The program said what it's doing (the last word counts).
+        if let Some(asked) = said.last() {
+            crate::states::from_escape(&s.name, *asked);
         }
     }
 
@@ -464,6 +475,7 @@ fn pump(state: &State, s: &Session, mut reader: Box<dyn Read + Send>, generation
         i.clients.clear();
         drop(i);
         state.sessions.lock().unwrap().retain(|x| x.name != s.name);
+        crate::states::remove(&s.name);
         state.event("closed", &s.name, code.to_string());
         return;
     }
@@ -535,6 +547,7 @@ fn stop(state: &State, req: &Value) -> Result<Value, String> {
         i.clients.clear();
     }
     state.sessions.lock().unwrap().retain(|x| x.name != name);
+    crate::states::remove(name);
     Ok(json!({}))
 }
 
@@ -549,6 +562,13 @@ fn restart(state: &Arc<State>, req: &Value) -> Result<Value, String> {
         let mut parser = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
         parser.advance(&mut i.term, b"\x1bc");
         i.broadcast(proto::DATA, b"\x1bc");
+        i.escapes = Default::default();
+    }
+    // A new run: what the last one said is over (its conversation id stays, for resuming).
+    if let Some(mut r) = crate::states::read(name) {
+        r["state"] = serde_json::Value::Null;
+        r.as_object_mut().map(|o| o.remove("pid"));
+        let _ = crate::states::replace(name, &r);
     }
     launch(state, &s).map_err(|e| format!("couldn't restart it: {e}"))?;
     Ok(json!({ "session": session_json(&s) }))

@@ -676,14 +676,18 @@ fn watch(out: Out) {
         let signature = match sys::connect() {
             Err(_) => "no server".to_string(),
             Ok(mut s) => {
-                let list = proto::write_line(&mut s, &json!({ "op": "list" })).and_then(|_| proto::read_line(&mut s)).unwrap_or(Value::Null);
+                let mut list = proto::write_line(&mut s, &json!({ "op": "list" })).and_then(|_| proto::read_line(&mut s)).unwrap_or(Value::Null);
+                // A hook saying it's done or needs you is news right away.
+                if let Some(sessions) = list.get_mut("sessions") {
+                    crate::states::annotate(sessions, &crate::states::all(), now);
+                }
                 let sessions: Vec<String> = list["sessions"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .map(|x| {
                         let busy = x["last_output"].as_i64().is_some_and(|t| now - t < 6);
-                        format!("{}:{}:{}:{}:{}", x["name"], x["status"], x["exit_code"], x["title"], busy)
+                        format!("{}:{}:{}:{}:{}:{}", x["name"], x["status"], x["exit_code"], x["title"], busy, x["state"])
                     })
                     .collect();
                 let events = list["events"].as_array().map(|e| (e.len(), e.last().cloned())).unwrap_or_default();

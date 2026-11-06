@@ -3,9 +3,113 @@
 //! question with options) or, when it's simply done and waiting, the end of
 //! what it said. The app shows it with a button for each choice and a field
 //! to reply, so an agent can be answered without opening its terminal.
+//!
+//! The marks and words it goes by are data (`Rules`): built in, and replaced
+//! by a newer set from muxin.dev when there is one (rules.rs), so a CLI that
+//! draws its prompts a new way needn't wait for a Muxin release.
+
+use std::sync::{Arc, OnceLock, RwLock};
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+/// How prompts look on agents' screens.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Rules {
+    /// The rules' own version; a newer set replaces an older one.
+    pub version: u32,
+    /// Words (lowercase) under a menu that say a number needs Enter after it
+    /// ("Press enter to continue", Codex's "enter continue · esc back").
+    pub enter_phrases: Vec<String>,
+    /// Marks before the selected one of numbered choices ("❯ 1. Yes").
+    pub selected_marks: Vec<String>,
+    /// Marks before the selected one of a menu without numbers ("❯ No, exit").
+    pub menu_marks: Vec<String>,
+    /// How an input box's line starts (and your own message above the question).
+    pub input_marks: Vec<String>,
+    /// A box's sides, which lines start with.
+    pub box_sides: Vec<String>,
+    /// A box's sides and corners, trimmed off a line's ends.
+    pub border_marks: Vec<String>,
+    /// What rules across the screen are drawn with.
+    pub rule_marks: Vec<String>,
+    /// Marks that start an agent's status line, not something it said ("✻ Baked for 3s").
+    pub status_marks: Vec<String>,
+    /// Words in a status line or a hint ("esc to interrupt", "? for shortcuts").
+    pub status_words: Vec<String>,
+    /// Words in the hint under a list of choices ("Enter to select").
+    pub hint_words: Vec<String>,
+    /// Bullets before what an agent said ("⏺ Done.").
+    pub bullets: Vec<String>,
+}
+
+fn strings(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+impl Default for Rules {
+    /// Muxin's own, as read off Claude Code 2.1 and Codex 0.163 screens.
+    fn default() -> Rules {
+        Rules {
+            version: 1,
+            enter_phrases: strings(&["press enter to", "enter to confirm", "enter to continue", "enter continue", "enter confirm"]),
+            selected_marks: strings(&["❯", "›", ">", "▶", "→", "●"]),
+            menu_marks: strings(&["❯", "›"]),
+            input_marks: strings(&["›", "❯", ">"]),
+            box_sides: strings(&["│", "┃", "║"]),
+            border_marks: strings(&["│", "┃", "║", "╭", "╮", "╰", "╯", "┌", "┐", "└", "┘"]),
+            rule_marks: strings(&["─", "━", "═", "-", "╌", "┄", "▔", "▁"]),
+            status_marks: strings(&["✻", "✽", "✶", "✳", "✢", "✺", "⏵", "·", "*"]),
+            status_words: strings(&["esc to interrupt", "for shortcuts"]),
+            hint_words: strings(&[" to select", " to confirm"]),
+            bullets: strings(&["⏺", "●", "•"]),
+        }
+    }
+}
+
+impl Rules {
+    /// Whether a set (from muxin.dev) is one to use: something in each list
+    /// that needs it, nothing absurdly long.
+    pub fn sane(&self) -> bool {
+        let lists = [&self.enter_phrases, &self.selected_marks, &self.menu_marks, &self.input_marks, &self.box_sides, &self.border_marks, &self.rule_marks, &self.status_marks, &self.status_words, &self.hint_words, &self.bullets];
+        let needed = [&self.selected_marks, &self.menu_marks, &self.input_marks, &self.rule_marks];
+        lists.iter().all(|l| l.len() <= 64 && l.iter().all(|s| !s.is_empty() && s.chars().count() <= 40)) && needed.iter().all(|l| !l.is_empty())
+    }
+
+    fn one_of(list: &[String], c: char) -> bool {
+        list.iter().any(|m| m.chars().count() == 1 && m.starts_with(c))
+    }
+
+    /// `text` starts with one of the marks, then a space: "❯ x".
+    fn starts_marked(list: &[String], text: &str) -> bool {
+        list.iter().any(|m| text.strip_prefix(m.as_str()).is_some_and(|rest| rest.starts_with(' ')))
+    }
+
+    /// `text` starts with one of the marks.
+    fn starts_with_any(list: &[String], text: &str) -> bool {
+        list.iter().any(|m| text.starts_with(m.as_str()))
+    }
+}
+
+fn store() -> &'static RwLock<Arc<Rules>> {
+    static RULES: OnceLock<RwLock<Arc<Rules>>> = OnceLock::new();
+    RULES.get_or_init(|| RwLock::new(Arc::new(Rules::default())))
+}
+
+/// The rules in use.
+pub fn rules() -> Arc<Rules> {
+    store().read().unwrap().clone()
+}
+
+/// Uses `rules` from now on, when they're sane and no older than these.
+pub fn use_rules(rules: Rules) -> bool {
+    if !rules.sane() || rules.version < self::rules().version {
+        return false;
+    }
+    *store().write().unwrap() = Arc::new(rules);
+    true
+}
 
 /// One of a prompt's choices: the key that picks it, and what it says. A
 /// numbered option's key is its number ("2"); an option of a menu without
@@ -31,35 +135,35 @@ pub fn keys_for(key: &str, selected: Option<&str>, confirm: bool) -> (String, bo
 
 /// The menu says a number needs Enter after it ("Press enter to continue",
 /// Codex's newer "enter continue · esc back").
-fn asks_for_enter(lines: &[&str]) -> bool {
+fn asks_for_enter(r: &Rules, lines: &[&str]) -> bool {
     lines.iter().rev().take(6).any(|l| {
         let l = l.to_lowercase();
-        ["press enter to", "enter to confirm", "enter to continue", "enter continue", "enter confirm"].iter().any(|p| l.contains(p))
+        r.enter_phrases.iter().any(|p| l.contains(p.as_str()))
     })
 }
 
 /// A line's indent and text, past a box's side.
-fn lead(line: &str) -> (usize, &str) {
-    let rest = line.trim_start_matches([' ']).trim_start_matches(['│', '┃', '║']);
+fn lead<'a>(r: &Rules, line: &'a str) -> (usize, &'a str) {
+    let rest = line.trim_start_matches([' ']).trim_start_matches(|c: char| Rules::one_of(&r.box_sides, c));
     let skipped = line.len() - rest.len();
     let text = rest.trim_start_matches(' ');
     let spaces = rest.len() - text.len();
     // Count the box side as one column, the spaces as theirs.
-    (line[..skipped].chars().count() + spaces, text.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '│' | '┃' | '║')))
+    (line[..skipped].chars().count() + spaces, text.trim_end_matches(|c: char| c.is_whitespace() || Rules::one_of(&r.box_sides, c)))
 }
 
 /// A menu without numbers ("❯ Yes, I trust this folder" over its siblings):
 /// its first and last lines, its choices and the one selected.
-fn menu(lines: &[&str]) -> Option<(usize, usize, Vec<Choice>, String)> {
+fn menu(r: &Rules, lines: &[&str]) -> Option<(usize, usize, Vec<Choice>, String)> {
     let at = (0..lines.len()).rev().find(|&i| {
-        let (_, t) = lead(lines[i]);
-        (t.starts_with("❯ ") || t.starts_with("› ")) && option(lines[i]).is_none()
+        let (_, t) = lead(r, lines[i]);
+        Rules::starts_marked(&r.menu_marks, t) && option(r, lines[i]).is_none()
     })?;
-    let (col, sel) = lead(lines[at]);
+    let (col, sel) = lead(r, lines[at]);
     let text_col = col + 2;
     let sibling = |i: usize| {
-        let (c, t) = lead(lines[i]);
-        c == text_col && !t.is_empty() && !is_rule(lines[i])
+        let (c, t) = lead(r, lines[i]);
+        c == text_col && !t.is_empty() && !is_rule(r, lines[i])
     };
     let mut first = at;
     while first > 0 && sibling(first - 1) {
@@ -74,7 +178,7 @@ fn menu(lines: &[&str]) -> Option<(usize, usize, Vec<Choice>, String)> {
     }
     let choices: Vec<Choice> = (first..=last)
         .map(|i| {
-            let label = if i == at { sel.trim_start_matches(['❯', '›']).trim() } else { lead(lines[i]).1 };
+            let label = if i == at { sel.trim_start_matches(|c: char| Rules::one_of(&r.menu_marks, c)).trim() } else { lead(r, lines[i]).1 };
             Choice { key: format!("#{}", i - first), label: label.to_string() }
         })
         .collect();
@@ -82,12 +186,12 @@ fn menu(lines: &[&str]) -> Option<(usize, usize, Vec<Choice>, String)> {
 }
 
 /// The question above a prompt's choices: up to a gap, a border or 12 lines.
-fn question_above(lines: &[&str]) -> Vec<String> {
+fn question_above(r: &Rules, lines: &[&str]) -> Vec<String> {
     let mut text = Vec::new();
     let mut gaps = 0;
     for line in lines.iter().rev() {
-        let t = clean(line);
-        if is_rule(line) {
+        let t = clean(r, line);
+        if is_rule(r, line) {
             if text.is_empty() {
                 continue;
             }
@@ -105,7 +209,7 @@ fn question_above(lines: &[&str]) -> Vec<String> {
         }
         gaps = 0;
         // Your own message, where this turn began: not part of the question.
-        if t.starts_with("› ") || t.starts_with("❯ ") || t.starts_with("> ") {
+        if Rules::starts_marked(&r.input_marks, &t) {
             break;
         }
         text.push(t);
@@ -145,30 +249,31 @@ impl Question {
 }
 
 /// Box drawing and the cursor marks prompts draw with.
-fn clean(line: &str) -> String {
-    let trimmed = line.trim_matches(|c: char| c.is_whitespace() || matches!(c, '│' | '┃' | '║' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘'));
+fn clean(r: &Rules, line: &str) -> String {
+    let trimmed = line.trim_matches(|c: char| c.is_whitespace() || Rules::one_of(&r.border_marks, c));
     trimmed.trim_end().to_string()
 }
 
 /// A line that's only a rule or a border.
-fn is_rule(line: &str) -> bool {
+fn is_rule(r: &Rules, line: &str) -> bool {
     let t = line.trim();
-    let across = |c: char| matches!(c, '─' | '━' | '═' | '-' | '╌' | '┄' | '▔' | '▁');
-    t.chars().any(across) && t.chars().all(|c| across(c) || matches!(c, '╭' | '╮' | '╰' | '╯' | '│' | '┃' | ' ' | '┌' | '┐' | '└' | '┘'))
+    let across = |c: char| Rules::one_of(&r.rule_marks, c);
+    t.chars().any(across) && t.chars().all(|c| across(c) || c == ' ' || Rules::one_of(&r.border_marks, c))
 }
 
 /// An agent's status line, not something it said: "✻ Baked for 3s",
 /// "⏵⏵ auto mode on", "esc to interrupt".
-fn is_status(line: &str) -> bool {
-    line.starts_with(['✻', '✽', '✶', '✳', '✢', '✺', '⏵', '·', '*']) || line.contains("esc to interrupt") || line.contains("for shortcuts")
+fn is_status(r: &Rules, line: &str) -> bool {
+    Rules::starts_with_any(&r.status_marks, line) || r.status_words.iter().any(|w| line.contains(w.as_str()))
 }
 
 /// "❯ 1. Yes" → (selected, "1", "Yes").
-fn option(line: &str) -> Option<(bool, String, String)> {
-    let t = clean(line);
-    let (selected, rest) = match t.chars().next()? {
-        '❯' | '›' | '>' | '▶' | '→' | '●' => (true, t[t.chars().next()?.len_utf8()..].trim_start()),
-        _ => (false, t.as_str()),
+fn option(r: &Rules, line: &str) -> Option<(bool, String, String)> {
+    let t = clean(r, line);
+    let first = t.chars().next()?;
+    let (selected, rest) = match Rules::one_of(&r.selected_marks, first) {
+        true => (true, t[first.len_utf8()..].trim_start()),
+        false => (false, t.as_str()),
     };
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     if digits.is_empty() || digits.len() > 2 {
@@ -181,6 +286,11 @@ fn option(line: &str) -> Option<(bool, String, String)> {
 
 /// Reads a waiting session's screen. `screen` is its text, bottom last.
 pub fn read(screen: &str) -> Question {
+    read_with(&rules(), screen)
+}
+
+/// `read` by these rules.
+pub fn read_with(r: &Rules, screen: &str) -> Question {
     let lines: Vec<&str> = screen.lines().collect();
     // Only the bottom: what's being asked is at the end.
     let from = lines.len().saturating_sub(40);
@@ -190,7 +300,7 @@ pub fn read(screen: &str) -> Question {
     // A choice: numbered options in a row (1, 2, 3...), nearest the bottom.
     let mut end = None;
     for i in (0..lines.len()).rev() {
-        if option(lines[i]).is_some() {
+        if option(r, lines[i]).is_some() {
             end = Some(i);
             break;
         }
@@ -202,15 +312,15 @@ pub fn read(screen: &str) -> Question {
         'up: loop {
             for k in 1..=3 {
                 let Some(j) = first.checked_sub(k) else { break 'up };
-                if option(lines[j]).is_some() {
+                if option(r, lines[j]).is_some() {
                     first = j;
                     continue 'up;
                 }
                 // A rule can part a menu's last options from the rest.
-                if is_rule(lines[j]) {
+                if is_rule(r, lines[j]) {
                     continue;
                 }
-                if clean(lines[j]).is_empty() {
+                if clean(r, lines[j]).is_empty() {
                     break 'up;
                 }
             }
@@ -221,11 +331,11 @@ pub fn read(screen: &str) -> Question {
         // The options, a wrapped label's next lines joined to it, then any
         // lines wrapped from the last one.
         let mut tail = last + 1;
-        while tail < lines.len() && tail <= last + 2 && !clean(lines[tail]).is_empty() && !is_rule(lines[tail]) && option(lines[tail]).is_none() && !clean(lines[tail]).contains(" to select") && !clean(lines[tail]).contains(" to confirm") {
+        while tail < lines.len() && tail <= last + 2 && !clean(r, lines[tail]).is_empty() && !is_rule(r, lines[tail]) && option(r, lines[tail]).is_none() && !r.hint_words.iter().any(|w| clean(r, lines[tail]).contains(w.as_str())) {
             tail += 1;
         }
         for line in &lines[first..tail] {
-            match option(line) {
+            match option(r, line) {
                 Some((sel, key, label)) => {
                     if sel {
                         selected = Some(key.clone());
@@ -234,8 +344,8 @@ pub fn read(screen: &str) -> Question {
                 }
                 None => {
                     if let Some(prev) = options.last_mut() {
-                        let more = clean(line);
-                        if !more.is_empty() && !is_rule(line) {
+                        let more = clean(r, line);
+                        if !more.is_empty() && !is_rule(r, line) {
                             // A description under it ("The color red"), or the rest of a long label.
                             prev.label.push_str(if more.starts_with(char::is_uppercase) { " · " } else { " " });
                             prev.label.push_str(&more);
@@ -248,23 +358,23 @@ pub fn read(screen: &str) -> Question {
         // An input box under the list: it's the agent's message (steps it
         // wrote), not a prompt waiting for a pick.
         let input_below = lines[last + 1..].iter().any(|l| {
-            let t = clean(l);
-            (t.starts_with('>') || t.starts_with('❯') || t.starts_with('›')) && option(l).is_none()
+            let t = clean(r, l);
+            Rules::starts_with_any(&r.input_marks, &t) && option(r, l).is_none()
         });
         if options.len() >= 2 && numbered && !input_below {
-            let text = question_above(&lines[..first]);
-            return Question { text, options, selected, confirm: asks_for_enter(lines), read_at };
+            let text = question_above(r, &lines[..first]);
+            return Question { text, options, selected, confirm: asks_for_enter(r, lines), read_at };
         }
     }
 
     // A menu without numbers (Claude Code's "Do you trust this folder?").
-    if let Some((first, last, options, selected)) = menu(lines) {
+    if let Some((first, last, options, selected)) = menu(r, lines) {
         let input_below = lines[last + 1..].iter().any(|l| {
-            let t = clean(l);
-            (t.starts_with('>') || t.starts_with('❯') || t.starts_with('›')) && option(l).is_none()
+            let t = clean(r, l);
+            Rules::starts_with_any(&r.input_marks, &t) && option(r, l).is_none()
         });
         if !input_below {
-            return Question { text: question_above(&lines[..first]), options, selected: Some(selected), confirm: false, read_at };
+            return Question { text: question_above(r, &lines[..first]), options, selected: Some(selected), confirm: false, read_at };
         }
     }
 
@@ -272,8 +382,8 @@ pub fn read(screen: &str) -> Question {
     let mut bottom = lines.len();
     // Skip the input box and the hints under it ("? for shortcuts").
     for i in (0..lines.len()).rev() {
-        let t = clean(lines[i]);
-        if t.starts_with('>') || t.starts_with('❯') || t.starts_with('›') {
+        let t = clean(r, lines[i]);
+        if Rules::starts_with_any(&r.input_marks, &t) {
             bottom = i;
             break;
         }
@@ -281,17 +391,17 @@ pub fn read(screen: &str) -> Question {
     // Its last paragraph, past status lines ("✻ Baked for 3s").
     let mut text: Vec<String> = Vec::new();
     for line in lines[..bottom].iter().rev() {
-        let t = clean(line);
-        if is_rule(line) || t.is_empty() {
+        let t = clean(r, line);
+        if is_rule(r, line) || t.is_empty() {
             if text.is_empty() {
                 continue;
             }
             break;
         }
-        if text.is_empty() && is_status(&t) {
+        if text.is_empty() && is_status(r, &t) {
             continue;
         }
-        text.push(t.trim_start_matches(['⏺', '●', '•']).trim_start().to_string());
+        text.push(t.trim_start_matches(|c: char| Rules::one_of(&r.bullets, c)).trim_start().to_string());
         if text.len() >= 8 {
             break;
         }

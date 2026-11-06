@@ -768,7 +768,17 @@ impl World {
             status: "running".into(),
             exit_code: None,
             busy,
-            attention: (name == "codex-19be").then(|| "waiting".to_string()),
+            // Codex asks before it runs a command; Claude on Pebble finished.
+            state: match name {
+                _ if busy => "working",
+                "codex-19be" => "needs_you",
+                "claude-5d2e" => "done",
+                _ => "idle",
+            }
+            .into(),
+            state_source: if agent == "shell" { "output" } else { "hook" }.into(),
+            conversation_id: (agent == "claude" || agent == "codex").then(|| format!("{name}-0b7c-4e1a-9f3d")),
+            attention: matches!(name, "codex-19be" | "claude-5d2e").then(|| "waiting".to_string()),
             clients,
             created_at: Some(now - chrono::Duration::minutes(mins)),
             last_output_at: Some(now - chrono::Duration::seconds(if busy { 1 } else { 140 })),
@@ -793,7 +803,8 @@ impl World {
                     SessionInfo { box_id: Some("box-7k2m9q".into()), ..session("box-7k2m9q", "claude", "Claude Code", "Add rate limit headers", "/home/ci/muxen/boxes/box-7k2m9q/repo", true, 9, 0) },
                 ],
             ),
-            "pebble" | "dev-1" | "sandbox" => (vec!["claude", "codex"], Vec::new()),
+            "pebble" => (vec!["claude", "codex"], vec![session("claude-5d2e", "claude", "Claude Code", "Docs refresh", "/home/ci/docs", false, 26, 0)]),
+            "dev-1" | "sandbox" => (vec!["claude", "codex"], Vec::new()),
             "win-test" => (vec!["claude"], Vec::new()),
             _ => (Vec::new(), Vec::new()),
         };
@@ -833,6 +844,8 @@ impl World {
             boxes,
             events: Vec::new(),
             error: None,
+            hooks: Some(serde_json::json!({ "claude": "on", "codex": "on" })),
+            hooks_sent: Some(true),
         }
     }
 
@@ -939,6 +952,9 @@ impl World {
             status: "running".into(),
             exit_code: None,
             busy: true,
+            state: "working".into(),
+            state_source: "hook".into(),
+            conversation_id: None,
             attention: None,
             clients: 0,
             created_at: Some(Utc::now()),

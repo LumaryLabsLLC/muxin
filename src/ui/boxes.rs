@@ -90,7 +90,7 @@ impl Root {
             .p(px(16.))
             .rounded(crate::ui::kit::corner(12.))
             .border_1()
-            .border_color(if b.attention.is_some() { theme.warning.opacity(0.6) } else { theme.border_variant })
+            .border_color(if b.agent_state.as_deref() == Some("needs_you") || b.attention.as_deref() == Some("bell") { theme.warning.opacity(0.6) } else { theme.border_variant })
             .bg(theme.surface)
             .cursor_pointer()
             .hover(|st| st.border_color(theme.accent.opacity(0.55)))
@@ -316,8 +316,11 @@ impl Root {
 }
 
 fn state_pill(theme: &Theme, b: &BoxInfo) -> AnyElement {
+    let needs_you = b.agent_state.as_deref() == Some("needs_you") || b.attention.as_deref() == Some("bell");
+    let done = b.agent_state.as_deref() == Some("done") && b.attention.is_some();
     match (b.state.as_str(), b.busy, b.attention.as_deref()) {
-        ("running", _, Some("waiting" | "bell")) => kit::pill("waiting for you", theme.warning).into_any_element(),
+        ("running", _, _) if needs_you => kit::pill("needs you", theme.warning).into_any_element(),
+        ("running", _, _) if done => kit::pill("done", theme.accent).into_any_element(),
         ("running", true, _) => div()
             .flex()
             .items_center()

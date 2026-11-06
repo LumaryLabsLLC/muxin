@@ -323,10 +323,22 @@ pub struct StatusResponse {
     /// Problems worth acting on, most severe first. Read these first.
     pub attention: Vec<AttentionOut>,
     pub machines: Vec<MachineSummary>,
+    /// Agent sessions by state, as last read (refresh=true reads them again).
+    pub agents: AgentCounts,
     pub inventory: InventoryOut,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
     pub demo: bool,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct AgentCounts {
+    pub working: usize,
+    pub needs_you: usize,
+    pub done: usize,
+    pub idle: usize,
+    /// The sessions that need you (a question or an approval waits): see session_question.
+    pub needs_you_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -929,6 +941,9 @@ pub async fn status(engine: &Arc<Engine>, req: StatusRequest, surface: Surface) 
         engine.refresh_from_disk();
         engine.run_check(None).await;
         engine.sync_github().await;
+        // And what the agents there are doing.
+        let online: Vec<String> = engine.current().machines.iter().filter(|m| m.status == "online").map(|m| m.id.clone()).collect();
+        futures::future::join_all(online.iter().map(|id| tokio::time::timeout(Duration::from_secs(15), engine.refresh_sessions(id)))).await;
         engine.current()
     } else {
         freshen(engine).await
@@ -974,9 +989,29 @@ pub fn status_from(s: &Snapshot, surface: Surface) -> StatusResponse {
         })
         .collect::<Vec<_>>();
 
+    let mut agents = AgentCounts::default();
+    for x in s.sessions.iter().filter(|x| x.status == "running") {
+        match x.state.as_str() {
+            "working" => agents.working += 1,
+            "needs_you" => {
+                agents.needs_you += 1;
+                agents.needs_you_ids.push(x.id.clone());
+            }
+            "done" => agents.done += 1,
+            _ => agents.idle += 1,
+        }
+    }
+    let agents_line = match (agents.working, agents.needs_you, agents.done) {
+        (0, 0, 0) => String::new(),
+        (w, n, d) => {
+            let needs = if n == 1 { "needs you" } else { "need you" };
+            let parts: Vec<String> = [(w, "working"), (n, needs), (d, "done")].iter().filter(|(c, _)| *c > 0).map(|(c, what)| format!("{c} {what}")).collect();
+            format!(" Agents: {}.", parts.join(", "))
+        }
+    };
     let never_checked = s.check.finished_at.is_none() && s.machines.iter().all(|m| m.probe.is_none());
     let summary = format!(
-        "{} machine{}, {} runner{}: {} working, {} idle, {} offline{}. {} queued job{}, {} running.{}",
+        "{} machine{}, {} runner{}: {} working, {} idle, {} offline{}. {} queued job{}, {} running.{agents_line}{}",
         c.machines,
         plural(c.machines),
         c.runners,
@@ -1020,6 +1055,7 @@ pub fn status_from(s: &Snapshot, surface: Surface) -> StatusResponse {
         last_check_at: s.check.finished_at,
         attention,
         machines: s.machines.iter().map(machine_summary).collect(),
+        agents,
         inventory: InventoryOut { path: s.inventory.path.clone(), error: s.inventory.error.clone() },
         hint: never_checked.then(|| {
             surface.say(
@@ -2734,6 +2770,8 @@ pub struct SessionReadOut {
     pub session_id: String,
     pub status: String,
     pub exit_code: Option<i32>,
+    /// "working", "needs_you", "done" or "idle" (see SessionInfo).
+    pub state: String,
     pub busy: bool,
     /// The screen and recent scrollback as plain text.
     pub text: String,
@@ -2868,7 +2906,7 @@ pub async fn session_read(engine: &Arc<Engine>, req: SessionReadRequest) -> ApiR
     let s = resolve_session(engine, &req.session_id).await?;
     let lines = req.lines.unwrap_or(READ_DEFAULT_LINES);
     let text = engine.control_session(&s.id, Control::Read { lines }).await.map_err(session_error)?;
-    Ok(SessionReadOut { session_id: s.id, status: s.status, exit_code: s.exit_code, busy: s.busy, text })
+    Ok(SessionReadOut { session_id: s.id, status: s.status, exit_code: s.exit_code, state: s.state, busy: s.busy, text })
 }
 
 /// What a session is waiting for: a choice (with the keys that pick each

@@ -209,6 +209,10 @@ pub struct Machine {
     pub sessions_error: Option<String>,
     /// The GitHub CLI there, once looked up.
     pub gh: Option<GhCli>,
+    /// Muxin's hooks in the agent CLIs' settings there, per CLI: "on", "off",
+    /// "none" (not set up there) or what went wrong (see fleet::sessions).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_hooks: Option<serde_json::Value>,
     /// Why it can't be reached, when `status` is "offline".
     pub unreachable: Option<Unreachable>,
     /// It on the user's tailnet, as Tailscale last saw it.

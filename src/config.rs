@@ -572,6 +572,73 @@ pub struct Settings {
     pub prompts: std::collections::BTreeMap<String, String>,
     /// Sharing sessions by link (see crate::share).
     pub share: ShareSettings,
+    /// What the agents on the machines may do (Settings › Agents).
+    pub agents: AgentSettings,
+}
+
+/// What the agents on the user's machines may do (`[settings.agents]`).
+/// Each is on unless turned off, and goes to the machines with when it was
+/// last changed: they keep the newest choice from any of the user's Muxins
+/// (a Mac's, an iPad's) and give it back, so all of them agree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AgentSettings {
+    /// Muxin's hooks in Claude Code's and Codex's settings, so they say when
+    /// they work, need you or are done (see fleet::sessions). Off takes them out.
+    pub hooks: bool,
+    /// When each was last changed (unix seconds), by name ("hooks").
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub changed: std::collections::BTreeMap<String, i64>,
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        AgentSettings { hooks: true, changed: Default::default() }
+    }
+}
+
+impl AgentSettings {
+    fn choices(&self) -> [(&'static str, bool); 1] {
+        [("hooks", self.hooks)]
+    }
+
+    fn set(&mut self, name: &str, on: bool) {
+        if name == "hooks" {
+            self.hooks = on;
+        }
+    }
+
+    /// What machines are sent: each choice with when it was made (0: never changed).
+    pub fn for_machines(&self) -> serde_json::Value {
+        let map: serde_json::Map<String, serde_json::Value> =
+            self.choices().iter().map(|(name, on)| (name.to_string(), serde_json::json!({ "on": on, "at": self.changed.get(*name).copied().unwrap_or(0) }))).collect();
+        serde_json::Value::Object(map)
+    }
+
+    /// Notes when each choice that differs from `before` changed: `now`.
+    pub fn stamp(&mut self, before: &AgentSettings, now: i64) {
+        for ((name, on), (_, was)) in self.choices().into_iter().zip(before.choices()) {
+            if on != was {
+                self.changed.insert(name.to_string(), now);
+            }
+        }
+    }
+
+    /// Takes the choices a machine kept that are newer than these (made in
+    /// another Muxin). True when any was.
+    pub fn adopt(&mut self, kept: &serde_json::Value) -> bool {
+        let mut took = false;
+        for (name, _) in self.choices() {
+            let (Some(theirs), Some(at)) = (kept[name]["on"].as_bool(), kept[name]["at"].as_i64()) else { continue };
+            // Newer, even when it's the same: so this one sends when it was made.
+            if at > self.changed.get(name).copied().unwrap_or(0) {
+                self.set(name, theirs);
+                self.changed.insert(name.to_string(), at);
+                took = true;
+            }
+        }
+        took
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -657,6 +724,7 @@ impl Default for Settings {
             cloud: CloudSettings::default(),
             prompts: Default::default(),
             share: ShareSettings::default(),
+            agents: AgentSettings::default(),
         }
     }
 }
@@ -833,6 +901,32 @@ pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn agent_choices_are_stamped_sent_and_taken_back() {
+        use super::*;
+        // On by default, never changed: sent with 0, nothing in the file.
+        let mut a = AgentSettings::default();
+        assert_eq!(a.for_machines(), serde_json::json!({ "hooks": { "on": true, "at": 0 } }));
+        let text = toml::to_string(&Settings::default()).unwrap();
+        assert!(text.contains("[agents]\nhooks = true\n") && !text.contains("changed"), "{text}");
+        // Turned off here: when goes with it.
+        let before = a.clone();
+        a.hooks = false;
+        a.stamp(&before, 100);
+        assert_eq!(a.for_machines()["hooks"], serde_json::json!({ "on": false, "at": 100 }));
+        let saved: Settings = toml::from_str(&toml::to_string(&Settings { agents: a.clone(), ..Settings::default() }).unwrap()).unwrap();
+        assert_eq!(saved.agents, a);
+        // A machine kept a newer choice (another Muxin's): taken; an older one isn't.
+        assert!(!a.adopt(&serde_json::json!({ "hooks": { "on": true, "at": 50 } })));
+        assert!(a.adopt(&serde_json::json!({ "hooks": { "on": true, "at": 200 } })));
+        assert_eq!((a.hooks, a.changed["hooks"]), (true, 200));
+        assert!(!a.adopt(&serde_json::json!({ "hooks": { "on": true, "at": 200 } })));
+        // Unchanged since: no new stamp.
+        let same = a.clone();
+        a.stamp(&same, 300);
+        assert_eq!(a.changed["hooks"], 200);
+    }
 
     #[test]
     fn cloud_history_keeps_one_entry_per_droplet() {

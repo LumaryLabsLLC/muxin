@@ -2258,8 +2258,9 @@ impl Root {
                 continue;
             }
             let open = !self.collapsed.contains(&m.id) || !q.is_empty();
-            // Collapsed: the machine carries its sessions' unread dot.
-            let alert = (!open).then(|| sessions.iter().find_map(|x| x.attention.clone().map(|k| (k, x.exit_code)))).flatten();
+            // Collapsed: the machine carries its sessions' most urgent mark
+            // (needs you, an error, working, done).
+            let alert = (!open).then(|| crate::fleet::sessions::rollup(sessions.iter().copied())).filter(|m| *m != crate::fleet::sessions::Mark::Idle);
             let has_desktop = pinned_desktops.contains(&m.id);
             let has_forwards = forwards.iter().any(|f| f.machine_id == m.id);
             // A machine on another one is a row like the rest under it; its line starts under its icon.
@@ -2552,7 +2553,7 @@ impl Root {
         m: &Machine,
         open: bool,
         has_sessions: bool,
-        alert: Option<(String, Option<i32>)>,
+        alert: Option<crate::fleet::sessions::Mark>,
         selected: bool,
         hint: Option<String>,
         cx: &mut Context<Self>,
@@ -2636,7 +2637,7 @@ impl Root {
                             .child(subtitle),
                     ),
             )
-            .children(alert.map(|(kind, code)| super::sessions::attention_dot(theme, &kind, code)))
+            .children(alert.and_then(|mark| super::sessions::mark_view(theme, format!("side-m-mark-{}", m.id), mark, 8.)))
             .when(favorite, |d| d.child(icon("star-filled", 12., theme.warning)))
             .children(hint.map(|k| kit::kbd(theme, k)))
             .when(has_children, |d| {
@@ -2688,7 +2689,7 @@ impl Root {
         m: &Machine,
         open: bool,
         has_children: bool,
-        alert: Option<(String, Option<i32>)>,
+        alert: Option<crate::fleet::sessions::Mark>,
         selected: bool,
         hint: Option<String>,
         cx: &mut Context<Self>,
@@ -2746,7 +2747,7 @@ impl Root {
                 ),
             )
             .child(div().flex_1().min_w(px(0.)).overflow_hidden().whitespace_nowrap().text_size(px(12.5)).text_color(theme.text).child(m.name.clone()))
-            .children(alert.map(|(kind, code)| super::sessions::attention_dot(theme, &kind, code)))
+            .children(alert.and_then(|mark| super::sessions::mark_view(theme, format!("side-m-mark-{}", m.id), mark, 8.)))
             .when(favorite, |d| d.child(icon("star-filled", 11., theme.warning)))
             .children(hint.clone().map(|k| kit::kbd(theme, k)))
             .when(hint.is_none() && !meta.is_empty(), |d| {
@@ -2967,7 +2968,7 @@ impl Root {
         let machine_name = |id: &str| s.machines.iter().find(|m| m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.to_string());
         let who = |x: &crate::fleet::sessions::SessionInfo| if x.agent_name.is_empty() { "A session".to_string() } else { x.agent_name.clone() };
         let running: Vec<&crate::fleet::model::Operation> = s.operations.iter().filter(|o| o.status == "running" && o.kind != "logs").collect();
-        let needs_you = s.sessions.iter().find(|x| matches!(x.attention.as_deref(), Some("bell" | "waiting")));
+        let needs_you = s.sessions.iter().find(|x| x.mark() == crate::fleet::sessions::Mark::NeedsYou);
         let working: Vec<&crate::fleet::sessions::SessionInfo> = s.sessions.iter().filter(|x| x.busy && x.status == "running").collect();
         let github_trouble = s.github.configured && (!s.github.live || s.github.scopes.iter().any(|sc| sc.error.is_some()));
         let mut progress = None;

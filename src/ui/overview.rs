@@ -8,7 +8,7 @@ use super::kit::{self, Button, ButtonStyle, card, chip, icon, meter, section_tit
 use super::theme::{ActiveTheme, mono_font, Theme};
 use super::root::{Route, Root};
 use crate::fleet::model::{Job, Machine, Snapshot};
-use crate::fleet::sessions::SessionInfo;
+use crate::fleet::sessions::{Mark, SessionInfo};
 
 const CARD_MIN_WIDTH: f32 = 300.;
 const GAP: f32 = 14.;
@@ -58,14 +58,18 @@ impl Root {
         };
         let plural = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
         let online = s.machines.iter().filter(|m| m.status == "online").count();
-        let working = s.sessions.iter().filter(|x| x.busy && x.status == "running").count();
-        let waiting = s.sessions.iter().filter(|x| x.attention.is_some()).count();
+        let marks: Vec<Mark> = s.sessions.iter().map(SessionInfo::mark).collect();
+        let count = |m: Mark| marks.iter().filter(|x| **x == m).count();
+        let (working, needs_you, done) = (count(Mark::Working), count(Mark::NeedsYou) + count(Mark::Failed), count(Mark::Done));
         let mut parts = vec![plural(s.machines.len(), "machine"), format!("{online} online")];
         if working > 0 {
             parts.push(format!("{} working", plural(working, "agent")));
         }
-        if waiting > 0 {
-            parts.push(format!("{waiting} waiting for you"));
+        if needs_you > 0 {
+            parts.push(format!("{needs_you} need{} you", if needs_you == 1 { "s" } else { "" }));
+        }
+        if done > 0 {
+            parts.push(format!("{done} done"));
         }
         if s.counts.runners > 0 {
             parts.push(format!("{} of {} busy", s.counts.working, plural(s.counts.runners, "runner")));
@@ -209,20 +213,18 @@ impl Root {
         let mut now: Vec<AnyElement> = Vec::new();
         if !offline {
             let mut sessions: Vec<&SessionInfo> = s.sessions.iter().filter(|x| x.machine_id == m.id).collect();
-            sessions.sort_by_key(|x| (!x.busy, x.attention.is_none(), std::cmp::Reverse(x.created_at)));
+            // The most urgent first: needs you, working, done.
+            sessions.sort_by_key(|x| (std::cmp::Reverse(x.mark()), std::cmp::Reverse(x.created_at)));
             let others = usize::from(desktop) + usize::from(!m.runner_ids.is_empty());
             let room = NOW_ROWS.saturating_sub(others).max(1);
             let extra = sessions.len().saturating_sub(room);
             for x in sessions.iter().take(if extra > 0 { room - 1 } else { room }) {
                 let (glyph, (gf, gt)) = kit::agent_look(&x.agent);
-                let (state, color) = if x.status == "exited" {
-                    ("Exited", theme.text_placeholder)
-                } else if x.busy {
-                    ("Working…", theme.text_accent)
-                } else if x.attention.is_some() {
-                    ("Waiting for you", theme.warning)
-                } else {
-                    ("Idle", theme.text_placeholder)
+                let (state, color) = match x.mark() {
+                    _ if x.status == "exited" => ("Exited", theme.text_placeholder),
+                    Mark::Working => ("Working…", theme.text_accent),
+                    m @ (Mark::NeedsYou | Mark::Done) => (m.label(), super::sessions::mark_color(theme, m)),
+                    _ => ("Idle", theme.text_placeholder),
                 };
                 now.push(now_row(theme, kit::tile(glyph, gf, gt, 18.).into_any_element(), x.title.clone(), state, color, inner));
             }
@@ -354,10 +356,10 @@ impl Root {
             .into_any_element()
     }
 
-    /// Every agent session, across the machines: working first, then waiting.
+    /// Every agent session, across the machines: needing you first, then working, then done.
     fn render_agents(&self, theme: &Theme, s: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
         let mut sessions: Vec<&SessionInfo> = s.sessions.iter().collect();
-        sessions.sort_by_key(|x| (!x.busy, x.attention.is_none(), x.status == "exited", std::cmp::Reverse(x.created_at)));
+        sessions.sort_by_key(|x| (std::cmp::Reverse(x.mark()), x.status == "exited", std::cmp::Reverse(x.created_at)));
         let content = if sessions.is_empty() {
             card(theme).child(kit::empty_state(theme, "square-terminal", "No agents running. Start Claude Code, Codex or a shell on any machine.")).into_any_element()
         } else {

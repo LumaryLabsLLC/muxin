@@ -88,6 +88,7 @@ fn machine(id: &str, platform: &str, cpu: f64, working: usize, disk_free: u64, a
         agent_version: None,
         sessions_error: None,
         gh: None,
+        agent_hooks: None,
         unreachable: None,
         tailnet: None,
         cloud: None,

@@ -171,6 +171,7 @@ pub fn build(input: &Inputs) -> Snapshot {
             agent_version: None,
             sessions_error: None,
             gh: None,
+            agent_hooks: None,
             unreachable,
             parent,
             vm: spec.vm.clone(),

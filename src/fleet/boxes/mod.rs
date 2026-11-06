@@ -131,8 +131,12 @@ pub struct BoxInfo {
     pub agent_name: String,
     /// "running", "starting" or "paused".
     pub state: String,
-    /// Its agent printed something in the last few seconds: it's working.
+    /// Its agent is working (`agent_state` "working").
     pub busy: bool,
+    /// What its agent is doing while it runs, as sessions say it ("working",
+    /// "needs_you", "done", "idle"; see fleet::sessions).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_state: Option<String>,
     /// An unread notice from its agent ("waiting", "bell" or "exited").
     pub attention: Option<String>,
     /// Its agent's session (`<machine>/<box id>`) while it runs.

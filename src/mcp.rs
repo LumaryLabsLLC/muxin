@@ -271,10 +271,10 @@ fn readable_text(tool: &str, v: &Value) -> Option<String> {
         }
         "workspace_changes" => Some(str_of("changes").to_string()),
         "session_read" => {
-            let state = match (str_of("status"), v.get("busy").and_then(Value::as_bool)) {
+            let state = match (str_of("status"), str_of("state")) {
                 ("exited", _) => format!("exited (code {})", v.get("exit_code").map(|c| c.to_string()).unwrap_or_else(|| "?".into())),
-                (_, Some(true)) => "running, working".into(),
-                _ => "running, idle".into(),
+                (_, "") => "running".into(),
+                (_, s) => format!("running, {}", s.replace('_', " ")),
             };
             Some(format!("{} — {state}\n```\n{}\n```\n", str_of("session_id"), str_of("text")))
         }
@@ -642,7 +642,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "box_list",
-            "description": "The user's boxes: tasks an agent CLI works on in a container of its own on one of their machines. Each has its id (box-ab12cd), machine, repo, branch, agent, state (running, starting or paused), busy (working right now), attention (waiting for an answer), session_id while it runs (for session_read and session_question), its task, and git (what it changed, its pull request). Read-only.",
+            "description": "The user's boxes: tasks an agent CLI works on in a container of its own on one of their machines. Each has its id (box-ab12cd), machine, repo, branch, agent, state (running, starting or paused), agentState while it runs (working, needs_you, done or idle, as session_list says it), busy (working right now), attention (an unread notice), session_id while it runs (for session_read and session_question), its task, and git (what it changed, its pull request). Read-only.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": "Only this machine's boxes." } }), &[]),
             "annotations": annotations("List boxes", true, false, true, false),
         }),
@@ -881,7 +881,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "session_list",
-            "description": "Agent sessions on the user's machines: terminals running Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell, kept alive by Muxin's agent on the machine. Each has an id (<machine-id>/<name>), agent, title, folder, status (running/exited), busy (printed output in the last few seconds, i.e. the agent is working) and the command a human can paste to attach. Also lists, per machine, the agent CLIs installed. Reads the machines over ssh, so it's always current (and sets up Muxin's agent on a machine the first time).",
+            "description": "Agent sessions on the user's machines: terminals running Claude Code, Codex, OpenCode, Gemini CLI, Amp, Pi or a shell, kept alive by Muxin's agent on the machine. Each has an id (<machine-id>/<name>), agent, title, folder, status (running/exited), state (working; needs_you: a question or an approval waits, see session_question; done: it finished its turn; idle), stateSource (hook or escape: the agent said so; screen: a known question is on its screen; output: a guess from its output), conversationId (the agent's own session id, when its hooks said), busy (state is working; kept for older clients), attention (an unread notice: waiting, bell or exited) and the command a human can paste to attach. Also lists, per machine, the agent CLIs installed. Reads the machines over ssh, so it's always current (and sets up Muxin's agent on a machine the first time).",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &[]),
             "annotations": annotations("List agent sessions", true, false, true, true),
         }),
@@ -899,7 +899,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "session_read",
-            "description": "The session's screen plus recent scrollback as plain text, with its status and whether it's busy. Use it to see what an agent is doing or waiting for.",
+            "description": "The session's screen plus recent scrollback as plain text, with its status and state (working, needs_you, done, idle). Use it to see what an agent is doing or waiting for.",
             "inputSchema": schema(json!({
                 "session_id": { "type": "string", "description": SESSION_ID },
                 "lines": { "type": "integer", "minimum": 1, "maximum": 50000, "description": "Scrollback lines above the screen to include. Default 200." }

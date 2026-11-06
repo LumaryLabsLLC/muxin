@@ -562,10 +562,9 @@ pub fn sessions(r: &crate::api::SessionsOut) -> String {
             .sessions
             .iter()
             .map(|s| {
-                let state = match (s.status.as_str(), s.busy) {
-                    ("exited", _) => format!("exited ({})", s.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into())),
-                    (_, true) => "working".into(),
-                    _ => "idle".into(),
+                let state = match s.status.as_str() {
+                    "exited" => format!("exited ({})", s.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into())),
+                    _ => s.state.replace('_', " "),
                 };
                 vec![s.id.clone(), s.agent_name.clone(), state, s.cwd.clone(), s.git.as_ref().map(|g| g.short()).unwrap_or_else(|| "—".into()), s.created_at.map(ago).unwrap_or_else(|| "—".into())]
             })
@@ -594,11 +593,10 @@ pub fn boxes(r: &crate::api::BoxesOut) -> String {
             .boxes
             .iter()
             .map(|b| {
-                let state = match (b.state.as_str(), b.busy, b.attention.as_deref()) {
-                    ("running", _, Some("waiting")) => "waiting".to_string(),
-                    ("running", true, _) => "working".into(),
-                    ("running", false, _) => "idle".into(),
-                    (other, _, _) => other.to_string(),
+                let state = match (b.state.as_str(), b.agent_state.as_deref()) {
+                    ("running", Some(s)) => s.replace('_', " "),
+                    ("running", None) => "idle".into(),
+                    (other, _) => other.to_string(),
                 };
                 let git = b.git.as_ref().map(|g| g.short()).unwrap_or_else(|| b.branch.clone());
                 vec![b.id.clone(), b.name.clone(), b.agent_name.clone(), state, b.machine_id.clone(), b.repo.clone(), git, b.created_at.map(ago).unwrap_or_else(|| "—".into())]

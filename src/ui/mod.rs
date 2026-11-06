@@ -292,6 +292,11 @@ pub(crate) enum AppCommand {
     OpenSession(String),
     /// A share link opened with Muxin: the window offers to join it.
     Join(String),
+    Settings,
+    /// About, where the answer shows, and a look at GitHub now.
+    CheckForUpdates,
+    /// Text for the clipboard (the tray's Copy Versions).
+    Copy(String),
     Quit,
 }
 
@@ -326,6 +331,18 @@ fn run_command(next: AppCommand, cx: &mut App) {
                 cx.notify();
             });
         }
+        AppCommand::Settings => {
+            show_main_window(cx);
+            with_root(cx, |root, window, cx| root.navigate(root::Route::Settings, window, cx));
+        }
+        AppCommand::CheckForUpdates => {
+            show_main_window(cx);
+            with_root(cx, |root, window, cx| root.navigate(root::Route::About, window, cx));
+            if cx.has_global::<MainWindow>() {
+                updates::check_now(main_engine(cx), cx);
+            }
+        }
+        AppCommand::Copy(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
         AppCommand::Quit => quit(cx),
     }
 }

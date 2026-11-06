@@ -67,6 +67,8 @@ async fn look(engine: &Arc<Engine>, cx: &mut AsyncApp) {
         u.checked = true;
         match result {
             Ok(latest) => {
+                // The tray's menu says so too.
+                super::tray::set_newer_version(latest.as_ref().map(|l| l.version.clone()));
                 u.latest = latest;
                 u.error = None;
             }

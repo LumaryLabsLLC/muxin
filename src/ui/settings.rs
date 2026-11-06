@@ -1061,8 +1061,9 @@ impl SettingsPage {
 
     /// What the agents on the machines may do (config::AgentSettings):
     /// Muxin's hooks in Claude Code's and Codex's settings, so they say when
-    /// they work, need you or are done (fleet::sessions), and whether they
-    /// continue their conversations when sessions come back after a restart.
+    /// they work, need you or are done (fleet::sessions), whether they
+    /// continue their conversations when sessions come back after a restart,
+    /// and whether they may start helper sessions.
     fn agents_section(&self, theme: &Theme) -> impl IntoElement {
         let on = self.engine.settings().agents.hooks;
         let mut with: Vec<String> = Vec::new();
@@ -1083,8 +1084,10 @@ impl SettingsPage {
             (true, names) => format!("On for {}.", names.join(", ")),
         };
         let resume = self.engine.settings().agents.resume;
+        let helpers = self.engine.settings().agents.helpers;
         let engine = self.engine.clone();
         let engine2 = self.engine.clone();
+        let engine3 = self.engine.clone();
         div()
             .flex()
             .flex_col()
@@ -1113,6 +1116,16 @@ impl SettingsPage {
                     }))
                     .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(
                         "Sessions come back after a machine restarts. With this on, Claude Code and Codex continue their conversation. Off, they start a new one.",
+                    ))
+                    .child(div().h(px(6.)))
+                    .child(kit::checkbox(theme, "agent-helpers", helpers, "Agents may start helper sessions", move |on, _, cx| {
+                        let mut s = engine3.settings();
+                        s.agents.helpers = *on;
+                        let _ = engine3.update_settings(s);
+                        cx.refresh_windows();
+                    }))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(
+                        "An agent in a session can start another one to help with its task, and wait for its answer. Helpers show under it and end when it does. Off, Muxin says no when an agent asks.",
                     )),
             )
     }

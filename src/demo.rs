@@ -789,12 +789,16 @@ impl World {
             // Pebble restarted for an update; Claude continued its conversation there.
             restored: (name == "claude-5d2e").then(|| "resumed".to_string()),
             restored_at: (name == "claude-5d2e").then(|| now - chrono::Duration::minutes(25)),
+            // Claude on the Forge asked Codex to run the tests beside it.
+            parent: (name == "codex-4c1e").then(|| format!("{machine_id}/claude-7f3a")),
+            keep: false,
         };
         let (agents, sessions): (Vec<&str>, Vec<SessionInfo>) = match machine_id {
             "forge" => (
                 vec!["claude", "codex", "opencode", "agy"],
                 vec![
                     session("claude-7f3a", "claude", "Claude Code", "Checkout fix", "/Users/ci/code/checkout", true, 12, 1),
+                    session("codex-4c1e", "codex", "Codex", "Run the checkout tests", "/Users/ci/code/checkout", true, 4, 0),
                     session("shell-2b81", "shell", "Shell", "Shell · checkout", "/Users/ci/code/checkout", false, 31, 0),
                 ],
             ),
@@ -968,6 +972,8 @@ impl World {
             box_id: None,
             restored: None,
             restored_at: None,
+            parent: None,
+            keep: false,
         }
     }
 
@@ -981,6 +987,12 @@ impl World {
 
 /// What a demo session's screen says, for `session read`.
 pub fn demo_screen_text(name: &str) -> String {
+    // Claude on the Forge started Codex as its helper, to run the tests.
+    match name {
+        "claude-7f3a" => return "> Fix the flaky checkout test\n\n⏺ Reading e2e/checkout.spec.ts\n⏺ The discount is applied after tax; moving it before.\n⏺ Started a helper to run the tests: forge/codex-4c1e\n⏺ Waiting for its answer…\n\n✻ Thinking…".into(),
+        "codex-4c1e" => return "› Run the checkout tests and say which fail\n\n• Running npm test -- e2e/checkout.spec.ts\n  ✓ 12 passed\n\n• All 12 pass.\n".into(),
+        _ => {}
+    }
     match name.split('-').next().unwrap_or("") {
         "claude" => "> Fix the flaky checkout test\n\n⏺ Reading e2e/checkout.spec.ts\n⏺ The discount is applied after tax; moving it before.\n⏺ Running npm test -- e2e/checkout.spec.ts\n  ✓ 12 passed\n\n✻ Thinking…".into(),
         "codex" => "› Add a dark mode toggle to Settings\n\n• Updated SettingsView.swift (+42 -3)\n• Build succeeded\n\nWould you like to run the following command?\n\n  $ xcodebuild -scheme App -destination 'platform=iOS Simulator,name=iPhone 17' test\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for this command (a)\n  3. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n".into(),

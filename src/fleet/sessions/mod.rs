@@ -12,6 +12,7 @@ pub mod actions;
 pub(crate) mod agent;
 pub mod git;
 pub mod handoff;
+pub mod here;
 pub mod question;
 pub mod rules;
 
@@ -136,6 +137,14 @@ pub struct SessionInfo {
     pub restored: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restored_at: Option<DateTime<Utc>>,
+    /// The session that started this one (a helper): `<machine-id>/<name>`.
+    /// An agent in a Muxin session started it through Muxin's MCP server or
+    /// CLI. It ends with that session unless `keep`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// A helper that goes on after the session that started it ends.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub keep: bool,
 }
 
 /// What a session shows beside it, the most urgent last: a machine or a list
@@ -191,6 +200,85 @@ impl SessionInfo {
             _ => Mark::Idle,
         }
     }
+}
+
+/// The session id under column `col` of a line of terminal text, if the word
+/// there looks like one: `beelink/codex-3f9a`, or a name on its own
+/// (`codex-3f9a`, `box-7k2m9q`). Whether it's a session Muxin knows is the
+/// caller's to check.
+pub fn session_id_at(line: &[char], col: usize) -> Option<String> {
+    let part = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/');
+    if col >= line.len() || !part(line[col]) {
+        return None;
+    }
+    let (mut a, mut b) = (col, col);
+    while a > 0 && part(line[a - 1]) {
+        a -= 1;
+    }
+    while b + 1 < line.len() && part(line[b + 1]) {
+        b += 1;
+    }
+    let word: String = line[a..=b].iter().collect();
+    let word = word.trim_matches(|c| matches!(c, '.' | '/' | '-' | '_'));
+    looks_like_session_id(word).then(|| word.to_string())
+}
+
+/// `<machine-id>/<name>` or a name alone, a name being `<agent>-<id>`.
+fn looks_like_session_id(word: &str) -> bool {
+    let (machine, name) = match word.split_once('/') {
+        Some((m, n)) => (Some(m), n),
+        None => (None, word),
+    };
+    let machine_ok = machine.is_none_or(|m| !m.is_empty() && m.len() <= 64 && m.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')));
+    let Some((kind, id)) = name.split_once('-') else { return false };
+    let kind_ok = kind == "box" || AGENTS.iter().any(|a| a.id == kind);
+    let id_ok = (4..=24).contains(&id.len()) && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    machine_ok && kind_ok && id_ok
+}
+
+/// Helpers (machine, name) whose parent is on another machine and gone from
+/// it, by machines read in the last two minutes without an error.
+fn far_orphans(all: &[(String, MachineSessions)], now: DateTime<Utc>) -> Vec<(String, String)> {
+    let fresh = |id: &str| all.iter().find(|(m, f)| m == id && f.error.is_none() && f.checked_at.is_some_and(|t| now - t < chrono::Duration::minutes(2))).map(|(_, f)| f);
+    let mut out = Vec::new();
+    for (machine, found) in all {
+        for s in found.sessions.iter().filter(|s| !s.keep) {
+            let Some((pm, pn)) = s.parent.as_deref().and_then(|p| p.split_once('/')) else { continue };
+            if pm == machine {
+                continue;
+            }
+            if fresh(pm).is_some_and(|f| !f.sessions.iter().any(|x| x.name == pn)) {
+                out.push((machine.clone(), s.name.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Sessions in the order a list shows them: each one followed by its helpers
+/// (the ones it started, see `SessionInfo::parent`), theirs under them, with
+/// how deep each is. A helper whose parent isn't among them is at the top.
+pub fn tree<'a>(sessions: &[&'a SessionInfo]) -> Vec<(usize, &'a SessionInfo)> {
+    let ids: std::collections::HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+    let mut out = Vec::with_capacity(sessions.len());
+    let mut placed = std::collections::HashSet::new();
+    fn place<'a>(s: &'a SessionInfo, depth: usize, all: &[&'a SessionInfo], placed: &mut std::collections::HashSet<String>, out: &mut Vec<(usize, &'a SessionInfo)>) {
+        if !placed.insert(s.id.clone()) {
+            return;
+        }
+        out.push((depth, s));
+        for h in all.iter().filter(|h| h.parent.as_deref() == Some(s.id.as_str())) {
+            place(h, depth + 1, all, placed, out);
+        }
+    }
+    for s in sessions.iter().filter(|s| s.parent.as_deref().is_none_or(|p| !ids.contains(p) || p == s.id)) {
+        place(s, 0, sessions, &mut placed, &mut out);
+    }
+    // Helpers of each other only (it can't happen, but): at the top.
+    for s in sessions {
+        place(s, 0, sessions, &mut placed, &mut out);
+    }
+    out
 }
 
 /// The most urgent mark among sessions: needs you, then an error, working, done.
@@ -269,6 +357,12 @@ pub struct StartSession {
     /// Text typed into the terminal once it's up, without pressing Enter: a
     /// command for the user to look at and run themselves.
     pub typed: Option<String>,
+    /// The session it's started from (a helper): its name when it's on the
+    /// same machine, else `<machine-id>/<name>`. The machine refuses it when
+    /// the user turned helpers off (Settings › Agents).
+    pub parent: Option<String>,
+    /// A helper that goes on after its parent ends.
+    pub keep: bool,
 }
 
 /// A session without the agent: what to run when its terminal opens.
@@ -370,6 +464,7 @@ impl Engine {
         self.set_sessions(&spec.id, found.clone());
         if found.error.is_none() {
             self.maybe_look_at_git(&spec.id, previous.as_ref(), &found);
+            self.end_far_helpers();
         }
         // Working now: look again once it should have gone quiet, rather than
         // only trusting the agent to say so.
@@ -403,6 +498,21 @@ impl Engine {
                 let asks = !screen.is_empty() && question::read(&screen).options.len() >= 2;
                 (s.state, s.state_source) = if asks { ("needs_you".into(), "screen".into()) } else { ("done".into(), "output".into()) };
             }
+        }
+    }
+
+    /// Ends helpers on another machine than the session that started them,
+    /// once that session is gone: their own machine can't tell (it ends the
+    /// ones whose parent is beside them itself). Only by what was read from
+    /// the parent's machine just now, so a machine that's away ends nothing.
+    fn end_far_helpers(self: &Arc<Self>) {
+        let all = self.all_sessions();
+        for (machine, name) in far_orphans(&all, Utc::now()) {
+            let me = self.clone();
+            let id = format!("{machine}/{name}");
+            tokio::spawn(async move {
+                let _ = me.control_session(&id, Control::Stop).await;
+            });
         }
     }
 
@@ -458,7 +568,7 @@ impl Engine {
             Some(c) => c.clone(),
             None => launch_line(kind, prompt, windows).0,
         };
-        let request = json!({
+        let mut request = json!({
             "op": "start",
             "name": name,
             "agent": kind.id,
@@ -470,6 +580,13 @@ impl Engine {
             "cols": req.cols.clamp(40, 500),
             "rows": req.rows.clamp(10, 200),
         });
+        // A helper: the machine notes its parent, and refuses it when helpers are
+        // off (the newest choice: this app's, sent along, or the one it kept).
+        if let Some(parent) = req.parent.as_deref().filter(|p| !p.is_empty()) {
+            request["parent"] = json!(parent);
+            request["keep"] = json!(req.keep);
+            request["settings"] = self.settings().agents.for_machines();
+        }
         agent::ctl(&spec, &request).await?;
 
         // A CLI without a prompt argument gets the prompt typed in once it's up.
@@ -652,6 +769,8 @@ impl Engine {
             box_id: None,
             restored: None,
             restored_at: None,
+            parent: None,
+            keep: false,
             name,
         };
         self.add_direct(DirectSession { info: info.clone(), run, windows });
@@ -875,6 +994,9 @@ pub(crate) fn parse_discovery(spec: &MachineSpec, reply: &Value) -> MachineSessi
             box_id: crate::fleet::boxes::box_of_session(&name, &found.boxes).map(|b| b.id.clone()),
             restored: s["restored"].as_str().filter(|r| !r.is_empty()).map(str::to_string),
             restored_at: ts(&s["restored_at"]),
+            // A parent here is a name; one on another machine is already `<machine-id>/<name>`.
+            parent: s["parent"].as_str().filter(|p| !p.is_empty()).map(|p| if p.contains('/') { p.to_string() } else { format!("{}/{p}", spec.id) }),
+            keep: s["keep"].as_bool().unwrap_or(false),
             name,
         });
     }
@@ -891,6 +1013,53 @@ pub(crate) fn parse_discovery(spec: &MachineSpec, reply: &Value) -> MachineSessi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn helpers_on_another_machine_end_once_their_parent_is_gone_there() {
+        let now = Utc::now();
+        let s = |machine: &str, name: &str, parent: Option<&str>, keep: bool| SessionInfo { id: format!("{machine}/{name}"), machine_id: machine.into(), name: name.into(), parent: parent.map(str::to_string), keep, ..Default::default() };
+        let read = |sessions: Vec<SessionInfo>, ago: i64, error: bool| MachineSessions { sessions, checked_at: Some(now - chrono::Duration::seconds(ago)), error: error.then(|| "unreachable".to_string()), ..Default::default() };
+        let beelink = read(vec![s("beelink", "codex-1", Some("mac/claude-a"), false), s("beelink", "codex-2", Some("mac/claude-a"), true), s("beelink", "codex-3", Some("beelink/claude-b"), false)], 1, false);
+        // The Mac has claude-a still: nothing ends.
+        let all = vec![("beelink".to_string(), beelink.clone()), ("mac".to_string(), read(vec![s("mac", "claude-a", None, false)], 1, false))];
+        assert!(far_orphans(&all, now).is_empty());
+        // Gone from the Mac: its helper there ends (not the kept one, nor one whose parent is beside it).
+        let all = vec![("beelink".to_string(), beelink.clone()), ("mac".to_string(), read(vec![], 1, false))];
+        assert_eq!(far_orphans(&all, now), [("beelink".to_string(), "codex-1".to_string())]);
+        // The Mac didn't answer, or was read long ago: nothing ends.
+        let all = vec![("beelink".to_string(), beelink.clone()), ("mac".to_string(), read(vec![], 1, true))];
+        assert!(far_orphans(&all, now).is_empty());
+        let all = vec![("beelink".to_string(), beelink), ("mac".to_string(), read(vec![], 600, false))];
+        assert!(far_orphans(&all, now).is_empty());
+    }
+
+    #[test]
+    fn session_ids_in_terminal_text_are_found_under_the_pointer() {
+        let line: Vec<char> = "Started beelink/codex-3f9a (Codex). Wait: box-7k2m9q, see ~/a/b and claude-x.".chars().collect();
+        let at = |word: &str| line.iter().collect::<String>().find(word).unwrap() + 2;
+        assert_eq!(session_id_at(&line, at("beelink/codex")).as_deref(), Some("beelink/codex-3f9a"));
+        assert_eq!(session_id_at(&line, at("codex-3f9a")).as_deref(), Some("beelink/codex-3f9a"));
+        assert_eq!(session_id_at(&line, at("box-7k2m9q")).as_deref(), Some("box-7k2m9q"));
+        // Not ids: words, paths, a name too short to be one.
+        for w in ["Started", "(Codex)", "~/a/b", "claude-x"] {
+            assert_eq!(session_id_at(&line, at(w)), None, "{w}");
+        }
+        assert_eq!(session_id_at(&line, 1000), None);
+        assert_eq!(session_id_at(&"mac-studio/shell-ab12.".chars().collect::<Vec<_>>(), 0).as_deref(), Some("mac-studio/shell-ab12"));
+    }
+
+    #[test]
+    fn helpers_list_under_the_session_that_started_them() {
+        let s = |id: &str, parent: Option<&str>| SessionInfo { id: id.into(), parent: parent.map(str::to_string), ..Default::default() };
+        let all = [s("m/a", None), s("m/b", Some("m/a")), s("m/c", None), s("m/d", Some("m/b")), s("m/e", Some("m/a")), s("m/f", Some("other/x"))];
+        let refs: Vec<&SessionInfo> = all.iter().collect();
+        let order: Vec<(usize, &str)> = tree(&refs).into_iter().map(|(d, s)| (d, s.id.as_str())).collect();
+        assert_eq!(order, [(0, "m/a"), (1, "m/b"), (2, "m/d"), (1, "m/e"), (0, "m/c"), (0, "m/f")]);
+        // Two that say they started each other still show, once each.
+        let odd = [s("m/x", Some("m/y")), s("m/y", Some("m/x"))];
+        let refs: Vec<&SessionInfo> = odd.iter().collect();
+        assert_eq!(tree(&refs).len(), 2);
+    }
 
     fn spec(host: &str) -> MachineSpec {
         let mut s: MachineSpec = toml::from_str(&format!("name = \"Beelink\"\nhost = \"{host}\"")).unwrap();

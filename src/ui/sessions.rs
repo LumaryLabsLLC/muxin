@@ -186,11 +186,15 @@ impl Root {
             self.notify_user(e, true, cx);
             return;
         }
+        // Session ids in it are links: ⌘-click one to peek at it.
+        let engine = self.engine.clone();
+        view.update(cx, |v, _| v.set_sessions(Arc::new(move |word| known_session(&engine.current(), word))));
         // When the attach ends (detached, the session ended, the network dropped), re-read the machine.
         let machine = id.split('/').next().unwrap_or_default().to_string();
         let sid = id.to_string();
         let shell = self.snapshot.sessions.iter().find(|s| s.id == id).is_some_and(|s| s.agent == "shell");
-        self._subscriptions.push(cx.subscribe(&view, move |this, _, event: &TerminalEvent, cx| match event {
+        self._subscriptions.push(cx.subscribe_in(&view, window, move |this, _, event: &TerminalEvent, window, cx| match event {
+            TerminalEvent::Peek(other) => this.peek_session(&sid, other, window, cx),
             TerminalEvent::Exited(code) => {
                 // A session without the agent ends with its terminal: a shell that
                 // exits or an agent that quits cleanly closes; a crash stays.
@@ -597,6 +601,8 @@ impl Root {
                             .child(kit::icon("rotate-ccw", 12., theme.text_muted))
                             .child(format!("{text}{at}"))
                     }))
+                    // A helper: who started it. Helpers it started: each, to go to.
+                    .children(self.helpers_line(&theme, &info, cx))
                     .children(info.git.as_ref().map(|g| git_line(&theme, &info.id, g, true).mt(px(2.)))),
             )
             .when(!info.persistent, |d| d.child(kit::pill("Ends when you close Muxin", theme.warning)))
@@ -693,7 +699,7 @@ impl Root {
             Some(layout) => self.render_panes(&layout, id, window, cx),
             None => self.session_body(&info, window, cx).into_any_element(),
         };
-        let body = div().relative().flex_1().min_w(px(0.)).min_h(px(0.)).flex().child(body);
+        let body = div().relative().flex_1().min_w(px(0.)).min_h(px(0.)).flex().child(body).children(self.render_peek(&theme, id, cx));
         let panel = self.split_desktop(&info.id).map(|view| {
             let (pop, close) = (machine_id.clone(), info.id.clone());
             let to_sidebar = info.id.clone();
@@ -942,7 +948,39 @@ impl Root {
     // -----------------------------------------------------------------------
     // Sidebar
 
-    pub(super) fn session_row(&self, theme: &Theme, s: &SessionInfo, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A session's row in the sidebar. A helper (`depth` > 0) sits under the
+    /// session that started it, branching off its icon; `last`: no more
+    /// helpers of that session below it.
+    pub(super) fn session_row(&self, theme: &Theme, s: &SessionInfo, selected: bool, depth: usize, last: bool, cx: &mut Context<Self>) -> AnyElement {
+        let row = self.session_row_inner(theme, s, selected, HELPER_STEP * depth as f32, cx);
+        if depth == 0 {
+            return row.into_any_element();
+        }
+        // From under the parent's icon (margin 10 + padding + half the 16px tile) to just before this one's.
+        let color = theme.text_placeholder.opacity(0.45);
+        let x = 10. + super::root::CHILD_PAD + 8. + HELPER_STEP * (depth - 1) as f32;
+        let mid = 13.;
+        div()
+            .relative()
+            .child(row)
+            .child(
+                div()
+                    .absolute()
+                    .top(px(-4.))
+                    .left(px(x))
+                    .w(px(HELPER_STEP - 10.))
+                    .h(px(mid + 4.))
+                    .border_l_1()
+                    .border_b_1()
+                    .rounded_bl(crate::ui::kit::corner(5.))
+                    .border_color(color)
+                    // More helpers below: the line goes on down to them.
+                    .when(!last, |d| d.child(div().absolute().left(px(-1.)).top(px(mid + 4.)).w(px(1.)).h(px(26. - mid)).bg(color))),
+            )
+            .into_any_element()
+    }
+
+    fn session_row_inner(&self, theme: &Theme, s: &SessionInfo, selected: bool, indent: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let id = s.id.clone();
         let (icon_name, (from, to)) = kit::agent_look(&s.agent);
         let exited = s.status == "exited";
@@ -956,7 +994,7 @@ impl Root {
         let shown = if selected && mark != Mark::Working { Mark::Idle } else { mark };
         let trailing = if exited { 40. } else if shown != Mark::Idle { 20. } else { 0. } + if knocking || watched { 18. } else { 0. };
         let trailing = trailing + if exited && shown != Mark::Idle { 14. } else { 0. };
-        let text_w = (self.row_width() - 20. - 22. - 8. - 16. - 8. - trailing).max(40.);
+        let text_w = (self.row_width() - indent - 20. - 22. - 8. - 16. - 8. - trailing).max(40.);
         div()
             .id(SharedString::from(format!("side-s-{}", s.id)))
             .flex()
@@ -964,7 +1002,7 @@ impl Root {
             .gap(px(8.))
             .h(px(26.))
             .mx(px(10.))
-            .pl(px(super::root::CHILD_PAD))
+            .pl(px(super::root::CHILD_PAD + indent))
             .pr(px(8.))
             .rounded(crate::ui::kit::corner(7.))
             .cursor_pointer()
@@ -1033,7 +1071,8 @@ impl Root {
                 )
                 .into_any_element()
         } else {
-            let rows: Vec<AnyElement> = sessions.iter().enumerate().map(|(i, x)| self.machine_session_row(theme, x, i, false, cx)).collect();
+            // Helpers under the session that started them.
+            let rows: Vec<AnyElement> = crate::fleet::sessions::tree(&sessions).into_iter().enumerate().map(|(i, (depth, x))| self.machine_session_row_at(theme, x, i, false, depth, cx)).collect();
             card(theme).children(rows).into_any_element()
         };
         div().flex().flex_col().gap(px(10.)).child(title).child(content).into_any_element()
@@ -1041,7 +1080,13 @@ impl Root {
 
     /// A session in a list; `with_machine` names its machine too (lists that span machines).
     pub(super) fn machine_session_row(&self, theme: &Theme, x: &SessionInfo, i: usize, with_machine: bool, cx: &mut Context<Self>) -> AnyElement {
+        self.machine_session_row_at(theme, x, i, with_machine, 0, cx)
+    }
+
+    /// A session in a list, `depth` helpers deep (moved right, and saying whose it is).
+    fn machine_session_row_at(&self, theme: &Theme, x: &SessionInfo, i: usize, with_machine: bool, depth: usize, cx: &mut Context<Self>) -> AnyElement {
         let id = x.id.clone();
+        let helper_of = self.helper_of(x);
         let machine = with_machine.then(|| self.snapshot.machines.iter().find(|m| m.id == x.machine_id).map(|m| m.name.clone())).flatten();
         let (icon_name, (from, to)) = kit::agent_look(&x.agent);
         let offline = self.snapshot.machines.iter().any(|m| m.id == x.machine_id && m.is_down());
@@ -1057,11 +1102,13 @@ impl Root {
             .flex()
             .items_center()
             .gap(px(12.))
-            .px(px(14.))
+            .pl(px(14. + 22. * depth as f32))
+            .pr(px(14.))
             .py(px(10.))
             .when(i > 0, |d| d.border_t_1().border_color(theme.border_variant))
             .cursor_pointer()
             .hover(|st| st.bg(theme.ghost_hover))
+            .when(depth > 0, |d| d.child(icon("corner-down-right", 13., theme.text_placeholder)))
             .child(kit::tile(icon_name, from, to, 26.))
             .child(
                 div()
@@ -1084,6 +1131,7 @@ impl Root {
                             .child(div().font_family(mono_font()).child(x.cwd.clone()))
                             .child("·")
                             .child(format!("started {}", format::ago(x.created_at)))
+                            .children(helper_of.map(|p| div().child("·").child(format!("helper of {p}")).flex().gap(px(6.))))
                             .children(x.restored_text().map(|t| div().child("·").child(t.to_string()).flex().gap(px(6.)))),
                     )
                     .children(x.git.as_ref().map(|g| git_line(theme, &format!("row-{}", x.id), g, false).mt(px(3.)))),
@@ -1096,6 +1144,60 @@ impl Root {
             })
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Session(id.clone()), window, cx)))
             .into_any_element()
+    }
+}
+
+/// How far a helper's row sits right of the session that started it.
+const HELPER_STEP: f32 = 18.;
+
+impl Root {
+    /// The title of the session that started this one (a helper), or its id
+    /// when this Muxin doesn't list it (on a machine it doesn't have).
+    pub(super) fn helper_of(&self, x: &SessionInfo) -> Option<String> {
+        let p = x.parent.as_deref()?;
+        Some(self.snapshot.sessions.iter().find(|s| s.id == p).map(|s| s.title.clone()).unwrap_or_else(|| p.to_string()))
+    }
+
+    /// The session page's line about helpers: whose helper it is (and
+    /// whether it ends with it), and the helpers it started, each a link.
+    fn helpers_line(&self, theme: &Theme, info: &SessionInfo, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let helpers: Vec<&SessionInfo> = self.snapshot.sessions.iter().filter(|s| s.parent.as_deref() == Some(info.id.as_str())).collect();
+        let parent = info.parent.as_deref().map(|p| (p.to_string(), self.snapshot.sessions.iter().find(|s| s.id == p).map(|s| s.title.clone())));
+        if parent.is_none() && helpers.is_empty() {
+            return None;
+        }
+        let link = |id: String, label: String, key: String, cx: &mut Context<Self>| {
+            div()
+                .id(SharedString::from(key))
+                .text_color(theme.text_accent)
+                .cursor_pointer()
+                .hover(|st| st.underline())
+                .child(label)
+                .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Session(id.clone()), window, cx)))
+                .into_any_element()
+        };
+        let mut line = div().flex().flex_wrap().items_center().gap_x(px(4.)).text_size(px(12.)).text_color(theme.text_muted).child(kit::icon("corner-down-right", 12., theme.text_muted));
+        if let Some((pid, title)) = parent {
+            line = line.child("Helper of");
+            line = match title {
+                Some(t) => line.child(link(pid, t, "helper-parent".into(), cx)),
+                None => line.child(div().font_family(mono_font()).child(pid)),
+            };
+            line = line.child(if info.keep { "· keeps going after it ends" } else { "· ends with it" });
+        }
+        if !helpers.is_empty() {
+            if info.parent.is_some() {
+                line = line.child("·");
+            }
+            line = line.child(if helpers.len() == 1 { "Its helper:".to_string() } else { format!("Its {} helpers:", helpers.len()) });
+            for (n, h) in helpers.iter().enumerate() {
+                if n > 0 {
+                    line = line.child(",");
+                }
+                line = line.child(link(h.id.clone(), h.title.clone(), format!("helper-{}", h.id), cx));
+            }
+        }
+        Some(line.into_any_element())
     }
 }
 
@@ -1623,6 +1725,217 @@ impl super::terminal::RemoteIo for LinkIo {
     fn close(&self) {
         self.link.close_channel(self.channel);
     }
+}
+
+/// Another session, peeked at over the one shown: watched live (its keys
+/// and size stay its own), or its screen read every few seconds where there's
+/// no link to its machine.
+pub(super) struct Peek {
+    /// The session peeked at, and the session page it's over.
+    pub id: String,
+    over: String,
+    view: Option<gpui::Entity<TerminalView>>,
+    text: Option<String>,
+}
+
+/// A session Muxin knows, by its full id or a name that's on one machine only.
+pub(super) fn known_session(s: &Snapshot, word: &str) -> Option<String> {
+    if word.contains('/') {
+        return s.sessions.iter().find(|x| x.id == word).map(|x| x.id.clone());
+    }
+    let mut named = s.sessions.iter().filter(|x| x.name == word);
+    match (named.next(), named.next()) {
+        (Some(x), None) => Some(x.id.clone()),
+        _ => None,
+    }
+}
+
+impl Root {
+    /// Peeks at `id` over the session page `over` (⌘-clicking it again closes it).
+    pub(super) fn peek_session(&mut self, from: &str, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // Over the page it was clicked on (a split's panes are on their first session's page).
+        let over = match &self.route {
+            Route::Session(page) => page.clone(),
+            _ => from.to_string(),
+        };
+        let over = over.as_str();
+        if id == from || id == over || self.peek.as_ref().is_some_and(|p| p.id == id && p.over == over) {
+            self.peek = None;
+            cx.notify();
+            return;
+        }
+        let (machine_id, name) = id.split_once('/').unwrap_or((id, ""));
+        let size = (120, 40);
+        let link = (!self.engine.is_demo()).then(|| crate::fleet::link::current(machine_id)).flatten();
+        let view = if self.engine.is_demo() {
+            let agent = self.snapshot.sessions.iter().find(|s| s.id == id).map(|s| s.agent.clone()).unwrap_or_default();
+            Some(cx.new(|cx| TerminalView::replay(&demo_screen(&agent), window, cx)))
+        } else {
+            link.map(|link| {
+                let (io, output) = peek_over_link(&self.engine, link, name, size);
+                cx.new(|cx| TerminalView::peek(io, output, size, window, cx))
+            })
+        };
+        // No link to its machine: its screen as text, read again every few seconds while it's shown.
+        if view.is_none() {
+            let (engine, pid) = (self.engine.clone(), id.to_string());
+            let task = cx.spawn(async move |this, cx| {
+                loop {
+                    let read = engine.runtime().spawn({
+                        let (engine, pid) = (engine.clone(), pid.clone());
+                        async move { engine.control_session(&pid, Control::Read { lines: 1 }).await }
+                    });
+                    let text = read.await.ok().and_then(Result::ok);
+                    let still = this.update(cx, |this, cx| match this.peek.as_mut().filter(|p| p.id == pid) {
+                        Some(p) => {
+                            p.text = Some(text.unwrap_or_else(|| "Couldn't read it.".into()));
+                            cx.notify();
+                            true
+                        }
+                        None => false,
+                    });
+                    if !still.unwrap_or(false) {
+                        return;
+                    }
+                    cx.background_executor().timer(Duration::from_secs(3)).await;
+                }
+            });
+            self.track(task);
+        }
+        self.peek = Some(Peek { id: id.to_string(), over: over.to_string(), view, text: None });
+        cx.notify();
+    }
+
+    /// The peek over the session page `over`, when there's one.
+    fn render_peek(&self, theme: &Theme, over: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.peek.as_ref().filter(|p| p.over == over)?;
+        let info = self.snapshot.sessions.iter().find(|s| s.id == p.id);
+        let (icon_name, (from, to)) = kit::agent_look(info.map(|i| i.agent.as_str()).unwrap_or(""));
+        let machine = self.snapshot.machines.iter().find(|m| Some(m.id.as_str()) == p.id.split('/').next()).map(|m| m.name.clone()).unwrap_or_default();
+        let title = info.map(|i| i.title.clone()).unwrap_or_else(|| p.id.clone());
+        let about = info.map(|i| format!("{} · {machine}", i.agent_name)).unwrap_or(machine);
+        let mark = info.map(SessionInfo::mark).unwrap_or(Mark::Idle);
+        let open = p.id.clone();
+        let body = match (info, &p.view, &p.text) {
+            (None, _, _) => div().size_full().flex().items_center().justify_center().text_size(px(12.5)).text_color(theme.text_muted).child("This session has ended.").into_any_element(),
+            (_, Some(view), _) => div().size_full().child(view.clone()).into_any_element(),
+            (_, None, Some(text)) => div()
+                .id("peek-text")
+                .size_full()
+                .overflow_y_scroll()
+                .p(px(10.))
+                .font_family(mono_font())
+                .text_size(px(11.))
+                .text_color(theme.text)
+                .children(text.lines().map(|l| div().whitespace_nowrap().child(if l.is_empty() { " ".to_string() } else { l.to_string() })))
+                .into_any_element(),
+            (_, None, None) => div().size_full().flex().items_center().justify_center().child(spinner("peek-loading", 14., theme.accent)).into_any_element(),
+        };
+        Some(
+            div()
+                .id("peek")
+                .absolute()
+                .top(px(10.))
+                .right(px(10.))
+                .w(gpui::relative(0.58))
+                .h(gpui::relative(0.66))
+                .flex()
+                .flex_col()
+                .bg(theme.elevated)
+                .border_1()
+                .border_color(theme.border)
+                .rounded(crate::ui::kit::corner(10.))
+                .when(!crate::ui::kit::square(), |d| d.shadow_lg())
+                .overflow_hidden()
+                // Its clicks, scrolls and hovers stay here, not on the terminal under it.
+                .occlude()
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(12.))
+                        .py(px(8.))
+                        .border_b_1()
+                        .border_color(theme.border_variant)
+                        .child(kit::tile(icon_name, from, to, 20.))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .child(div().truncate().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title))
+                                .child(div().truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(about)),
+                        )
+                        .child(state_label(theme, "peek-state", mark))
+                        .child(
+                            Button::new("peek-open", "Open")
+                                .icon("arrow-right")
+                                .tooltip("Go to this session")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.peek = None;
+                                    this.navigate(Route::Session(open.clone()), window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::icon_only("peek-close", "x")
+                                .tooltip("Close")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.peek = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(div().flex_1().min_h(px(0.)).child(body))
+                .into_any_element(),
+        )
+    }
+}
+
+/// Watches a session over the machine's link, for a peek: attached
+/// watch-only (its keys and size stay its own), with its size as it changes.
+fn peek_over_link(
+    engine: &Arc<crate::fleet::Engine>,
+    link: Arc<crate::fleet::link::Link>,
+    name: &str,
+    (cols, rows): (u16, u16),
+) -> (Arc<dyn super::terminal::RemoteIo>, futures::channel::mpsc::UnboundedReceiver<super::terminal::RemoteOutput>) {
+    use super::terminal::RemoteOutput;
+    use crate::fleet::link::{DATA, EXIT};
+    /// The session's size (agent/src/proto.rs SIZE).
+    const SIZE: u8 = 3;
+    let (channel, mut frames) = link.open_channel();
+    let (tx, output) = futures::channel::mpsc::unbounded();
+    let rt = engine.runtime().clone();
+    rt.spawn(async move {
+        while let Some((kind, bytes)) = frames.recv().await {
+            match kind {
+                DATA => {
+                    let _ = tx.unbounded_send(RemoteOutput::Bytes(bytes));
+                }
+                SIZE if bytes.len() == 4 => {
+                    let _ = tx.unbounded_send(RemoteOutput::Resize(u16::from_be_bytes([bytes[0], bytes[1]]), u16::from_be_bytes([bytes[2], bytes[3]])));
+                }
+                EXIT => {
+                    let _ = tx.unbounded_send(RemoteOutput::Ended(None));
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let _ = tx.unbounded_send(RemoteOutput::Ended(None));
+    });
+    let request = serde_json::json!({ "op": "attach", "name": name, "channel": channel, "cols": cols, "rows": rows, "watch_only": true, "sizes": true });
+    let attaching = link.clone();
+    rt.spawn(async move {
+        let ok = attaching.request(request, std::time::Duration::from_secs(15)).await.is_ok_and(|r| r["ok"].as_bool() == Some(true));
+        if !ok {
+            attaching.close_channel(channel);
+        }
+    });
+    (Arc::new(LinkIo { link, channel }), output)
 }
 
 /// Attaches to a session over the machine's link: a channel for it, the

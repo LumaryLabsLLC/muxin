@@ -1711,6 +1711,8 @@ impl NewSessionDialog {
             direct,
             command: self.prefill.command.as_ref().map(|(c, _)| c.clone()),
             typed: None,
+            parent: None,
+            keep: false,
         };
         let snapshot = self.engine.current();
         let plan = self.prefill.workspace.clone();

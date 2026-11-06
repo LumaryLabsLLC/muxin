@@ -2664,10 +2664,14 @@ pub struct SessionListRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionStartRequest {
-    pub machine_id: String,
+    /// The machine to start it on. Default, from inside a session (a
+    /// helper): that session's machine.
+    #[serde(default)]
+    pub machine_id: Option<String>,
     /// "claude", "codex", "opencode", "gemini", "agy", "amp", "pi" or "shell".
     pub agent: String,
-    /// Folder on the machine to start in. Default: the home folder.
+    /// Folder on the machine to start in. Default: the folder of the session
+    /// it's started from (a helper beside it), else the home folder.
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
@@ -2675,6 +2679,39 @@ pub struct SessionStartRequest {
     /// First message for the agent.
     #[serde(default)]
     pub prompt: Option<String>,
+    /// A helper (started from inside a session) ends with that session;
+    /// with keep, it goes on.
+    #[serde(default)]
+    pub keep: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionWaitRequest {
+    pub session_id: String,
+    /// Give up after this long (1-3600). Default 50: MCP clients stop waiting
+    /// for a tool after about a minute (Codex's is 60 s), so call it again.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionWaitOut {
+    pub session_id: String,
+    /// "done" (it finished its turn), "needs_you" (a question or an approval
+    /// waits), "exited", "ended" (it's gone), or, when it timed out, what it
+    /// is now ("working", "idle").
+    pub state: String,
+    /// "running", "exited", or "ended".
+    pub status: String,
+    pub exit_code: Option<i32>,
+    /// The timeout passed first.
+    pub timed_out: bool,
+    pub waited_secs: u64,
+    /// The end of what it said: its last message, or the question it asks.
+    pub text: String,
+    /// Its choices, when it asks one (session_answer picks one by its key).
+    pub options: Vec<crate::fleet::sessions::question::Choice>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2857,17 +2894,70 @@ async fn resolve_session(engine: &Arc<Engine>, id: &str) -> ApiResult<SessionInf
     }
 }
 
+/// The session this process runs in (Muxin's CLI or MCP server run by an
+/// agent in one), by name on this computer. Never in the demo or in tests.
+fn session_here(engine: &Arc<Engine>) -> Option<String> {
+    if engine.is_demo() || cfg!(test) {
+        return None;
+    }
+    sessions::here::current()
+}
+
+/// The session called `name` that this process runs in: on this computer
+/// (a machine with host "local"), else on `target` (where the helper goes,
+/// should this computer be one of the machines under another name), else
+/// one Muxin knows on any machine.
+async fn find_parent(engine: &Arc<Engine>, name: &str, target: Option<&str>) -> Option<SessionInfo> {
+    let s = engine.current();
+    let mut look: Vec<String> = s.machines.iter().filter(|m| m.local).map(|m| m.id.clone()).collect();
+    if let Some(t) = target.and_then(|t| find_machine(&s, t).ok()).map(|m| m.id.clone())
+        && !look.contains(&t)
+    {
+        look.push(t);
+    }
+    for id in look {
+        if let Ok(found) = engine.refresh_sessions(&id).await
+            && let Some(p) = found.sessions.into_iter().find(|x| x.name == name)
+        {
+            return Some(p);
+        }
+    }
+    let known: Vec<SessionInfo> = engine.current().sessions.iter().filter(|x| x.name == name).cloned().collect();
+    (known.len() == 1).then(|| known.into_iter().next()).flatten()
+}
+
+const HELPERS_OFF: &str = "Agents can't start other sessions: the user turned that off in Muxin (Settings › General › Agents).";
+
 pub async fn session_start(engine: &Arc<Engine>, req: SessionStartRequest) -> ApiResult<SessionInfo> {
-    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
     if sessions::agent(&req.agent).is_none() {
         let ids: Vec<&str> = sessions::AGENTS.iter().map(|a| a.id).collect();
         return Err(ApiError::invalid(format!("Unknown agent \"{}\".", req.agent)).with_hint(format!("Use one of: {}.", ids.join(", "))));
     }
+    // Started from inside one of Muxin's sessions: a helper of it.
+    let here = session_here(engine);
+    let parent = match &here {
+        Some(name) => find_parent(engine, name, req.machine_id.as_deref()).await,
+        None => None,
+    };
+    // (Looking at its machine took up a newer choice made in another Muxin.)
+    if here.is_some() && !engine.settings().agents.helpers {
+        return Err(helpers_off());
+    }
+    let machine_id = match (&req.machine_id, &parent) {
+        (Some(m), _) => m.clone(),
+        (None, Some(p)) => p.machine_id.clone(),
+        (None, None) => return Err(ApiError::invalid("Say which machine: machine_id is missing.").with_hint("List machines with status (`muxin status`).")),
+    };
+    let m = find_machine(&engine.current(), &machine_id)?.clone();
+    // Beside it: same machine, same folder, unless asked otherwise.
+    let beside = parent.as_ref().filter(|p| p.machine_id == m.id);
+    let cwd = req.cwd.clone().or_else(|| beside.map(|p| p.cwd.clone())).unwrap_or_default();
+    let parent_ref = parent.as_ref().map(|p| if beside.is_some() { p.name.clone() } else { p.id.clone() });
     engine
         .start_session(StartSession {
             machine_id: m.id,
             agent: req.agent.to_ascii_lowercase(),
-            cwd: req.cwd.unwrap_or_default(),
+            cwd,
             title: req.title,
             prompt: req.prompt,
             cols: HEADLESS_COLS,
@@ -2876,9 +2966,83 @@ pub async fn session_start(engine: &Arc<Engine>, req: SessionStartRequest) -> Ap
             direct: false,
             command: None,
             typed: None,
+            parent: parent_ref,
+            keep: req.keep,
         })
         .await
-        .map_err(session_error)
+        .map_err(|e| if e.contains("turned that off") { helpers_off() } else { session_error(e) })
+}
+
+fn helpers_off() -> ApiError {
+    ApiError::invalid(HELPERS_OFF).with_hint("Do the work in this session, or ask the user to turn on \"Agents may start helper sessions\" there.")
+}
+
+/// Waits until a session is done, needs you, exits or ends (or `timeout_secs`
+/// passes), and says what it said: so an agent that started a helper gets its
+/// answer in one call rather than reading its screen over and over.
+pub async fn session_wait(engine: &Arc<Engine>, req: SessionWaitRequest) -> ApiResult<SessionWaitOut> {
+    let started = std::time::Instant::now();
+    let limit = std::time::Duration::from_secs(req.timeout_secs.unwrap_or(WAIT_DEFAULT_SECS).clamp(1, 3600));
+    let first = resolve_session(engine, &req.session_id).await?;
+    let (id, machine, name) = (first.id.clone(), first.machine_id.clone(), first.name.clone());
+    let mut now = Some(first);
+    loop {
+        let waited = started.elapsed();
+        let over = waited >= limit;
+        if let Some(out) = waited_for(now.as_ref(), over) {
+            let (text, options) = match (&now, out) {
+                // Gone: nothing left to read.
+                (None, _) => (String::new(), Vec::new()),
+                (Some(_), "exited") => (last_lines(&engine.control_session(&id, Control::Read { lines: 40 }).await.unwrap_or_default(), 20), Vec::new()),
+                (Some(_), _) => match engine.session_question(&id).await {
+                    Ok(q) => (q.text.join("\n"), q.options),
+                    Err(_) => (String::new(), Vec::new()),
+                },
+            };
+            let s = now.as_ref();
+            return Ok(SessionWaitOut {
+                session_id: id,
+                state: out.to_string(),
+                status: s.map(|s| s.status.clone()).unwrap_or_else(|| "ended".into()),
+                exit_code: s.and_then(|s| s.exit_code),
+                timed_out: over && !matches!(out, "done" | "needs_you" | "exited" | "ended"),
+                waited_secs: waited.as_secs(),
+                text,
+                options,
+            });
+        }
+        // Quick at first (a short answer), then every few seconds.
+        let step = if waited.as_secs() < 10 { 1 } else { 2 };
+        tokio::time::sleep(std::time::Duration::from_secs(step).min(limit.saturating_sub(waited)).max(std::time::Duration::from_millis(200))).await;
+        // A machine that doesn't answer for a moment: what it was.
+        if let Ok(found) = engine.refresh_sessions(&machine).await {
+            now = found.sessions.into_iter().find(|s| s.name == name);
+        }
+    }
+}
+
+/// Seconds `session_wait` waits unless asked otherwise.
+pub const WAIT_DEFAULT_SECS: u64 = 50;
+
+/// What a wait ends with, given the session now (`None`: it's gone): its
+/// state when it's one to stop at, or whatever it is once `over`.
+fn waited_for(s: Option<&SessionInfo>, over: bool) -> Option<&'static str> {
+    let Some(s) = s else { return Some("ended") };
+    if s.status == "exited" {
+        return Some("exited");
+    }
+    match s.state.as_str() {
+        "done" => Some("done"),
+        "needs_you" => Some("needs_you"),
+        _ if over => Some(if s.state == "working" { "working" } else { "idle" }),
+        _ => None,
+    }
+}
+
+/// The last `n` lines of a screen with something on them.
+fn last_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
 /// Asks a session's agent to commit, open a pull request, review, ...: types

@@ -658,7 +658,28 @@ fn stop(state: &State, req: &Value) -> Result<Value, String> {
     if let Some(store) = &state.store {
         store.remove(name);
     }
+    end_helpers(state, name);
     Ok(json!({}))
+}
+
+/// Ends the helpers a session started (helpers.rs), and theirs: it ended.
+/// The ones started with `keep` go on.
+fn end_helpers(state: &State, parent: &str) {
+    let helpers = crate::helpers::all();
+    if helpers.is_empty() {
+        return;
+    }
+    if helpers.contains_key(parent) {
+        crate::helpers::forget(parent);
+    }
+    for name in crate::helpers::ending_with(&helpers, parent) {
+        if state.find(&name).is_some() {
+            state.event("closed", &name, "its parent ended".into());
+            let _ = stop(state, &json!({ "name": name }));
+        } else {
+            crate::helpers::forget(&name);
+        }
+    }
 }
 
 fn restart(state: &Arc<State>, req: &Value) -> Result<Value, String> {
@@ -795,6 +816,8 @@ fn save(state: &State, now: i64) {
     for name in due.iter().filter(|n| state.find(n).is_none()) {
         store.remove(name);
         crate::states::remove(name);
+        // It closed (not a shutdown, or this server would be gone too): its helpers go with it.
+        end_helpers(state, name);
     }
 }
 

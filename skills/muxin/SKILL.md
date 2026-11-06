@@ -55,13 +55,15 @@ No session on that branch? Start one in a checkout of the repository (`muxin che
 
 **"What's my agent on beelink doing?"** `muxin session read beelink/claude-3f9a --json` returns its screen as text. `muxin session question beelink/claude-3f9a --json` says what it's waiting for.
 
+**Split up your own task** (you run in one of Muxin's sessions): `muxin session start codex --prompt "Run the tests and list what fails" --json` starts a helper beside you, and `muxin session wait <its id> --json` waits for its answer. It ends when your session does. See [sessions and boxes](references/sessions-and-boxes.md).
+
 **"Why is machine X offline?"** `muxin machine X --json`. When `status` is `offline`, `unreachable` says why. `kind: "offline"` means it didn't answer (off, asleep, off the network): tell the user, with `last_seen_at`; `muxin wake X` may bring it back. Other kinds come with a `hint` to pass on.
 
 ## More
 
 Read the one that fits the task:
 
-- [Sessions and boxes](references/sessions-and-boxes.md): start, read, answer and steer agent sessions; actions (review, conflicts, PRs); hand-offs; boxes.
+- [Sessions and boxes](references/sessions-and-boxes.md): start, read, answer and steer agent sessions; helpers and waiting for them; actions (review, conflicts, PRs); hand-offs; boxes.
 - [GitHub and git](references/github.md): inbox, repositories, issues and PRs, checkouts, git setup on a machine.
 - [Workspaces](references/workspaces.md): a folder on one of the user's machines to work in yourself: run commands, read and write files, sync code.
 - [Runners and jobs](references/runners.md): self-hosted GitHub Actions runners, installing them, jobs that don't start.

@@ -191,8 +191,17 @@ pub(super) fn family(window: &Window) -> SharedString {
 
 #[allow(clippy::too_many_arguments)]
 fn prepaint(shared: &Shared, palette: &Palette, focused: bool, show_cursor: bool, m: Metrics, bounds: Bounds<Pixels>, window: &mut Window) -> Frame {
-    let (cell_w, line_h) = cell_size(window, m);
     let fixed = *shared.fixed.lock().unwrap();
+    // A peek: all of the other session, in a smaller font when it's bigger than the space.
+    let mut m = m;
+    if let (Some((cols, rows)), true) = (fixed, shared.fit.load(std::sync::atomic::Ordering::Relaxed)) {
+        let (w, h) = cell_size(window, m);
+        let room_w = (f32::from(bounds.size.width) - 2. * PAD_X).max(1.);
+        let room_h = (f32::from(bounds.size.height) - 2. * PAD_Y).max(1.);
+        let scale = (room_w / (cols as f32 * w)).min(room_h / (rows as f32 * h)).clamp(0.35, 1.);
+        m.size *= scale;
+    }
+    let (cell_w, line_h) = cell_size(window, m);
     let (cols, rows) = match fixed {
         Some(size) => size,
         None => {

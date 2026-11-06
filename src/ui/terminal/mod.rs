@@ -155,6 +155,8 @@ struct Shared {
     geometry: Mutex<Geometry>,
     /// A size set from elsewhere (a shared session's), instead of the space it has.
     fixed: Mutex<Option<(usize, usize)>>,
+    /// At a size set from elsewhere, the font shrinks so all of it fits (a peek).
+    fit: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
@@ -211,7 +213,13 @@ impl Drop for Shared {
 pub enum TerminalEvent {
     /// The program exited (for sessions: detached, or the session ended), with its code when known.
     Exited(Option<i32>),
+    /// A session id in the text (`beelink/codex-3f9a`) was ⌘-clicked (Ctrl
+    /// elsewhere): to peek at it.
+    Peek(String),
 }
+
+/// A session's full id from an id or name in a terminal's text, when it's one Muxin knows.
+pub type SessionLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 pub struct TerminalView {
     shared: Arc<Shared>,
@@ -225,6 +233,11 @@ pub struct TerminalView {
     /// The button held in mouse-reporting mode, and the last cell reported.
     pressed: Option<(u8, (usize, usize))>,
     scroll_rest: f32,
+    /// The pointer is on a session id with ⌘ held (it's a link then).
+    on_link: bool,
+    /// Which session ids in its text are links: the full id of a session
+    /// Muxin knows by that id or name (`set_sessions`). None: no links.
+    sessions: Option<SessionLookup>,
     /// The blinking cursor's phase, and the last key press (which shows it).
     cursor_on: bool,
     typed_at: Instant,
@@ -343,6 +356,14 @@ impl TerminalView {
         view
     }
 
+    /// Another session, only watched (its keys and size are its own): drawn
+    /// at its size, small enough to fit the space it has.
+    pub fn peek(io: Arc<dyn RemoteIo>, output: futures::channel::mpsc::UnboundedReceiver<RemoteOutput>, (cols, rows): (u16, u16), window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let view = Self::guest(io, output, (cols, rows), window, cx);
+        view.shared.fit.store(true, std::sync::atomic::Ordering::Relaxed);
+        view
+    }
+
     /// A terminal showing fixed output (the demo), with no program behind it.
     pub fn replay(bytes: &[u8], window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (term, _listener, rx) = new_term(110, 34);
@@ -401,13 +422,15 @@ impl TerminalView {
             }
         });
         TerminalView {
-            shared: Arc::new(Shared { term, backend, geometry: Mutex::new(Geometry::default()), fixed: Mutex::new(None) }),
+            shared: Arc::new(Shared { term, backend, geometry: Mutex::new(Geometry::default()), fixed: Mutex::new(None), fit: Default::default() }),
             focus,
             exited: false,
             guest: false,
             selecting: false,
             pressed: None,
             scroll_rest: 0.,
+            on_link: false,
+            sessions: None,
             cursor_on: true,
             typed_at: Instant::now(),
             ime: ime::Composition::default(),
@@ -579,9 +602,37 @@ impl TerminalView {
         self.shared.write(bytes);
     }
 
+    /// Session ids in its text become links (⌘-click to peek).
+    pub fn set_sessions(&mut self, lookup: SessionLookup) {
+        self.sessions = Some(lookup);
+    }
+
+    /// The session id under a cell, if there's one Muxin knows (`beelink/codex-3f9a`).
+    fn session_at(&self, col: usize, row: usize) -> Option<String> {
+        let lookup = self.sessions.as_ref()?;
+        let term = self.shared.term.lock();
+        let line = Line(row as i32 - term.grid().display_offset() as i32);
+        if line.0 < -(term.grid().history_size() as i32) || line.0 >= term.screen_lines() as i32 {
+            return None;
+        }
+        let cells = &term.grid()[line];
+        let text: Vec<char> = (0..term.columns()).map(|c| cells[Column(c)].c).collect();
+        drop(term);
+        crate::fleet::sessions::session_id_at(&text, col).and_then(|w| lookup(&w))
+    }
+
     fn mouse_down(&mut self, button: MouseButton, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
         let Some((col, row, right)) = self.cell(e.position) else { return };
+        // ⌘-click (Ctrl elsewhere) on a session id: peek at it, even where the program takes the mouse.
+        if button == MouseButton::Left
+            && e.modifiers.secondary()
+            && !self.guest
+            && let Some(id) = self.session_at(col, row)
+        {
+            cx.emit(TerminalEvent::Peek(id));
+            return;
+        }
         if let Some(mode) = self.reporting(&e.modifiers) {
             let code = match button {
                 MouseButton::Left => 0,
@@ -611,6 +662,11 @@ impl TerminalView {
 
     fn mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some((col, row, right)) = self.cell(e.position) else { return };
+        let on_link = e.modifiers.secondary() && e.pressed_button.is_none() && !self.guest && self.session_at(col, row).is_some();
+        if on_link != self.on_link {
+            self.on_link = on_link;
+            cx.notify();
+        }
         if let (Some((code, last)), Some(mode)) = (self.pressed, self.reporting(&e.modifiers)) {
             if last != (col, row) && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
                 self.pressed = Some((code, (col, row)));
@@ -695,7 +751,7 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .size_full()
             .bg(palette.bg)
-            .cursor(CursorStyle::IBeam)
+            .cursor(if self.on_link { CursorStyle::PointingHand } else { CursorStyle::IBeam })
             .on_key_down(cx.listener(Self::key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e, window, cx| this.mouse_down(MouseButton::Left, e, window, cx)))
             .on_mouse_down(MouseButton::Middle, cx.listener(|this, e, window, cx| this.mouse_down(MouseButton::Middle, e, window, cx)))

@@ -558,15 +558,17 @@ pub fn sessions(r: &crate::api::SessionsOut) -> String {
     if r.sessions.is_empty() {
         out.push_str("No agent sessions. Start one with `muxin session start <machine> claude [--cwd ~/code/app]`.\n");
     } else {
-        let rows: Vec<Vec<String>> = r
-            .sessions
-            .iter()
-            .map(|s| {
+        // Helpers under the session that started them.
+        let all: Vec<&crate::fleet::sessions::SessionInfo> = r.sessions.iter().collect();
+        let rows: Vec<Vec<String>> = crate::fleet::sessions::tree(&all)
+            .into_iter()
+            .map(|(depth, s)| {
                 let state = match s.status.as_str() {
                     "exited" => format!("exited ({})", s.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into())),
                     _ => s.state.replace('_', " "),
                 };
-                vec![s.id.clone(), s.agent_name.clone(), state, s.cwd.clone(), s.git.as_ref().map(|g| g.short()).unwrap_or_else(|| "—".into()), s.created_at.map(ago).unwrap_or_else(|| "—".into())]
+                let id = if depth == 0 { s.id.clone() } else { format!("{}└ {}", "  ".repeat(depth - 1), s.id) };
+                vec![id, s.agent_name.clone(), state, s.cwd.clone(), s.git.as_ref().map(|g| g.short()).unwrap_or_else(|| "—".into()), s.created_at.map(ago).unwrap_or_else(|| "—".into())]
             })
             .collect();
         out.push_str(&table(&["SESSION", "AGENT", "STATE", "FOLDER", "GIT", "STARTED"], &rows));
@@ -632,10 +634,32 @@ pub fn box_created(r: &crate::api::BoxCreatedOut) -> String {
 }
 
 pub fn session_started(s: &crate::fleet::sessions::SessionInfo) -> String {
-    format!(
-        "Started {} ({}) in {}.\nWatch it in the Muxin app, or attach here: {}\n",
-        s.id, s.agent_name, s.cwd, s.attach_command
-    )
+    let mut out = format!("Started {} ({}) in {}.\n", s.id, s.agent_name, s.cwd);
+    if let Some(p) = &s.parent {
+        out.push_str(&if s.keep { format!("A helper of {p}; it goes on after {p} ends.\n") } else { format!("A helper of {p}; it ends when {p} does.\n") });
+        out.push_str(&format!("Wait for its answer: muxin session wait {}\n", s.id));
+    }
+    out.push_str(&format!("Watch it in the Muxin app, or attach here: {}\n", s.attach_command));
+    out
+}
+
+pub fn session_waited(w: &crate::api::SessionWaitOut) -> String {
+    let mut out = match w.state.as_str() {
+        "done" => format!("{} is done.\n", w.session_id),
+        "needs_you" => format!("{} needs you.\n", w.session_id),
+        "exited" => format!("{} exited (code {}).\n", w.session_id, w.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into())),
+        "ended" => format!("{} ended.\n", w.session_id),
+        s => format!("{} is still {} after {} s.\n", w.session_id, if s == "working" { "working" } else { "going" }, w.waited_secs),
+    };
+    if !w.text.is_empty() {
+        out.push('\n');
+        out.push_str(w.text.trim_end());
+        out.push('\n');
+    }
+    for o in &w.options {
+        out.push_str(&format!("  {:<3} {}\n", o.key, o.label));
+    }
+    out
 }
 
 pub fn handed_off(h: &crate::fleet::sessions::handoff::HandedOff) -> String {

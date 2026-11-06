@@ -303,6 +303,34 @@ fn parse_escape(body: &str) -> Option<Option<&'static str>> {
     body.split(';').find_map(|kv| kv.split_once('=').filter(|(k, _)| k.trim() == "state").and_then(|(_, v)| escape_state(v)))
 }
 
+/// Someone typed into a session through Muxin (`send`): an agent that was
+/// waiting (it needed you, or it was done and Enter sends the message) is
+/// working on that now, and says so itself a moment later. Until then, the
+/// old state isn't the answer to what was just asked (`session_wait`). The
+/// report from before, to put back should the typing fail.
+pub fn typed(name: &str, enter: bool, at: i64) -> Option<Value> {
+    let before = read(name)?;
+    let next = after_typing(&before, enter, at)?;
+    write(name, &next).ok()?;
+    Some(before)
+}
+
+fn after_typing(report: &Value, enter: bool, at: i64) -> Option<Value> {
+    let waiting = match report["state"].as_str() {
+        Some("needs_you") => true,
+        Some("done") => enter,
+        _ => false,
+    };
+    if !waiting {
+        return None;
+    }
+    let mut next = report.clone();
+    next["state"] = json!("working");
+    next["at"] = json!(at);
+    next["event"] = json!("typed");
+    Some(next)
+}
+
 /// Records a state a session's program printed (`None`: forget it).
 pub fn from_escape(name: &str, state: Option<&str>) {
     let Some(state) = state else {
@@ -482,5 +510,21 @@ mod tests {
         assert!(e.carry.len() < 16, "{}", e.carry.len());
         assert!(e.feed(b"plain").is_empty());
         assert!(e.carry.is_empty());
+    }
+
+    #[test]
+    fn typing_into_a_waiting_agent_puts_it_to_work() {
+        let done = json!({ "state": "done", "at": 10, "source": "hook", "conversation": "c1", "pid": 7 });
+        // A message with Enter: working now, and the rest kept (who said it, the conversation).
+        let next = after_typing(&done, true, 20).unwrap();
+        assert_eq!((next["state"].as_str(), next["at"].as_i64(), next["conversation"].as_str(), next["pid"].as_u64()), (Some("working"), Some(20), Some("c1"), Some(7)));
+        // Typing without Enter isn't a message yet.
+        assert!(after_typing(&done, false, 20).is_none());
+        // Any answer to a question is.
+        let asks = json!({ "state": "needs_you", "at": 10, "source": "hook" });
+        assert_eq!(after_typing(&asks, false, 20).unwrap()["state"], "working");
+        // Already working, or idle: nothing to change.
+        assert!(after_typing(&json!({ "state": "working", "at": 10 }), true, 20).is_none());
+        assert!(after_typing(&json!({ "state": "idle", "at": 10 }), true, 20).is_none());
     }
 }

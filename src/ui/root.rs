@@ -390,6 +390,8 @@ pub struct Root {
     /// Terminals attached to agent sessions, kept while the app runs so
     /// switching pages doesn't drop them.
     pub(super) terminals: HashMap<String, Entity<TerminalView>>,
+    /// Another session peeked at over the one shown (⌘-click its id there).
+    pub(super) peek: Option<super::sessions::Peek>,
     /// Terminals whose connection dropped, being re-attached: tries so far,
     /// and whether one is on its way.
     pub(super) resuming: HashMap<String, (u32, bool)>,
@@ -613,6 +615,7 @@ impl Root {
             show_keys: false,
             keys_soon: None,
             terminals: HashMap::new(),
+            peek: None,
             resuming: HashMap::new(),
             sessions_requested: HashSet::new(),
             gh: Default::default(),
@@ -2279,9 +2282,13 @@ impl Root {
             let first_child_row = rows.len();
             self.sidebar_indent.set(child_indent(pos.depth));
             if open {
-                // Agent sessions first: they're what you come back to.
-                for x in sessions {
-                    rows.push(self.session_row(&theme, x, selected_session.as_deref() == Some(&x.id), cx).into_any_element());
+                // Agent sessions first: they're what you come back to. Helpers
+                // under the session that started them.
+                let tree = crate::fleet::sessions::tree(&sessions);
+                for (n, (depth, x)) in tree.iter().enumerate() {
+                    // The last helper of its parent: none of its siblings below it.
+                    let last = tree[n + 1..].iter().take_while(|(d, _)| *d >= *depth).all(|(d, _)| *d > *depth);
+                    rows.push(self.session_row(&theme, x, selected_session.as_deref() == Some(&x.id), *depth, last, cx));
                 }
                 // Which of its displays the desktop page shows, when it's on screen.
                 let showing = (self.route == Route::Desktop(m.id.clone())).then(|| self.desktops.get(&m.id).map(|v| v.read(cx).display().map(str::to_string))).flatten();

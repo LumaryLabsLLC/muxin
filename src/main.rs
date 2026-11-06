@@ -1044,6 +1044,8 @@ enum SessionCommand {
     Read(SessionReadArgs),
     /// Type text into a session (and press Enter)
     Send(SessionSendArgs),
+    /// Wait until a session is done, needs you or exits; print what it said
+    Wait(SessionWaitArgs),
     /// Ask a session's agent to commit, commit_push, pull_request, review, fix_comments, conflicts or recap
     Do(SessionDoArgs),
     /// What a session's agent is waiting for: a choice and its options, or what it said last
@@ -1162,12 +1164,13 @@ struct SessionLsArgs {
 struct SessionStartArgs {
     #[command(flatten)]
     agent: AgentArgs,
-    /// Machine id or name
+    /// Machine id or name (from inside a session, it can be left out: a helper starts on that session's machine)
+    #[arg(value_name = "MACHINE")]
     machine: String,
     /// claude, codex, opencode, gemini, agy, amp, pi or shell
     #[arg(value_name = "AGENT")]
-    kind: String,
-    /// Folder on the machine (default: home)
+    kind: Option<String>,
+    /// Folder on the machine (default: home; for a helper, its parent's folder)
     #[arg(long)]
     cwd: Option<String>,
     #[arg(long)]
@@ -1175,6 +1178,20 @@ struct SessionStartArgs {
     /// First message for the agent
     #[arg(long)]
     prompt: Option<String>,
+    /// From inside a session: keep this one going after that session ends
+    #[arg(long)]
+    keep: bool,
+}
+
+#[derive(Args)]
+struct SessionWaitArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Session id (<machine-id>/<name>) or unique name
+    session_id: String,
+    /// Give up after this many seconds (exits 2 when it does)
+    #[arg(long, default_value_t = 600)]
+    timeout: u64,
 }
 
 #[derive(Args)]
@@ -2706,8 +2723,24 @@ fn session(cmd: SessionCommand, runtime: &tokio::runtime::Runtime) -> u8 {
             run(runtime, &a.agent, async move |e| api::sessions_list(&e, req).await, cli::sessions)
         }
         SessionCommand::Start(a) => {
-            let req = api::SessionStartRequest { machine_id: a.machine, agent: a.kind, cwd: a.cwd, title: a.title, prompt: a.prompt };
+            // `start codex` from inside a session: a helper beside it.
+            let (machine_id, kind) = match a.kind {
+                Some(kind) => (Some(a.machine), kind),
+                None => (None, a.machine),
+            };
+            let req = api::SessionStartRequest { machine_id, agent: kind, cwd: a.cwd, title: a.title, prompt: a.prompt, keep: a.keep };
             run(runtime, &a.agent, async move |e| api::session_start(&e, req).await, cli::session_started)
+        }
+        SessionCommand::Wait(a) => {
+            let req = api::SessionWaitRequest { session_id: a.session_id, timeout_secs: Some(a.timeout) };
+            let code = std::cell::Cell::new(0u8);
+            let printed = run(runtime, &a.agent, async move |e| api::session_wait(&e, req).await, |w| {
+                if w.timed_out {
+                    code.set(2);
+                }
+                cli::session_waited(w)
+            });
+            if printed == 0 { code.get() } else { printed }
         }
         SessionCommand::Read(a) => {
             let req = api::SessionReadRequest { session_id: a.session_id, lines: Some(a.lines) };

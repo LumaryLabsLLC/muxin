@@ -54,7 +54,13 @@ Code, Codex, OpenCode, Gemini CLI, Amp, Pi) or a plain shell, kept alive by Muxi
 the machine so they survive disconnects. The user watches and types into them in the Muxin app. session_list shows them \
 (and which agents each machine has); session_start starts one, optionally with a first prompt; \
 session_read returns its screen as text; session_send types into it; session_stop ends it. \
-Sessions belong to the user: only start, type into or stop one when they asked you to.
+Sessions belong to the user: only start, type into or stop one when they asked you to. \
+Helpers: when you run in one of Muxin's sessions yourself, session_start (machine_id can be left out) \
+starts a helper for your own task, beside you: same machine and folder unless you say otherwise. It \
+shows under your session in the app and ends when your session does (keep: true lets it go on). \
+Give it its task as prompt, then session_wait for its answer instead of reading its screen over \
+and over; session_send asks it more. The user can turn helpers off (Settings › Agents in the app); \
+then session_start says so, and you do the work yourself.
 
 Boxes: a task handed to an agent CLI that works on it by itself, in a container of its own on one \
 of the user's machines (Docker), on a new branch of a fresh checkout, with its permission prompts \
@@ -278,6 +284,24 @@ fn readable_text(tool: &str, v: &Value) -> Option<String> {
             };
             Some(format!("{} — {state}\n```\n{}\n```\n", str_of("session_id"), str_of("text")))
         }
+        "session_wait" => {
+            let id = str_of("session_id");
+            let mut out = match str_of("state") {
+                "done" => format!("{id} is done. It said:\n"),
+                "needs_you" => format!("{id} needs an answer (session_answer picks an option, session_send replies):\n"),
+                "exited" => format!("{id} exited (code {}). Its last lines:\n", v.get("exit_code").filter(|c| !c.is_null()).map(|c| c.to_string()).unwrap_or_else(|| "?".into())),
+                "ended" => format!("{id} ended.\n"),
+                s => format!("{id} is still {} after {} s (timed out): call session_wait again.\n", if s == "working" { "working" } else { "going" }, v["waited_secs"]),
+            };
+            let text = str_of("text").trim_end();
+            if !text.is_empty() {
+                out.push_str(&format!("```\n{text}\n```\n"));
+            }
+            for o in v["options"].as_array().into_iter().flatten() {
+                out.push_str(&format!("- {}: {}\n", o["key"].as_str().unwrap_or(""), o["label"].as_str().unwrap_or("")));
+            }
+            Some(out)
+        }
         _ => None,
     }
 }
@@ -359,6 +383,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "session_question" => ok(api::session_question(engine, args(a)?).await?),
         "session_answer" => ok(api::session_answer(engine, args(a)?).await?),
         "session_read" => ok(api::session_read(engine, args(a)?).await?),
+        "session_wait" => ok(api::session_wait(engine, args(a)?).await?),
         "session_stop" => ok(api::session_stop(engine, args(a)?).await?),
         "session_restart" => ok(api::session_restart(engine, args(a)?).await?),
         "session_rename" => ok(api::session_rename(engine, args(a)?).await?),
@@ -887,14 +912,15 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "session_start",
-            "description": "Start an agent CLI (or a shell) in a new session on a machine, in a folder there, optionally with a first prompt. It keeps running until stopped; the user can watch and type into it from the Muxin app. Returns the session. Only start sessions the user asked for.",
+            "description": "Start an agent CLI (or a shell) in a new session on a machine, in a folder there, optionally with a first prompt. It keeps running until stopped; the user can watch and type into it from the Muxin app. Returns the session. Only start sessions the user asked for, with one exception: when you run in one of Muxin's sessions yourself, you may start helpers for your own task. A helper starts beside you (your machine and folder, unless you pass machine_id or cwd), shows under your session, and ends when your session ends unless keep is true; its `parent` is your session. Wait for its answer with session_wait. It's refused when the user turned helpers off in Muxin (Settings › Agents).",
             "inputSchema": schema(json!({
-                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "machine_id": { "type": "string", "description": format!("{MACHINE_ID} Can be left out from inside a session: a helper starts on its machine.") },
                 "agent": { "type": "string", "enum": ["claude", "codex", "opencode", "gemini", "agy", "amp", "pi", "shell"], "description": "Which CLI to run. session_list shows which are installed on each machine." },
-                "cwd": { "type": "string", "description": "Folder on the machine, e.g. \"~/code/api\". Default: the home folder." },
+                "cwd": { "type": "string", "description": "Folder on the machine, e.g. \"~/code/api\". Default: a helper's parent's folder, else the home folder." },
                 "title": { "type": "string", "description": "Shown in the app's sidebar. Default: agent and folder name." },
-                "prompt": { "type": "string", "description": "First message for the agent." }
-            }), &["machine_id", "agent"]),
+                "prompt": { "type": "string", "description": "First message for the agent: a helper's task." },
+                "keep": { "type": "boolean", "description": "A helper goes on after the session that started it ends. Default false: it ends with it." }
+            }), &["agent"]),
             "annotations": annotations("Start agent session", false, false, false, true),
         }),
         json!({
@@ -905,6 +931,15 @@ pub fn tools() -> Vec<Value> {
                 "lines": { "type": "integer", "minimum": 1, "maximum": 50000, "description": "Scrollback lines above the screen to include. Default 200." }
             }), &["session_id"]),
             "annotations": annotations("Read session screen", true, false, true, false),
+        }),
+        json!({
+            "name": "session_wait",
+            "description": "Wait until a session's agent is done (it finished its turn), needs you (a question or an approval waits), or exits, then return its state and the end of what it said (its answer, or the question with its options). Use it after starting a helper or sending it more, instead of reading its screen over and over. Returns at once when it's already done or waiting. timed_out: true when timeout_secs passed first (it's still working): call it again. Read-only.",
+            "inputSchema": schema(json!({
+                "session_id": { "type": "string", "description": SESSION_ID },
+                "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Give up after this long. Default 50: many MCP clients stop waiting for a tool after a minute." }
+            }), &["session_id"]),
+            "annotations": annotations("Wait for a session", true, false, true, false),
         }),
         json!({
             "name": "session_send",
@@ -1302,7 +1337,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 96);
+        assert_eq!(tools.len(), 97);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

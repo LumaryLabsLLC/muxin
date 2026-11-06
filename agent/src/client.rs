@@ -78,7 +78,8 @@ pub fn handle(req: &Value) -> Value {
             Ok(output) => json!({ "ok": true, "output": output }),
             Err(e) => json!({ "ok": false, "error": e }),
         },
-        "start" => request(&req, true),
+        "start" => start(&req),
+        "send" => send(&req),
         "rename" => rename(&req),
         #[cfg(unix)]
         "displays" => crate::displays::list(),
@@ -157,6 +158,42 @@ fn in_desktop(args: &[&str], failed: &str) -> Value {
     let mut text = String::new();
     let _ = stream.read_to_string(&mut text);
     serde_json::from_str(text.trim()).unwrap_or_else(|_| json!({ "ok": false, "error": failed }))
+}
+
+/// Starts a session. One started from inside another (`"parent"`, see
+/// helpers.rs) is refused when the user turned helpers off: the newest
+/// choice, the app's (`"settings"`) or the one kept here.
+fn start(req: &Value) -> Value {
+    let parent = req["parent"].as_str().unwrap_or("").trim();
+    if parent.is_empty() {
+        return request(req, true);
+    }
+    let choices = req.get("settings").filter(|s| s.is_object()).map(crate::settings::merge).unwrap_or_else(crate::settings::kept);
+    let list = (!parent.contains('/')).then(|| request(&json!({ "op": "list" }), false));
+    if let Some(why) = crate::helpers::refused(parent, &choices, list.as_ref().map(|l| &l["sessions"])) {
+        return json!({ "ok": false, "error": why, "refused": true });
+    }
+    let name = req["name"].as_str().unwrap_or("");
+    crate::helpers::record(name, parent, req["keep"].as_bool() == Some(true));
+    let reply = request(req, true);
+    if reply["ok"].as_bool() != Some(true) {
+        crate::helpers::forget(name);
+    }
+    reply
+}
+
+/// Types into a session. What's typed into an agent that waits (an answer,
+/// or a new message with Enter) puts it to work: it says so itself a moment
+/// later, and until then `session_wait` shouldn't take the old state for
+/// the answer (states.rs `typed`).
+fn send(req: &Value) -> Value {
+    let name = req["name"].as_str().unwrap_or("");
+    let before = crate::states::typed(name, req["enter"].as_bool().unwrap_or(true), now());
+    let reply = request(req, false);
+    if let (Some(before), false) = (before, reply["ok"].as_bool() == Some(true)) {
+        let _ = crate::states::replace(name, &before);
+    }
+    reply
 }
 
 /// Titles the user gave sessions, by session name (`~/.muxen/titles.json`).
@@ -257,6 +294,24 @@ fn discover(req: &Value) -> Value {
         crate::states::annotate(&mut sessions, &reports, now());
         if answered {
             crate::states::prune(&present);
+        }
+    }
+    // Which session started which (helpers.rs); helpers whose parent here is
+    // gone end with it (a session server from before helpers ends them itself).
+    let helpers = crate::helpers::all();
+    if !helpers.is_empty() {
+        if answered && running {
+            let gone = crate::helpers::orphans(&helpers, &present);
+            for name in &gone {
+                let _ = request(&json!({ "op": "stop", "name": name }), false);
+            }
+            if let Some(list) = sessions.as_array_mut() {
+                list.retain(|s| !s["name"].as_str().is_some_and(|n| gone.iter().any(|g| g == n)));
+            }
+        }
+        crate::helpers::annotate(&mut sessions, &helpers);
+        if answered {
+            crate::helpers::prune(&present);
         }
     }
     let boxes = crate::boxes::list_with(sessions.as_array().map(Vec::as_slice).unwrap_or_default());

@@ -24,6 +24,7 @@ mod crash;
 mod daemon;
 mod detect;
 mod handoff;
+mod helpers;
 mod hooks;
 mod desktop;
 #[cfg(unix)]

@@ -248,17 +248,24 @@ impl Question {
     }
 }
 
-/// Box drawing and the cursor marks prompts draw with.
+/// Box drawing and the cursor marks prompts draw with. Braille dots are
+/// drawing too, not words: spinners, and the starry backdrop some Codex
+/// models draw on empty cells (around its input box, between its lines).
 fn clean(r: &Rules, line: &str) -> String {
+    let line: String = line.chars().map(|c| if dots(c) { ' ' } else { c }).collect();
     let trimmed = line.trim_matches(|c: char| c.is_whitespace() || Rules::one_of(&r.border_marks, c));
     trimmed.trim_end().to_string()
+}
+
+fn dots(c: char) -> bool {
+    ('\u{2800}'..='\u{28ff}').contains(&c)
 }
 
 /// A line that's only a rule or a border.
 fn is_rule(r: &Rules, line: &str) -> bool {
     let t = line.trim();
     let across = |c: char| Rules::one_of(&r.rule_marks, c);
-    t.chars().any(across) && t.chars().all(|c| across(c) || c == ' ' || Rules::one_of(&r.border_marks, c))
+    t.chars().any(across) && t.chars().all(|c| across(c) || c == ' ' || dots(c) || Rules::one_of(&r.border_marks, c))
 }
 
 /// An agent's status line, not something it said: "✻ Baked for 3s",
@@ -419,6 +426,18 @@ mod tests {
 
     fn keys(q: &Question) -> Vec<&str> {
         q.options.iter().map(|c| c.key.as_str()).collect()
+    }
+
+    #[test]
+    fn codexs_starry_backdrop_isnt_what_it_said() {
+        // Codex 0.154 with gpt-6-astra, done (beelink, 2026-11-06): dots on every empty cell.
+        let screen = "  Tip: New Use /fast to enable our fastest inference with increased plan usage.\n\n\n› What is 17 times 23? Answer with just the number.\n\n\n• You have 3 usage limit resets available. Run /usage to use one.\n\n• 391\n\n                            ⠈   ⠁                ⠐      ⡀ ⠂ ⠄                  ⠈       ⠈   ⠠ ⠠      ⡀   ⠈⡀ ⠂      ⠁\n› Ask Codex to do anything⡀               ⠁                           ⠄             ⠁   ⠈  ⢀    ⠁\n      ⠠⢀            ⠠     ⠄                          ⡀                    ⠄⠈   ⠄    ⠂\n  gpt-6-astra default · /tmp/mxc/work · Calculate 17 times 23\n";
+        let q = read(screen);
+        assert!(q.options.is_empty());
+        assert_eq!(q.text, ["391"]);
+        // Between the rules, too.
+        let ruled = "• 391\n──────── ⠁ ──────── ⠄\n⠈   ⠁\n› Ask Codex to do anything ⠂\n";
+        assert_eq!(read(ruled).text, ["391"]);
     }
 
     #[test]

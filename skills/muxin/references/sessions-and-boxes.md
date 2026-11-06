@@ -18,6 +18,7 @@ Session, box and checkout JSON uses camelCase keys (`machineId`, `agentName`, `s
 - `state`: what its agent is doing. `working`; `needs_you` (a question or an approval waits: see `question` below); `done` (it finished its turn); `idle`.
 - `stateSource`: how that's known. `hook` or `escape`: the agent said so (Claude Code and Codex through Muxin's hooks; any program with an escape code). `screen`: a question Muxin knows is on its screen. `output`: a guess (printing is working, quiet after working is done).
 - `conversationId`: the agent's own id for its conversation, when its hooks said.
+- `parent`: the session that started this one, a helper (see below), and `keep` when it goes on after that session ends.
 - `restored`: it came back after its machine, or Muxin's agent there, restarted. `resumed`: its agent continues its conversation. `fresh`: its agent started again without it. `shell`: a new shell. `exited`: it had exited and is as it was. `restoredAt` says when. It goes when the session is restarted.
 - `busy`: `state` is `working` (kept for older scripts).
 - `attention`: `waiting` (it came to need you, or finished), `bell` or `exited`, until the user opens it.
@@ -29,6 +30,7 @@ Session, box and checkout JSON uses camelCase keys (`machineId`, `agentName`, `s
 
 ```sh
 muxin session read beelink/claude-3f9a --json                 # the screen and recent scrollback, as `text`
+muxin session wait beelink/claude-3f9a --json                 # until it's done, needs you or exits
 muxin session read beelink/claude-3f9a --lines 50 --json      # less scrollback
 muxin session question beelink/claude-3f9a --json             # what it's waiting for
 muxin session answer beelink/claude-3f9a 1 --json             # pick an option by its key
@@ -82,6 +84,29 @@ muxin session stop beelink/claude-3f9a --json
 The agent is `claude`, `codex`, `opencode`, `gemini`, `agy`, `amp`, `pi` or `shell`. `muxin session attach` opens one in a terminal; it's interactive, for the user, not for you.
 
 `restart` continues a Claude Code or Codex conversation when its id is known, rather than giving the agent its first task again.
+
+### Helpers: start one from your own session, then wait for it
+
+When you run in one of Muxin's sessions yourself (Muxin sets `MUXEN_SESSION` there), you may start helpers for your own task. This is the one time you start a session the user didn't ask for. A helper:
+
+- starts beside you: your machine and your folder, unless you pass a machine or `--cwd`;
+- shows under your session in the app (`parent` in `session ls` is your session's id);
+- ends when your session ends, unless you start it with `--keep`.
+
+```sh
+muxin session start codex --prompt "Run the test suite and tell me which tests fail, with their errors" --json
+muxin session wait beelink/codex-8k2p --json       # until it's done, needs you or exits
+muxin session send beelink/codex-8k2p "Now fix the first one" --json
+muxin session wait beelink/codex-8k2p --json
+```
+
+Through MCP: `session_start` (leave `machine_id` out), then `session_wait`.
+
+`wait` returns `state`: `done`, `needs_you`, `exited` or `ended` (it's gone), with `text`, the end of what it said (its answer, or the question), and `options` when it asks something. With `timed_out: true` it's still working: wait again. The MCP tool waits 50 s unless you pass `timeout_secs` (many MCP clients stop waiting for a tool after a minute); the CLI waits 10 minutes unless `--timeout N`, and exits 2 when it times out. Wait instead of reading its screen over and over.
+
+The user can turn helpers off in Settings › General › Agents, on the Mac or the iPad. Then starting a session from inside one is refused (`invalid`): do the work yourself.
+
+In the app, a session id printed in a terminal is a link: ⌘-click it on the Mac (Ctrl-click on Linux and Windows), or tap it on the iPad, to peek at that session without leaving yours. Printing a helper's id is enough for the user to look at it.
 
 ### After a restart
 

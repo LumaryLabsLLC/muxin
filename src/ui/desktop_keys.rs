@@ -354,6 +354,26 @@ pub fn examples() -> &'static str {
     }
 }
 
+/// The shortcut that stands for them all on the toolbar: this computer's app
+/// switcher.
+pub fn example_key() -> &'static str {
+    if cfg!(target_os = "macos") { "⌘Tab" } else { "Alt+Tab" }
+}
+
+/// The toolbar's words for where this computer's own shortcuts go, by the
+/// machine's name (empty when it has none here: a shared desktop). An offer
+/// while they're this computer's ("Send ⌘Tab to Beacon"); where they go and
+/// the way back while they go to the machine.
+pub fn switch_label(there: bool, machine: &str) -> String {
+    let machine = match machine.trim() {
+        "" => "the machine".to_string(),
+        name if name.chars().count() > 22 => format!("{}…", name.chars().take(21).collect::<String>().trim_end()),
+        name => name.to_string(),
+    };
+    let key = example_key();
+    if there { format!("{key} goes to {machine} · {} to stop", release_key_label()) } else { format!("Send {key} to {machine}") }
+}
+
 /// A combination's keysyms, in the order to press them.
 pub fn combo_keys(keys: &str) -> Option<Vec<u32>> {
     keys.split('+').map(|k| crate::fleet::desktop::keysym(k.trim())).collect()
@@ -591,5 +611,18 @@ mod tests {
         assert_eq!(menu("darwin-arm64", true)[0], Combo { label: "Previous Space", keys: "ctrl+left" });
         assert!(menu("windows-x64", false).iter().all(|c| c.keys != "ctrl+alt+delete" && c.keys != "super+l"));
         assert!(menu("linux-x64", false).iter().any(|c| c.keys == "ctrl+alt+delete"));
+    }
+
+    #[test]
+    fn the_toolbar_names_the_key_and_the_machine() {
+        let key = example_key();
+        // An offer while the shortcuts are this computer's; where they go, and the way back, after.
+        assert_eq!(switch_label(false, "Beacon"), format!("Send {key} to Beacon"));
+        assert_eq!(switch_label(true, "Beacon"), format!("{key} goes to Beacon · {} to stop", release_key_label()));
+        // A shared desktop has no name here.
+        assert_eq!(switch_label(false, ""), format!("Send {key} to the machine"));
+        // A long name doesn't push the rest of the toolbar away.
+        let long = switch_label(false, "Adib's MacBook Pro in the living room");
+        assert_eq!(long, format!("Send {key} to Adib's MacBook Pro in…"));
     }
 }

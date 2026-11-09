@@ -1945,11 +1945,15 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
     let keyboard = (shortcuts != Shortcuts::NotOffered).then(|| {
         let there = shortcuts == Shortcuts::There;
         let (examples, release) = (desktop_keys::examples(), desktop_keys::release_key_label());
+        // By its name (a shared desktop has none here).
+        let name = engine.current().machines.iter().find(|m| m.id == machine).map(|m| m.name.clone()).unwrap_or_default();
+        let to = if name.is_empty() { "the machine" } else { name.as_str() };
         let tip = match shortcuts {
-            Shortcuts::There => format!("{examples} go to the machine. {release} by themselves gives them back."),
-            Shortcuts::NeedsPermission => format!("Click to send {examples} to the machine. macOS asks to allow Muxin under Accessibility."),
-            _ => format!("{examples} stay on this computer. Click, or press {release} by themselves, to send them to the machine."),
+            Shortcuts::There => format!("{examples} go to {to}. Click, or press {release} by themselves, to get them back."),
+            Shortcuts::NeedsPermission => format!("{examples} act on this computer. Click to send them to {to}: macOS asks to allow Muxin under Accessibility first."),
+            _ => format!("{examples} act on this computer. Click, or press {release} by themselves, to send them to {to}."),
         };
+        let label = desktop_keys::switch_label(there, &name);
         let view = view.clone();
         div()
             .id("desktop-shortcuts")
@@ -1962,10 +1966,11 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
             .rounded(crate::ui::kit::corner(5.))
             .cursor_pointer()
             .text_size(px(11.5))
-            .text_color(if there { theme.text } else { theme.text_placeholder })
+            .text_color(if there { theme.text } else { theme.text_muted })
             .when(there, |d| d.bg(theme.element_selected).child(kit::dot(theme.accent, 6.)))
-            .when(!there, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-            .child(if there { format!("Shortcuts go there · {release} to stop") } else { "Shortcuts stay here".to_string() })
+            // An offer while they're this computer's: it reads as a button.
+            .when(!there, |d| d.border_1().border_color(theme.border).hover(|st| st.bg(theme.ghost_hover)))
+            .child(label)
             .tooltip(move |window, cx| kit::Tooltip::view(tip.clone().into(), window, cx))
             .on_click(move |_, window, cx| view.update(cx, |v, cx| v.switch_keyboard(true, window, cx)))
     });

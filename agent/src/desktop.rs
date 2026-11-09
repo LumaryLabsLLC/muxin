@@ -2017,7 +2017,7 @@ mod mac {
                 return Err("No display here.".into());
             }
             if unsafe { muxen_capture_allowed(1) } == 0 {
-                return Err(format!("On {}, allow muxen-agent under Privacy & Security › Screen Recording, then try again.", computer_name()));
+                return Err(format!("On {}, allow {} under Privacy & Security › Screen Recording, then try again.", computer_name(), listed_as()));
             }
             let input = unsafe { muxen_input_allowed(1) } == 1;
             let fw = (max_width as usize).min(pw).max(1);
@@ -2042,7 +2042,7 @@ mod mac {
             let id: u32 = id.parse().map_err(|_| closed())?;
             let (_, pid, on_screen) = window_info(id).ok_or_else(closed)?;
             if unsafe { muxen_capture_allowed(1) } == 0 {
-                return Err(format!("On {}, allow muxen-agent under Privacy & Security › Screen Recording, then try again.", computer_name()));
+                return Err(format!("On {}, allow {} under Privacy & Security › Screen Recording, then try again.", computer_name(), listed_as()));
             }
             let input = unsafe { muxen_input_allowed(1) } == 1;
             // Minimized or hidden, it isn't drawn: bring it back.
@@ -2249,7 +2249,7 @@ mod mac {
             }
             if !self.input {
                 m.insert("input".into(), false.into());
-                m.insert("note".into(), format!("view only: allow muxen-agent under Accessibility on {}", computer_name()).into());
+                m.insert("note".into(), format!("view only: allow {} under Accessibility on {}", listed_as(), computer_name()).into());
             }
             m
         }
@@ -2409,6 +2409,19 @@ mod mac {
             .unwrap_or_else(|| "this Mac".into())
     }
 
+    /// The name System Settings › Privacy & Security lists this agent under:
+    /// Muxin Agent when it runs from its app (Muxin 0.10.0 and later), else
+    /// the plain program's own name.
+    fn listed_as() -> &'static str {
+        let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
+        listed_name(&exe)
+    }
+
+    /// `~/.muxen/bin/muxen-agent` is a link: `exe` is where it leads.
+    fn listed_name(exe: &std::path::Path) -> &'static str {
+        if exe.to_string_lossy().contains("Muxin Agent.app/Contents/MacOS/") { "Muxin Agent" } else { "muxen-agent" }
+    }
+
     /// The CGEventFlags bit of a modifier keysym.
     fn modifier_flag(sym: u32) -> Option<u64> {
         Some(match sym {
@@ -2551,6 +2564,14 @@ mod mac {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn permissions_name_the_app_the_agent_runs_from() {
+            let app = std::path::Path::new("/Users/me/.muxen/agent/c79755dff29f2948/Muxin Agent.app/Contents/MacOS/muxen-agent");
+            assert_eq!(listed_name(app), "Muxin Agent");
+            assert_eq!(listed_name(std::path::Path::new("/Users/me/.muxen/bin/muxen-agent")), "muxen-agent");
+            assert_eq!(listed_name(std::path::Path::new("")), "muxen-agent");
+        }
 
         // On a US keyboard, unless a test says otherwise.
         fn mac_press(sym: u32, flags: u64, exact: bool) -> MacPress {

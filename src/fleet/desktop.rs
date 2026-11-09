@@ -291,6 +291,12 @@ impl Engine {
             return Err("The demo doesn't change monitors.".into());
         }
         super::sessions::agent::ensure(&spec, probe.as_ref()).await?;
+        // The size it has now, to offer the way back (listed first if it
+        // hasn't been, as when an agent asks without looking).
+        if size.is_some() && !self.remember_display_size(&spec.id, display) {
+            let _ = self.displays(&spec.id).await;
+            self.remember_display_size(&spec.id, display);
+        }
         let mut request = json!({ "op": "display_set", "display": display });
         if let Some((w, h)) = size {
             request["width"] = json!(w);
@@ -390,6 +396,7 @@ fn demo_displays(machine_id: &str) -> Vec<DisplayInfo> {
         is_virtual: false,
         modes: vec![(w as u32, h as u32)],
         any_size: false,
+        before: None,
         scale: 1.,
         scales: Vec::new(),
     };

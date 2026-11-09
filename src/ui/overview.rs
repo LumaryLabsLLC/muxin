@@ -124,14 +124,29 @@ impl Root {
                     "warning" => "triangle-alert",
                     _ => "info",
                 };
+                // A suggestion to connect directly can be turned down.
+                let keep = a.action.as_ref().filter(|x| x.kind == "direct").and_then(|x| x.target.clone());
+                let changing = keep.as_ref().is_some_and(|id| self.conn_changing.contains(id));
                 let button = a.action.clone().map(|action| {
-                    Button::new(SharedString::from(format!("att-{}", a.id)), action.label.clone())
+                    let main = Button::new(SharedString::from(format!("att-{}", a.id)), action.label.clone())
                         .style(ButtonStyle::Ghost)
-                        .on_click(cx.listener(move |this, _, window, cx| this.run_attention_action(&action, window, cx)))
-                        .into_any_element()
+                        .loading(changing)
+                        .on_click(cx.listener(move |this, _, window, cx| this.run_attention_action(&action, window, cx)));
+                    let keep = keep.clone().filter(|_| !changing).map(|id| {
+                        Button::new(SharedString::from(format!("att-keep-{}", a.id)), "Keep ssh")
+                            .style(ButtonStyle::Ghost)
+                            .tooltip("Don't ask again. Connect directly from its page any time.")
+                            .on_click(cx.listener(move |this, _, _, cx| this.keep_ssh(&id, cx)))
+                    });
+                    div().flex().flex_none().items_center().gap(px(2.)).children(keep).child(main).into_any_element()
                 });
                 // Explicit widths: GPUI 0.2 only ellipsizes text whose width it knows.
-                let text_w = (width - 2. - 28. - 14. - 12. - if button.is_some() { 140. } else { 0. }).max(120.);
+                let buttons_w = match (&button, &keep) {
+                    (None, _) => 0.,
+                    (Some(_), None) => 140.,
+                    (Some(_), Some(_)) => 230.,
+                };
+                let text_w = (width - 2. - 28. - 14. - 12. - buttons_w).max(120.);
                 div()
                     .flex()
                     .items_center()

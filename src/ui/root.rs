@@ -1306,8 +1306,21 @@ impl Root {
                     cx.open_url(t)
                 }
             }
+            "direct" => {
+                if let Some(t) = action.target.clone() {
+                    self.set_machine_direct(&t, true, cx)
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Keeps a machine on ssh: no more suggestions to connect to it directly.
+    pub(super) fn keep_ssh(&mut self, machine_id: &str, cx: &mut Context<Self>) {
+        if let Err(e) = self.engine.keep_ssh(machine_id) {
+            self.notify_user(e, true, cx);
+        }
+        cx.notify();
     }
 
     // -----------------------------------------------------------------------

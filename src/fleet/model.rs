@@ -301,6 +301,10 @@ pub struct DisplayInfo {
     /// Any size can be given to it, not only `modes` (Linux).
     #[serde(default)]
     pub any_size: bool,
+    /// Its size before Muxin first changed it, while it's at another one: the
+    /// way back. Remembered by this app while it runs (see Engine::set_displays).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<(u32, u32)>,
     /// How much the desktop scales things up on it (2: twice as big, as
     /// sharp); 0 when unknown.
     #[serde(default)]
@@ -308,6 +312,13 @@ pub struct DisplayInfo {
     /// The scales it can be set to (empty: it can't be).
     #[serde(default)]
     pub scales: Vec<f64>,
+}
+
+impl DisplayInfo {
+    /// Its size now, in whole points.
+    pub fn size(&self) -> (u32, u32) {
+        (self.width.round() as u32, self.height.round() as u32)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -547,7 +558,8 @@ pub struct Attention {
 #[serde(rename_all = "camelCase")]
 pub struct Action {
     pub label: String,
-    /// "settings" | "check" | "machine" | "runner" | "link" | "queue"
+    /// "settings" | "check" | "machine" | "runner" | "link" | "queue" |
+    /// "direct" (connect to the machine directly)
     pub kind: String,
     /// machine/runner id or URL, depending on `kind`
     pub target: Option<String>,

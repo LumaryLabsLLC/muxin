@@ -983,7 +983,7 @@ pub fn status_from(s: &Snapshot, surface: Surface) -> StatusResponse {
                 level: a.level.clone(),
                 title: a.title.clone(),
                 detail: a.detail.clone(),
-                machine_id: (kind == "machine").then(|| target.clone()).flatten(),
+                machine_id: matches!(kind, "machine" | "direct").then(|| target.clone()).flatten(),
                 runner_id: (kind == "runner").then_some(target).flatten(),
             }
         })

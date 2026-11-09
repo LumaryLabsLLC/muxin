@@ -1407,6 +1407,10 @@ impl Root {
                         format!("Over ssh{net}{speed}"),
                         c.note.clone().unwrap_or_else(|| match &via {
                             Some(v) => format!("One ssh connection through {v}, kept open."),
+                            // On this network: say what direct would bring.
+                            None if !c.direct && c.network.as_deref() == Some("Local network") => {
+                                "One ssh connection, kept open. Connect directly for a faster desktop and terminals.".into()
+                            }
                             None => "One ssh connection, kept open.".into(),
                         }),
                         c.direct,
@@ -1518,7 +1522,7 @@ impl Root {
     }
 
     /// Pairs for a direct connection (installs the listener there), or goes back to ssh.
-    fn set_machine_direct(&mut self, machine_id: &str, enabled: bool, cx: &mut Context<Self>) {
+    pub(super) fn set_machine_direct(&mut self, machine_id: &str, enabled: bool, cx: &mut Context<Self>) {
         use super::github::Load;
         if !self.conn_changing.insert(machine_id.to_string()) {
             return;

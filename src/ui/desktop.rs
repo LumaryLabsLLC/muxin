@@ -21,6 +21,7 @@ use super::terminal::{ime::Composition, keys};
 use super::theme::ActiveTheme;
 use crate::fleet::Engine;
 use crate::fleet::desktop::{FRAME, INPUT, META, TILES, keysym};
+use crate::fleet::model::DisplayInfo;
 use crate::fleet::link::Link;
 use crate::share::guest;
 
@@ -80,6 +81,21 @@ pub const NATIVE: u32 = 16384;
 
 /// Monitor sizes with a short name, offered when the monitor has them.
 const SIZES: [((u32, u32), &str); 4] = [((1280, 720), "720p"), ((1920, 1080), "1080p"), ((2560, 1440), "1440p"), ((3840, 2160), "4K")];
+
+/// The sizes the bar offers for a monitor, smallest first: the named ones it
+/// has, the size it's at, and the one it had before Muxin changed it (so
+/// there's always a way back, whatever that size is).
+fn size_choices(d: &DisplayInfo) -> Vec<((u32, u32), String)> {
+    let mut choices: Vec<((u32, u32), String)> = SIZES.iter().filter(|(size, _)| d.any_size || d.modes.contains(size)).map(|(size, label)| (*size, label.to_string())).collect();
+    for size in [Some(d.size()), d.before].into_iter().flatten() {
+        if !choices.iter().any(|(s, _)| *s == size) {
+            let label = SIZES.iter().find(|(s, _)| *s == size).map_or_else(|| format!("{}×{}", size.0, size.1), |(_, l)| l.to_string());
+            choices.push((size, label));
+        }
+    }
+    choices.sort_by_key(|&((w, h), _)| (w as u64 * h as u64, w));
+    choices
+}
 
 /// An app's window shown on its own (a `window:<id>` display), as its stream
 /// describes it.
@@ -1576,12 +1592,8 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
     };
     let group = |chips: Vec<gpui::Stateful<gpui::Div>>| div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(chips);
     let sizes = screen.and_then(|d| {
-        let current = (d.width.round() as u32, d.height.round() as u32);
-        let mut choices: Vec<((u32, u32), String)> = SIZES.iter().filter(|(size, _)| d.any_size || d.modes.contains(size)).map(|(size, label)| (*size, label.to_string())).collect();
-        if !choices.iter().any(|(size, _)| *size == current) {
-            choices.push((current, format!("{}×{}", current.0, current.1)));
-            choices.sort_by_key(|((w, h), _)| w * h);
-        }
+        let current = d.size();
+        let choices = size_choices(d);
         (choices.len() > 1).then(|| {
             group(
                 choices
@@ -1849,6 +1861,28 @@ mod tests {
 
     const GERMAN: &str = "com.apple.keylayout.German";
     const US: &str = "com.apple.keylayout.US";
+
+    fn monitor(size: (u32, u32), modes: &[(u32, u32)], before: Option<(u32, u32)>) -> DisplayInfo {
+        serde_json::from_value(json!({ "id": "2", "name": "BenQ RD280U", "width": size.0, "height": size.1, "modes": modes, "before": before })).unwrap()
+    }
+
+    fn labels(d: &DisplayInfo) -> Vec<String> {
+        size_choices(d).into_iter().map(|(_, l)| l).collect()
+    }
+
+    #[test]
+    fn the_size_it_had_stays_offered() {
+        let modes = [(2560, 1707), (1920, 1080), (1280, 720)];
+        // At its own size: that, and the named sizes it has.
+        assert_eq!(labels(&monitor((2560, 1707), &modes, None)), ["720p", "1080p", "2560×1707"]);
+        // Switched to 1080p by Muxin: the way back is still there.
+        assert_eq!(labels(&monitor((1920, 1080), &modes, Some((2560, 1707)))), ["720p", "1080p", "2560×1707"]);
+        // Even when the machine's list is short (an older agent) and the
+        // size it came from has a name.
+        assert_eq!(labels(&monitor((1280, 720), &[(1280, 720)], Some((1920, 1080)))), ["720p", "1080p"]);
+        let back = size_choices(&monitor((1920, 1080), &[(1920, 1080), (1280, 720)], Some((2560, 1707))));
+        assert_eq!(back.last().map(|c| c.0), Some((2560, 1707)));
+    }
 
     /// As GPUI reports it on a Mac: Shift taken off, the key named what it types.
     fn stroke(key: &str, control: bool, platform: bool) -> gpui::Keystroke {

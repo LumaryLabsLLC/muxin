@@ -163,6 +163,8 @@ impl Engine {
             return self.connection(&spec.id).await;
         }
         agent::ensure(&spec, probe.as_ref()).await?;
+        // Its choice, either way: no more suggestions to connect directly.
+        let _ = direct::set_ssh_only(&spec.id, !enabled);
         if !enabled {
             // Only this app: others paired with the machine keep their direct connections.
             if let (Ok(app), Some(l)) = (direct::app_fingerprint(), link::get(&spec).await) {
@@ -170,7 +172,9 @@ impl Engine {
             }
             direct::save(&spec.id, None)?;
             link::reset(&spec.id);
-            return self.connection(&spec.id).await;
+            let out = self.connection(&spec.id).await;
+            self.republish();
+            return out;
         }
         // Pair over ssh: the agent learns this app's fingerprint and (re)starts
         // its listener, which would cut a direct link off mid-request.
@@ -202,7 +206,18 @@ impl Engine {
         if out.note.is_none() {
             out.note = reply["note"].as_str().map(str::to_string);
         }
+        self.republish();
         Ok(out)
+    }
+
+    /// Keeps a machine on ssh without changing anything there: Muxin stops
+    /// suggesting a direct connection to it (Connect directly on its page
+    /// still works).
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub fn keep_ssh(&self, machine_id: &str) -> Result<(), String> {
+        direct::set_ssh_only(machine_id, true)?;
+        self.republish();
+        Ok(())
     }
 
     /// A machine that was paired left Muxin: its agent forgets this app too

@@ -37,6 +37,13 @@ pub struct Inputs<'a> {
     pub tailscale: Option<&'a TailscaleStatus>,
     /// Cloud machines' power as the provider last reported it, by machine id.
     pub droplets: &'a HashMap<String, String>,
+    /// How each machine's live link goes: ("direct" | "ssh", its network,
+    /// such as "Local network"), by machine id.
+    pub links: &'a HashMap<String, (&'static str, Option<&'static str>)>,
+    /// Machines paired for direct connections.
+    pub paired: &'a HashSet<String>,
+    /// Machines the user keeps on ssh (no suggestion to connect directly).
+    pub ssh_only: &'a HashSet<String>,
 }
 
 pub fn build(input: &Inputs) -> Snapshot {
@@ -1113,6 +1120,25 @@ fn attention(
         }
     }
 
+    // Reached over ssh on this network, where a direct connection would be
+    // quicker: ask once, until the user connects directly or keeps ssh.
+    if !input.demo {
+        for m in machines.iter().filter(|m| m.status == "online" && !m.local) {
+            let ssh_here = input.links.get(&m.id).is_some_and(|(via, network)| *via == "ssh" && *network == Some("Local network"));
+            // Inside another machine with nothing forwarded to it: direct can't get in.
+            let shut_in = m.parent.as_ref().is_some_and(|p| p.inside()) && m.direct_address.is_none();
+            if ssh_here && !shut_in && !input.paired.contains(&m.id) && !input.ssh_only.contains(&m.id) {
+                out.push(Attention {
+                    id: format!("direct-{}", m.id),
+                    level: "info".into(),
+                    title: format!("Connect to {} directly?", m.name),
+                    detail: "It's on your local network. Without ssh in between, its desktop and terminals respond faster.".into(),
+                    action: action("Connect directly", "direct", Some(m.id.clone())),
+                });
+            }
+        }
+    }
+
     for m in machines {
         if let Some(d) = m.diagnostics.iter().find(|d| d.code == "low-disk") {
             out.push(Attention {
@@ -1256,6 +1282,9 @@ mod tests {
             tailnet: &HashMap::new(),
             tailscale: None,
             droplets: &HashMap::new(),
+            links: &HashMap::new(),
+            paired: &HashSet::new(),
+            ssh_only: &HashSet::new(),
         })
     }
 
@@ -1672,5 +1701,50 @@ mod tests {
         assert!(version_lt("2.317.0", "2.321.0"));
         assert!(!version_lt("2.321.0", "2.321.0"));
         assert!(version_lt("2.99.0", "2.100.0"));
+    }
+
+    /// A machine reached over ssh on this network gets the question; one
+    /// that's direct, paired, kept on ssh, or away from this network doesn't.
+    #[test]
+    fn suggests_connecting_directly_on_this_network() {
+        let inv = inventory("[[machine]]\nname = \"Work Mac\"\nhost = \"ahanna@work.local\"\n");
+        let probes = HashMap::from([("work-mac".to_string(), probe_with(Vec::new()))]);
+        let settings = Settings::default();
+        let asks = |link: (&'static str, Option<&'static str>), paired: &[&str], ssh_only: &[&str]| -> Option<Attention> {
+            let links = HashMap::from([("work-mac".to_string(), link)]);
+            let set = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<HashSet<String>>();
+            let (paired, ssh_only) = (set(paired), set(ssh_only));
+            let snap = build(&Inputs {
+                now: Utc::now(),
+                demo: false,
+                inventory: &inv,
+                inventory_info: InventoryInfo::default(),
+                settings: &settings,
+                probes: &probes,
+                checking: &HashSet::new(),
+                check: CheckInfo::default(),
+                github: None,
+                github_syncing: false,
+                token_source: "gh".into(),
+                tailnet: &HashMap::new(),
+                tailscale: None,
+                droplets: &HashMap::new(),
+                links: &links,
+                paired: &paired,
+                ssh_only: &ssh_only,
+            });
+            snap.attention.into_iter().find(|a| a.id.starts_with("direct-"))
+        };
+        let lan = ("ssh", Some("Local network"));
+        let a = asks(lan, &[], &[]).expect("asked");
+        assert_eq!(a.id, "direct-work-mac");
+        assert_eq!(a.title, "Connect to Work Mac directly?");
+        let action = a.action.expect("an action");
+        assert_eq!((action.kind.as_str(), action.target.as_deref()), ("direct", Some("work-mac")));
+
+        assert!(asks(("direct", Some("Local network")), &[], &[]).is_none(), "already direct");
+        assert!(asks(lan, &["work-mac"], &[]).is_none(), "paired (direct didn't come up: its page says why)");
+        assert!(asks(lan, &[], &["work-mac"]).is_none(), "kept on ssh");
+        assert!(asks(("ssh", Some("Tailscale")), &[], &[]).is_none(), "not on this network");
     }
 }

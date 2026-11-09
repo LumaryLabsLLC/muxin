@@ -6,7 +6,7 @@
 //! Files, in Muxin's config folder: `identity/cert.der` and
 //! `identity/key.der` (this app), `direct.json` (paired machines).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -71,6 +71,34 @@ fn load() -> HashMap<String, Paired> {
 
 pub fn paired(machine_id: &str) -> Option<Paired> {
     load().remove(machine_id)
+}
+
+/// The machines paired for direct connections, by id.
+pub fn paired_ids() -> HashSet<String> {
+    load().into_keys().collect()
+}
+
+/// Machines the user keeps on ssh: Muxin doesn't suggest connecting to them
+/// directly. `ssh-only.json`, a list of machine ids.
+fn ssh_only_store() -> Option<PathBuf> {
+    DIR.get().map(|d| d.join("ssh-only.json"))
+}
+
+pub fn ssh_only() -> HashSet<String> {
+    ssh_only_store().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+/// Keeps a machine on ssh (no more suggestions to connect directly), or not.
+pub fn set_ssh_only(machine_id: &str, keep: bool) -> Result<(), String> {
+    let path = ssh_only_store().ok_or("Muxin's config folder isn't set")?;
+    let mut all = ssh_only();
+    let changed = if keep { all.insert(machine_id.to_string()) } else { all.remove(machine_id) };
+    if !changed {
+        return Ok(());
+    }
+    let mut list: Vec<String> = all.into_iter().collect();
+    list.sort();
+    crate::config::write_atomic(&path, &serde_json::to_vec_pretty(&list).unwrap_or_default()).map_err(|e| e.to_string())
 }
 
 pub fn save(machine_id: &str, entry: Option<Paired>) -> Result<(), String> {

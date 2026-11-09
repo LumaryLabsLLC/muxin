@@ -83,6 +83,9 @@ struct State {
     droplets: HashMap<String, String>,
     /// Machines' monitors, as last listed (see fleet::desktop).
     displays: HashMap<String, Vec<super::model::DisplayInfo>>,
+    /// Monitors' sizes from before Muxin first changed them, by machine and
+    /// monitor, until they're back at them.
+    display_before: HashMap<(String, String), (u32, u32)>,
     /// Stop flags of the operations that can be cancelled.
     cancels: HashMap<u64, Arc<std::sync::atomic::AtomicBool>>,
 }
@@ -193,6 +196,7 @@ impl Engine {
             tailscale: None,
             droplets: persisted.droplets,
             displays: HashMap::new(),
+            display_before: HashMap::new(),
             cancels: HashMap::new(),
         };
         let (tx, _) = watch::channel(Arc::new(Snapshot::default()));
@@ -706,9 +710,29 @@ impl Engine {
         self.publish(&mut st);
     }
 
-    /// What the machine's monitors are now (see fleet::desktop).
-    pub(crate) fn set_displays(&self, machine_id: &str, displays: Vec<super::model::DisplayInfo>) {
+    /// Keeps a monitor's size, as last listed, before Muxin changes it; the
+    /// first one only, so a few changes in a row still lead back to where it
+    /// was. False when the monitor hasn't been listed.
+    pub(crate) fn remember_display_size(&self, machine_id: &str, display: &str) -> bool {
         let mut st = self.state.lock().unwrap();
+        let Some(size) = st.displays.get(machine_id).and_then(|all| all.iter().find(|d| d.id == display)).map(|d| d.size()) else { return false };
+        st.display_before.entry((machine_id.to_string(), display.to_string())).or_insert(size);
+        true
+    }
+
+    /// What the machine's monitors are now (see fleet::desktop), each with
+    /// its size from before Muxin changed it, while it's at another.
+    pub(crate) fn set_displays(&self, machine_id: &str, mut displays: Vec<super::model::DisplayInfo>) {
+        let mut st = self.state.lock().unwrap();
+        for d in displays.iter_mut() {
+            let key = (machine_id.to_string(), d.id.clone());
+            d.before = st.display_before.get(&key).copied();
+            if d.before == Some(d.size()) {
+                // Back where it was: nothing to go back to.
+                st.display_before.remove(&key);
+                d.before = None;
+            }
+        }
         if st.displays.get(machine_id) != Some(&displays) {
             st.displays.insert(machine_id.to_string(), displays);
             self.publish(&mut st);
@@ -1243,6 +1267,10 @@ impl Engine {
             (m, Some(t)) => Some(t + chrono::Duration::minutes(m as i64)),
             (_, None) => None,
         };
+        // How each machine is reached right now, for suggesting direct connections.
+        let links: HashMap<String, (&'static str, Option<&'static str>)> =
+            st.inventory.machines.iter().filter_map(|m| super::link::current(&m.id).map(|l| (m.id.clone(), (l.transport(), l.network())))).collect();
+        let (paired, ssh_only) = if self.demo.is_some() { Default::default() } else { (super::direct::paired_ids(), super::direct::ssh_only()) };
         let mut snapshot = build(&Inputs {
             now: Utc::now(),
             demo: self.demo.is_some(),
@@ -1264,6 +1292,9 @@ impl Engine {
             tailnet: &st.tailnet,
             tailscale: st.tailscale.as_ref(),
             droplets: &st.droplets,
+            links: &links,
+            paired: &paired,
+            ssh_only: &ssh_only,
         });
         snapshot.version = st.version;
         snapshot.operations = st.operations.iter().cloned().collect();
@@ -1400,5 +1431,28 @@ mod tests {
         let beacon = s.machines.iter().find(|m| m.id == "beacon").unwrap();
         assert!(!beacon.checking && beacon.probe.is_some(), "run_check returned while beacon was still being checked");
         assert_eq!(beacon.platform, "linux-x64");
+    }
+
+    /// A monitor Muxin resized keeps the size it had as `before`, through
+    /// more changes, until it's back at it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resized_monitor_remembers_its_size() {
+        let engine = Engine::new(Paths::resolve(Some(std::env::temp_dir().join("muxen-display-before")), None), true);
+        let at = |w: u32, h: u32| -> Vec<super::super::model::DisplayInfo> { vec![serde_json::from_value(serde_json::json!({ "id": "2", "name": "BenQ", "width": w, "height": h })).unwrap()] };
+        let before = |engine: &Engine| engine.state.lock().unwrap().displays["m"][0].before;
+        assert!(!engine.remember_display_size("m", "2"), "a monitor never listed");
+        engine.set_displays("m", at(2560, 1707));
+        assert!(engine.remember_display_size("m", "2"));
+        engine.set_displays("m", at(1920, 1080));
+        assert_eq!(before(&engine), Some((2560, 1707)));
+        // Another change: still the first size.
+        assert!(engine.remember_display_size("m", "2"));
+        engine.set_displays("m", at(1280, 720));
+        assert_eq!(before(&engine), Some((2560, 1707)));
+        // Back: forgotten.
+        engine.set_displays("m", at(2560, 1707));
+        assert_eq!(before(&engine), None);
+        engine.set_displays("m", at(1920, 1080));
+        assert_eq!(before(&engine), None);
     }
 }

@@ -12,7 +12,9 @@ use super::theme::Theme;
 use crate::fleet::model::Machine;
 use crate::fleet::ports::{Forward, ListeningPort};
 
-/// Ports shown before "Show N more" (sites always show).
+/// Sites shown before "Show N more" (one open here always shows).
+const SITES_SHOWN: usize = 5;
+/// Other ports shown before "Show N more".
 const OTHERS_SHOWN: usize = 0;
 
 impl Root {
@@ -59,11 +61,19 @@ impl Root {
             Some(Load::Failed(e)) => kit::card(theme).p(px(16.)).text_size(px(12.5)).text_color(theme.error).child(e.clone()).into_any_element(),
             Some(Load::Ready(_)) => {
                 let mut rows: Vec<AnyElement> = Vec::new();
+                // The first few sites; the rest wait behind Show more, unless open here.
+                let mut hidden_sites = 0;
                 for (i, p) in sites.iter().enumerate() {
-                    rows.push(self.port_row(theme, m, p, open.iter().find(|f| f.port == p.port), i, cx));
+                    let forward = open.iter().find(|f| f.port == p.port);
+                    if !more && i >= SITES_SHOWN && forward.is_none() {
+                        hidden_sites += 1;
+                        continue;
+                    }
+                    rows.push(self.port_row(theme, m, p, forward, i, cx));
                 }
-                let hidden = if more { 0 } else { others.len().saturating_sub(OTHERS_SHOWN) };
-                for (i, p) in others.iter().take(others.len() - hidden).enumerate() {
+                let hidden_others = if more { 0 } else { others.len().saturating_sub(OTHERS_SHOWN) };
+                let hidden = hidden_sites + hidden_others;
+                for (i, p) in others.iter().take(others.len() - hidden_others).enumerate() {
                     rows.push(self.port_row(theme, m, p, open.iter().find(|f| f.port == p.port), 100 + i, cx));
                 }
                 // Ports open here that aren't listed (opened by number, or gone quiet).
@@ -73,10 +83,17 @@ impl Root {
                 }
                 if rows.is_empty() && hidden == 0 {
                     rows.push(div().p(px(16.)).text_size(px(12.5)).text_color(theme.text_muted).child(format!("Nothing is listening on {} right now. Start a server there and look again.", m.name)).into_any_element());
-                } else if sites.is_empty() && others.len() == hidden && open.is_empty() {
+                } else if sites.is_empty() && others.len() == hidden_others && open.is_empty() {
                     rows.insert(0, div().px(px(16.)).py(px(12.)).text_size(px(12.5)).text_color(theme.text_muted).child("No web servers running there.").into_any_element());
                 }
-                let toggle = (!others.is_empty()).then(|| {
+                let label = if more {
+                    "Show fewer".to_string()
+                } else if hidden_sites > 0 {
+                    format!("Show {hidden} more")
+                } else {
+                    format!("{} other port{}: databases, system services, apps' helpers", others.len(), if others.len() == 1 { "" } else { "s" })
+                };
+                let toggle = (hidden > 0 || (more && (!others.is_empty() || sites.len() > SITES_SHOWN))).then(|| {
                     let mid = mid.clone();
                     div()
                         .id("m-ports-more")
@@ -90,7 +107,7 @@ impl Root {
                         .text_color(theme.text_placeholder)
                         .hover(|st| st.text_color(theme.text_muted))
                         .child(icon(if more { "chevron-down" } else { "chevron-right" }, 11., theme.text_placeholder))
-                        .child(if more { "Fewer ports".to_string() } else { format!("{} other port{}: databases, system services, apps' helpers", others.len(), if others.len() == 1 { "" } else { "s" }) })
+                        .child(label)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.ports_more.remove(&mid) {
                                 this.ports_more.insert(mid.clone());

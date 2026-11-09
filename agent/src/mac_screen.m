@@ -132,20 +132,24 @@ static CFArrayRef muxen_modes(uint32_t id) {
 }
 
 /// The sizes a display can be set to, in points, as width/height pairs into
-/// `sizes` (room for `max` of them); how many (repeats included).
+/// `sizes` (room for `max` of them); how many there are (repeats included),
+/// which can be more than `max`: then only the first `max` are written. A
+/// big monitor offers well over a hundred, smallest first.
 size_t muxen_display_modes(uint32_t id, uint32_t *sizes, size_t max) {
     CFArrayRef modes = muxen_modes(id);
     if (!modes) {
         return 0;
     }
     size_t n = 0;
-    for (CFIndex i = 0; i < CFArrayGetCount(modes) && n < max; i++) {
+    for (CFIndex i = 0; i < CFArrayGetCount(modes); i++) {
         CGDisplayModeRef mode = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
         if (!CGDisplayModeIsUsableForDesktopGUI(mode)) {
             continue;
         }
-        sizes[n * 2] = (uint32_t)CGDisplayModeGetWidth(mode);
-        sizes[n * 2 + 1] = (uint32_t)CGDisplayModeGetHeight(mode);
+        if (n < max) {
+            sizes[n * 2] = (uint32_t)CGDisplayModeGetWidth(mode);
+            sizes[n * 2 + 1] = (uint32_t)CGDisplayModeGetHeight(mode);
+        }
         n++;
     }
     CFRelease(modes);

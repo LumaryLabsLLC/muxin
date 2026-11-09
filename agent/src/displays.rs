@@ -95,8 +95,7 @@ pub fn list() -> Value {
                     if sizes.is_empty() {
                         continue;
                     }
-                    sizes.sort_by_key(|(w, h)| std::cmp::Reverse(w * h));
-                    sizes.dedup();
+                    biggest_first(&mut sizes);
                     d["modes"] = json!(sizes);
                     if let Some(p) = layout.placed(&id).map(|i| &layout.monitors[i]) {
                         d["scale"] = json!(p.scale);
@@ -138,6 +137,15 @@ pub fn rename(req: &Value) -> Value {
     }
     save_names(&all);
     json!({ "ok": true })
+}
+
+/// A monitor's sizes, biggest first, each once. By area, then width, so
+/// repeats sit together even when another size has the same area (1600×900
+/// and 1200×1200 both have 1.44 million pixels).
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+fn biggest_first(sizes: &mut Vec<(u32, u32)>) {
+    sizes.sort_by_key(|&(w, h)| std::cmp::Reverse((w as u64 * h as u64, w, h)));
+    sizes.dedup();
 }
 
 /// The displays, from `muxen-agent displays` run where it can see them: in
@@ -278,8 +286,7 @@ fn monitors() -> Result<Vec<Value>, String> {
         let Some(res) = &res else { return Vec::new() };
         let Some(info) = m.outputs.first().and_then(|o| conn.randr_get_output_info(*o, res.config_timestamp).ok()?.reply().ok()) else { return Vec::new() };
         let mut sizes: Vec<(u32, u32)> = info.modes.iter().filter_map(|id| res.modes.iter().find(|m| m.id == *id)).map(|m| (m.width as u32, m.height as u32)).collect();
-        sizes.sort_by_key(|(w, h)| std::cmp::Reverse(w * h));
-        sizes.dedup();
+        biggest_first(&mut sizes);
         sizes
     };
     for (i, m) in monitors.iter().enumerate() {
@@ -1437,11 +1444,16 @@ fn monitors() -> Result<Vec<Value>, String> {
                     format!("Display {external}")
                 }
             };
-            let mut modes = [(0u32, 0u32); 64];
-            let count = unsafe { muxen_display_modes(id, modes.as_mut_ptr() as *mut u32, modes.len()) };
+            // All of them: a big monitor has well over a hundred, smallest
+            // first, so a short list missed every size it's really used at.
+            let mut modes = vec![(0u32, 0u32); 256];
+            let mut count = unsafe { muxen_display_modes(id, modes.as_mut_ptr() as *mut u32, modes.len()) };
+            if count > modes.len() {
+                modes.resize(count, (0, 0));
+                count = unsafe { muxen_display_modes(id, modes.as_mut_ptr() as *mut u32, modes.len()) }.min(modes.len());
+            }
             let mut sizes: Vec<(u32, u32)> = modes[..count].to_vec();
-            sizes.sort_by_key(|(w, h)| std::cmp::Reverse(w * h));
-            sizes.dedup();
+            biggest_first(&mut sizes);
             let scale = if tw > 0. { (pw as f64 / tw * 100.).round() / 100. } else { 1. };
             json!({ "id": id.to_string(), "name": name, "x": x, "y": y, "width": tw, "height": th, "pixel_width": pw, "pixel_height": ph, "main": id == main, "modes": sizes, "scale": scale })
         })
@@ -1572,6 +1584,15 @@ fn take_down(_: &Value, _: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_come_biggest_first_and_once() {
+        // A Mac's order: smallest first, repeats apart, and two sizes with
+        // the same area between repeats of one of them.
+        let mut sizes = vec![(800, 600), (1600, 900), (1200, 1200), (1600, 900), (2560, 1707), (800, 600), (1200, 1200), (2560, 1707)];
+        biggest_first(&mut sizes);
+        assert_eq!(sizes, [(2560, 1707), (1600, 900), (1200, 1200), (800, 600)]);
+    }
 
     #[test]
     fn reads_the_display_service() {

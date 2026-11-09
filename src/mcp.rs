@@ -67,7 +67,7 @@ of the user's machines (Docker), on a new branch of a fresh checkout, with its p
 off since the container is its sandbox. box_create makes one (repo, prompt, agent); box_list \
 shows them (running, paused, git); box_send asks one more, starting it again when it's paused \
 (a box pauses by itself when its agent has been quiet for a while); session_read and \
-session_question work on a running box's session_id; box_destroy deletes one with its unpushed \
+session_question work on a running box's session_id (as their session); box_destroy deletes one with its unpushed \
 work. Only make or destroy boxes when the user asked.
 
 GitHub: github_inbox (review requests, assigned issues, the user's PRs), github_repos (favorites first), github_repo \
@@ -206,6 +206,7 @@ async fn handle(engine: &Arc<Engine>, session: &Session, method: &str, params: V
 /// Runs a tool and wraps the outcome as an MCP tool result. Failures are
 /// results with `isError: true`, not protocol errors, so the model sees them.
 pub async fn call_tool(engine: &Arc<Engine>, session: &Session, name: &str, args: Value) -> Value {
+    let args = session_arg(args);
     // A screenshot comes back as an image the model can look at.
     if name == "desktop_screenshot" {
         let machine = args["machine_id"].as_str().unwrap_or("").to_string();
@@ -306,7 +307,22 @@ fn readable_text(tool: &str, v: &Value) -> Option<String> {
     }
 }
 
+/// The session tools take `session` (see SESSION_ID); what they're given is the
+/// request's `session_id`, also when a caller still names it that.
+fn session_arg(mut args: Value) -> Value {
+    if let Some(o) = args.as_object_mut()
+        && !o.contains_key("session_id")
+        && let Some(id) = o.remove("session")
+    {
+        o.insert("session_id".into(), id);
+    }
+    args
+}
+
+/// A tool's result. `structuredContent` has to be an object (Claude's MCP client
+/// refuses anything else): a list goes under "result".
 fn tool_result(value: Value, text: Option<String>, is_error: bool) -> Value {
+    let value = if value.is_object() { value } else { json!({ "result": value }) };
     let text = text.unwrap_or_else(|| serde_json::to_string_pretty(&value).unwrap_or_default());
     json!({
         "content": [{ "type": "text", "text": text }],
@@ -344,7 +360,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "cloud_power" => ok(api::cloud_power(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "machine_power" => ok(api::machine_power(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "vm_options" => ok(api::vm_options(engine).await),
-        "schedule_list" => ok(api::schedule_list(engine, args(a)?).await?),
+        "schedule_list" => ok(json!({ "machines": api::schedule_list(engine, args(a)?).await? })),
         "schedule_save" => ok(api::schedule_save(engine, args(a)?).await?),
         "schedule_delete" => ok(api::schedule_delete(engine, args(a)?).await?),
         "schedule_run" => ok(api::schedule_run(engine, args(a)?).await?),
@@ -417,7 +433,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "agent_usage" => ok(api::usage(engine, args(a)?).await?),
         "machine_processes" => ok(api::machine_processes(engine, args(a)?).await?),
         "process_signal" => ok(api::process_signal(engine, args(a)?).await?),
-        "run_on_machines" => ok(api::run_on_machines(engine, args(a)?).await?),
+        "run_on_machines" => ok(json!({ "machines": api::run_on_machines(engine, args(a)?).await? })),
         "wake_machine" => ok(api::wake_machine(engine, args(a)?).await?),
         "direct_connection" => ok(api::set_direct(engine, args(a)?).await?),
         "git_setup" => ok(api::git_setup(engine, args(a)?).await?),
@@ -443,6 +459,9 @@ const MACHINE_ID: &str = "Machine id (a slug like \"mac-studio\"; the display na
 const DISPLAY_ID: &str = "One of the machine's displays, by its id from desktop_displays, or one app's window as \"window:<id>\" (an id from desktop_windows). Default: the whole desktop (Linux) or the main display (a Mac).";
 const WORKSPACE_ID: &str = "Workspace id from workspace_create or workspace_list, e.g. \"ws-7f3a2c\".";
 const WS_PATH: &str = "Path relative to the workspace folder, e.g. \"src/main.rs\". Absolute paths and \"..\" escapes are rejected.";
+/// The session tools' argument is `session`, not `session_id`: Claude Desktop drops a tool argument
+/// named exactly session_id from tools/call (#47), so those tools got none. `session_id` still
+/// works (session_arg).
 const SESSION_ID: &str = "Session id from session_list or session_start: \"<machine-id>/<name>\", e.g. \"beelink/claude-3f9a\". A bare name works when unique.";
 const RUNNER_ID: &str = "Runner id: \"<machine-id>/<runner-name>\", or \"github/<name>\" for a runner no machine lists. A bare runner name works when unique.";
 
@@ -672,7 +691,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "box_list",
-            "description": "The user's boxes: tasks an agent CLI works on in a container of its own on one of their machines. Each has its id (box-ab12cd), machine, repo, branch, agent, state (running, starting or paused), agentState while it runs (working, needs_you, done or idle, as session_list says it), busy (working right now), attention (an unread notice), session_id while it runs (for session_read and session_question), its task, and git (what it changed, its pull request). Read-only.",
+            "description": "The user's boxes: tasks an agent CLI works on in a container of its own on one of their machines. Each has its id (box-ab12cd), machine, repo, branch, agent, state (running, starting or paused), agentState while it runs (working, needs_you, done or idle, as session_list says it), busy (working right now), attention (an unread notice), session_id while it runs (pass it as session to session_read and session_question), its task, and git (what it changed, its pull request). Read-only.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": "Only this machine's boxes." } }), &[]),
             "annotations": annotations("List boxes", true, false, true, false),
         }),
@@ -932,84 +951,84 @@ pub fn tools() -> Vec<Value> {
             "name": "session_read",
             "description": "The session's screen plus recent scrollback as plain text, with its status and state (working, needs_you, done, idle). Use it to see what an agent is doing or waiting for.",
             "inputSchema": schema(json!({
-                "session_id": { "type": "string", "description": SESSION_ID },
+                "session": { "type": "string", "description": SESSION_ID },
                 "lines": { "type": "integer", "minimum": 1, "maximum": 50000, "description": "Scrollback lines above the screen to include. Default 200." }
-            }), &["session_id"]),
+            }), &["session"]),
             "annotations": annotations("Read session screen", true, false, true, false),
         }),
         json!({
             "name": "session_wait",
             "description": "Wait until a session's agent is done (it finished its turn), needs you (a question or an approval waits), or exits, then return its state and the end of what it said (its answer, or the question with its options). Use it after starting a helper or sending it more, instead of reading its screen over and over. Returns at once when it's already done or waiting. timed_out: true when timeout_secs passed first (it's still working): call it again. Read-only.",
             "inputSchema": schema(json!({
-                "session_id": { "type": "string", "description": SESSION_ID },
+                "session": { "type": "string", "description": SESSION_ID },
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Give up after this long. Default 50: many MCP clients stop waiting for a tool after a minute." }
-            }), &["session_id"]),
+            }), &["session"]),
             "annotations": annotations("Wait for a session", true, false, true, false),
         }),
         json!({
             "name": "session_send",
             "description": "Type text into a session, then press Enter (unless enter=false). Answers an agent's question or gives it a new instruction. Only send what the user asked you to.",
             "inputSchema": schema(json!({
-                "session_id": { "type": "string", "description": SESSION_ID },
+                "session": { "type": "string", "description": SESSION_ID },
                 "text": { "type": "string", "description": "Text to type." },
                 "enter": { "type": "boolean", "description": "Press Enter afterwards. Default true." }
-            }), &["session_id", "text"]),
+            }), &["session", "text"]),
             "annotations": annotations("Type into session", false, false, false, false),
         }),
         json!({
             "name": "session_action",
             "description": "Ask a session's agent to do one of Muxin's session actions, by typing that action's prompt (the user may have changed it in Settings) into it: commit (commit its changes, don't push), commit_push, pull_request (push and open or update the branch's pull request), review (review the branch against the default branch, no code changes), fix_comments (address the pull request's review comments), conflicts (bring the branch up to date and resolve conflicts) or recap (summarize the session). session_list's `git` says which fit: a branch, a pull request. Only when the user asked for it.",
             "inputSchema": schema(json!({
-                "session_id": { "type": "string", "description": SESSION_ID },
+                "session": { "type": "string", "description": SESSION_ID },
                 "action": { "type": "string", "enum": ["commit", "commit_push", "pull_request", "review", "fix_comments", "conflicts", "recap"], "description": "Which action." }
-            }), &["session_id", "action"]),
+            }), &["session", "action"]),
             "annotations": annotations("Ask a session's agent", false, false, false, false),
         }),
         json!({
             "name": "session_question",
             "description": "What a session's agent is waiting for, read off its screen: a choice (\"Do you want to proceed?\" with its options, each with a key, and the one selected), or, when it's simply done, the end of what it said (options empty). Read-only.",
-            "inputSchema": schema(json!({ "session_id": { "type": "string", "description": SESSION_ID } }), &["session_id"]),
+            "inputSchema": schema(json!({ "session": { "type": "string", "description": SESSION_ID } }), &["session"]),
             "annotations": annotations("Read what a session asks", true, false, true, false),
         }),
         json!({
             "name": "session_answer",
             "description": "Pick one of a waiting session's choices by its key from session_question (\"1\", \"2\", or \"#1\" for a menu without numbers). It approves or refuses what the agent asked: only when the user asked you to answer, and say which option. To reply with text, use session_send.",
             "inputSchema": schema(json!({
-                "session_id": { "type": "string", "description": SESSION_ID },
+                "session": { "type": "string", "description": SESSION_ID },
                 "choice": { "type": "string", "description": "The option's key." }
-            }), &["session_id", "choice"]),
+            }), &["session", "choice"]),
             "annotations": annotations("Answer a session's question", false, false, false, false),
         }),
         json!({
             "name": "session_stop",
             "description": "End a session: closes it and whatever runs in it. Unsaved agent state is lost. Ask the user first unless they asked for exactly this.",
-            "inputSchema": schema(json!({ "session_id": { "type": "string", "description": SESSION_ID } }), &["session_id"]),
+            "inputSchema": schema(json!({ "session": { "type": "string", "description": SESSION_ID } }), &["session"]),
             "annotations": annotations("Stop session", false, true, true, false),
         }),
         json!({
             "name": "session_restart",
             "description": "Run a session's agent again in the same session (for one that exited, or is stuck). Kills what's running in it first.",
-            "inputSchema": schema(json!({ "session_id": { "type": "string", "description": SESSION_ID } }), &["session_id"]),
+            "inputSchema": schema(json!({ "session": { "type": "string", "description": SESSION_ID } }), &["session"]),
             "annotations": annotations("Restart session", false, true, false, false),
         }),
         json!({
             "name": "session_rename",
             "description": "Give a session a new title (what the app's sidebar and session_list show). The agent on its machine keeps it, so it sticks for every Muxin. An empty title goes back to the one it started with. Doesn't touch what runs in it.",
             "inputSchema": schema(json!({
-                "session_id": { "type": "string", "description": SESSION_ID },
+                "session": { "type": "string", "description": SESSION_ID },
                 "title": { "type": "string", "description": "The new title, e.g. \"API server\"." }
-            }), &["session_id", "title"]),
+            }), &["session", "title"]),
             "annotations": annotations("Rename session", false, false, true, false),
         }),
         json!({
             "name": "session_handoff",
             "description": "Hand a session's work to another agent (Claude Code to Codex, say), or a box's to another agent in the box: Muxin writes .muxin/handoff.md in its folder (where the git work stands, the agent's to-do list, and the conversation so far from the agent's own transcript: Claude Code, Codex, Gemini CLI and Pi; else what its terminal showed), starts the new agent there asked to read it first, and ends the old session unless keep. With machine_id the work moves to that machine first (git checkouts only; the folder it left stays as it was). Returns the new session, the note's path and what it was made from (`source`). Only when the user asked.",
             "inputSchema": schema(json!({
-                "session_id": { "type": "string", "description": "A session id, or a box id (box-7k2m9q)." },
+                "session": { "type": "string", "description": "A session id, or a box id (box-7k2m9q)." },
                 "agent": { "type": "string", "description": format!("The agent to hand it to: {handoff_list}.") },
                 "keep": { "type": "boolean", "description": "Keep the old session running too. Default false." },
                 "machine_id": { "type": "string", "description": "Move the work to this machine and continue there: its commits that aren't on origin, uncommitted changes and new files go into a workspace there (a worktree of a checkout of the repository, else a clone). Default: the session's own machine. Not for boxes." }
-            }), &["session_id", "agent"]),
+            }), &["session", "agent"]),
             "annotations": annotations("Hand off a session", false, true, false, false),
         }),
         json!({
@@ -1437,6 +1456,43 @@ mod tests {
         assert!(ran["content"][0]["text"].as_str().unwrap().starts_with("exit code: 0"));
         let destroyed = call_tool(&engine, &session, "workspace_destroy", json!({"workspace_id": id})).await;
         assert_eq!(destroyed["isError"], false, "{destroyed}");
+    }
+
+    // #47: Claude Desktop drops an argument named session_id, and Claude's
+    // client refuses a structuredContent that isn't an object.
+    #[test]
+    fn no_tool_takes_an_argument_named_session_id() {
+        for t in tools() {
+            assert!(t["inputSchema"]["properties"].get("session_id").is_none(), "{}", t["name"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn session_tools_take_session_and_still_session_id() {
+        let engine = demo();
+        engine.run_check(None).await;
+        let session = Session::default();
+        for args in [json!({"session": "forge/shell-2b81"}), json!({"session_id": "forge/shell-2b81"})] {
+            let out = call_tool(&engine, &session, "session_read", args.clone()).await;
+            assert_eq!(out["isError"], false, "{args}: {out}");
+            assert_eq!(out["structuredContent"]["session_id"], "forge/shell-2b81");
+        }
+        let none = call_tool(&engine, &session, "session_read", json!({})).await;
+        assert_eq!(none["isError"], true, "{none}");
+    }
+
+    #[tokio::test]
+    async fn every_result_is_an_object() {
+        let engine = demo();
+        engine.run_check(None).await;
+        let session = Session::default();
+        let schedules = call_tool(&engine, &session, "schedule_list", json!({})).await;
+        assert_eq!(schedules["isError"], false, "{schedules}");
+        assert!(schedules["structuredContent"]["machines"].is_array(), "{schedules}");
+        let ran = call_tool(&engine, &session, "run_on_machines", json!({"machine_ids": ["forge"], "command": "true"})).await;
+        assert!(ran["structuredContent"]["machines"].is_array(), "{ran}");
+        let listed = tool_result(json!([1, 2]), None, false);
+        assert_eq!(listed["structuredContent"], json!({"result": [1, 2]}));
     }
 
     #[tokio::test(flavor = "multi_thread")]

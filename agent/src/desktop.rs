@@ -2113,7 +2113,7 @@ mod mac {
         /// Lets go of every key and button it pressed there.
         fn let_go(&mut self) {
             for (code, _) in self.pressed.drain(..) {
-                unsafe { muxen_key(code, 0, 0) };
+                unsafe { muxen_key(code, 0, key_flags(code, 0)) };
             }
             let (x, y) = self.at;
             for (i, up) in [LEFT_UP, RIGHT_UP, OTHER_UP].into_iter().enumerate() {
@@ -2375,14 +2375,14 @@ mod mac {
                             (super::typed_char(sym).is_none() || self.pressed.iter().any(|(c, _)| *c == code)).then_some(code)
                         });
                         if let Some(code) = code {
-                            unsafe { muxen_key(code, 0, self.flags) };
+                            unsafe { muxen_key(code, 0, key_flags(code, self.flags)) };
                             self.pressed.retain(|(c, _)| *c != code);
                         }
                         return;
                     }
                     match mac_press(sym, self.flags, e["char"].as_bool().unwrap_or(false), &Layout::current()) {
                         MacPress::Key(code, flags) => {
-                            unsafe { muxen_key(code, 1, flags) };
+                            unsafe { muxen_key(code, 1, key_flags(code, flags)) };
                             self.pressed.retain(|(c, _)| *c != code);
                             self.pressed.push((code, sym));
                         }
@@ -2431,6 +2431,22 @@ mod mac {
             0xffeb | 0xffec | 0xffe7 => 0x100000, // command
             _ => return None,
         })
+    }
+
+    const FN: u64 = 0x800000;
+    const KEYPAD: u64 = 0x200000;
+
+    /// The flags a key's events carry: the modifiers held, and what a real
+    /// keyboard adds for the key itself. Fn for the arrows, the keys above
+    /// them (Home, End, Page Up, Page Down, Delete) and F1 to F12, and the
+    /// keypad's for the arrows. Mission Control's shortcuts are defined with
+    /// Fn, so the Dock doesn't take ⌃←, ⌃→ or ⌃↑ without it.
+    fn key_flags(code: u16, flags: u64) -> u64 {
+        match code {
+            123..=126 => flags | FN | KEYPAD,
+            96..=101 | 103 | 109 | 111 | 115..=122 => flags | FN,
+            _ => flags,
+        }
     }
 
     #[derive(Debug, PartialEq)]
@@ -2580,6 +2596,24 @@ mod mac {
 
         fn keycode(sym: u32) -> Option<u16> {
             super::keycode(sym, 0, &Layout::us()).map(|(code, _)| code)
+        }
+
+        #[test]
+        fn arrows_and_function_keys_carry_fn_as_from_a_keyboard() {
+            const CONTROL: u64 = 0x40000;
+            // ⌃→ (next Space) and ⌃↑ (Mission Control): Control, Fn and the keypad's.
+            assert_eq!(key_flags(keycode(0xff53).unwrap(), CONTROL), 0xa40000);
+            assert_eq!(key_flags(keycode(0xff52).unwrap(), CONTROL), 0xa40000);
+            // Let go with nothing held, they still say which key it was.
+            assert_eq!(key_flags(keycode(0xff51).unwrap(), 0), FN | KEYPAD);
+            // Home, End, Page Up, Page Down, Delete and F1 to F12: Fn alone.
+            for sym in [0xff50, 0xff57, 0xff55, 0xff56, 0xffff].into_iter().chain(0xffbe..=0xffc9) {
+                assert_eq!(key_flags(keycode(sym).unwrap(), 0), FN, "{sym:#x}");
+            }
+            // Letters, Return, Tab, Space, Escape and the modifiers themselves: as held.
+            for sym in ['a' as u32, 0xff0d, 0xff09, 0x20, 0xff1b, 0xff08, 0xffe3, 0xffeb] {
+                assert_eq!(key_flags(keycode(sym).unwrap(), COMMAND), COMMAND, "{sym:#x}");
+            }
         }
 
         #[test]

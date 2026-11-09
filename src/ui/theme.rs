@@ -131,6 +131,9 @@ pub struct Appearance {
     /// Sidebar width in pixels, as last dragged, and whether it's hidden.
     pub sidebar_width: f32,
     pub sidebar_hidden: bool,
+    /// The sidebar's Agents section: every agent session, the ones that need
+    /// you first (agent_list.rs). On unless turned off in Settings.
+    pub sidebar_agents: bool,
     /// The terminal's font family (SF Mono unless picked in Settings).
     pub terminal_font: String,
     /// Terminal text size in points, and line height as a multiple of it.
@@ -175,6 +178,7 @@ impl Default for Appearance {
             dark: DEFAULT_DARK.into(),
             sidebar_width: super::root::SIDEBAR_DEFAULT,
             sidebar_hidden: false,
+            sidebar_agents: true,
             terminal_font: super::terminal::DEFAULT_FONT.into(),
             terminal_font_size: TERMINAL_FONT_SIZE,
             terminal_line_height: TERMINAL_LINE_HEIGHT,

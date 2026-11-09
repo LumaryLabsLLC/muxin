@@ -13,6 +13,7 @@ pub(crate) mod agent;
 pub mod git;
 pub mod handoff;
 pub mod here;
+pub mod list;
 pub mod question;
 pub mod rules;
 

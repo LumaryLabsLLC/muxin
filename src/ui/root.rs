@@ -2416,7 +2416,11 @@ impl Root {
                         .child(div().absolute().right(px(7.)).top(px(6.)).child(kit::kbd(&theme, "/"))),
                 ),
             )
-            .child(div().id("machine-list").flex_1().min_h(px(0.)).overflow_y_scroll().pb(px(12.)).children(rows))
+            // As tall as it needs, scrolling when the Agents section below needs the room.
+            .child(div().id("machine-list").flex_shrink().min_h(px(0.)).overflow_y_scroll().pb(px(12.)).children(rows))
+            // Every agent session, the ones that need you first (agent_list.rs).
+            .children(self.agents_section(window, cx))
+            .child(div().flex_1())
             // The "what's happening now" card is hidden for now (connection_card).
             .child(self.sidebar_footer(&theme, cx))
     }
@@ -2525,7 +2529,7 @@ impl Root {
             .on_click(cx.listener(|this, _, _, cx| this.show(Route::Activity, cx)))
     }
 
-    fn section_header(&self, title: &'static str, count: Option<usize>, add: Option<SectionAdd>, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn section_header(&self, title: &'static str, count: Option<usize>, add: Option<SectionAdd>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         div()
             .flex()
@@ -3791,7 +3795,7 @@ impl Focusable for Root {
 
 /// What a sidebar section's + adds.
 #[derive(Clone, Copy)]
-enum SectionAdd {
+pub(super) enum SectionAdd {
     Machine,
     Share,
 }

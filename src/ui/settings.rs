@@ -1064,7 +1064,7 @@ impl SettingsPage {
     /// they work, need you or are done (fleet::sessions), whether they
     /// continue their conversations when sessions come back after a restart,
     /// and whether they may start helper sessions.
-    fn agents_section(&self, theme: &Theme) -> impl IntoElement {
+    fn agents_section(&self, theme: &Theme, cx: &App) -> impl IntoElement {
         let on = self.engine.settings().agents.hooks;
         let mut with: Vec<String> = Vec::new();
         let mut trouble: Vec<String> = Vec::new();
@@ -1085,6 +1085,7 @@ impl SettingsPage {
         };
         let resume = self.engine.settings().agents.resume;
         let helpers = self.engine.settings().agents.helpers;
+        let in_sidebar = cx.global::<Appearance>().sidebar_agents;
         let engine = self.engine.clone();
         let engine2 = self.engine.clone();
         let engine3 = self.engine.clone();
@@ -1127,7 +1128,14 @@ impl SettingsPage {
                         cx.refresh_windows();
                     }))
                     .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("An agent in a session can start another one to help with its task, and wait for its answer."))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Helpers show under it and end when it does. Off, Muxin says no when an agent asks.")),
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Helpers show under it and end when it does. Off, Muxin says no when an agent asks."))
+                    .child(div().h(px(6.)))
+                    .child(kit::checkbox(theme, "sidebar-agents", in_sidebar, "Show agents in the sidebar", move |on, _, cx| {
+                        let on = *on;
+                        theme_mod::remember(cx, |a| a.sidebar_agents = on);
+                        cx.refresh_windows();
+                    }))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Every agent session on your machines in one list, the ones that need you first.")),
             )
     }
 
@@ -1322,7 +1330,7 @@ impl Render for SettingsPage {
         let body = match self.tab {
             SettingsTab::General => body
                 .child(self.shell_section(&theme, cx))
-                .child(self.agents_section(&theme))
+                .child(self.agents_section(&theme, cx))
                 .child(self.clipboard_section(&theme))
                 .child(self.tray_section(&theme, cx))
                 .child(self.editor_section(&theme))

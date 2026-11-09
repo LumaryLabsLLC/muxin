@@ -121,7 +121,8 @@ impl Engine {
             // A Mac blocks the agent's network until Local Network access is allowed there.
             let mac = self.current().machines.iter().any(|m| m.id == spec.id && m.platform.starts_with("darwin"));
             out.note = Some(if mac {
-                format!("On {}, allow muxen-agent under Privacy & Security › Local Network.", spec.name)
+                // Muxin Agent since 0.10.0, a plain muxen-agent before.
+                format!("On {}, allow Muxin Agent (or muxen-agent, with an older agent) under Privacy & Security › Local Network.", spec.name)
             } else {
                 "Direct didn't connect (UDP 47821 blocked?), so it's ssh.".into()
             });

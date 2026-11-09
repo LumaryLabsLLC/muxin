@@ -104,12 +104,62 @@ fn build_path(target: &str) -> Result<PathBuf, String> {
     })
 }
 
-/// The build for `target` and its hash (what `muxen-agent hash` prints).
-fn build(target: &str) -> Result<(Vec<u8>, String), String> {
+/// What gets installed on a machine: the agent program, or on a Mac,
+/// Muxin Agent.app as a tar (scripts/build-agents.sh). `hash` is the
+/// program's either way (what `muxen-agent hash` prints).
+struct Build {
+    bytes: Vec<u8>,
+    hash: String,
+    bundle: bool,
+}
+
+/// Where a Mac build's Muxin Agent.app is, beside the plain program
+/// (`muxen-agent-darwin-aarch64.app.tar`). Not on an iPad: it installs the plain one.
+fn bundle_path(target: &str) -> Option<PathBuf> {
+    if cfg!(target_os = "ios") || !target.starts_with("darwin") {
+        return None;
+    }
+    let tar = builds_dir()?.join(format!("muxen-agent-{target}.app.tar"));
+    tar.is_file().then_some(tar)
+}
+
+/// The program inside Muxin Agent.app, in the bundle's tar.
+const BUNDLE_PROGRAM: &str = "Muxin Agent.app/Contents/MacOS/muxen-agent";
+
+/// The build for `target` and its hash.
+fn build(target: &str) -> Result<Build, String> {
+    if let Some(tar) = bundle_path(target) {
+        let bytes = std::fs::read(&tar).map_err(|e| format!("Muxin couldn't read its agent for {target} machines: {e}"))?;
+        let program = tar_entry(&bytes, BUNDLE_PROGRAM).ok_or_else(|| format!("Muxin's agent for {target} machines ({}) has no program in it.", tar.display()))?;
+        let hash = format!("{:016x}", fnv(program));
+        return Ok(Build { bytes, hash, bundle: true });
+    }
     let path = build_path(target)?;
     let bytes = read_build(&path).ok_or_else(|| format!("Muxin has no agent build for {target} machines yet."))?;
     let hash = format!("{:016x}", fnv(&bytes));
-    Ok((bytes, hash))
+    Ok(Build { bytes, hash, bundle: false })
+}
+
+/// A file's bytes in a tar (ustar, as bsdtar and GNU tar write it).
+fn tar_entry<'a>(tar: &'a [u8], path: &str) -> Option<&'a [u8]> {
+    let field = |h: &[u8], from: usize, to: usize| String::from_utf8_lossy(&h[from..to]).trim_end_matches('\0').to_string();
+    let mut at = 0;
+    while at + 512 <= tar.len() {
+        let header = &tar[at..at + 512];
+        if header.iter().all(|b| *b == 0) {
+            return None;
+        }
+        let size = usize::from_str_radix(field(header, 124, 136).trim(), 8).ok()?;
+        let prefix = field(header, 345, 500);
+        let name = field(header, 0, 100);
+        let name = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+        let data = at + 512;
+        if matches!(header[156], b'0' | 0) && name.trim_start_matches("./") == path {
+            return tar.get(data..data + size);
+        }
+        at = data + size.div_ceil(512) * 512;
+    }
+    None
 }
 
 /// A build's bytes. In the iPad app they're gzipped (`<name>.gz`), as data
@@ -194,7 +244,7 @@ pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(
         Some(p) => format!("Muxin has no agent for {}-{} machines yet.", p.os.as_deref().unwrap_or("?"), p.arch.as_deref().unwrap_or("?")),
         None => format!("Muxin hasn't reached {} yet, so it doesn't know which agent build it needs. Refresh it first.", spec.name),
     })?;
-    let (bytes, hash) = build(&target)?;
+    let Build { bytes, hash, bundle } = build(&target)?;
     if verified().lock().unwrap().get(&spec.id) == Some(&hash) {
         return Ok(());
     }
@@ -218,7 +268,12 @@ pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(
     if installed.trim() != hash {
         tracing::info!("installing muxen-agent ({target}) on {}", spec.name);
         // Boxed: these futures are big, and `ensure` sits inside nearly every request's.
-        let got = if windows { Box::pin(upload_windows(spec, &build_path(&target)?, bytes, &hash)).await? } else { Box::pin(upload(spec, bytes, &hash)).await? };
+        let got = if windows {
+            Box::pin(upload_windows(spec, &build_path(&target)?, bytes, &hash)).await?
+        } else {
+            let script = if bundle { upload_bundle_script(&hash) } else { upload_script(&hash) };
+            Box::pin(upload(spec, &script, bytes)).await?
+        };
         if got.trim() != hash {
             return Err(format!("The agent didn't install correctly on {} (got {}).", spec.name, got.trim()));
         }
@@ -245,15 +300,15 @@ pub fn forget(machine_id: &str) {
     verified().lock().unwrap().remove(machine_id);
 }
 
-/// Copies the build into place atomically and prints its hash.
-async fn upload(spec: &MachineSpec, bytes: Vec<u8>, hash: &str) -> Result<String, String> {
-    let script = upload_script(hash);
+/// Streams the build to `script` (upload_script or upload_bundle_script) on
+/// the machine, which puts it in place atomically and prints its hash.
+async fn upload(spec: &MachineSpec, script: &str, bytes: Vec<u8>) -> Result<String, String> {
     let mut child = if spec.is_local() {
         let mut c = Command::new("/bin/sh");
-        c.args(["-c", &script]);
+        c.args(["-c", script]);
         crate::fleet::child::Child::local(c).map_err(|e| format!("couldn't run sh: {e}"))?
     } else {
-        crate::fleet::child::ssh(spec, &format!("sh -c {}", sh_quote(&script))).await?
+        crate::fleet::child::ssh(spec, &format!("sh -c {}", sh_quote(script))).await?
     };
     let mut stdin = child.take_stdin().ok_or("no stdin")?;
     let mut stdout = child.take_stdout().ok_or("no stdout")?;
@@ -284,11 +339,33 @@ async fn upload(spec: &MachineSpec, bytes: Vec<u8>, hash: &str) -> Result<String
 /// answering. (With no service, `migrate` starts the listener again.)
 fn upload_script(hash: &str) -> String {
     format!(
-        "want={}; {}",
+        "want={}; {MIGRATE} {}; {AFTER}",
         sh_quote(hash),
-        r#"set -e; if [ -d "$HOME/.openrunner" ] && [ ! -e "$HOME/.muxen" ]; then mv "$HOME/.openrunner" "$HOME/.muxen"; fi; d="$HOME/.muxen/bin"; mkdir -p "$d"; n="$d/muxen-agent.new.$$"; cat > "$n"; chmod 755 "$n"; got=$(sh -c '"$1" hash; exit $?' sh "$n" 2>/dev/null) || got=; if [ "$got" != "$want" ]; then rm -f "$n"; echo "the upload arrived incomplete (its hash is ${got:-unreadable}, not $want), so the agent there is as it was" >&2; exit 3; fi; mv -f "$n" "$d/muxen-agent"; rm -f "$d/openrunner-agent"; "$d/muxen-agent" migrate >/dev/null 2>&1 || true; rmdir "$HOME/.openrunner" 2>/dev/null || true; if systemctl --user is-enabled muxen-agent.service >/dev/null 2>&1; then pkill -f "$d/muxen-agent listen" >/dev/null 2>&1 || true; systemctl --user restart muxen-agent.service >/dev/null 2>&1 || true; elif launchctl print "gui/$(id -u)/com.lumarylabs.muxen-agent" >/dev/null 2>&1; then pkill -f "$d/muxen-agent listen" >/dev/null 2>&1 || true; launchctl kickstart -k "gui/$(id -u)/com.lumarylabs.muxen-agent" >/dev/null 2>&1 || true; fi; "$d/muxen-agent" hash"#
+        r#"d="$HOME/.muxen/bin"; mkdir -p "$d"; n="$d/muxen-agent.new.$$"; cat > "$n"; chmod 755 "$n"; got=$(sh -c '"$1" hash; exit $?' sh "$n" 2>/dev/null) || got=; if [ "$got" != "$want" ]; then rm -f "$n"; echo "the upload arrived incomplete (its hash is ${got:-unreadable}, not $want), so the agent there is as it was" >&2; exit 3; fi; mv -f "$n" "$d/muxen-agent""#
     )
 }
+
+/// The OpenRunner folder moves over first (see upload_script).
+const MIGRATE: &str = r#"set -e; if [ -d "$HOME/.openrunner" ] && [ ! -e "$HOME/.muxen" ]; then mv "$HOME/.openrunner" "$HOME/.muxen"; fi;"#;
+
+/// After the new build is in place: the rest of upload_script. The service is
+/// restarted only when it runs this home's agent (a test or a scratch home
+/// installing its own leaves the user's alone).
+const AFTER: &str = r#"d="$HOME/.muxen/bin"; rm -f "$d/openrunner-agent"; "$d/muxen-agent" migrate >/dev/null 2>&1 || true; rmdir "$HOME/.openrunner" 2>/dev/null || true; if systemctl --user is-enabled muxen-agent.service >/dev/null 2>&1 && systemctl --user cat muxen-agent.service 2>/dev/null | grep -qF "$d/muxen-agent"; then pkill -f "$d/muxen-agent listen" >/dev/null 2>&1 || true; systemctl --user restart muxen-agent.service >/dev/null 2>&1 || true; elif launchctl print "gui/$(id -u)/com.lumarylabs.muxen-agent" 2>/dev/null | grep -qF "$d/muxen-agent"; then pkill -f "$d/muxen-agent listen" >/dev/null 2>&1 || true; launchctl kickstart -k "gui/$(id -u)/com.lumarylabs.muxen-agent" >/dev/null 2>&1 || true; fi; "$d/muxen-agent" hash"#;
+
+/// upload_script for a Mac's Muxin Agent.app, streamed as a tar: it unpacks
+/// into `~/.muxen/agent/<hash>` (only once its program says it's the build,
+/// as upload_script checks), then `~/.muxen/bin/muxen-agent` becomes a link to
+/// that program, in one step: everything that runs that path (the app, the
+/// direct-connection service, hooks, schedules) runs the app's program.
+/// The bundle the link pointed to stays (a session server may still run it);
+/// older ones go.
+fn upload_bundle_script(hash: &str) -> String {
+    format!("want={}; {MIGRATE} {BUNDLE_SWAP}; {AFTER}", sh_quote(hash))
+}
+
+/// The middle of upload_bundle_script: the bundle into place, and the link to it.
+const BUNDLE_SWAP: &str = r#"d="$HOME/.muxen/bin"; a="$HOME/.muxen/agent"; mkdir -p "$d" "$a"; s="$a/.incoming.$$"; rm -rf "$s"; mkdir "$s"; if ! tar -xf - -C "$s" 2>/dev/null; then rm -rf "$s"; echo "the upload arrived incomplete, so the agent there is as it was" >&2; exit 3; fi; b="$s/Muxin Agent.app/Contents/MacOS/muxen-agent"; got=$(sh -c '"$1" hash; exit $?' sh "$b" 2>/dev/null) || got=; if [ "$got" != "$want" ]; then rm -rf "$s"; echo "the upload arrived incomplete (its hash is ${got:-unreadable}, not $want), so the agent there is as it was" >&2; exit 3; fi; old=$(readlink "$d/muxen-agent" 2>/dev/null) || old=; rm -rf "${a:?}/$want"; mv "$s" "$a/$want"; ln -s "$a/$want/Muxin Agent.app/Contents/MacOS/muxen-agent" "$d/muxen-agent.link.$$"; mv -f "$d/muxen-agent.link.$$" "$d/muxen-agent"; for x in "$a"/* "$a"/.incoming.*; do [ -e "$x" ] || continue; [ "$x" = "$a/$want" ] && continue; case "$old" in "$x"/*) continue ;; esac; rm -rf "$x"; done"#;
 
 /// Puts an uploaded build (`muxen-agent.upload.exe`) in place on Windows and
 /// prints its hash, once the upload says it's the build (`hash`); else it
@@ -480,6 +557,10 @@ mod tests {
         let sh = upload_script("0123456789abcdef");
         assert!(sh.starts_with("want='0123456789abcdef'; set -e;"));
         assert!(sh.find("hash; exit $?' sh \"$n\"").unwrap() < sh.find("mv -f \"$n\"").unwrap());
+        let bundle = upload_bundle_script("0123456789abcdef");
+        assert!(bundle.starts_with("want='0123456789abcdef'; set -e;"));
+        assert!(bundle.find("hash; exit $?' sh \"$b\"").unwrap() < bundle.find("mv \"$s\" \"$a/$want\"").unwrap());
+        assert!(bundle.find("mv \"$s\" \"$a/$want\"").unwrap() < bundle.find("launchctl kickstart").unwrap());
         let ps = swap_ps1("0123456789abcdef");
         assert!(ps.starts_with("$want = '0123456789abcdef'\n"));
         assert!(ps.find("& $u hash").unwrap() < ps.find("Move-Item -Force $u $t").unwrap());
@@ -516,6 +597,84 @@ mod tests {
             assert_eq!(std::fs::read_dir(&bin).unwrap().count(), 1, "case {i}: the upload is gone");
             let _ = std::fs::remove_dir_all(&home);
         }
+    }
+
+    /// A Muxin Agent.app tar whose program says it's the build `hash`.
+    #[cfg(unix)]
+    fn fake_bundle(dir: &std::path::Path, hash: &str) -> Vec<u8> {
+        use std::os::unix::fs::PermissionsExt;
+        let stage = dir.join(format!("stage-{hash}"));
+        let program = stage.join(BUNDLE_PROGRAM);
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::write(stage.join("Muxin Agent.app/Contents/Info.plist"), "<plist/>").unwrap();
+        std::fs::write(&program, format!("#!/bin/sh\necho {hash}\n")).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let out = std::process::Command::new("tar").env("COPYFILE_DISABLE", "1").args(["-cf", "-", "-C"]).arg(&stage).arg("Muxin Agent.app").output().unwrap();
+        assert!(out.status.success());
+        out.stdout
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finds_the_program_in_a_bundle_tar() {
+        let dir = std::env::temp_dir().join(format!("muxen-tar-{}", std::process::id()));
+        let tar = fake_bundle(&dir, "0123456789abcdef");
+        assert_eq!(tar_entry(&tar, BUNDLE_PROGRAM), Some(&b"#!/bin/sh\necho 0123456789abcdef\n"[..]));
+        assert_eq!(tar_entry(&tar, "Muxin Agent.app/Contents/MacOS/other"), None);
+        assert_eq!(tar_entry(&tar[..600], BUNDLE_PROGRAM), None, "a cut-off tar has no program");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Muxin Agent.app goes in beside the bundle before it, the link moves to
+    /// it in one step, and only the bundle before stays. An upload that's cut
+    /// off or isn't the build changes nothing. (Without the services part.)
+    #[cfg(unix)]
+    #[test]
+    fn a_bundle_replaces_the_agent_and_keeps_the_one_before() {
+        use std::io::Write as _;
+        let home = std::env::temp_dir().join(format!("muxen-bundle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let bin = home.join(".muxen/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("muxen-agent"), b"the plain agent from before").unwrap();
+        let install = |want: &str, upload: &[u8]| {
+            let script = format!("want={}; {MIGRATE} {BUNDLE_SWAP}; \"$d/muxen-agent\" hash", sh_quote(want));
+            let mut child = std::process::Command::new("/bin/sh")
+                .args(["-c", &script])
+                .env("HOME", &home)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(upload).unwrap();
+            let out = child.wait_with_output().unwrap();
+            (out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string(), String::from_utf8_lossy(&out.stderr).to_string())
+        };
+        let agents = |home: &std::path::Path| {
+            let mut v: Vec<String> = std::fs::read_dir(home.join(".muxen/agent")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+            v.sort();
+            v
+        };
+        let link = || std::fs::read_link(bin.join("muxen-agent")).unwrap();
+
+        let first = install("1111111111111111", &fake_bundle(&home, "1111111111111111"));
+        assert_eq!(first, (true, "1111111111111111".to_string(), String::new()));
+        assert_eq!(link(), home.join(".muxen/agent/1111111111111111").join(BUNDLE_PROGRAM));
+        assert_eq!(install("2222222222222222", &fake_bundle(&home, "2222222222222222")).1, "2222222222222222");
+        assert_eq!(agents(&home), ["1111111111111111", "2222222222222222"]);
+        assert_eq!(install("3333333333333333", &fake_bundle(&home, "3333333333333333")).1, "3333333333333333");
+        assert_eq!(agents(&home), ["2222222222222222", "3333333333333333"], "the one before stays, older ones go");
+
+        let whole = fake_bundle(&home, "4444444444444444");
+        for (i, upload) in [&whole[..700], &fake_bundle(&home, "5555555555555555")[..]].into_iter().enumerate() {
+            let (ok, _, err) = install("4444444444444444", upload);
+            assert!(!ok, "case {i}");
+            assert!(err.contains("arrived incomplete"), "case {i}: {err}");
+            assert_eq!(link(), home.join(".muxen/agent/3333333333333333").join(BUNDLE_PROGRAM), "case {i}");
+            assert_eq!(agents(&home), ["2222222222222222", "3333333333333333"], "case {i}: nothing left behind");
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

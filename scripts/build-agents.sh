@@ -3,6 +3,11 @@
 # dist/agents/muxen-agent-<os>-<arch>. The app uploads the matching one
 # to each machine (~/.muxen/bin) when it connects.
 #
+# On a Mac it also packs each macOS build as Muxin Agent.app, a hidden app
+# with a reason for each permission a program in a session may ask for
+# (agent/macos), into dist/agents/muxen-agent-darwin-<arch>.app.tar. That's
+# what the app installs on Macs, in ~/.muxen/agent/<hash>.
+#
 # Needs: rustup targets (x86_64-apple-darwin, aarch64-apple-darwin,
 # x86_64-unknown-linux-musl, aarch64-unknown-linux-musl, x86_64-pc-windows-gnu,
 # aarch64-pc-windows-gnullvm), cargo-zigbuild and zig for the Linux builds
@@ -35,15 +40,33 @@ case "$(uname -s)" in
     else
       sign_flags="--timestamp=none"
     fi
+    if [ -z "$identity" ] && [ "${MUXEN_RELEASE:-}" = 1 ]; then
+      echo "error: a release needs a Developer ID Application certificate in the keychain" >&2
+      exit 1
+    fi
+    # Muxin Agent.app for each, signed with its entitlements, as a tar the app
+    # streams to a Mac. Same identifier as the bare build, so the permissions
+    # a Mac gave the agent (Screen Recording, Accessibility) carry over.
+    version=$(sed -n 's/^version = "\(.*\)"/\1/p' agent/Cargo.toml | head -n1)
+    for arch in aarch64 x86_64; do
+      stage=$(mktemp -d)
+      app="$stage/Muxin Agent.app"
+      mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+      cp "$out/muxen-agent-darwin-$arch" "$app/Contents/MacOS/muxen-agent"
+      sed "s/@VERSION@/$version/g" agent/macos/Info.plist > "$app/Contents/Info.plist"
+      cp assets/brand/Muxin.icns "$app/Contents/Resources/Muxin.icns"
+      # shellcheck disable=SC2086
+      codesign --force $sign_flags --entitlements agent/macos/entitlements.plist -s "${identity:--}" "$app"
+      codesign --verify --strict "$app"
+      COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$stage" -cf "$out/muxen-agent-darwin-$arch.app.tar" "Muxin Agent.app"
+      rm -rf "$stage"
+    done
     if [ -n "$identity" ]; then
-      for f in "$out"/muxen-agent-darwin-*; do
+      for f in "$out"/muxen-agent-darwin-aarch64 "$out"/muxen-agent-darwin-x86_64; do
         # shellcheck disable=SC2086
         codesign --force $sign_flags --identifier com.lumarylabs.muxen-agent -s "$identity" "$f"
       done
-      echo "▸ signed the macOS agents ($identity)"
-    elif [ "${MUXEN_RELEASE:-}" = 1 ]; then
-      echo "error: a release needs a Developer ID Application certificate in the keychain" >&2
-      exit 1
+      echo "▸ signed the macOS agents and Muxin Agent.app ($identity)"
     else
       echo "▸ no Developer ID certificate: the macOS agents are ad-hoc signed"
     fi

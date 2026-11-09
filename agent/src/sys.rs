@@ -13,12 +13,35 @@ use std::process::Command;
 
 /// The user's home folder.
 pub fn user_home() -> PathBuf {
+    #[cfg(test)]
+    isolate_home();
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os(var)
         .or_else(|| std::env::var_os("HOME"))
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/tmp" }))
+}
+
+/// Tests never touch the user's own home (~/.muxen, ~/.claude, ~/.codex): a
+/// test run's home is a folder of its own, from the first look at it on.
+#[cfg(test)]
+fn isolate_home() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // Short: the session server's socket goes in it (about 100 bytes at most).
+        let home = std::env::temp_dir().join(format!("mxa-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&home);
+        // SAFETY: once per test run, before the home is first used; Rust's own reads of
+        // the environment take the same lock as set_var.
+        unsafe {
+            std::env::set_var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }, &home);
+            std::env::set_var("HOME", &home);
+            for var in crate::detect::DIR_VARS {
+                std::env::remove_var(var);
+            }
+        }
+    });
 }
 
 /// `~` and `~/x` (or `~\x`) under the user's home; anything else as it is.
@@ -127,7 +150,12 @@ pub fn kill_one(pid: u32, gently: bool) {
 pub fn spawn_background(args: &[&str], log: PathBuf) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let home = crate::home_dir();
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    {
+        let log = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
+        mac::spawn_disclaimed(&exe, args, &log, &home)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         use std::process::Stdio;
         let log = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
@@ -169,6 +197,105 @@ pub fn spawn_background(args: &[&str], log: PathBuf) -> io::Result<()> {
             .stderr(std::process::Stdio::null())
             .status()?;
         if status.success() { Ok(()) } else { Err(io::Error::other(format!("Windows didn't start it ({:?})", status.code()))) }
+    }
+}
+
+/// Starting the agent's background processes on a Mac.
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::ffi::{CString, OsStr};
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::AsRawFd;
+    use std::path::Path;
+
+    unsafe extern "C" {
+        /// libSystem, macOS 10.14 and later, as Terminal and iTerm use it: the
+        /// new process is responsible for itself, not for whoever started it.
+        fn responsibility_spawnattrs_setdisclaim(attrs: *mut libc::posix_spawnattr_t, disclaim: libc::c_int) -> libc::c_int;
+        fn posix_spawn_file_actions_addchdir_np(actions: *mut libc::posix_spawn_file_actions_t, path: *const libc::c_char) -> libc::c_int;
+    }
+    /// A session of its own, like `setsid` (<spawn.h>).
+    const POSIX_SPAWN_SETSID: libc::c_short = 0x0400;
+
+    fn c(s: &OsStr) -> io::Result<CString> {
+        CString::new(s.as_bytes()).map_err(|_| io::Error::other("a NUL in an argument"))
+    }
+
+    fn check(what: &str, rc: libc::c_int) -> io::Result<()> {
+        if rc == 0 { Ok(()) } else { Err(io::Error::other(format!("{what}: {}", io::Error::from_raw_os_error(rc)))) }
+    }
+
+    /// `exe args...` in a session of its own, with no files open but /dev/null
+    /// in and `log` out, started in `dir`, and responsible for itself.
+    ///
+    /// macOS asks about the camera, the microphone, contacts and the like on
+    /// behalf of the process "responsible" for the one asking, and that's
+    /// inherited: the session server started by Muxin.app would ask as
+    /// Muxin.app, by sshd as sshd, by launchd as itself. Disclaimed, it's
+    /// always the agent (Muxin Agent.app, with a word on why for each), so a
+    /// program in any session gets the same prompt, and one answer covers all.
+    pub fn spawn_disclaimed(exe: &Path, args: &[&str], log: &std::fs::File, dir: &Path) -> io::Result<()> {
+        let program = c(exe.as_os_str())?;
+        let mut owned = vec![program.clone()];
+        for a in args {
+            owned.push(c(OsStr::new(a))?);
+        }
+        let mut argv: Vec<*mut libc::c_char> = owned.iter().map(|a| a.as_ptr() as *mut libc::c_char).collect();
+        argv.push(std::ptr::null_mut());
+        let null = CString::new("/dev/null").unwrap();
+        let dir = c(dir.as_os_str())?;
+        unsafe {
+            let mut attrs: libc::posix_spawnattr_t = std::ptr::null_mut();
+            let mut actions: libc::posix_spawn_file_actions_t = std::ptr::null_mut();
+            check("posix_spawnattr_init", libc::posix_spawnattr_init(&mut attrs))?;
+            let spawned = (|| {
+                check("posix_spawn_file_actions_init", libc::posix_spawn_file_actions_init(&mut actions))?;
+                check("posix_spawnattr_setflags", libc::posix_spawnattr_setflags(&mut attrs, POSIX_SPAWN_SETSID | libc::POSIX_SPAWN_CLOEXEC_DEFAULT as libc::c_short))?;
+                // Where it's not there (an old system), the agent asks as before.
+                let _ = responsibility_spawnattrs_setdisclaim(&mut attrs, 1);
+                check("addopen", libc::posix_spawn_file_actions_addopen(&mut actions, 0, null.as_ptr(), libc::O_RDONLY, 0))?;
+                check("adddup2", libc::posix_spawn_file_actions_adddup2(&mut actions, log.as_raw_fd(), 1))?;
+                check("adddup2", libc::posix_spawn_file_actions_adddup2(&mut actions, log.as_raw_fd(), 2))?;
+                check("addchdir", posix_spawn_file_actions_addchdir_np(&mut actions, dir.as_ptr()))?;
+                let mut pid: libc::pid_t = 0;
+                check("posix_spawn", libc::posix_spawn(&mut pid, program.as_ptr(), &actions, &attrs, argv.as_ptr(), *libc::_NSGetEnviron() as *const *mut libc::c_char))
+            })();
+            if !actions.is_null() {
+                libc::posix_spawn_file_actions_destroy(&mut actions);
+            }
+            libc::posix_spawnattr_destroy(&mut attrs);
+            spawned
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// It starts the program in a session of its own, in `dir`, with its
+        /// output in the log and nothing on its input.
+        #[test]
+        fn starts_a_program_on_its_own() {
+            let tmp = std::env::temp_dir().join(format!("muxen-spawn-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir_all(&tmp).unwrap();
+            let log_path = tmp.join("log");
+            let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).unwrap();
+            let script = "echo \"dir=$(pwd -P) sid=$(ps -o sess= -p $$ | tr -d ' ') pid=$$\"; read x || echo stdin-empty";
+            spawn_disclaimed(Path::new("/bin/sh"), &["-c", script], &log, &tmp).unwrap();
+            let mut out = String::new();
+            for _ in 0..50 {
+                out = std::fs::read_to_string(&log_path).unwrap_or_default();
+                if out.contains("stdin-empty") {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            assert!(out.contains(&format!("dir={}", tmp.canonicalize().unwrap().display())), "{out}");
+            assert!(out.contains("stdin-empty"), "{out}");
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
     }
 }
 

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Muxin Agent.app's entitlements (scripts/build-agents.sh signs with them).
+  The hardened runtime refuses these resources to a program without them,
+  before macOS ever asks the user: with them, a program in a Muxin session can
+  ask, and the user decides (Info.plist says why).
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.device.camera</key><true/>
+  <key>com.apple.security.device.audio-input</key><true/>
+  <key>com.apple.security.personal-information.addressbook</key><true/>
+  <key>com.apple.security.personal-information.calendars</key><true/>
+  <key>com.apple.security.personal-information.photos-library</key><true/>
+  <key>com.apple.security.personal-information.location</key><true/>
+  <key>com.apple.security.automation.apple-events</key><true/>
+</dict>
+</plist>

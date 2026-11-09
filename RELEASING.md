@@ -132,7 +132,7 @@ again.
 |---|---|---|
 | macOS | `scripts/bundle-macos.sh` | `dist/Muxin.app`, for this Mac (what you use day to day) |
 | macOS release | `scripts/bundle-macos.sh --release && scripts/notarize-macos.sh` | a universal, notarized `dist/Muxin-<version>-macos.dmg` |
-| Agents | `scripts/build-agents.sh` | `dist/agents/`, every platform (needs zig and cargo-zigbuild) |
+| Agents | `scripts/build-agents.sh` | `dist/agents/`, every platform (needs zig and cargo-zigbuild); on a Mac also `muxen-agent-darwin-*.app.tar`, Muxin Agent.app signed with `agent/macos/entitlements.plist` |
 | Linux | `scripts/package-linux.sh` | `dist/Muxin-<version>-linux-<arch>.tar.gz` |
 | Windows | `scripts\package-windows.ps1` | the installer and zip (agents from a Mac or Linux first) |
 

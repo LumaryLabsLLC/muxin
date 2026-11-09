@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Muxin Agent.app: the agent on a Mac, as a hidden app (scripts/build-agents.sh
+  fills in @VERSION@). Its session server is responsible for itself
+  (agent/src/sys.rs), so when a program in a session asks for the camera, the
+  microphone, contacts or another app, macOS asks about Muxin Agent and shows
+  the reason below. Muxin itself uses none of these.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>com.lumarylabs.muxen-agent</string>
+  <key>CFBundleName</key><string>Muxin Agent</string>
+  <key>CFBundleDisplayName</key><string>Muxin Agent</string>
+  <key>CFBundleExecutable</key><string>muxen-agent</string>
+  <key>CFBundleIconFile</key><string>Muxin</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>@VERSION@</string>
+  <key>CFBundleVersion</key><string>@VERSION@</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHumanReadableCopyright</key><string>© Lumary Labs LLC</string>
+  <key>NSCameraUsageDescription</key><string>A program in a Muxin session wants to use the camera. Muxin doesn't use it itself.</string>
+  <key>NSMicrophoneUsageDescription</key><string>A program in a Muxin session wants to use the microphone. Muxin doesn't use it itself.</string>
+  <key>NSContactsUsageDescription</key><string>A program in a Muxin session wants to read your contacts. Muxin doesn't read them itself.</string>
+  <key>NSCalendarsUsageDescription</key><string>A program in a Muxin session wants to use your calendars. Muxin doesn't use them itself.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key><string>A program in a Muxin session wants to use your calendars. Muxin doesn't use them itself.</string>
+  <key>NSRemindersUsageDescription</key><string>A program in a Muxin session wants to use your reminders. Muxin doesn't use them itself.</string>
+  <key>NSRemindersFullAccessUsageDescription</key><string>A program in a Muxin session wants to use your reminders. Muxin doesn't use them itself.</string>
+  <key>NSPhotoLibraryUsageDescription</key><string>A program in a Muxin session wants to use your photos. Muxin doesn't use them itself.</string>
+  <key>NSLocationUsageDescription</key><string>A program in a Muxin session wants to know this Mac's location. Muxin doesn't use it itself.</string>
+  <key>NSLocationWhenInUseUsageDescription</key><string>A program in a Muxin session wants to know this Mac's location. Muxin doesn't use it itself.</string>
+  <key>NSAppleEventsUsageDescription</key><string>A program in a Muxin session wants to control another app. Muxin doesn't do that itself.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>A program in a Muxin session wants to use speech recognition. Muxin doesn't use it itself.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>A program in a Muxin session wants to use Bluetooth. Muxin doesn't use it itself.</string>
+  <key>NSDesktopFolderUsageDescription</key><string>A program in a Muxin session wants to use files on your Desktop.</string>
+  <key>NSDocumentsFolderUsageDescription</key><string>A program in a Muxin session wants to use files in your Documents folder.</string>
+  <key>NSDownloadsFolderUsageDescription</key><string>A program in a Muxin session wants to use files in your Downloads folder.</string>
+  <key>NSRemovableVolumesUsageDescription</key><string>A program in a Muxin session wants to use files on a removable drive.</string>
+  <key>NSNetworkVolumesUsageDescription</key><string>A program in a Muxin session wants to use files on a network drive.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Muxin's agent answers your other devices on the local network, and programs in Muxin sessions may reach it too.</string>
+</dict>
+</plist>

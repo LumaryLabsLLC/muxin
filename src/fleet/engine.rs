@@ -98,9 +98,33 @@ pub struct Engine {
     settings_changed: Notify,
 }
 
+/// Tests never touch the user's own home. An engine with a machine of host
+/// "local" runs this computer's agent from ~/.muxen (installing the build from
+/// the checkout there) and puts hooks in ~/.claude and ~/.codex; in a test
+/// that's a folder of the test run's own, from the first engine on.
+#[cfg(test)]
+fn isolate_home() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // Short: the agent's socket goes in it, and a socket's path is limited to about 100 bytes.
+        let home = std::env::temp_dir().join(format!("mxt-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&home);
+        // SAFETY: once per test run, before this engine runs anything; Rust's own reads of the
+        // environment (Command, env::var) take the same lock as set_var.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            for var in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "QWEN_HOME", "KIMI_CODE_HOME", "XDG_CONFIG_HOME"] {
+                std::env::remove_var(var);
+            }
+        }
+    });
+}
+
 impl Engine {
     /// Must be called from within a tokio runtime; background work runs there.
     pub fn new(paths: Paths, demo: bool) -> Arc<Engine> {
+        #[cfg(test)]
+        isolate_home();
         let world = demo.then(|| Arc::new(World::new()));
         let (inventory, inventory_info, settings, persisted) = match &world {
             Some(w) => (

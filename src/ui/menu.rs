@@ -5,6 +5,7 @@ use gpui::{AnyElement, ClipboardItem, Context, FontWeight, MouseButton, Pixels, 
 use super::kit::{self, icon};
 use super::root::{Root, Route};
 use super::theme::Theme;
+use crate::fleet::order::Move;
 use crate::fleet::sessions::{AGENTS, StartSession};
 use crate::ops::RunnerAction;
 
@@ -74,6 +75,8 @@ enum Action {
     Runner(String, RunnerAction),
     RemoveRunner(String),
     FavoriteMachine(String, bool),
+    /// Up, down or to the top of the machines at its level.
+    MoveMachine(String, Move),
     CloudPower(String, bool),
     /// Start (true) or stop a VM or container that runs on another machine.
     MachinePower(String, bool),
@@ -268,6 +271,16 @@ impl Root {
                     items.push(act("Remove from favorites", "star", Action::FavoriteMachine(id.clone(), false)));
                 } else {
                     items.push(act("Add to favorites", "star", Action::FavoriteMachine(id.clone(), true)));
+                }
+                // Its place among the machines at its level (VMs: under their host).
+                let (entries, sorted) = Root::order_entries(s, cx);
+                let moves = [("Move Up", "arrow-up", Move::Up), ("Move Down", "arrow-down", Move::Down), ("Move to Top", "arrow-up", Move::Top)];
+                let can: Vec<bool> = moves.iter().map(|(_, _, how)| crate::fleet::order::moved(&entries, sorted, id, how).is_some()).collect();
+                if can.iter().any(|c| *c) {
+                    items.push(Item::Separator);
+                    for ((label, glyph, how), can) in moves.into_iter().zip(can) {
+                        items.push(if can { act(label, glyph, Action::MoveMachine(id.clone(), how)) } else { Item::Off { label: label.into(), glyph: Glyph::Icon(glyph) } });
+                    }
                 }
                 items.push(Item::Separator);
                 // A cloud machine is powered and destroyed; removing it alone would leave it running (and billed).
@@ -677,6 +690,7 @@ impl Root {
             }
             Action::Runner(id, action) => self.runner_action(&id, action, cx),
             Action::FavoriteMachine(id, favorite) => self.set_favorite_machine(&id, favorite, cx),
+            Action::MoveMachine(id, how) => self.move_machine(&id, how, cx),
             Action::AddDisplay(id) => self.show_add_display(id, window, cx),
             Action::ShowDisplay(machine, display) => self.show_display(machine, Some(display), window, cx),
             Action::OpenApp(machine, app) => self.open_app_window(machine, app, cx),

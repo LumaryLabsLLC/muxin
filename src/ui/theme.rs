@@ -151,8 +151,13 @@ pub struct Appearance {
     pub desktops: Vec<String>,
     /// Terminals split into panes, each layout as text (see panes.rs).
     pub panes: Vec<String>,
-    /// Favorite machines: first in the sidebar (so ⌘1, ⌘2, …), with a star.
+    /// Favorite machines, with a star: first in the sidebar (so ⌘1, ⌘2, …)
+    /// until the user orders the machines; after that, starring one moves it to the top.
     pub favorite_machines: Vec<String>,
+    /// The user put the machines in order (dragged one, or Move Up / Down):
+    /// they're listed as config.toml has them, not favorites and machines
+    /// with runners first. See fleet::order.
+    pub machines_ordered: bool,
     /// Machines' ports open on this computer, as "machine:port:local port"
     /// (opened again at launch).
     pub forwards: Vec<String>,
@@ -189,6 +194,7 @@ impl Default for Appearance {
             desktops: Vec::new(),
             panes: Vec::new(),
             favorite_machines: Vec::new(),
+            machines_ordered: false,
             forwards: Vec::new(),
             icon_style: super::kit::IconStyle::default().id().into(),
             shortcuts: Default::default(),

@@ -193,8 +193,7 @@ impl Root {
     }
 
     fn render_machine_grid(&self, theme: &Theme, s: &Snapshot, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
-        let favorites = cx.global::<super::theme::Appearance>().favorite_machines.clone();
-        let machines: Vec<&Machine> = Self::machine_order(s, &favorites);
+        let machines: Vec<&Machine> = Self::machine_order(s, cx);
         let cols = (((width + GAP) / (CARD_MIN_WIDTH + GAP)).floor() as usize).clamp(1, 3);
         let card_width = ((width - GAP * (cols as f32 - 1.)) / cols as f32).floor();
         // Explicit rows rather than flex-wrap, so the section's height is always right.

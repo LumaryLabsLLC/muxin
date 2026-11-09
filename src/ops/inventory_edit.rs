@@ -270,6 +270,116 @@ pub fn set_disconnected(text: &str, machine_id: &str, disconnected: bool) -> Res
     finish(doc)
 }
 
+/// Puts the `[[machine]]` tables in this order, by id (tables it doesn't
+/// name keep their order, after it). Comments above a machine go with it;
+/// the file's header stays at the top, and lines right under a table (a
+/// commented-out `# runners = [...]`) stay with that table. Ids don't
+/// change: a machine whose id came from its place (the second "Box" is
+/// "box-2") gets it written as `id`.
+pub fn reorder_machines(text: &str, ids: &[String]) -> Result<String, String> {
+    let mut doc = parse(text)?;
+    let trailing = doc.trailing().as_str().unwrap_or("").to_string();
+    let machines = machines_mut(&mut doc)?;
+    let tables: Vec<Table> = machines.iter().cloned().collect();
+    let n = tables.len();
+    let id_of = |t: &Table, taken: &mut HashSet<String>| {
+        let name = table_name(t);
+        (!name.is_empty()).then(|| assign_machine_id(name, t.get("id").and_then(Item::as_str).unwrap_or(""), taken))
+    };
+    let mut taken = HashSet::new();
+    let old_ids: Vec<Option<String>> = tables.iter().map(|t| id_of(t, &mut taken)).collect();
+    let rank = |i: usize| old_ids[i].as_ref().and_then(|id| ids.iter().position(|x| x == id)).unwrap_or(usize::MAX);
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| rank(i));
+    if order.iter().enumerate().all(|(k, &i)| k == i) {
+        return Ok(text.to_string());
+    }
+
+    // What's above each table: the first one's starts with the file's header
+    // (up to its last blank line), which stays first; a later one's starts
+    // with lines that belong to the table above it (up to its first blank line).
+    let prefix = |t: &Table| t.decor().prefix().and_then(|p| p.as_str()).unwrap_or("").to_string();
+    let first = prefix(&tables[0]);
+    let header = file_header(&first).to_string();
+    let mut own = vec![String::new(); n];
+    let mut below = vec![String::new(); n];
+    own[0] = first[header.len()..].to_string();
+    for i in 1..n {
+        let p = prefix(&tables[i]);
+        let (above, mine) = split_above(&p);
+        below[i - 1] = above.to_string();
+        own[i] = mine.to_string();
+    }
+    let (last_below, rest) = split_attached(&trailing);
+    below[n - 1] = last_below.to_string();
+
+    // Each table takes the k-th machine's place in the file, its sub-tables
+    // (`[machine.cloud]`) with it.
+    let places: Vec<Option<isize>> = tables.iter().map(Table::position).collect();
+    fn place(t: &mut Table, position: isize) {
+        t.set_position(Some(position));
+        for (_, item) in t.iter_mut() {
+            if let Some(sub) = item.as_table_mut() {
+                place(sub, position);
+            }
+        }
+    }
+    let mut fresh = ArrayOfTables::new();
+    for (k, &i) in order.iter().enumerate() {
+        let mut t = tables[i].clone();
+        let p = if k == 0 {
+            // A blank line above it (after [ui]) when the first one had one.
+            let gap = if header.is_empty() && first.starts_with('\n') { "\n" } else { "" };
+            format!("{header}{gap}{}", own[i].trim_start_matches('\n'))
+        } else {
+            // The old first table had its blank line in the header.
+            let mine = if i == 0 && !own[i].starts_with('\n') { format!("\n{}", own[i]) } else { own[i].clone() };
+            format!("{}{mine}", below[order[k - 1]])
+        };
+        t.decor_mut().set_prefix(p);
+        if let Some(position) = places[k] {
+            place(&mut t, position);
+        }
+        fresh.push(t);
+    }
+    *machines = fresh;
+    doc.set_trailing(format!("{}{rest}", below[order[n - 1]]));
+
+    // Ids from place ("box-2") would follow the new place: write them down.
+    let new_ids: Vec<Option<String>> = {
+        let mut taken = HashSet::new();
+        order.iter().map(|&i| id_of(&tables[i], &mut taken)).collect()
+    };
+    if order.iter().zip(&new_ids).any(|(&i, id)| &old_ids[i] != id) {
+        let machines = machines_mut(&mut doc)?;
+        for (k, &i) in order.iter().enumerate() {
+            let Some(id) = &old_ids[i] else { continue };
+            if id_of(&tables[i], &mut HashSet::new()).as_ref() != Some(id) {
+                if let Some(t) = machines.get_mut(k) {
+                    t["id"] = value(id.as_str());
+                }
+            }
+        }
+    }
+    let out = finish(doc)?;
+    let kept: Vec<String> = Inventory::parse(&out).map_err(|e| e.to_string())?.machines.into_iter().map(|m| m.id).collect();
+    let want: Vec<String> = order.iter().filter_map(|&i| old_ids[i].clone()).collect();
+    if kept != want {
+        return Err("Moving it would change a machine's id, so the order wasn't changed.".into());
+    }
+    Ok(out)
+}
+
+/// A later table's prefix: the lines that belong to the table above it
+/// (right under it, up to a blank line), and its own (from that blank line on).
+/// With no blank line, they're all its own.
+fn split_above(prefix: &str) -> (&str, &str) {
+    match prefix.find("\n\n") {
+        Some(i) if !prefix.starts_with('\n') => (&prefix[..=i], &prefix[i + 1..]),
+        _ => ("", prefix),
+    }
+}
+
 fn parse(text: &str) -> Result<DocumentMut, String> {
     text.parse::<DocumentMut>().map_err(|e| format!("config.toml has a syntax error, so it wasn't changed: {}", e.to_string().trim()))
 }
@@ -470,6 +580,78 @@ host = "nas"
 
         assert!(rename_machine(FILE, "mac-studio", "NAS").is_err());
         assert!(rename_machine(FILE, "nope", "X").is_err());
+    }
+
+    fn order_of(text: &str) -> Vec<String> {
+        Inventory::parse(text).unwrap().machines.into_iter().map(|m| m.id).collect()
+    }
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn reorders_machines_keeping_comments_and_the_header() {
+        let out = reorder_machines(FILE, &ids(&["nas", "mac-studio"])).unwrap();
+        assert_eq!(order_of(&out), ["nas", "mac-studio"]);
+        // The header stays on top; each machine's comments go with it.
+        assert!(out.starts_with("# My fleet\n# (hand written)\n\n# The NAS doesn't run jobs.\n[[machine]]\nname = \"NAS\""), "{out}");
+        assert!(out.contains("host = \"nas\"\n\n[[machine]]\nname = \"Mac Studio\"   # the big one"), "{out}");
+        assert_eq!(Inventory::parse(&out).unwrap().machines[1].runners, vec!["studio-01", "studio-02"]);
+        // And back: the file as it was.
+        assert_eq!(reorder_machines(&out, &ids(&["mac-studio", "nas"])).unwrap(), FILE);
+        // The same order changes nothing.
+        assert_eq!(reorder_machines(FILE, &ids(&["mac-studio", "nas"])).unwrap(), FILE);
+    }
+
+    #[test]
+    fn reorders_after_settings_and_keeps_lines_under_their_table() {
+        // As Muxin writes it: [settings] and [ui] first, then the inventory's
+        // header, a commented-out runners line under the first machine, and
+        // examples at the end.
+        let (text, _) = add_machine(&default_inventory(), "Beelink", "beelink").unwrap();
+        let ui: toml::Table = "mode = \"system\"".parse().unwrap();
+        let text = crate::config::set_section(&text, "ui", &ui).unwrap();
+        let (text, _) = add_machine(&text, "Work", "work").unwrap();
+        let local = order_of(&text)[0].clone();
+        let out = reorder_machines(&text, &ids(&["work", "beelink", &local])).unwrap();
+        assert_eq!(order_of(&out), ["work", "beelink", local.as_str()]);
+        // [ui] and the header stay first; the runners line stays under the local machine; examples last.
+        let at = |s: &str| out.find(s).unwrap_or_else(|| panic!("{s} isn't in:\n{out}"));
+        assert!(at("[ui]") < at("# Each [[machine]] is a computer") && at("# Each [[machine]] is a computer") < at("name = \"Work\""), "{out}");
+        assert!(at("name = \"Work\"") < at("name = \"Beelink\"") && at("name = \"Beelink\"") < at("host = \"local\"\n#"), "{out}");
+        assert!(out.contains("host = \"local\"\n# runners = ["), "{out}");
+        assert!(at("# runners = [") < at("# name = \"Forge\""), "{out}");
+        // A blank line between machines, none doubled.
+        assert!(out.contains("host = \"work\"\n\n[[machine]]\nname = \"Beelink\""), "{out}");
+        assert!(out.contains("host = \"beelink\"\n\n[[machine]]\nname = "), "{out}");
+        assert!(!out.contains("\n\n\n"), "{out}");
+        // Back to where it was.
+        assert_eq!(reorder_machines(&out, &ids(&[&local, "beelink", "work"])).unwrap(), text);
+    }
+
+    #[test]
+    fn reordering_keeps_numbered_ids() {
+        let text = "[[machine]]\nname = \"Box\"\nhost = \"a\"\n\n[[machine]]\nname = \"Box\"\nhost = \"b\"\n\n[[machine]]\nname = \"NAS\"\nhost = \"nas\"\n";
+        let out = reorder_machines(text, &ids(&["nas", "box-2", "box"])).unwrap();
+        let inv = Inventory::parse(&out).unwrap();
+        assert_eq!(inv.machines.iter().map(|m| (m.id.as_str(), m.host.as_str())).collect::<Vec<_>>(), [("nas", "nas"), ("box-2", "b"), ("box", "a")]);
+        // Only the one whose id came from its place gets it written.
+        assert_eq!(out.matches("id = ").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn reordering_moves_sub_tables_and_leaves_out_nothing() {
+        let text = "[[machine]]\nname = \"Droplet\"\nhost = \"d\"\n[machine.cloud]\nprovider = \"digitalocean\"\nid = 7\nregion = \"nyc3\"\nsize = \"s\"\nprice_hourly = 0.01\ncreated_at = \"2026-11-09T00:00:00Z\"\n\n[[machine]]\nname = \"A\"\nhost = \"a\"\n\n[[machine]]\nname = \"B\"\nhost = \"b\"\n";
+        // Ids it doesn't name keep their order, after the rest; unknown ones are ignored.
+        let out = reorder_machines(text, &ids(&["b", "gone"])).unwrap();
+        assert_eq!(order_of(&out), ["b", "droplet", "a"]);
+        let inv = Inventory::parse(&out).unwrap();
+        assert_eq!(inv.machines[1].cloud.as_ref().map(|c| c.id), Some(7));
+        assert!(inv.machines[0].cloud.is_none() && inv.machines[2].cloud.is_none());
+        assert!(out.find("[machine.cloud]").unwrap() < out.find("name = \"A\"").unwrap(), "{out}");
+        // An empty file has nothing to move.
+        assert_eq!(reorder_machines("", &ids(&["x"])).unwrap(), "");
     }
 
     #[test]

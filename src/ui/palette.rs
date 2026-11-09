@@ -378,8 +378,7 @@ impl Root {
     /// desktop under it.
     fn place_items(&self, cx: &App) -> Vec<Item> {
         let s = &self.snapshot;
-        let favorites = cx.global::<theme::Appearance>().favorite_machines.clone();
-        let machines = Root::machine_order(s, &favorites);
+        let machines = Root::machine_order(s, cx);
         let session = |x: &crate::fleet::sessions::SessionInfo, machine: &str| {
             let folder = x.cwd.rsplit('/').find(|p| !p.is_empty()).unwrap_or(&x.cwd).to_string();
             let who = if x.agent_name.is_empty() { "Session".to_string() } else { x.agent_name.clone() };

@@ -400,6 +400,19 @@ impl Engine {
         Ok(())
     }
 
+    /// Puts the machines in this order in config.toml, by id (ones it leaves
+    /// out keep their order, after them). Ids don't change. Everything that
+    /// lists machines follows it: the sidebar, `muxin status`, the MCP tools.
+    pub fn order_machines(self: &Arc<Self>, ids: &[String]) -> Result<(), String> {
+        let edit = |text: &str| inventory_edit::reorder_machines(text, ids);
+        match self.demo_world() {
+            Some(w) => w.edit_inventory(edit)?,
+            None => inventory_edit::edit_file(self.inventory_path(), edit)?,
+        }
+        self.reload_inventory_now();
+        Ok(())
+    }
+
     /// Drops a machine from config.toml, for an operation that is itself
     /// what's changing it (destroying a cloud machine).
     pub(crate) fn forget_machine(self: &Arc<Self>, machine_id: &str) -> Result<(), String> {
@@ -1123,6 +1136,37 @@ async fn demo_action(engine: &Arc<Engine>, op: u64, runner: &Runner, action: Run
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A move rewrites config.toml's order, so it outlives a restart and
+    /// what lists machines (`muxin status`, the MCP tools) follows it. A new
+    /// machine goes at the end.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ordering_machines_sticks_and_new_ones_go_last() {
+        let dir = std::env::temp_dir().join(format!("muxen-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = "# mine\n\n[[machine]]\nname = \"A\"\nhost = \"a.invalid\"\n\n[[machine]]\nname = \"B\"\nhost = \"b.invalid\"\n\n[[machine]]\nname = \"C\"\nhost = \"c.invalid\"\n";
+        std::fs::write(dir.join("config.toml"), text).unwrap();
+        let paths = crate::config::Paths::resolve(Some(dir.clone()), None);
+        let ids = |e: &Arc<Engine>| e.current().machines.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+        let engine = Engine::new(paths.clone(), false);
+        engine.refresh_from_disk();
+        assert_eq!(ids(&engine), ["a", "b", "c"]);
+
+        engine.order_machines(&["c".into(), "a".into(), "b".into()]).unwrap();
+        assert_eq!(ids(&engine), ["c", "a", "b"]);
+        let status = crate::api::status_from(&engine.current(), crate::api::Surface::Mcp);
+        assert_eq!(status.machines.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["c", "a", "b"]);
+        assert!(std::fs::read_to_string(dir.join("config.toml")).unwrap().starts_with("# mine\n\n[[machine]]\nname = \"C\""));
+
+        // After a restart, the same; a machine added then goes last.
+        let again = Engine::new(paths, false);
+        again.refresh_from_disk();
+        assert_eq!(ids(&again), ["c", "a", "b"]);
+        again.add_machine(NewMachine { name: "D".into(), host: "d.invalid".into(), port: None }).unwrap();
+        assert_eq!(ids(&again), ["c", "a", "b", "d"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn parses_ssh_config_hosts() {

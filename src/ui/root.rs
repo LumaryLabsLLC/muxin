@@ -294,6 +294,33 @@ impl Render for DraggedSplit {
     }
 }
 
+/// Drag payload for a machine in the sidebar, dropped on another at its
+/// level to take its place (fleet::order::Move::Onto).
+#[derive(Clone)]
+pub(super) struct DraggedMachine {
+    id: String,
+    /// The machine it's under: it moves only among the ones there.
+    host: Option<String>,
+    name: String,
+}
+
+impl Render for DraggedMachine {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .px(px(10.))
+            .py(px(6.))
+            .rounded(kit::corner(7.))
+            .bg(theme.elevated)
+            .border_1()
+            .border_color(theme.border)
+            .opacity(0.92)
+            .text_size(px(12.5))
+            .text_color(theme.text)
+            .child(self.name.clone())
+    }
+}
+
 impl Render for DraggedSidebar {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         gpui::Empty
@@ -381,6 +408,9 @@ pub struct Root {
     /// on another sits under it), so its text fits.
     pub(super) sidebar_indent: std::cell::Cell<f32>,
     sidebar_resizing: bool,
+    /// A machine dragged over another it can be dropped on (the dragged one,
+    /// then that one): the sidebar draws a line where it will land.
+    machine_drop: Option<(String, String)>,
     /// The sidebar is tucked away (the toolbar's button, ⌘B).
     pub(super) sidebar_hidden: bool,
     /// ⌘ is held down: shortcuts show next to what they do. `keys_soon` shows
@@ -611,6 +641,7 @@ impl Root {
             sidebar_width: cx.global::<super::theme::Appearance>().sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX),
             sidebar_indent: std::cell::Cell::new(0.),
             sidebar_resizing: false,
+            machine_drop: None,
             sidebar_hidden: cx.global::<super::theme::Appearance>().sidebar_hidden,
             show_keys: false,
             keys_soon: None,
@@ -2057,33 +2088,42 @@ impl Root {
         self.navigate(Route::Jobs, window, cx);
     }
 
-    /// The machines in the sidebar's order (⌘1 is the first).
-    /// Favorites first, then machines with runners, then the rest; a machine
-    /// that runs on another one comes right after it.
-    pub(super) fn machine_order<'a>(s: &'a Snapshot, favorites: &[String]) -> Vec<&'a Machine> {
-        let mut sorted: Vec<&Machine> = s.machines.iter().collect();
-        sorted.sort_by_key(|m| (!favorites.contains(&m.id), m.kind != "runner"));
-        let host = |m: &Machine| Self::host_in_sidebar(s, m);
-        let mut out: Vec<&Machine> = Vec::new();
-        fn place<'a>(m: &'a Machine, sorted: &[&'a Machine], host: &dyn Fn(&Machine) -> Option<String>, out: &mut Vec<&'a Machine>) {
-            if out.iter().any(|x| x.id == m.id) {
-                return;
+    /// The machines in the sidebar's order (⌘1 is the first), each followed
+    /// by the ones that run on it. See fleet::order.
+    pub(super) fn machine_order<'a>(s: &'a Snapshot, cx: &App) -> Vec<&'a Machine> {
+        let (entries, sorted) = Self::order_entries(s, cx);
+        crate::fleet::order::arrange(&entries, sorted).into_iter().map(|i| &s.machines[i]).collect()
+    }
+
+    /// The machines as far as their order goes, and whether it's still the
+    /// sorted one (favorites, then machines with runners) and not the user's.
+    pub(super) fn order_entries(s: &Snapshot, cx: &App) -> (Vec<crate::fleet::order::Entry>, bool) {
+        let look = cx.global::<super::theme::Appearance>();
+        let entries = s
+            .machines
+            .iter()
+            .map(|m| crate::fleet::order::Entry { id: m.id.clone(), host: Self::host_in_sidebar(s, m), favorite: look.favorite_machines.contains(&m.id), runners: m.kind == "runner" })
+            .collect();
+        (entries, !look.machines_ordered)
+    }
+
+    /// Moves a machine among the ones at its level (up, down, to the top, or
+    /// into another's place when dropped on it). It's config.toml's order
+    /// that changes, so the order sticks and everything that lists machines
+    /// follows it.
+    pub(super) fn move_machine(&mut self, id: &str, how: crate::fleet::order::Move, cx: &mut Context<Self>) {
+        let (entries, sorted) = Self::order_entries(&self.snapshot, cx);
+        let Some(ids) = crate::fleet::order::moved(&entries, sorted, id, &how) else { return };
+        match self.engine.order_machines(&ids) {
+            Ok(()) => {
+                // From now on it's the user's order.
+                if sorted {
+                    super::theme::remember(cx, |a| a.machines_ordered = true);
+                }
+                self.apply_snapshot(self.engine.current(), cx);
             }
-            out.push(m);
-            for c in sorted.iter().filter(|c| host(c).as_deref() == Some(m.id.as_str())) {
-                place(c, sorted, host, out);
-            }
+            Err(e) => self.notify_user(e, true, cx),
         }
-        for m in sorted.iter().filter(|m| host(m).is_none()) {
-            place(m, &sorted, &host, &mut out);
-        }
-        // Anything left (machines on each other, which can't be): at the end.
-        for m in &sorted {
-            if !out.iter().any(|x| x.id == m.id) {
-                out.push(m);
-            }
-        }
-        out
     }
 
     /// The machine it sits under in the sidebar: the one it runs on, when that's in Muxin.
@@ -2100,7 +2140,8 @@ impl Root {
         cx.global::<super::theme::Appearance>().favorite_machines.iter().any(|f| f == machine_id)
     }
 
-    /// Stars or unstars a machine.
+    /// Stars or unstars a machine. Once the user has ordered the machines,
+    /// a star also moves it to the top (favorites come first either way).
     pub(super) fn set_favorite_machine(&mut self, machine_id: &str, favorite: bool, cx: &mut Context<Self>) {
         super::theme::remember(cx, |a| {
             a.favorite_machines.retain(|f| f != machine_id);
@@ -2108,13 +2149,15 @@ impl Root {
                 a.favorite_machines.push(machine_id.to_string());
             }
         });
+        if favorite && cx.global::<super::theme::Appearance>().machines_ordered {
+            self.move_machine(machine_id, crate::fleet::order::Move::Top, cx);
+        }
         cx.notify();
     }
 
     /// ⌘1…⌘9: the n-th machine in the sidebar (1-based).
     fn go_to_machine(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let favorites = cx.global::<super::theme::Appearance>().favorite_machines.clone();
-        if let Some(id) = Self::machine_order(&self.snapshot, &favorites).get(n - 1).map(|m| m.id.clone()) {
+        if let Some(id) = Self::machine_order(&self.snapshot, cx).get(n - 1).map(|m| m.id.clone()) {
             self.navigate(Route::Machine(id), window, cx);
         }
     }
@@ -2243,9 +2286,8 @@ impl Root {
         let mac_titlebar = cfg!(target_os = "macos") && !window.is_fullscreen();
 
         let mut rows: Vec<AnyElement> = Vec::new();
-        // Machines with runners first, then the rest; all under one heading.
-        let favorites = cx.global::<super::theme::Appearance>().favorite_machines.clone();
-        let runner_machines: Vec<&Machine> = Self::machine_order(&s, &favorites);
+        // All under one heading, in the user's order (see fleet::order).
+        let runner_machines: Vec<&Machine> = Self::machine_order(&s, cx);
         let unassigned: Vec<&Runner> = s.runners.iter().filter(|r| r.machine_id.is_none() && matches_runner(r)).collect();
 
         rows.push(self.section_header("Machines", Some(runner_machines.len()), Some(SectionAdd::Machine), cx).into_any_element());
@@ -2253,6 +2295,8 @@ impl Root {
         let forwards = self.engine.forwards();
         // The tree: where each machine sits (not while searching, which lists them flat).
         let tree = if q.is_empty() { sidebar_tree(&s, &runner_machines) } else { HashMap::new() };
+        // Each machine listed: its depth in the tree and its row.
+        let mut placed: Vec<(&str, usize, usize)> = Vec::new();
         for (n, m) in runner_machines.iter().enumerate() {
             let pos = tree.get(&m.id).cloned().unwrap_or_default();
             // Under a machine that's closed: hidden with the rest of its rows.
@@ -2291,6 +2335,7 @@ impl Root {
             let machine_row = tree_row(&theme, machine_row, indent, &pos.rails, (pos.depth > 0).then(|| (pos.depth - 1, pos.last)), CHILD_H);
             let at = rows.len();
             rows.push(machine_row);
+            placed.push((m.id.as_str(), pos.depth, at));
             // Its own rows: the lines of what's above go on past them.
             let first_child_row = rows.len();
             self.sidebar_indent.set(child_indent(pos.depth));
@@ -2359,6 +2404,26 @@ impl Root {
                 rows[at] = div().relative().child(row).child(div().absolute().left(px(tree_x(pos.depth))).top(px(from)).bottom_0().w(px(1.)).bg(tree_color(&theme))).into_any_element();
             }
             self.sidebar_indent.set(0.);
+        }
+        // A machine dragged over another: a line where it will land. Above
+        // that one, or under its last row (it goes after the machines on it).
+        // A drag let go anywhere else never reaches `on_drop`.
+        if !cx.has_active_drag() {
+            self.machine_drop = None;
+        }
+        if let Some((dragged, target)) = &self.machine_drop
+            && let Some(k) = placed.iter().position(|(id, ..)| id == target)
+        {
+            let (entries, sorted) = Self::order_entries(&s, cx);
+            if let Some(after) = crate::fleet::order::lands_after(&entries, sorted, dragged, target) {
+                let (_, depth, start) = placed[k];
+                let end = placed[k + 1..].iter().find(|(_, d, _)| *d <= depth).map_or(rows.len(), |(.., at)| *at);
+                let at = if after { end - 1 } else { start };
+                let left = 10. + if depth > 0 { child_indent(depth - 1) } else { 0. };
+                let line = div().absolute().left(px(left)).right(px(10.)).h(px(2.)).rounded_full().bg(theme.accent);
+                let row = std::mem::replace(&mut rows[at], div().into_any_element());
+                rows[at] = div().relative().child(row).child(if after { line.bottom_0() } else { line.top_0() }).into_any_element();
+            }
         }
         // Always there (but in the demo), so joining a share is easy to find.
         if !self.engine.is_demo() {
@@ -2599,6 +2664,7 @@ impl Root {
         div()
             .id(SharedString::from(format!("side-m-{}", m.id)))
             .group("machine-row")
+            .map(|d| self.machine_drag(d, m, cx))
             // Files from the Finder dropped here are copied to the machine.
             .when(!m.host.is_empty(), |d| {
                 let (mid, accent) = (m.id.clone(), theme.accent);
@@ -2703,6 +2769,35 @@ impl Root {
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(id.clone()), window, cx)))
     }
 
+    /// A machine's row drags onto another at its level (the top-level ones,
+    /// or those on the same host), and takes that one's place there. While
+    /// it's over one, the sidebar draws a line where it will land.
+    fn machine_drag(&self, row: gpui::Stateful<gpui::Div>, m: &Machine, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let host = Self::host_in_sidebar(&self.snapshot, m);
+        let dragged = DraggedMachine { id: m.id.clone(), host: host.clone(), name: m.name.clone() };
+        let (target, here) = (m.id.clone(), m.id.clone());
+        let (over, over_host) = (m.id.clone(), host.clone());
+        row.on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone()))
+            // Other drags (files from the Finder) are for the row's own drop.
+            .can_drop(move |v, _, _| v.downcast_ref::<DraggedMachine>().is_none_or(|d| d.id != here && d.host == host))
+            // Every row hears every move of the drag: this one is the target
+            // while the pointer is on it.
+            .on_drag_move(cx.listener(move |this, e: &DragMoveEvent<DraggedMachine>, _, cx| {
+                let d = e.drag(cx);
+                let on = e.bounds.contains(&e.event.position) && d.id != over && d.host == over_host;
+                let now = on.then(|| (d.id.clone(), over.clone()));
+                let was_here = this.machine_drop.as_ref().is_some_and(|(_, t)| *t == over);
+                if (on && this.machine_drop != now) || (!on && was_here) {
+                    this.machine_drop = now;
+                    cx.notify();
+                }
+            }))
+            .on_drop(cx.listener(move |this, d: &DraggedMachine, _, cx| {
+                this.machine_drop = None;
+                this.move_machine(&d.id, crate::fleet::order::Move::Onto(target.clone()), cx)
+            }))
+    }
+
     /// A machine that runs on another one (a VM, a container), under it: a row
     /// like the others there, with its status on its icon and what it is (or
     /// why it's down) on the right. Its own rows hang off it like any machine's.
@@ -2734,6 +2829,7 @@ impl Root {
         div()
             .id(SharedString::from(format!("side-m-{}", m.id)))
             .group("nested-row")
+            .map(|d| self.machine_drag(d, m, cx))
             .when(!m.host.is_empty(), |d| {
                 let (mid, accent) = (m.id.clone(), theme.accent);
                 d.drag_over::<gpui::ExternalPaths>(move |st, _, _, _| st.bg(accent.opacity(0.18)))

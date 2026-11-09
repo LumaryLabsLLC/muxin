@@ -63,6 +63,14 @@ security-framework = "3"
 # no system libraries to depend on; `tray-icon` on a Mac and Windows.
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3", optional = true }
+# Already in GPUI's tree: taking the window manager's shortcuts for a machine's
+# desktop (src/capture). A keyboard grab on X11, from a connection of our own;
+# on Wayland, the shortcuts-inhibit protocol on GPUI's connection.
+x11rb = { version = "0.13", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+wayland-client = { version = "0.31", optional = true }
+wayland-backend = { version = "0.3", features = ["client_system"], optional = true }
+wayland-protocols = { version = "0.31", features = ["client", "unstable"], optional = true }
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 tray-icon = { version = "0.26", default-features = false, optional = true }
@@ -91,7 +99,7 @@ winresource = "0.1"
 # Starting without a console window (see main.rs `without_console_window`);
 # telling a password manager's copies on the clipboard (ui/mod.rs).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_Security_Credentials", "Win32_Graphics_Dwm", "Win32_System_DataExchange"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_Security_Credentials", "Win32_Graphics_Dwm", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse"] }
 # The window's handle, to color its title bar like the theme.
 raw-window-handle = { version = "0.6", optional = true }
 
@@ -102,7 +110,7 @@ members = [".", "agent", "share-server"]
 default = ["gui"]
 # The native window. Build with `--no-default-features` for a headless CLI + MCP
 # server that needs no GUI libraries (Linux servers, CI, agent boxes).
-gui = ["dep:gpui", "dep:unicode-segmentation", "dep:cocoa", "dep:objc", "dep:raw-window-handle", "dep:alacritty_terminal", "dep:image", "dep:smallvec", "dep:ksni", "dep:tray-icon"]
+gui = ["dep:gpui", "dep:unicode-segmentation", "dep:cocoa", "dep:objc", "dep:raw-window-handle", "dep:alacritty_terminal", "dep:image", "dep:smallvec", "dep:ksni", "dep:tray-icon", "dep:x11rb", "dep:wayland-client", "dep:wayland-backend", "dep:wayland-protocols"]
 
 [profile.release]
 lto = "thin"

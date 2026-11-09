@@ -181,6 +181,7 @@ pub fn apply(cx: &mut App) {
     super::terminal::bind_keys(cx);
     super::desktop::bind_keys(cx);
     super::root::bind_keys(cx);
+    super::desktop::bind_taken_keys(cx);
     cx.set_menus(super::root::menus());
 }
 

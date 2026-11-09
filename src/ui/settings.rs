@@ -1059,6 +1059,40 @@ impl SettingsPage {
             )
     }
 
+    /// A machine's desktop: whether this computer's own shortcuts go to it
+    /// while it has the keyboard (crate::capture).
+    fn desktop_section(&self, theme: &Theme) -> impl IntoElement {
+        let on = self.engine.settings().desktop_shortcuts;
+        let release = super::desktop_keys::release_key_label();
+        let examples = super::desktop_keys::examples();
+        // (Short lines: text here doesn't wrap.)
+        let permission = match crate::capture::ready() {
+            crate::capture::Ready::NeedsPermission => Some("macOS asks to allow Muxin under Accessibility: click the desktop's toolbar."),
+            _ => None,
+        };
+        let engine = self.engine.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(section_title(theme, "Desktops", None))
+            .child(
+                card(theme)
+                    .px(px(14.))
+                    .py(px(12.))
+                    .gap(px(6.))
+                    .child(kit::checkbox(theme, "desktop-shortcuts", on, "Send this computer's shortcuts to the machine", move |on, _, cx| {
+                        let mut s = engine.settings();
+                        s.desktop_shortcuts = *on;
+                        let _ = engine.update_settings(s);
+                        cx.refresh_windows();
+                    }))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("While a desktop has the keyboard, {examples} go to it.")))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("{release} by themselves gives them back, and takes them again.")))
+                    .children(permission.map(|p| div().text_size(px(11.5)).text_color(theme.text_muted).child(p))),
+            )
+    }
+
     /// What the agents on the machines may do (config::AgentSettings):
     /// Muxin's hooks in the agent CLIs' settings (Claude Code, Codex, ...), so they say when
     /// they work, need you or are done (fleet::sessions), whether they
@@ -1332,6 +1366,7 @@ impl Render for SettingsPage {
                 .child(self.shell_section(&theme, cx))
                 .child(self.agents_section(&theme, cx))
                 .child(self.clipboard_section(&theme))
+                .child(self.desktop_section(&theme))
                 .child(self.tray_section(&theme, cx))
                 .child(self.editor_section(&theme))
                 .child(self.code_folders_section(&theme, cx))

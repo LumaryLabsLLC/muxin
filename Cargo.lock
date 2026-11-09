@@ -4459,9 +4459,13 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "unicode-segmentation",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols 0.31.2",
  "webrtc",
  "windows-sys 0.61.2",
  "winresource",
+ "x11rb",
 ]
 
 [[package]]

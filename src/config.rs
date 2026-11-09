@@ -560,6 +560,11 @@ pub struct Settings {
     /// Text copied here can be pasted on the machines (Linux desktops, Macs), and back.
     /// Off until the user turns it on (a `true` saved before stays on).
     pub share_clipboard: bool,
+    /// While a machine's desktop has the keyboard, this computer's own
+    /// shortcuts (⌘Tab, Mission Control, Alt+Tab, the Windows key) go to the
+    /// machine (see crate::capture). On unless turned off; either way the
+    /// release key and the desktop's toolbar change it for the moment.
+    pub desktop_shortcuts: bool,
     /// Ask GitHub now and then whether a newer Muxin is out (see crate::update).
     pub check_updates: bool,
     /// The editor machines' folders open in: "zed", "cursor", "vscode", or "" for the first one installed.
@@ -731,6 +736,7 @@ impl Default for Settings {
             code_folders: default_code_folders(),
             favorite_repos: Vec::new(),
             share_clipboard: false,
+            desktop_shortcuts: true,
             check_updates: true,
             editor: String::new(),
             cloud: CloudSettings::default(),

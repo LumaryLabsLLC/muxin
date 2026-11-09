@@ -1114,7 +1114,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "desktop_input",
-            "description": "Use a machine's desktop like a person: events run in order. {type: move|click|scroll|key|text|wait}: click {x, y, button?: left|right|middle, double?}; move {x, y}; scroll {x, y, dy} (positive scrolls down); key {key: \"enter\" | \"ctrl+c\" | \"alt+tab\" ...}; text {text}; wait {ms}. Coordinates in desktop_screenshot pixels; take a screenshot after to see what happened. It acts on the user's real screen: only when asked.",
+            "description": "Use a machine's desktop like a person: events run in order. {type: move|click|scroll|key|text|wait}: click {x, y, button?: left|right|middle, double?}; move {x, y}; scroll {x, y, dy} (positive scrolls down); key {key: \"enter\" | \"ctrl+c\" | \"alt+tab\" ...}; text {text}; wait {ms}. On a Mac, ctrl+left and ctrl+right switch Spaces and ctrl+up opens Mission Control. Coordinates in desktop_screenshot pixels; take a screenshot after to see what happened. It acts on the user's real screen: only when asked.",
             "inputSchema": schema(json!({
                 "machine_id": { "type": "string", "description": MACHINE_ID },
                 "display": { "type": "string", "description": DISPLAY_ID },

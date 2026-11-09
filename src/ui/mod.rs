@@ -24,6 +24,7 @@ mod palette;
 mod panes;
 mod ports;
 mod desktop;
+mod desktop_keys;
 mod sessions;
 mod compose;
 mod services;
@@ -115,6 +116,7 @@ fn run_app(engine: Arc<Engine>, initial_view: Option<String>) {
         terminal::bind_keys(cx);
         desktop::bind_keys(cx);
         root::bind_keys(cx);
+        desktop::bind_taken_keys(cx);
         cx.on_action(|_: &Quit, cx| quit(cx));
         // Quitting ends this app's shares: guests hear so if there's time.
         cx.on_app_quit(|cx| {

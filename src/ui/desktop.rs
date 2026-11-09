@@ -16,6 +16,7 @@ use gpui::{
 };
 use serde_json::{Value, json};
 
+use super::desktop_keys::{self, Mods, Os, ReleaseKey};
 use super::kit::{self, Button, ButtonStyle, spinner};
 use super::terminal::{ime::Composition, keys};
 use super::theme::ActiveTheme;
@@ -26,6 +27,10 @@ use crate::fleet::link::Link;
 use crate::share::guest;
 
 const CONTEXT: &str = "Desktop";
+/// Also in the view's context while this computer's own shortcuts go to the
+/// machine (see `crate::capture`): then Muxin's go there too.
+const TAKEN: &str = "DesktopKeys";
+const TAKEN_CONTEXT: &str = "Desktop DesktopKeys";
 
 /// Keys that would otherwise run Muxin's own shortcuts go to the machine.
 pub fn bind_keys(cx: &mut App) {
@@ -36,6 +41,22 @@ pub fn bind_keys(cx: &mut App) {
         keys.extend(super::shortcuts::ctrl_keys(cx));
     }
     cx.bind_keys(keys.iter().map(|k| KeyBinding::new(k, NoAction, Some(CONTEXT))));
+}
+
+/// While the keyboard's shortcuts go to the machine, so does every key Muxin
+/// has a shortcut on (⌘W, ⌘Q, ⌃1, the user's own): the release key gives
+/// them back. Bound after everything else, as it reads what's bound.
+pub fn bind_taken_keys(cx: &mut App) {
+    let mut keys: Vec<String> = {
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        keymap.bindings().filter(|b| b.keystrokes().len() == 1).map(|b| b.keystrokes()[0].inner().unparse()).collect()
+    };
+    // (Only what reads back as a key: binding one that doesn't would panic.)
+    keys.retain(|k| gpui::Keystroke::parse(k).is_ok());
+    keys.sort();
+    keys.dedup();
+    cx.bind_keys(keys.iter().map(|k| KeyBinding::new(k, NoAction, Some(TAKEN))));
 }
 
 enum State {
@@ -105,6 +126,22 @@ pub struct AppShown {
     /// Frame pixels per point: how much its machine scales it up (2 at
     /// 200%), less how much the stream scales it down (on a slow network).
     pub scale: f32,
+}
+
+/// Where this computer's own shortcuts go while a desktop has the keyboard
+/// (⌘Tab and Mission Control's on a Mac, Alt+Tab and the Windows key
+/// elsewhere).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Shortcuts {
+    /// To the machine.
+    There,
+    /// They're this computer's; they can go to the machine.
+    Here,
+    /// A Mac: they can once Muxin is allowed under Accessibility.
+    NeedsPermission,
+    /// Nothing to offer: a desktop only watched, an app's window, a system
+    /// that can't.
+    NotOffered,
 }
 
 /// The desktop's channel: on the machine's link, or on a share.
@@ -177,10 +214,25 @@ pub struct DesktopView {
     /// The area it was drawn in (to place things over the picture).
     area: Rc<Cell<Option<Bounds<Pixels>>>>,
     focus: FocusHandle,
-    /// Modifier keys the machine has been told are down (for Alt, see `option`).
-    held: Modifiers,
+    /// The modifier keys held here, and what the machine was told of them
+    /// (for Alt, see `option`).
+    mods: Mods,
     /// Where Option stands, and so what the machine knows about Alt.
     option: OptionKey,
+    /// Ctrl+Alt by themselves: gives the keyboard's shortcuts back to this
+    /// computer, or takes them again.
+    release: ReleaseKey,
+    /// This computer's own shortcuts are going to the machine (see
+    /// `crate::capture`), and the task bringing the keys taken around GPUI.
+    capture: Option<crate::capture::Capture>,
+    taken: Option<Task<()>>,
+    /// The user gave them back: not taken again until they say so, or come
+    /// back to the desktop from elsewhere.
+    given_back: bool,
+    /// The Windows key is held, as the keyboard hook says (GPUI never hears of it).
+    hook_super: bool,
+    /// The Keys menu is open: where its button was clicked.
+    keys_menu: Option<Point<Pixels>>,
     /// A dead key waiting for the next key, with the input method (see `DesktopInput`).
     composing: Composition,
     /// Other keys (keysyms) and mouse buttons it has been told are down, let
@@ -240,6 +292,7 @@ impl DesktopView {
     pub fn shared(engine: Arc<Engine>, joined: Arc<guest::Joined>, mac: bool, quality: &'static str, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut view = Self::make(engine, String::new(), Some(joined), None, quality, window, cx);
         view.mac = mac;
+        view.mods.set_there(if mac { Os::Mac } else { Os::Pc });
         view
     }
 
@@ -272,8 +325,14 @@ impl DesktopView {
             shown: Rc::new(Cell::new(None)),
             area: Rc::new(Cell::new(None)),
             focus: cx.focus_handle(),
-            held: Modifiers::default(),
+            mods: Mods::new(Os::here(), Os::Pc),
             option: OptionKey::default(),
+            release: ReleaseKey::default(),
+            capture: None,
+            taken: None,
+            given_back: false,
+            hook_super: false,
+            keys_menu: None,
             composing: Composition::default(),
             keys_down: Vec::new(),
             buttons_down: Vec::new(),
@@ -298,25 +357,36 @@ impl DesktopView {
         };
         view.platform = view.engine.current().machines.iter().find(|m| m.id == view.machine).map(|m| m.platform.clone()).unwrap_or_default();
         view.mac = view.platform.starts_with("darwin");
+        view.mods.set_there(if view.mac { Os::Mac } else { Os::Pc });
         view.display = display;
         view.start(window, cx);
+        // Keys and buttons held when the view loses the keyboard (another
+        // app, ⌘Q, a click elsewhere): let go on the machine too, and this
+        // computer's shortcuts are its own again. They go to the machine
+        // again when the keyboard comes back.
+        let focus = cx.on_focus_in(&view.focus, window, |this, window, cx| {
+            this.given_back = false;
+            this.take_keyboard(false, window, cx);
+        });
+        let blur = cx.on_focus_out(&view.focus, window, |this, _, _, cx| this.lost_keyboard(cx));
         if view.shared.is_some() {
-            let blur = cx.on_focus_out(&view.focus, window, |this, _, _, _| this.let_go());
-            view._subscriptions = vec![blur];
+            let away = cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    this.lost_keyboard(cx);
+                }
+            });
+            view._subscriptions = vec![focus, blur, away];
             return view;
         }
-        // Keys and buttons held when the view loses the keyboard (another
-        // app, ⌘Q, a click elsewhere): let go on the machine too.
-        let blur = cx.on_focus_out(&view.focus, window, |this, _, _, _| this.let_go());
-        let away = cx.observe_window_activation(window, |this, window, _| {
+        let away = cx.observe_window_activation(window, |this, window, cx| {
             if !window.is_window_active() {
-                this.let_go();
+                this.lost_keyboard(cx);
             } else if std::mem::take(&mut this.minimized) && this.shows_window() {
                 // Its window here came back: so does the app's there.
                 this.send(json!({ "t": "restore" }));
             }
         });
-        view._subscriptions = vec![blur, away];
+        view._subscriptions = vec![focus, blur, away];
         // Follow the machine: say so when it goes offline, and pick the stream
         // back up when it returns.
         let mut rx = view.engine.subscribe();
@@ -769,6 +839,7 @@ impl DesktopView {
                                 this.retries = 0;
                                 this.resuming = false;
                                 this.via = via.split_once('|').map_or(via.as_str(), |(v, _)| v).to_string();
+                                this.take_keyboard(false, window, cx);
                             }
                             Msg::Changed => {
                                 this.pending.store(false, std::sync::atomic::Ordering::Release);
@@ -830,6 +901,10 @@ impl DesktopView {
                                 }
                             }
                         }
+                    }
+                    // Nothing to send keys to: this computer's shortcuts are its own.
+                    if matches!(this.state, State::Ended(_)) {
+                        this.give_keyboard_back(cx);
                     }
                     cx.notify();
                 });
@@ -956,7 +1031,11 @@ impl DesktopView {
         if down {
             window.focus(&self.focus);
             cx.notify();
+            self.release.other();
+            self.keys_menu = None;
             self.alt_needed();
+            let keys = self.mods.needed();
+            self.send_keys(keys);
         }
         self.buttons_down.retain(|x| *x != b);
         if down {
@@ -981,6 +1060,8 @@ impl DesktopView {
         if notches != 0. {
             self.scroll_rest -= notches;
             self.alt_needed();
+            let keys = self.mods.needed();
+            self.send_keys(keys);
             // Wheel up scrolls content up: X's button 4 (negative dy).
             self.send(json!({ "t": "scroll", "dy": -(notches as i64), "dx": 0, "x": x, "y": y }));
         }
@@ -988,27 +1069,27 @@ impl DesktopView {
 
     /// Tells the machine about modifier keys pressed or let go. `may_type`:
     /// a key pressed with Option can be a character here (see `OptionKey`).
-    fn modifiers(&mut self, m: Modifiers, may_type: bool) {
-        // On a Mac ⌘ is ⌘; elsewhere it works as Ctrl (copy, paste, ... as on a Mac).
-        let keys: [(bool, bool, u32); 3] = if self.mac {
-            [(m.shift, self.held.shift, 0xffe1), (m.control, self.held.control, 0xffe3), (m.platform, self.held.platform, 0xffeb)]
-        } else {
-            let ctrl = |m: &Modifiers| m.control || m.platform;
-            [(m.shift, self.held.shift, 0xffe1), (ctrl(&m), ctrl(&self.held), 0xffe3), (false, false, 0)]
-        };
-        for (now, before, sym) in keys {
-            if now != before && sym != 0 {
-                self.send(json!({ "t": "key", "keysym": sym, "down": now }));
-            }
-        }
+    /// Which key each is there: see `Mods`.
+    fn modifiers(&mut self, mut m: Modifiers, may_type: bool) {
+        // The Windows key, when the keyboard hook took it.
+        m.platform |= self.hook_super;
+        // Alt first: what stands in for it there ends with what's held (`Mods::set`).
         let alt = self.option.pressed(m.alt, may_type);
         self.tell_alt(alt);
-        self.held = m;
+        let keys = self.mods.set(m);
+        self.send_keys(keys);
     }
 
-    fn tell_alt(&self, changes: &[bool]) {
+    fn send_keys(&self, keys: Vec<desktop_keys::Event>) {
+        for (sym, down) in keys {
+            self.send(json!({ "t": "key", "keysym": sym, "down": down }));
+        }
+    }
+
+    fn tell_alt(&mut self, changes: &[bool]) {
         for down in changes {
-            self.send(json!({ "t": "key", "keysym": 0xffe9, "down": down }));
+            let keys = self.mods.alt(*down);
+            self.send_keys(keys);
         }
     }
 
@@ -1026,7 +1107,7 @@ impl DesktopView {
     /// Nothing stays held there that would change them.
     fn type_text(&mut self, text: &str) {
         self.alt_for_typing();
-        self.modifiers(Modifiers { shift: false, ..self.held }, false);
+        self.modifiers(Modifiers { shift: false, ..self.mods.held() }, false);
         self.send(json!({ "t": "text", "s": text }));
     }
 
@@ -1034,14 +1115,33 @@ impl DesktopView {
         if !self.can_control {
             return;
         }
-        if let Some(sym) = keysym(key) {
+        // The key as the machine's keyboard has it: ⌘Q from a Mac is Alt+F4
+        // on Windows (see `Mods`).
+        let key = if down {
+            self.release.other();
+            let pressed = self.mods.key_down(key);
+            self.send_keys(pressed.before);
+            pressed.key
+        } else {
+            self.mods.key_up(key)
+        };
+        let Some(key) = key else {
+            cx.stop_propagation();
+            return;
+        };
+        if let Some(sym) = keysym(&key) {
             // A key let go that's not down there: its character went as text, or
             // it was let go when Shift changed (see `let_go_characters`).
             if down || self.keys_down.contains(&sym) {
                 self.send(key_event(sym, down));
             }
             self.keys_down.retain(|x| *x != sym);
-            if down {
+            // A Mac doesn't say when a key is let go while ⌘ is held: it's let go
+            // there at once (held here, it repeats from here), or ⌘Tab would
+            // leave Tab down on the machine, repeating.
+            if down && cfg!(target_os = "macos") && self.mods.held().platform {
+                self.send(key_event(sym, false));
+            } else if down {
                 self.keys_down.push(sym);
             }
             cx.stop_propagation();
@@ -1058,15 +1158,230 @@ impl DesktopView {
         }
     }
 
+    /// Where this computer's own shortcuts go, for the toolbar.
+    pub fn shortcuts(&self) -> Shortcuts {
+        use crate::capture::Ready;
+        if !self.can_control || self.shows_window() {
+            return Shortcuts::NotOffered;
+        }
+        if self.capture.is_some() {
+            return Shortcuts::There;
+        }
+        match crate::capture::ready() {
+            Ready::Yes => Shortcuts::Here,
+            Ready::NeedsPermission => Shortcuts::NeedsPermission,
+            Ready::No => Shortcuts::NotOffered,
+        }
+    }
+
+    /// Starts sending this computer's own shortcuts to the machine (see
+    /// `crate::capture`), if the desktop has the keyboard. `asked`: the user
+    /// just said so (the release key, the toolbar); else only when Settings
+    /// has it on and they haven't given the keyboard back. Not for an app's
+    /// window, which is a window here like any other.
+    fn take_keyboard(&mut self, asked: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.try_take_keyboard(asked, 0, window, cx);
+    }
+
+    fn try_take_keyboard(&mut self, asked: bool, tried: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = asked || (self.engine.settings().desktop_shortcuts && !self.given_back);
+        if self.capture.is_some() || !wanted || !self.can_control || self.shows_window() || self.remote.is_none() {
+            return;
+        }
+        if !self.focus.is_focused(window) || !window.is_window_active() {
+            return;
+        }
+        let Some(mut capture) = crate::capture::Capture::start(window) else {
+            // Something else may hold the keyboard for a moment: on X11, the
+            // window switcher that just brought it here. A few more tries.
+            if tried < 5 && crate::capture::ready() == crate::capture::Ready::Yes {
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_millis(200)).await;
+                    let _ = this.update_in(cx, |this, window, cx| this.try_take_keyboard(asked, tried + 1, window, cx));
+                })
+                .detach();
+            }
+            return;
+        };
+        // Windows: the keys its hook takes never reach GPUI.
+        self.taken = capture.keys().map(|mut keys| {
+            cx.spawn(async move |this, cx| {
+                while let Some((key, down)) = keys.next().await {
+                    if this.update(cx, |this, cx| this.taken_key(key, down, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+        });
+        self.capture = Some(capture);
+        self.mods.set_taking(true);
+        // X11: once the grab has settled (see `lost_keyboard`), make sure the
+        // keyboard didn't really go elsewhere meanwhile.
+        if cfg!(target_os = "linux") {
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(450)).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if !window.is_window_active() || !this.focus.is_focused(window) {
+                        this.lost_keyboard(cx);
+                    }
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// This computer's shortcuts are its own again.
+    fn give_keyboard_back(&mut self, cx: &mut Context<Self>) {
+        if self.capture.take().is_some() {
+            self.taken = None;
+            self.mods.set_taking(false);
+            // A key its hook took may still be down there.
+            self.let_go();
+            cx.notify();
+        }
+    }
+
+    /// The desktop lost the keyboard (another app, a click elsewhere): nothing
+    /// stays held on the machine, and this computer's shortcuts are its own.
+    fn lost_keyboard(&mut self, cx: &mut Context<Self>) {
+        // An X11 grab takes the keyboard from the window for a moment as it
+        // starts: that isn't the keyboard going elsewhere.
+        if self.capture.as_ref().is_some_and(|c| c.settling()) {
+            return;
+        }
+        self.let_go();
+        self.give_keyboard_back(cx);
+    }
+
+    /// The release key or the toolbar: this computer's shortcuts change
+    /// sides. `clicked`: from the toolbar, where a Mac that hasn't allowed
+    /// Muxin under Accessibility yet is asked to.
+    pub fn switch_keyboard(&mut self, clicked: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.capture.is_some() {
+            self.given_back = true;
+            self.give_keyboard_back(cx);
+            return;
+        }
+        self.given_back = false;
+        if clicked {
+            window.focus(&self.focus);
+            if crate::capture::ready() == crate::capture::Ready::NeedsPermission {
+                crate::capture::ask_permission();
+            }
+        }
+        self.take_keyboard(true, window, cx);
+        cx.notify();
+    }
+
+    /// A key the keyboard hook took before GPUI saw it (Windows): the Windows
+    /// key, or one Windows keeps with Alt or Ctrl held (Alt+Tab).
+    fn taken_key(&mut self, key: &'static str, down: bool, cx: &mut Context<Self>) {
+        if key == "super" {
+            self.hook_super = down;
+            if down {
+                self.release.other();
+            }
+            // (`modifiers` adds the Windows key back as the hook has it now.)
+            self.modifiers(Modifiers { platform: false, ..self.mods.held() }, false);
+            return;
+        }
+        if down {
+            self.alt_needed();
+        }
+        self.key(key, down, cx);
+    }
+
+    /// Opens or closes the Keys menu, under where its button was clicked.
+    pub fn toggle_keys_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        self.keys_menu = if self.keys_menu.is_some() { None } else { Some(at) };
+        cx.notify();
+    }
+
+    /// Presses a combination on the machine ("ctrl+right"), as the Keys menu
+    /// does: with nothing else held there.
+    fn send_combo(&mut self, keys: &str) {
+        let Some(syms) = desktop_keys::combo_keys(keys).filter(|_| self.can_control) else { return };
+        self.let_go();
+        for sym in &syms {
+            self.send(json!({ "t": "key", "keysym": sym, "down": true }));
+        }
+        for sym in syms.iter().rev() {
+            self.send(json!({ "t": "key", "keysym": sym, "down": false }));
+        }
+    }
+
+    /// The Keys menu: combinations this keyboard can't send, or that this
+    /// computer keeps for itself, sent by a click.
+    fn keys_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let at = self.keys_menu.filter(|_| self.can_control)?;
+        let theme = cx.theme();
+        const WIDTH: f32 = 228.;
+        // Under its button, inside the picture.
+        let left = self.area.get().map_or(8., |area| (f32::from(at.x - area.origin.x) - WIDTH / 2.).min(f32::from(area.size.width) - WIDTH - 8.).max(8.));
+        let windows = self.platform.starts_with("windows");
+        let rows = desktop_keys::menu(&self.platform, self.mac).into_iter().enumerate().map(|(i, combo)| {
+            div()
+                .id(("desktop-key", i))
+                .h(px(28.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(12.))
+                .rounded(crate::ui::kit::corner(5.))
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .text_color(theme.text)
+                .hover(|st| st.bg(theme.ghost_hover))
+                .child(combo.label)
+                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(desktop_keys::combo_label(combo.keys, &self.platform, self.mac)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.send_combo(combo.keys);
+                    this.keys_menu = None;
+                    cx.notify();
+                }))
+        });
+        Some(
+            div()
+                .absolute()
+                .top(px(6.))
+                .left(px(left))
+                .w(px(WIDTH))
+                .p(px(4.))
+                .flex()
+                .flex_col()
+                .rounded(crate::ui::kit::corner(8.))
+                .bg(theme.surface)
+                .border_1()
+                .border_color(theme.border)
+                .when(!crate::ui::kit::square(), |d| d.shadow_lg())
+                .occlude()
+                // A click in the menu isn't a click on the machine's screen.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .children(rows)
+                .when(windows, |d| {
+                    d.child(div().px(px(10.)).pt(px(6.)).pb(px(4.)).text_size(px(11.)).text_color(theme.text_placeholder).child("Not Ctrl+Alt+Del or Win+L:"))
+                        .child(div().px(px(10.)).pb(px(4.)).text_size(px(11.)).text_color(theme.text_placeholder).child("Windows takes those from its own keyboard only."))
+                })
+                .into_any_element(),
+        )
+    }
+
     /// Lets go of every key, modifier and button the machine was told is down.
     fn let_go(&mut self) {
         for sym in std::mem::take(&mut self.keys_down) {
             self.send(json!({ "t": "key", "keysym": sym, "down": false }));
         }
         self.composing.clear();
-        let alt = self.option.let_go();
-        self.tell_alt(alt);
-        self.modifiers(Modifiers::default(), false);
+        // Keys let go from here on may never be heard of: the release key starts over.
+        self.release = ReleaseKey::default();
+        // (Its Alt goes with the rest.)
+        let _ = self.option.let_go();
+        self.hook_super = false;
+        let keys = self.mods.let_go();
+        self.send_keys(keys);
         for b in std::mem::take(&mut self.buttons_down) {
             self.send(json!({ "t": "button", "b": b, "down": false, "x": 0, "y": 0 }));
         }
@@ -1377,6 +1692,7 @@ impl Render for DesktopView {
         };
         // Showing every screen: each monitor's name over its corner opens it.
         let labels = self.monitor_labels(cx);
+        let keys_menu = self.keys_menu(cx);
         let hint = self.hint.filter(|until| Instant::now() < *until && self.frame.is_some()).map(|_| {
             let keys = if cfg!(target_os = "macos") { "⌘W" } else { "Ctrl+Shift+W" };
             div().absolute().bottom(px(18.)).left_0().right_0().flex().justify_center().child(
@@ -1398,7 +1714,7 @@ impl Render for DesktopView {
         });
         div()
             .id("desktop")
-            .key_context(CONTEXT)
+            .key_context(if self.capture.is_some() { TAKEN_CONTEXT } else { CONTEXT })
             .track_focus(&self.focus)
             .size_full()
             .relative()
@@ -1410,6 +1726,7 @@ impl Render for DesktopView {
             .children(hint)
             // Over the last picture, dimmed: it's no longer live.
             .children(waiting.map(|w| div().absolute().inset_0().flex().items_center().justify_center().when(self.frame.is_some(), |d| d.bg(gpui::black().opacity(0.72))).child(w)))
+            .children(keys_menu)
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_down(
                 MouseButton::Left,
@@ -1437,11 +1754,15 @@ impl Render for DesktopView {
             .on_mouse_up(MouseButton::Right, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.position, false, w, cx)))
             .on_mouse_up(MouseButton::Middle, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.position, false, w, cx)))
             .on_scroll_wheel(cx.listener(Self::scroll))
-            .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, _, cx| {
-                if e.modifiers.shift != this.held.shift {
+            .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, window, cx| {
+                if e.modifiers.shift != this.mods.held().shift {
                     this.let_go_characters();
                 }
-                this.modifiers(e.modifiers, option_may_type(cx))
+                this.modifiers(e.modifiers, option_may_type(cx));
+                // Ctrl+Alt by themselves: the keyboard's shortcuts change sides.
+                if this.release.modifiers(&e.modifiers) && this.can_control && !this.shows_window() {
+                    this.switch_keyboard(false, window, cx);
+                }
             }))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
                 // ⌘W closes an app's window here, as any window here (Ctrl+Shift+W
@@ -1473,7 +1794,7 @@ impl Render for DesktopView {
                     return;
                 }
                 this.alt_needed();
-                this.modifiers(modifiers_for_key(&e.keystroke, this.held.shift), option_may_type(cx));
+                this.modifiers(modifiers_for_key(&e.keystroke, this.mods.held().shift), option_may_type(cx));
                 this.key(&e.keystroke.key, true, cx)
             }))
             .on_key_up(cx.listener(|this, e: &KeyUpEvent, _, cx| this.key(&e.keystroke.key, false, cx)))
@@ -1530,9 +1851,9 @@ pub fn toolbar(view: &Entity<DesktopView>, extra: Vec<AnyElement>, cx: &App) -> 
 /// The toolbar, with `menu` opening a monitor's menu on right-click.
 pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, menu: Option<DisplayMenu>, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let (status, via, machine, shown, engine) = {
+    let (status, via, machine, shown, engine, shortcuts, keys_open) = {
         let v = view.read(cx);
-        (v.status(), v.via().to_string(), v.machine.clone(), v.display.clone(), v.engine.clone())
+        (v.status(), v.via().to_string(), v.machine.clone(), v.display.clone(), v.engine.clone(), v.shortcuts(), v.keys_menu.is_some())
     };
     // Its monitors, when it has more than one: pick the one to show (none
     // for an app's window).
@@ -1619,6 +1940,44 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
                 .collect(),
         )
     });
+    // Where this computer's own shortcuts go: a click changes it, as the
+    // release key does.
+    let keyboard = (shortcuts != Shortcuts::NotOffered).then(|| {
+        let there = shortcuts == Shortcuts::There;
+        let (examples, release) = (desktop_keys::examples(), desktop_keys::release_key_label());
+        let tip = match shortcuts {
+            Shortcuts::There => format!("{examples} go to the machine. {release} by themselves gives them back."),
+            Shortcuts::NeedsPermission => format!("Click to send {examples} to the machine. macOS asks to allow Muxin under Accessibility."),
+            _ => format!("{examples} stay on this computer. Click, or press {release} by themselves, to send them to the machine."),
+        };
+        let view = view.clone();
+        div()
+            .id("desktop-shortcuts")
+            .flex_none()
+            .px(px(8.))
+            .h(px(22.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .rounded(crate::ui::kit::corner(5.))
+            .cursor_pointer()
+            .text_size(px(11.5))
+            .text_color(if there { theme.text } else { theme.text_placeholder })
+            .when(there, |d| d.bg(theme.element_selected).child(kit::dot(theme.accent, 6.)))
+            .when(!there, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+            .child(if there { format!("Shortcuts go there · {release} to stop") } else { "Shortcuts stay here".to_string() })
+            .tooltip(move |window, cx| kit::Tooltip::view(tip.clone().into(), window, cx))
+            .on_click(move |_, window, cx| view.update(cx, |v, cx| v.switch_keyboard(true, window, cx)))
+    });
+    // Combinations to send by a click: a Mac's Spaces, the Windows key.
+    let keys = (shortcuts != Shortcuts::NotOffered).then(|| {
+        let view = view.clone();
+        Button::new("desktop-keys", "Keys")
+            .style(if keys_open { ButtonStyle::Outlined } else { ButtonStyle::Ghost })
+            .icon("keyboard")
+            .tooltip("Send a key combination to the machine")
+            .on_click(move |e: &gpui::ClickEvent, _, cx| view.update(cx, |v, cx| v.toggle_keys_menu(e.position(), cx)))
+    });
     div()
         .flex()
         .flex_none()
@@ -1647,6 +2006,8 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
         .children(monitors.map(|m| m.flex_none()))
         .children(sizes)
         .children(scales)
+        .children(keyboard)
+        .children(keys)
         .children(extra)
         .into_any_element()
 }

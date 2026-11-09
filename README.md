@@ -16,7 +16,7 @@ Point it at the machines you own (a Mac Studio under the desk, a NUC, a Linux bo
 
 - **Agent sessions:** Claude Code, Codex, OpenCode, Gemini CLI, Antigravity, Amp, Pi, Copilot CLI, Cursor Agent, Qwen Code, Droid, Kimi Code or a shell on any machine, in a real terminal, still running after you close the app.
 - **Boxes:** hand a task to an agent that works on it by itself, in a container of its own on one of your machines. A box pauses when it's quiet and picks up where it left off when you ask it more.
-- **Desktops:** see a Linux machine's screen live and use it, beside an agent's terminal or in its own window.
+- **Desktops:** see a Linux machine's screen live and use it, beside an agent's terminal or in its own window. While a desktop has the keyboard, the shortcuts your own computer keeps (⌘Tab and Mission Control on a Mac, Alt+Tab and the Windows key elsewhere) go to the machine; Ctrl+Alt (⌃⌥) by themselves gives them back, and the **Keys** menu sends combinations by a click. On a Mac, that needs Muxin allowed under Privacy & Security › Accessibility.
 - **Files and clipboard:** copy files and folders between any two machines, and copy on your Mac to paste on a machine (and back).
 - **GitHub:** your inbox, repositories, issues and pull requests, with one click to hand an issue to an agent on the machine you pick.
 - **Self-hosted runners:** which runners are working, idle or offline, which jobs no runner can take, and installing, starting, stopping or removing runners.

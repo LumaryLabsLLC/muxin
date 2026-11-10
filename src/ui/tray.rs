@@ -1,8 +1,10 @@
 //! The icon in the menu bar or the system tray: the way back to a closed window,
-//! with a dot while a session needs you or is done (never a notification from
-//! the system). Its menu says how things stand in one line, lists those
-//! sessions, opens Settings and the update check, has the versions to copy for
-//! a bug report, and quits (sessions keep running on their machines).
+//! with a dot while a session needs you or is done (the system's notifications
+//! for those are notify.rs). Its menu starts with the logo and how things stand
+//! (on a Mac as Rex's does: two lines, with a colored dot), lists those
+//! sessions with their agents' logos, opens Settings and the update check, has
+//! the versions to copy for a bug report, and quits (sessions keep running on
+//! their machines). Each line that does something has the app's icon for it.
 //!
 //! On a Mac and Windows it's `tray-icon`, on the main thread. On Linux it's a
 //! StatusNotifierItem over D-Bus, and outlives the app's windows (see `ui::run`).
@@ -36,6 +38,8 @@ const ICON: &[u8] = include_bytes!("../../assets/brand/icon-128.png");
 struct Waiting {
     id: String,
     label: String,
+    /// Its agent ("claude", "shell", ...), whose logo it shows.
+    agent: String,
     /// Needs you (or exited with an error); else it's done.
     needs_you: bool,
 }
@@ -50,7 +54,7 @@ fn waiting_sessions(snapshot: &Snapshot) -> Vec<Waiting> {
         .map(|s| {
             let machine = snapshot.machines.iter().find(|m| m.id == s.machine_id).map_or(s.machine_id.as_str(), |m| m.name.as_str());
             let title = if s.title.trim().is_empty() { &s.agent_name } else { &s.title };
-            Waiting { id: s.id.clone(), label: format!("{} · {machine}", short_title(title)), needs_you: s.mark() != Mark::Done }
+            Waiting { id: s.id.clone(), label: format!("{} · {machine}", short_title(title)), agent: s.agent.clone(), needs_you: s.mark() != Mark::Done }
         })
         .collect();
     out.sort_by_key(|w| !w.needs_you);
@@ -119,21 +123,45 @@ pub(super) fn set_newer_version(version: Option<String>) {
     });
 }
 
+/// How things stand at a glance: the dot before the status line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Health {
+    /// Machines online, nothing waiting for you.
+    Good,
+    /// A session needs you.
+    Waiting,
+    /// No machine online (none yet, all off, or still checking).
+    #[default]
+    Quiet,
+}
+
+fn health(snapshot: &Snapshot, waiting: &[Waiting]) -> Health {
+    if waiting.iter().any(|w| w.needs_you) {
+        Health::Waiting
+    } else if snapshot.machines.iter().any(|m| m.status == "online") {
+        Health::Good
+    } else {
+        Health::Quiet
+    }
+}
+
 /// Everything the menu shows: when it changes, so does the menu.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct MenuState {
     status: String,
+    health: Health,
     waiting: Vec<Waiting>,
     agent: Option<String>,
     newer: Option<String>,
 }
 
 fn menu_state(snapshot: &Snapshot, newer: Option<String>) -> MenuState {
-    MenuState { status: status_line(snapshot), waiting: waiting_sessions(snapshot), agent: agent_here(snapshot), newer }
+    let waiting = waiting_sessions(snapshot);
+    MenuState { status: status_line(snapshot), health: health(snapshot, &waiting), waiting, agent: agent_here(snapshot), newer }
 }
 
 /// A line of the menu, whichever system draws it.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Entry {
     /// How things stand (see `status_line`): first, and not a button.
     Status(String),
@@ -178,6 +206,107 @@ fn menu_entries(state: &MenuState) -> Vec<Entry> {
         Entry::Quit,
     ]);
     entries
+}
+
+/// What a line of the menu shows beside its words: one of the app's own
+/// icons, or an agent's logo (on its colored tile, as in the app).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ItemIcon {
+    Glyph(&'static str),
+    Agent(String),
+}
+
+impl Entry {
+    fn icon(&self) -> Option<ItemIcon> {
+        Some(match self {
+            Entry::Session(w) => ItemIcon::Agent(w.agent.clone()),
+            Entry::Show => ItemIcon::Glyph("monitor"),
+            Entry::Settings => ItemIcon::Glyph("settings"),
+            Entry::Updates(_) => ItemIcon::Glyph("refresh-cw"),
+            Entry::CopyVersions => ItemIcon::Glyph("copy"),
+            Entry::Quit => ItemIcon::Glyph("power"),
+            Entry::Status(_) | Entry::Note(_) | Entry::Separator | Entry::Versions(_) => return None,
+        })
+    }
+}
+
+/// The app's icons the menu uses (the Minimal set, the app's default).
+fn glyph_svg(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "monitor" => include_str!("../../assets/icons/hg-monitor.svg"),
+        "settings" => include_str!("../../assets/icons/hg-settings.svg"),
+        "refresh-cw" => include_str!("../../assets/icons/hg-refresh-cw.svg"),
+        "copy" => include_str!("../../assets/icons/hg-copy.svg"),
+        "power" => include_str!("../../assets/icons/hg-power.svg"),
+        "terminal" => include_str!("../../assets/icons/hg-terminal.svg"),
+        "bot" => include_str!("../../assets/icons/hg-bot.svg"),
+        _ => return None,
+    })
+}
+
+fn agent_svg(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "agent-claude" => include_str!("../../assets/icons/agent-claude.svg"),
+        "agent-codex" => include_str!("../../assets/icons/agent-codex.svg"),
+        "agent-opencode" => include_str!("../../assets/icons/agent-opencode.svg"),
+        "agent-gemini" => include_str!("../../assets/icons/agent-gemini.svg"),
+        "agent-agy" => include_str!("../../assets/icons/agent-agy.svg"),
+        "agent-amp" => include_str!("../../assets/icons/agent-amp.svg"),
+        "agent-pi" => include_str!("../../assets/icons/agent-pi.svg"),
+        "agent-copilot" => include_str!("../../assets/icons/agent-copilot.svg"),
+        "agent-cursor" => include_str!("../../assets/icons/agent-cursor.svg"),
+        "agent-qwen" => include_str!("../../assets/icons/agent-qwen.svg"),
+        "agent-droid" => include_str!("../../assets/icons/agent-droid.svg"),
+        "agent-kimi" => include_str!("../../assets/icons/agent-kimi.svg"),
+        other => return glyph_svg(other),
+    })
+}
+
+/// An icon as RGBA, `size` pixels square: a glyph in `color` with a little
+/// room around it, or an agent's logo in white on its brand's gradient tile.
+fn item_icon_rgba(icon: &ItemIcon, size: u32, color: [u8; 3]) -> Option<Vec<u8>> {
+    let hex = |c: u32| format!("#{c:06x}");
+    let svg = match icon {
+        ItemIcon::Glyph(name) => {
+            let inner = glyph_svg(name)?.replace("currentColor", &hex(u32::from_be_bytes([0, color[0], color[1], color[2]])));
+            format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g transform="translate(1.5 1.5) scale(0.875)">{}</g></svg>"#, strip_comment(&inner))
+        }
+        ItemIcon::Agent(agent) => {
+            let (name, (from, to)) = super::kit::agent_look(agent);
+            let inner = agent_svg(name)?.replace("currentColor", "#ffffff");
+            format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><defs><linearGradient id="t" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="{}"/><stop offset="1" stop-color="{}"/></linearGradient></defs><rect x="1" y="1" width="22" height="22" rx="5.5" fill="url(#t)"/><g transform="translate(5.5 5.5) scale(0.5417)">{}</g></svg>"#,
+                hex(from),
+                hex(to),
+                strip_comment(&inner)
+            )
+        }
+    };
+    render_svg(&svg, size)
+}
+
+/// Drops an SVG file's leading comment (the logos say where they're from).
+fn strip_comment(svg: &str) -> &str {
+    svg.find("<svg").map_or(svg, |i| &svg[i..])
+}
+
+fn render_svg(svg: &str, size: u32) -> Option<Vec<u8>> {
+    use resvg::{tiny_skia, usvg};
+    let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).ok()?;
+    let mut pixmap = tiny_skia::Pixmap::new(size, size)?;
+    let scale = size as f32 / tree.size().width();
+    resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    // Straight alpha, which the menus want.
+    Some(pixmap.pixels().iter().flat_map(|p| {
+        let c = p.demultiply();
+        [c.red(), c.green(), c.blue(), c.alpha()]
+    }).collect())
+}
+
+/// The app's logo, for the menu's first line.
+fn logo_rgba(size: u32) -> Option<Vec<u8>> {
+    let image = image::load_from_memory_with_format(include_bytes!("../../assets/brand/icon-128.png"), image::ImageFormat::Png).ok()?.into_rgba8();
+    Some(image::imageops::resize(&image, size, size, image::imageops::FilterType::Lanczos3).into_raw())
 }
 
 const SHOW_LABEL: &str = "Show Muxin";
@@ -310,7 +439,7 @@ mod imp {
     use std::sync::Mutex;
 
     use tray_icon::menu::accelerator::{Accelerator, Code, Modifiers};
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{IconMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
     use super::*;
@@ -328,8 +457,11 @@ mod imp {
     /// menu shows the new words at once.
     struct Shown {
         state: MenuState,
-        status: MenuItem,
-        updates: MenuItem,
+        /// The menu itself, for the first line's look on a Mac.
+        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+        menu: Menu,
+        status: IconMenuItem,
+        updates: IconMenuItem,
         versions: MenuItem,
     }
 
@@ -427,8 +559,8 @@ mod imp {
             *AGENT.lock().unwrap() = state.agent.clone();
             if before.waiting == state.waiting {
                 let shown = &mut tray.menu;
-                if shown.state.status != state.status {
-                    shown.status.set_text(plain(&state.status));
+                if shown.state.status != state.status || shown.state.health != state.health {
+                    show_status(&shown.menu, &shown.status, &state);
                 }
                 if shown.state.newer != state.newer {
                     shown.updates.set_text(plain(&updates_label(state.newer.as_deref())));
@@ -466,27 +598,135 @@ mod imp {
         Accelerator::new(if cfg!(target_os = "macos") { Modifiers::META } else { Modifiers::CONTROL }, Code::Comma)
     }
 
+    /// Icons beside the words: 18 points tall at most on a Mac (drawn at
+    /// twice that), 16 pixels on Windows.
+    const ITEM_ICON: u32 = if cfg!(target_os = "macos") { 36 } else { 16 };
+    /// A Mac tints a template glyph for a light or dark menu: drawn in black.
+    /// Windows shows it as drawn: a gray that reads on both.
+    const GLYPH_COLOR: [u8; 3] = if cfg!(target_os = "macos") { [0, 0, 0] } else { [0x76, 0x76, 0x7c] };
+
+    fn menu_icon(entry: &Entry) -> Option<tray_icon::menu::Icon> {
+        let icon = entry.icon()?;
+        tray_icon::menu::Icon::from_rgba(item_icon_rgba(&icon, ITEM_ICON, GLYPH_COLOR)?, ITEM_ICON, ITEM_ICON).ok()
+    }
+
+    /// A line with its icon; the app's glyphs follow the menu's colors on a
+    /// Mac, the agents' logos keep theirs.
+    fn icon_item(id: String, text: &str, entry: &Entry, accelerator: Option<Accelerator>) -> IconMenuItem {
+        let item = IconMenuItem::with_id(id, plain(text), true, None, accelerator);
+        let icon = menu_icon(entry);
+        #[cfg(target_os = "macos")]
+        if !matches!(entry, Entry::Session(_)) {
+            item.set_icon_templated(icon);
+            return item;
+        }
+        item.set_icon(icon);
+        item
+    }
+
     fn menu(state: &MenuState) -> (Menu, Shown) {
         let menu = Menu::new();
         let note = |text: &str| MenuItem::new(plain(text), false, None);
         let (mut status, mut updates, mut versions) = (None, None, None);
         for entry in menu_entries(state) {
-            let _ = match entry {
-                Entry::Status(text) => menu.append(status.insert(note(&text))),
-                Entry::Note(text) => menu.append(&note(&text)),
-                Entry::Session(w) => menu.append(&MenuItem::with_id(format!("session:{}", w.id), plain(&w.label), true, None)),
+            let _ = match &entry {
+                // The app's logo and how things stand. On a Mac it opens the window,
+                // as Rex's first line does; elsewhere it's a note.
+                Entry::Status(text) => {
+                    let logo = logo_rgba(ITEM_ICON).and_then(|rgba| tray_icon::menu::Icon::from_rgba(rgba, ITEM_ICON, ITEM_ICON).ok());
+                    menu.append(status.insert(IconMenuItem::with_id("show", plain(text), cfg!(target_os = "macos"), logo, None)))
+                }
+                Entry::Note(text) => menu.append(&note(text)),
+                Entry::Session(w) => menu.append(&icon_item(format!("session:{}", w.id), &w.label, &entry, None)),
                 Entry::Separator => menu.append(&PredefinedMenuItem::separator()),
-                Entry::Show => menu.append(&MenuItem::with_id("show", SHOW_LABEL, true, None)),
-                Entry::Settings => menu.append(&MenuItem::with_id("settings", SETTINGS_LABEL, true, Some(settings_shortcut()))),
-                Entry::Updates(newer) => menu.append(updates.insert(MenuItem::with_id("updates", plain(&updates_label(newer.as_deref())), true, None))),
-                Entry::Versions(text) => menu.append(versions.insert(note(&text))),
-                Entry::CopyVersions => menu.append(&MenuItem::with_id("copy", COPY_LABEL, true, None)),
-                Entry::Quit => menu.append(&MenuItem::with_id("quit", QUIT_LABEL, true, None)),
+                Entry::Show => menu.append(&icon_item("show".into(), SHOW_LABEL, &entry, None)),
+                Entry::Settings => menu.append(&icon_item("settings".into(), SETTINGS_LABEL, &entry, Some(settings_shortcut()))),
+                Entry::Updates(newer) => menu.append(updates.insert(icon_item("updates".into(), &updates_label(newer.as_deref()), &entry, None))),
+                Entry::Versions(text) => menu.append(versions.insert(note(text))),
+                Entry::CopyVersions => menu.append(&icon_item("copy".into(), COPY_LABEL, &entry, None)),
+                Entry::Quit => menu.append(&icon_item("quit".into(), QUIT_LABEL, &entry, None)),
             };
         }
         // (Each is in every menu: see `menu_entries`.)
-        let item = |i: Option<MenuItem>| i.unwrap_or_else(|| note(""));
-        (menu, Shown { state: state.clone(), status: item(status), updates: item(updates), versions: item(versions) })
+        let icon_note = |i: Option<IconMenuItem>| i.unwrap_or_else(|| IconMenuItem::new("", false, None, None));
+        let shown = Shown { state: state.clone(), menu: menu.clone(), status: icon_note(status), updates: icon_note(updates), versions: versions.unwrap_or_else(|| note("")) };
+        show_status(&shown.menu, &shown.status, state);
+        (menu, shown)
+    }
+
+    /// The first line. Elsewhere, just how things stand.
+    #[cfg(not(target_os = "macos"))]
+    fn show_status(_: &Menu, status: &IconMenuItem, state: &MenuState) {
+        status.set_text(plain(&state.status));
+    }
+
+    /// The first line, as Rex has it: the logo at full size, "Muxin" in
+    /// bold, and under it a colored dot and how things stand.
+    #[cfg(target_os = "macos")]
+    #[allow(unexpected_cfgs)] // objc's msg_send! checks a cfg this crate doesn't declare
+    fn show_status(menu: &Menu, status: &IconMenuItem, state: &MenuState) {
+        use cocoa::base::{id, nil};
+        use cocoa::foundation::{NSAutoreleasePool, NSRange, NSSize, NSString};
+        use objc::{class, msg_send, sel, sel_impl};
+        use tray_icon::menu::ContextMenu;
+        status.set_text(plain(&state.status));
+        const LOGO: u32 = 64;
+        let Some(png) = logo_png(LOGO) else { return };
+        unsafe {
+            let ns_menu = menu.ns_menu() as id;
+            if ns_menu == nil {
+                return;
+            }
+            let item: id = msg_send![ns_menu, itemAtIndex: 0isize];
+            if item == nil {
+                return;
+            }
+            let data: id = msg_send![class!(NSData), dataWithBytes: png.as_ptr() length: png.len()];
+            let image: id = msg_send![class!(NSImage), alloc];
+            let image: id = msg_send![image, initWithData: data];
+            if image != nil {
+                let _: () = msg_send![image, setSize: NSSize::new(30., 30.)];
+                let _: () = msg_send![item, setImage: image];
+                let _: () = msg_send![image, release];
+            }
+            let dot = match state.health {
+                Health::Good => msg_send![class!(NSColor), systemGreenColor],
+                Health::Waiting => msg_send![class!(NSColor), systemOrangeColor],
+                Health::Quiet => msg_send![class!(NSColor), tertiaryLabelColor],
+            };
+            let dot: id = dot;
+            let title_font: id = msg_send![class!(NSFont), boldSystemFontOfSize: 13.0f64];
+            let small_font: id = msg_send![class!(NSFont), systemFontOfSize: 11.0f64];
+            let label: id = msg_send![class!(NSColor), labelColor];
+            let secondary: id = msg_send![class!(NSColor), secondaryLabelColor];
+            let text = format!("Muxin\n● {}", state.status);
+            let whole: id = msg_send![class!(NSMutableAttributedString), alloc];
+            let whole: id = msg_send![whole, initWithString: NSString::alloc(nil).init_str(&text).autorelease()];
+            // In UTF-16 units, as NSString counts.
+            let units = |s: &str| s.encode_utf16().count() as u64;
+            let (name, dot_at, rest_at) = (units("Muxin"), units("Muxin\n"), units("Muxin\n● "));
+            let all = units(&text);
+            let font_key = NSString::alloc(nil).init_str("NSFont").autorelease();
+            let color_key = NSString::alloc(nil).init_str("NSColor").autorelease();
+            let set = |key: id, value: id, at: u64, len: u64| {
+                let _: () = msg_send![whole, addAttribute: key value: value range: NSRange::new(at, len)];
+            };
+            set(font_key, title_font, 0, name);
+            set(color_key, label, 0, name);
+            set(font_key, small_font, name, all - name);
+            set(color_key, dot, dot_at, rest_at - dot_at);
+            set(color_key, secondary, rest_at, all - rest_at);
+            let _: () = msg_send![item, setAttributedTitle: whole];
+            let _: () = msg_send![whole, release];
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn logo_png(size: u32) -> Option<Vec<u8>> {
+        let rgba = logo_rgba(size)?;
+        let mut png = Vec::new();
+        image::RgbaImage::from_raw(size, size, rgba)?.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).ok()?;
+        Some(png)
     }
 
     /// A "&" in a menu's text would underline the next letter.
@@ -645,12 +885,18 @@ mod imp {
         /// differently, and most tray menus don't show them.)
         fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
             use ksni::menu::{MenuItem, StandardItem};
-            let item = |label: &str, run: Box<dyn Fn(&mut Self) + Send>| -> MenuItem<Self> { StandardItem { label: plain(label), activate: run, ..Default::default() }.into() };
             let note = |text: &str| -> MenuItem<Self> { StandardItem { label: plain(text), enabled: false, ..Default::default() }.into() };
             menu_entries(&self.state)
                 .into_iter()
-                .map(|entry| match entry {
-                    Entry::Status(text) | Entry::Note(text) | Entry::Versions(text) => note(&text),
+                .map(|entry| {
+                    let icon_data = entry.icon().and_then(|icon| png(item_icon_rgba(&icon, MENU_ICON, GLYPH_COLOR)?, MENU_ICON)).unwrap_or_default();
+                    let item = move |label: &str, run: Box<dyn Fn(&mut Self) + Send>| -> MenuItem<Self> { StandardItem { label: plain(label), activate: run, icon_data: icon_data.clone(), ..Default::default() }.into() };
+                    (entry.clone(), item)
+                })
+                .map(|(entry, item)| match entry {
+                    // The app's logo beside how things stand.
+                    Entry::Status(text) => StandardItem { label: plain(&text), enabled: false, icon_data: logo_rgba(MENU_ICON).and_then(|rgba| png(rgba, MENU_ICON)).unwrap_or_default(), ..Default::default() }.into(),
+                    Entry::Note(text) | Entry::Versions(text) => note(&text),
                     Entry::Session(w) => {
                         let id = w.id.clone();
                         item(&w.label, Box::new(move |_| command(AppCommand::OpenSession(id.clone()))))
@@ -670,6 +916,17 @@ mod imp {
     fn plain(text: &str) -> String {
         text.replace('_', "__")
     }
+
+    /// Menu icons, as PNG: the desktop scales them to its own size.
+    const MENU_ICON: u32 = 32;
+    /// Shown as drawn, on a light or a dark menu: a gray that reads on both.
+    const GLYPH_COLOR: [u8; 3] = [0x76, 0x76, 0x7c];
+
+    fn png(rgba: Vec<u8>, size: u32) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        image::RgbaImage::from_raw(size, size, rgba)?.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).ok()?;
+        Some(out)
+    }
 }
 
 #[cfg(test)]
@@ -677,11 +934,11 @@ mod tests {
     use super::*;
 
     fn waiting(n: usize) -> Vec<Waiting> {
-        (0..n).map(|i| Waiting { id: format!("m/s{i}"), label: format!("Session {i} · m"), needs_you: true }).collect()
+        (0..n).map(|i| Waiting { id: format!("m/s{i}"), label: format!("Session {i} · m"), agent: "claude".into(), needs_you: true }).collect()
     }
 
     fn state(waiting: Vec<Waiting>) -> MenuState {
-        MenuState { status: "1 machine online".into(), waiting, agent: Some("0.6.0".into()), newer: None }
+        MenuState { status: "1 machine online".into(), health: Health::Good, waiting, agent: Some("0.6.0".into()), newer: None }
     }
 
     /// What every menu ends with, after the sessions.
@@ -716,10 +973,24 @@ mod tests {
         assert_eq!(entries[6..], the_rest(None, Some("0.6.0")));
         // Then the ones that are done, under their own heading.
         let mut both = waiting(1);
-        both.push(Waiting { id: "m/d".into(), label: "Done one · m".into(), needs_you: false });
+        both.push(Waiting { id: "m/d".into(), label: "Done one · m".into(), agent: "codex".into(), needs_you: false });
         let entries = menu_entries(&state(both));
         assert_eq!(entries[4], Entry::Note("Done".into()));
         assert!(matches!(&entries[5], Entry::Session(w) if w.id == "m/d"));
+    }
+
+    #[test]
+    fn every_line_with_an_icon_draws_one() {
+        let mut lines = the_rest(None, None);
+        lines.extend(["claude", "codex", "shell", "something-new"].map(|agent| Entry::Session(Waiting { id: "m/s".into(), label: "s".into(), agent: agent.into(), needs_you: true })));
+        for line in lines {
+            let Some(icon) = line.icon() else { continue };
+            let rgba = item_icon_rgba(&icon, 32, [0, 0, 0]).unwrap_or_else(|| panic!("{icon:?} didn't draw"));
+            assert_eq!(rgba.len(), 32 * 32 * 4);
+            let opaque = rgba.as_chunks::<4>().0.iter().filter(|p| p[3] > 128).count();
+            assert!(opaque > 40, "{icon:?} is nearly empty ({opaque} pixels)");
+        }
+        assert!(logo_rgba(36).is_some());
     }
 
     #[test]

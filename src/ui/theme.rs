@@ -170,6 +170,8 @@ pub struct Appearance {
     /// The icon in the menu bar or tray. On Linux and Windows, it's what keeps
     /// Muxin running when the window closes (see tray.rs).
     pub tray: bool,
+    /// System notifications when a session needs you or is done (notify.rs).
+    pub notifications: bool,
     /// Where to save; None in demo mode.
     #[serde(skip)]
     pub path: Option<PathBuf>,
@@ -200,6 +202,7 @@ impl Default for Appearance {
             shortcuts: Default::default(),
             close_hints: 0,
             tray: true,
+            notifications: true,
             path: None,
         }
     }

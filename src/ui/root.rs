@@ -3763,6 +3763,11 @@ impl Render for Root {
         self.content_width = f32::from(window.viewport_size().width) - if self.sidebar_hidden { 0. } else { self.sidebar_width } - 56.;
         // Switching away with ⌘ held (⌘Tab): its release never arrives here.
         let was_active = std::mem::replace(&mut self.window_active, window.is_window_active());
+        // No notification for the session you're looking at.
+        super::notify::set_in_front(match &self.route {
+            Route::Session(id) if self.window_active => Some(id.clone()),
+            _ => None,
+        });
         if was_active && !self.window_active {
             self.show_keys = false;
             self.keys_soon = None;

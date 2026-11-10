@@ -18,6 +18,7 @@ mod input;
 mod kit;
 mod logs;
 mod menu;
+mod notify;
 mod move_dialog;
 mod overview;
 mod palette;
@@ -109,6 +110,7 @@ fn run_app(engine: Arc<Engine>, initial_view: Option<String>) {
         let prefs_path = (!engine.is_demo()).then(|| engine.paths().config.clone());
         let appearance = Appearance::load(prefs_path);
         let wants_tray = appearance.tray;
+        let wants_notifications = appearance.notifications;
         cx.set_global(appearance.resolve(cx.window_appearance()));
         cx.set_global(appearance);
         input::bind_keys(cx);
@@ -134,6 +136,10 @@ fn run_app(engine: Arc<Engine>, initial_view: Option<String>) {
         let has_token = |token: &str| initial_view.as_deref().is_some_and(|v| v.split(',').any(|p| p.trim() == token));
         if wants_tray && (!has_token("display:builtin") || has_token("tray")) {
             tray::start(engine.clone(), cx);
+        }
+        // Not from a test window either, unless it's there to try the icon.
+        if !has_token("display:builtin") || has_token("tray") {
+            notify::start(engine.clone(), wants_notifications);
         }
         let takes_focus = !has_token("display:builtin");
         if open_main_window(engine.clone(), initial_view.as_deref(), cx).is_none() {

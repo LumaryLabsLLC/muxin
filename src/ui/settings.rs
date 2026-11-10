@@ -1177,6 +1177,7 @@ impl SettingsPage {
     /// The icon. On a Mac it's only that; elsewhere it's what keeps Muxin running.
     fn tray_section(&self, theme: &Theme, cx: &App) -> impl IntoElement {
         let on = cx.global::<Appearance>().tray;
+        let notifications = cx.global::<Appearance>().notifications;
         let (title, label) = if cfg!(target_os = "macos") { ("Menu bar", "Show Muxin in the menu bar") } else { ("Tray", "Keep running in the tray when the window closes") };
         let hint = if cfg!(target_os = "macos") {
             "A dot shows when a session needs you or is done. Its menu opens that session or brings the window back."
@@ -1218,7 +1219,19 @@ impl SettingsPage {
                         })
                         .detach();
                     }))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(hint)),
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(hint))
+                    .child(div().h(px(6.)))
+                    .child(kit::checkbox(theme, "notifications", notifications, "Notify me when a session needs me or is done", move |on, _, cx| {
+                        let on = *on;
+                        theme_mod::remember(cx, |a| a.notifications = on);
+                        super::notify::set_enabled(on);
+                        cx.refresh_windows();
+                    }))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(if cfg!(target_os = "macos") {
+                        "Click one to open that session. System Settings › Notifications › Muxin sets how they show."
+                    } else {
+                        "Click one to open that session."
+                    })),
             )
     }
 

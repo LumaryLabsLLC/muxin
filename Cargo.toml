@@ -55,6 +55,8 @@ qrcode = { version = "0.14", default-features = false }
 cocoa = { version = "=0.26.0", optional = true }
 # Also already in GPUI's tree: to start a native window drag from our own title bar.
 objc = { version = "0.2", optional = true }
+# Also in GPUI's tree (through cocoa): the notification center's callbacks.
+block = { version = "0.1", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 # Already in the tree (through reqwest/native roots): the Keychain, for cloud sign-ins.
 security-framework = "3"
@@ -63,6 +65,8 @@ security-framework = "3"
 # no system libraries to depend on; `tray-icon` on a Mac and Windows.
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3", optional = true }
+# Already there for ksni: system notifications over D-Bus (src/ui/notify.rs).
+zbus = { version = "5", default-features = false, features = ["tokio"], optional = true }
 # Already in GPUI's tree: taking the window manager's shortcuts for a machine's
 # desktop (src/capture). A keyboard grab on X11, from a connection of our own;
 # on Wayland, the shortcuts-inhibit protocol on GPUI's connection.
@@ -74,6 +78,12 @@ wayland-protocols = { version = "0.31", features = ["client", "unstable"], optio
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 tray-icon = { version = "0.26", default-features = false, optional = true }
+
+# Already in GPUI's tree: the tray menu's icons, drawn from the app's own SVGs.
+[dependencies.resvg]
+version = "0.45"
+default-features = false
+optional = true
 
 # Already in the tree: to start this computer's agent in a session of its own.
 [target.'cfg(unix)'.dependencies]
@@ -99,7 +109,9 @@ winresource = "0.1"
 # Starting without a console window (see main.rs `without_console_window`);
 # telling a password manager's copies on the clipboard (ui/mod.rs).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_Security_Credentials", "Win32_Graphics_Dwm", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_Security_Credentials", "Win32_Graphics_Dwm", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Registry"] }
+# Already in GPUI's tree: system notifications (src/ui/notify.rs).
+windows = { version = "0.61", features = ["UI_Notifications", "Data_Xml_Dom", "Foundation", "Win32_System_WinRT"], optional = true }
 # The window's handle, to color its title bar like the theme.
 raw-window-handle = { version = "0.6", optional = true }
 
@@ -110,7 +122,7 @@ members = [".", "agent", "share-server"]
 default = ["gui"]
 # The native window. Build with `--no-default-features` for a headless CLI + MCP
 # server that needs no GUI libraries (Linux servers, CI, agent boxes).
-gui = ["dep:gpui", "dep:unicode-segmentation", "dep:cocoa", "dep:objc", "dep:raw-window-handle", "dep:alacritty_terminal", "dep:image", "dep:smallvec", "dep:ksni", "dep:tray-icon", "dep:x11rb", "dep:wayland-client", "dep:wayland-backend", "dep:wayland-protocols"]
+gui = ["dep:gpui", "dep:unicode-segmentation", "dep:cocoa", "dep:objc", "dep:block", "dep:raw-window-handle", "dep:alacritty_terminal", "dep:image", "dep:smallvec", "dep:ksni", "dep:zbus", "dep:windows", "dep:tray-icon", "dep:resvg", "dep:x11rb", "dep:wayland-client", "dep:wayland-backend", "dep:wayland-protocols"]
 
 [profile.release]
 lto = "thin"

@@ -1,6 +1,6 @@
 //! Right-click menus for machines, runners, sessions and repositories.
 
-use gpui::{AnyElement, ClipboardItem, Context, FontWeight, MouseButton, Pixels, Point, Window, anchored, deferred, div, prelude::*, px};
+use gpui::{AnyElement, ClipboardItem, Context, Corner, FontWeight, MouseButton, Pixels, Point, Window, anchored, deferred, div, prelude::*, px};
 
 use super::kit::{self, icon};
 use super::root::{Root, Route};
@@ -49,6 +49,8 @@ pub struct ContextMenu {
     pub target: MenuTarget,
     /// Where the click was, in window coordinates.
     pub position: Point<Pixels>,
+    /// The submenu that's open, by its row.
+    pub submenu: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -140,6 +142,46 @@ enum Item {
     /// Text that isn't clickable.
     Note(String),
     Separator,
+    /// A row that opens more items beside it, showing the one picked (`value`).
+    Submenu { label: String, value: Option<String>, glyph: Glyph, items: Vec<Item> },
+}
+
+impl Item {
+    /// About how wide its row is (7.4px a character at 13px, plus the glyph and padding).
+    fn width(&self) -> f32 {
+        match self {
+            Item::Action { label, .. } | Item::Off { label, .. } => label.chars().count() as f32 * 7.4 + 64.,
+            Item::Note(text) => text.chars().count() as f32 * 6.8 + 32.,
+            Item::Separator => 0.,
+            Item::Submenu { label, value, .. } => (label.chars().count() + value.as_ref().map_or(0, |v| v.chars().count() + 2)) as f32 * 7.4 + 84.,
+        }
+    }
+}
+
+/// As wide as its longest line, within reason.
+fn menu_width(items: &[Item]) -> f32 {
+    items.iter().map(Item::width).fold(0., f32::max).clamp(200., 420.)
+}
+
+/// Items under one row that opens them, each with the shorter label it has
+/// there (if any). One item stays a row of its own, as it is; a row whose
+/// items are all dimmed is dimmed.
+fn group(label: &str, glyph: &'static str, entries: Vec<(Option<String>, Item)>) -> Option<Item> {
+    if entries.len() <= 1 {
+        return entries.into_iter().next().map(|(_, item)| item);
+    }
+    if entries.iter().all(|(_, item)| matches!(item, Item::Off { .. })) {
+        return Some(Item::Off { label: label.into(), glyph: Glyph::Icon(glyph) });
+    }
+    let items = entries
+        .into_iter()
+        .map(|(short, item)| match (short, item) {
+            (Some(l), Item::Action { glyph, action, danger, .. }) => Item::Action { label: l, glyph, action, danger },
+            (Some(l), Item::Off { glyph, .. }) => Item::Off { label: l, glyph },
+            (_, item) => item,
+        })
+        .collect();
+    Some(Item::Submenu { label: label.into(), value: None, glyph: Glyph::Icon(glyph), items })
 }
 
 enum Glyph {
@@ -210,7 +252,7 @@ impl Root {
     }
 
     pub(super) fn open_menu(&mut self, target: MenuTarget, position: Point<Pixels>, cx: &mut Context<Self>) {
-        self.context_menu = Some(ContextMenu { target, position });
+        self.context_menu = Some(ContextMenu { target, position, submenu: None });
         cx.notify();
     }
 
@@ -222,6 +264,15 @@ impl Root {
             MenuTarget::Machine(id) => {
                 let Some(m) = s.machines.iter().find(|m| &m.id == id) else { return Vec::new() };
                 let mut items = Vec::new();
+                let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(id.as_str()) && o.kind != "logs");
+                // These need the machine up: dimmed while it's off, unreachable or disconnected.
+                let up = !m.is_down();
+                let needs_up = |item: Item| match item {
+                    Item::Action { label, glyph, .. } if !up => Item::Off { label, glyph },
+                    other => other,
+                };
+                // Install a runner, a schedule, a VM: under New.
+                let mut new = Vec::new();
                 if !m.host.is_empty() {
                     // Asleep: wake it first.
                     if m.status == "offline" && super::format::is_just_offline(m) && self.engine.can_wake(&m.id) {
@@ -233,39 +284,50 @@ impl Root {
                         items.push(act("Connect", "plug", Action::Connect(id.clone(), true)));
                         items.push(Item::Separator);
                     }
-                    // These need the machine up: dimmed while it's off, unreachable or disconnected.
-                    let up = !m.is_down();
-                    let needs_up = |item: Item| match item {
-                        Item::Action { label, glyph, .. } if !up => Item::Off { label, glyph },
-                        other => other,
-                    };
                     items.push(needs_up(act("New terminal", "square-terminal", Action::NewTerminal(id.clone()))));
-                    for a in AGENTS.iter().filter(|a| a.id != "shell" && m.agents.iter().any(|i| i == a.id)) {
-                        items.push(needs_up(Item::Action { label: format!("New {} session…", a.name), glyph: Glyph::Agent(a.id), action: Action::NewAgent(id.clone(), a.id), danger: false }));
-                    }
+                    let agents = AGENTS
+                        .iter()
+                        .filter(|a| a.id != "shell" && m.agents.iter().any(|i| i == a.id))
+                        .map(|a| (Some(a.name.to_string()), needs_up(Item::Action { label: format!("New {} session…", a.name), glyph: Glyph::Agent(a.id), action: Action::NewAgent(id.clone(), a.id), danger: false })))
+                        .collect();
+                    items.extend(group("New session", "bot", agents));
+                    let mut desktop = Vec::new();
                     if super::format::has_desktop(m) && !m.local {
-                        items.push(needs_up(act("Show desktop", "monitor", Action::ShowDesktop(id.clone()))));
+                        desktop.push((Some("Show".to_string()), needs_up(act("Show desktop", "monitor", Action::ShowDesktop(id.clone())))));
                     }
                     if super::format::has_desktop(m) && !m.local && !s.demo {
-                        items.push(needs_up(act(crate::fleet::remote_desktop::open_label(&m.platform), "external-link", Action::OpenRemoteDesktop(id.clone()))));
+                        desktop.push((None, needs_up(act(crate::fleet::remote_desktop::open_label(&m.platform), "external-link", Action::OpenRemoteDesktop(id.clone())))));
                     }
                     if super::format::has_desktop(m) && !s.demo && !m.platform.starts_with("windows") {
-                        items.push(needs_up(act("Add virtual monitor…", "monitor", Action::AddDisplay(id.clone()))));
+                        desktop.push((None, needs_up(act("Add virtual monitor…", "monitor", Action::AddDisplay(id.clone())))));
                     }
+                    items.extend(group("Desktop", "monitor", desktop));
+                    items.push(needs_up(act("Run a command…", "zap", Action::RunOn(id.clone()))));
+                    items.push(needs_up(act("Copy files…", "folder", Action::CopyFiles(id.clone()))));
                     items.push(needs_up(act("Logs", "scroll-text", Action::ShowLogs(id.clone()))));
                     items.push(needs_up(act("Services", "layers", Action::ShowServices(id.clone()))));
-                    items.push(needs_up(act("Copy files…", "folder", Action::CopyFiles(id.clone()))));
-                    items.push(needs_up(act("Run a command…", "zap", Action::RunOn(id.clone()))));
+                    new.push((Some("Runner…".to_string()), needs_up(act("Install runner…", "plus", Action::InstallRunner(id.clone())))));
+                }
+                if m.cloud.is_none() && m.status == "online" {
+                    new.push((Some("Schedule…".to_string()), act("New schedule here…", "clock", Action::NewSchedule(id.clone()))));
+                }
+                // A machine that can run VMs: make one here.
+                if m.cloud.is_none() && self.engine.vm_options().hosts.iter().any(|h| &h.machine_id == id && !h.systems.is_empty()) {
+                    new.push((Some("VM…".to_string()), act("New VM here…", "box", Action::NewVm(id.clone()))));
+                }
+                if let Some(new) = group("New", "plus", new) {
                     items.push(Item::Separator);
+                    items.push(new);
+                }
+                if !m.host.is_empty() {
                     if !m.is_disconnected() {
                         items.push(act("Refresh", "refresh-cw", Action::Check(id.clone())));
                     }
-                    items.push(needs_up(act("Install runner…", "plus", Action::InstallRunner(id.clone()))));
                     if !m.is_disconnected() && !m.local {
                         items.push(act("Disconnect", "unplug", Action::Connect(id.clone(), false)));
                     }
-                    items.push(Item::Separator);
                 }
+                items.push(Item::Separator);
                 items.push(act("Rename…", "pencil", Action::RenameMachine(id.clone())));
                 if Root::is_favorite(cx, id) {
                     items.push(act("Remove from favorites", "star", Action::FavoriteMachine(id.clone(), false)));
@@ -274,44 +336,37 @@ impl Root {
                 }
                 // Its place among the machines at its level (VMs: under their host).
                 let (entries, sorted) = Root::order_entries(s, cx);
-                let moves = [("Move Up", "arrow-up", Move::Up), ("Move Down", "arrow-down", Move::Down), ("Move to Top", "arrow-up", Move::Top)];
-                let can: Vec<bool> = moves.iter().map(|(_, _, how)| crate::fleet::order::moved(&entries, sorted, id, how).is_some()).collect();
-                if can.iter().any(|c| *c) {
-                    items.push(Item::Separator);
-                    for ((label, glyph, how), can) in moves.into_iter().zip(can) {
-                        items.push(if can { act(label, glyph, Action::MoveMachine(id.clone(), how)) } else { Item::Off { label: label.into(), glyph: Glyph::Icon(glyph) } });
-                    }
+                let moves = [("Up", "Move Up", "arrow-up", Move::Up), ("Down", "Move Down", "arrow-down", Move::Down), ("To the top", "Move to Top", "arrow-up", Move::Top)];
+                let moves: Vec<(Option<String>, Item)> = moves
+                    .into_iter()
+                    .map(|(short, label, glyph, how)| {
+                        let can = crate::fleet::order::moved(&entries, sorted, id, &how).is_some();
+                        (Some(short.to_string()), if can { act(label, glyph, Action::MoveMachine(id.clone(), how)) } else { Item::Off { label: label.into(), glyph: Glyph::Icon(glyph) } })
+                    })
+                    .collect();
+                if moves.iter().any(|(_, item)| matches!(item, Item::Action { .. })) {
+                    items.extend(group("Move", "arrow-up", moves));
                 }
-                items.push(Item::Separator);
+                // Starting, stopping, restarting: under Power.
+                let mut power = Vec::new();
                 // A cloud machine is powered and destroyed; removing it alone would leave it running (and billed).
                 if m.cloud.is_some() {
                     let off = m.status == "offline";
-                    let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(id.as_str()) && o.kind != "logs");
                     let label = if off { "Power on" } else { "Power off" };
-                    items.push(if busy { Item::Off { label: label.into(), glyph: Glyph::Icon("power") } } else { act(label, "power", Action::CloudPower(id.clone(), off)) });
-                    items.extend(os_power_items(m, busy));
-                    items.push(Item::Action { label: "Destroy…".into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
-                } else {
-                    // A VM or container on another machine: started and stopped there.
-                    if let Some(p) = m.parent.as_ref().filter(|p| p.container.is_some() && s.machines.iter().any(|h| h.id == p.machine_id && !h.is_down())) {
-                        let running = p.container_state.as_deref() == Some("running");
-                        let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(id.as_str()) && o.kind != "logs");
-                        let label = if running { "Stop" } else { "Start" };
-                        items.push(if busy { Item::Off { label: label.into(), glyph: Glyph::Icon("power") } } else { act(label, "power", Action::MachinePower(id.clone(), !running)) });
-                    }
-                    if m.status == "online" {
-                        items.push(act("New schedule here…", "clock", Action::NewSchedule(id.clone())));
-                    }
-                    // A machine that can run VMs: make one here.
-                    if self.engine.vm_options().hosts.iter().any(|h| &h.machine_id == id && !h.systems.is_empty()) {
-                        items.push(act("New VM here…", "box", Action::NewVm(id.clone())));
-                    }
-                    let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(id.as_str()) && o.kind != "logs");
-                    items.extend(os_power_items(m, busy));
-                    // A VM Muxin made goes with its container and disk.
-                    let label = if m.vm.is_some() { "Destroy…" } else { "Remove from Muxin…" };
-                    items.push(Item::Action { label: label.into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
+                    power.push((None, if busy { Item::Off { label: label.into(), glyph: Glyph::Icon("power") } } else { act(label, "power", Action::CloudPower(id.clone(), off)) }));
                 }
+                // A VM or container on another machine: started and stopped there.
+                if let Some(p) = m.parent.as_ref().filter(|p| m.cloud.is_none() && p.container.is_some() && s.machines.iter().any(|h| h.id == p.machine_id && !h.is_down())) {
+                    let running = p.container_state.as_deref() == Some("running");
+                    let label = if running { "Stop" } else { "Start" };
+                    power.push((None, if busy { Item::Off { label: label.into(), glyph: Glyph::Icon("power") } } else { act(label, "power", Action::MachinePower(id.clone(), !running)) }));
+                }
+                power.extend(os_power_items(m, busy).into_iter().map(|item| (None, item)));
+                items.push(Item::Separator);
+                items.extend(group("Power", "power", power));
+                // A cloud machine, or a VM Muxin made, goes with its disk.
+                let label = if m.cloud.is_some() || m.vm.is_some() { "Destroy…" } else { "Remove from Muxin…" };
+                items.push(Item::Action { label: label.into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
                 items
             }
             MenuTarget::MachineMore(id) => {
@@ -560,13 +615,17 @@ impl Root {
                 let current = (d.width.round() as u32, d.height.round() as u32);
                 let sizes: Vec<(u32, u32)> = d.modes.iter().copied().filter(|(w, _)| *w >= 1024).collect();
                 if sizes.len() > 1 {
+                    let value = sizes.contains(&current).then(|| format!("{} × {}", current.0, current.1));
+                    let sizes = sizes
+                        .into_iter()
+                        .map(|size| {
+                            let glyph = if size == current { Glyph::Selected } else { Glyph::None };
+                            let action = Action::SetDisplay(machine.clone(), display.clone(), Some(size), None);
+                            Item::Action { label: format!("{} × {}", size.0, size.1), glyph, action, danger: false }
+                        })
+                        .collect();
                     items.push(Item::Separator);
-                    items.push(Item::Note("Resolution".into()));
-                    for size in sizes {
-                        let glyph = if size == current { Glyph::Selected } else { Glyph::None };
-                        let action = Action::SetDisplay(machine.clone(), display.clone(), Some(size), None);
-                        items.push(Item::Action { label: format!("{} × {}", size.0, size.1), glyph, action, danger: false });
-                    }
+                    items.push(Item::Submenu { label: "Resolution".into(), value, glyph: Glyph::Icon("monitor"), items: sizes });
                 }
                 if [1., 2.].iter().all(|s| d.scales.iter().any(|x| (x - s).abs() < 0.01)) {
                     items.push(Item::Separator);
@@ -790,24 +849,19 @@ impl Root {
     }
 
     /// The open menu, drawn above everything, with a backdrop that closes it.
-    pub(super) fn render_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let position = self.context_menu.as_ref()?.position;
+    pub(super) fn render_menu(&mut self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (position, open) = self.context_menu.as_ref().map(|m| (m.position, m.submenu))?;
         let items = self.menu_items(cx);
         if items.is_empty() {
             self.context_menu = None;
             return None;
         }
-        // As wide as its longest line (about 7.4px a character at 13px, plus the
-        // glyph and padding), within reason.
-        let longest = items
-            .iter()
-            .map(|i| match i {
-                Item::Action { label, .. } | Item::Off { label, .. } => label.chars().count() as f32 * 7.4 + 64.,
-                Item::Note(text) => text.chars().count() as f32 * 6.8 + 32.,
-                Item::Separator => 0.,
-            })
-            .fold(0., f32::max);
-        let width = longest.clamp(200., 420.);
+        let width = menu_width(&items);
+        let viewport = window.viewport_size();
+        // A submenu opens on the right, or on the left when there's no room there
+        // (the menu itself is kept 8px inside the window).
+        let left = f32::from(position.x).min(f32::from(viewport.width) - 8. - width);
+        let room_right = f32::from(viewport.width) - 8. - (left + width);
         let close = |this: &mut Root, _: &gpui::MouseDownEvent, _: &mut Window, cx: &mut Context<Root>| {
             this.context_menu = None;
             cx.notify();
@@ -815,58 +869,68 @@ impl Root {
         let rows: Vec<AnyElement> = items
             .into_iter()
             .enumerate()
-            .map(|(i, item)| match item {
-                Item::Separator => div().h(px(1.)).my(px(4.)).mx(px(8.)).bg(theme.border_variant).into_any_element(),
-                Item::Note(text) => div().px(px(12.)).py(px(5.)).text_size(px(12.)).text_color(theme.text_placeholder).child(text).into_any_element(),
-                Item::Off { label, glyph } => div()
-                    .flex()
-                    .items_center()
-                    .gap(px(9.))
-                    .h(px(28.))
-                    .mx(px(4.))
-                    .px(px(8.))
-                    .opacity(0.4)
-                    .text_size(px(13.))
-                    .text_color(theme.text)
-                    .child(div().w(px(18.)).flex().justify_center().child(menu_glyph(theme, glyph)))
-                    .child(div().w(px(width - 56.)).truncate().child(label))
-                    .into_any_element(),
-                Item::Action { label, glyph, action, danger } => {
-                    let color = if danger { theme.error } else { theme.text };
-                    let glyph = menu_glyph(theme, glyph);
-                    div()
-                        .id(("menu-item", i))
-                        .flex()
-                        .items_center()
-                        .gap(px(9.))
-                        .h(px(28.))
-                        .mx(px(4.))
-                        .px(px(8.))
-                        .rounded(crate::ui::kit::corner(6.))
-                        .cursor_pointer()
-                        .hover(|st| st.bg(theme.element_hover))
-                        .text_size(px(13.))
-                        .text_color(color)
-                        .child(div().w(px(18.)).flex().justify_center().child(glyph))
-                        // Margins, padding, glyph and gap; past the widest menu, "…".
-                        .child(div().w(px(width - 56.)).truncate().child(label))
-                        .on_click(cx.listener(move |this, _, window, cx| this.run_menu_action(action.clone(), window, cx)))
-                        .into_any_element()
-                }
+            .map(|(i, item)| {
+                let is_sub = matches!(item, Item::Submenu { .. });
+                let row = match item {
+                    Item::Submenu { label, value, glyph, items } => {
+                        let sub_width = menu_width(&items);
+                        let is_open = open == Some(i);
+                        let side = if room_right >= sub_width - 4. { (Corner::TopLeft, width - 8.) } else { (Corner::TopRight, 4.) };
+                        let rows: Vec<AnyElement> = items.into_iter().enumerate().map(|(j, item)| self.menu_row(item, ("submenu-item", j), sub_width, theme, cx)).collect();
+                        div()
+                            .id(("menu-item", i))
+                            .relative()
+                            .flex()
+                            .items_center()
+                            .gap(px(9.))
+                            .h(px(28.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded(crate::ui::kit::corner(6.))
+                            .cursor_pointer()
+                            .when(is_open, |d| d.bg(theme.element_hover))
+                            .hover(|st| st.bg(theme.element_hover))
+                            .text_size(px(13.))
+                            .text_color(theme.text)
+                            .child(div().w(px(18.)).flex().justify_center().child(menu_glyph(theme, glyph)))
+                            .child(div().flex_1().min_w_0().truncate().child(label))
+                            .children(value.map(|v| div().flex_none().text_color(theme.text_placeholder).child(v)))
+                            .child(icon("chevron-right", 11., theme.text_placeholder))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(m) = this.context_menu.as_mut() {
+                                    m.submenu = if m.submenu == Some(i) { None } else { Some(i) };
+                                }
+                                cx.notify();
+                            }))
+                            .when(is_open, |d| {
+                                let menu = menu_panel("context-submenu", sub_width, theme)
+                                    .max_h(viewport.height - px(16.))
+                                    .overflow_y_scroll()
+                                    .children(rows);
+                                // Its top row level with this one.
+                                let at = div().absolute().top(px(-4.)).left(px(side.1)).child(anchored().anchor(side.0).snap_to_window_with_margin(px(8.)).child(menu));
+                                d.child(at)
+                            })
+                            .into_any_element()
+                    }
+                    item => self.menu_row(item, ("menu-item", i), width, theme, cx),
+                };
+                // Pointing at a row opens its submenu, or closes the one that's open.
+                div()
+                    .id(("menu-row", i))
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        let Some(m) = this.context_menu.as_mut() else { return };
+                        let want = if is_sub { Some(i) } else { None };
+                        if *hovered && m.submenu != want {
+                            m.submenu = want;
+                            cx.notify();
+                        }
+                    }))
+                    .child(row)
+                    .into_any_element()
             })
             .collect();
-        let menu = div()
-            .id("context-menu")
-            .occlude()
-            .w(px(width))
-            .py(px(4.))
-            .rounded(crate::ui::kit::corner(9.))
-            .bg(theme.elevated)
-            .border_1()
-            .border_color(theme.border)
-            .when(!crate::ui::kit::square(), |d| d.shadow_lg())
-            .font_weight(FontWeight::NORMAL)
-            .children(rows);
+        let menu = menu_panel("context-menu", width, theme).children(rows);
         Some(
             div()
                 .absolute()
@@ -876,6 +940,64 @@ impl Root {
                 .into_any_element(),
         )
     }
+
+    /// One row of a menu (a submenu row is drawn by render_menu).
+    fn menu_row(&self, item: Item, id: (&'static str, usize), width: f32, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        match item {
+            Item::Separator => div().h(px(1.)).my(px(4.)).mx(px(8.)).bg(theme.border_variant).into_any_element(),
+            Item::Note(text) => div().px(px(12.)).py(px(5.)).text_size(px(12.)).text_color(theme.text_placeholder).child(text).into_any_element(),
+            Item::Off { label, glyph } | Item::Submenu { label, glyph, .. } => div()
+                .flex()
+                .items_center()
+                .gap(px(9.))
+                .h(px(28.))
+                .mx(px(4.))
+                .px(px(8.))
+                .opacity(0.4)
+                .text_size(px(13.))
+                .text_color(theme.text)
+                .child(div().w(px(18.)).flex().justify_center().child(menu_glyph(theme, glyph)))
+                .child(div().w(px(width - 56.)).truncate().child(label))
+                .into_any_element(),
+            Item::Action { label, glyph, action, danger } => {
+                let color = if danger { theme.error } else { theme.text };
+                let glyph = menu_glyph(theme, glyph);
+                div()
+                    .id(id)
+                    .flex()
+                    .items_center()
+                    .gap(px(9.))
+                    .h(px(28.))
+                    .mx(px(4.))
+                    .px(px(8.))
+                    .rounded(crate::ui::kit::corner(6.))
+                    .cursor_pointer()
+                    .hover(|st| st.bg(theme.element_hover))
+                    .text_size(px(13.))
+                    .text_color(color)
+                    .child(div().w(px(18.)).flex().justify_center().child(glyph))
+                    // Margins, padding, glyph and gap; past the widest menu, "…".
+                    .child(div().w(px(width - 56.)).truncate().child(label))
+                    .on_click(cx.listener(move |this, _, window, cx| this.run_menu_action(action.clone(), window, cx)))
+                    .into_any_element()
+            }
+        }
+    }
+}
+
+/// A menu's box.
+fn menu_panel(id: &'static str, width: f32, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .occlude()
+        .w(px(width))
+        .py(px(4.))
+        .rounded(crate::ui::kit::corner(9.))
+        .bg(theme.elevated)
+        .border_1()
+        .border_color(theme.border)
+        .when(!crate::ui::kit::square(), |d| d.shadow_lg())
+        .font_weight(FontWeight::NORMAL)
 }
 
 /// Makes a sidebar row open its menu on right-click.
@@ -917,5 +1039,47 @@ fn menu_glyph(theme: &Theme, glyph: Glyph) -> AnyElement {
         Glyph::App(None, name) => kit::color_tile(name, 18.).into_any_element(),
         Glyph::Selected => icon("check", 14., theme.accent).into_any_element(),
         Glyph::None => div().into_any_element(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn action(label: &str) -> Item {
+        Item::Action { label: label.into(), glyph: Glyph::None, action: Action::AddAccount, danger: false }
+    }
+
+    fn labels(items: &[Item]) -> Vec<String> {
+        items
+            .iter()
+            .map(|i| match i {
+                Item::Action { label, .. } | Item::Off { label, .. } | Item::Submenu { label, .. } => label.clone(),
+                Item::Note(t) => t.clone(),
+                Item::Separator => "-".into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_group_of_one_stays_a_row_with_its_long_label() {
+        let item = group("New session", "bot", vec![(Some("Codex".into()), action("New Codex session…"))]).unwrap();
+        assert!(matches!(&item, Item::Action { label, .. } if label == "New Codex session…"));
+        assert!(group("New session", "bot", Vec::new()).is_none());
+    }
+
+    #[test]
+    fn a_group_of_several_opens_with_short_labels() {
+        let entries = vec![(Some("Claude Code".into()), action("New Claude Code session…")), (None, action("Something else"))];
+        let Some(Item::Submenu { label, items, .. }) = group("New session", "bot", entries) else { panic!("not a submenu") };
+        assert_eq!(label, "New session");
+        assert_eq!(labels(&items), ["Claude Code", "Something else"]);
+    }
+
+    #[test]
+    fn a_group_with_nothing_to_do_is_dimmed() {
+        let off = |l: &str| Item::Off { label: l.into(), glyph: Glyph::None };
+        let item = group("Desktop", "monitor", vec![(None, off("Show desktop")), (None, off("Add virtual monitor…"))]).unwrap();
+        assert!(matches!(&item, Item::Off { label, .. } if label == "Desktop"));
     }
 }

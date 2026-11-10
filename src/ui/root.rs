@@ -3787,7 +3787,7 @@ impl Render for Root {
             Modal::Licenses(d) => d.clone().into_any_element(),
         });
         let notice = self.render_notice(&theme);
-        let menu = self.render_menu(&theme, cx);
+        let menu = self.render_menu(&theme, window, cx);
         let palette = self.render_palette(&theme, cx);
 
         div()

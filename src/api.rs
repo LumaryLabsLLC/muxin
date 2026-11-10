@@ -154,6 +154,17 @@ pub struct CheckRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct IgnoreWarningRequest {
+    pub machine_id: String,
+    /// The warning's code, as diagnostics name it ("low-disk").
+    pub warning: String,
+    /// false shows it again. Default true.
+    #[serde(default = "default_true")]
+    pub ignored: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConnectMachineRequest {
     pub machine_id: String,
     /// false disconnects. Default true.
@@ -501,6 +512,9 @@ pub struct MachineDetail {
     pub notes: Option<String>,
     pub runners: Vec<RunnerOut>,
     pub diagnostics: Vec<DiagnosticOut>,
+    /// Warnings not shown for it, by code (`ignore_warning`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignored_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -772,6 +786,7 @@ fn machine_detail(s: &Snapshot, m: &Machine) -> MachineDetail {
                 actions: d.actions.clone(),
             })
             .collect(),
+        ignored_warnings: m.ignored_warnings.clone(),
     }
 }
 
@@ -1272,6 +1287,16 @@ pub async fn connect_machine(engine: &Arc<Engine>, req: ConnectMachineRequest) -
     }
     let s = engine.current();
     Ok(machine_summary(find_machine(&s, &id)?))
+}
+
+/// Stops showing one of a machine's warnings (in its diagnostics and in
+/// `attention`), or shows it again. Saved in config.toml.
+pub async fn ignore_warning(engine: &Arc<Engine>, req: IgnoreWarningRequest) -> ApiResult<MachineDetail> {
+    engine.refresh_from_disk();
+    let id = find_machine(&engine.current(), &req.machine_id)?.id.clone();
+    engine.set_warning_ignored(&id, &req.warning, req.ignored).map_err(op_error)?;
+    let s = engine.current();
+    Ok(machine_detail(&s, find_machine(&s, &id)?))
 }
 
 /// Gives a machine a new name; its id (and everything tied to it) stays.

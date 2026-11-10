@@ -1675,8 +1675,9 @@ impl Root {
     }
 
     /// A diagnostic's button (`DiagnosticAction::kind`).
-    pub(super) fn run_diagnostic_action(&mut self, kind: &str, machine: &str, runner: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn run_diagnostic_action(&mut self, kind: &str, code: &str, machine: &str, runner: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         match (kind, runner) {
+            ("ignore_warning", _) => self.set_warning_ignored(machine, code, true, cx),
             ("runner_update", Some(r)) => self.runner_action(r, RunnerAction::Update, cx),
             ("runner_start", Some(r)) => self.runner_action(r, RunnerAction::Start, cx),
             ("runner_restart", Some(r)) => self.runner_action(r, RunnerAction::Restart, cx),
@@ -1694,6 +1695,20 @@ impl Root {
             ("open_settings", _) => self.open_settings_tab(super::settings::SettingsTab::GitHub, window, cx),
             _ => {}
         }
+    }
+
+    /// Stops showing a machine's warning (by its code), or shows it again.
+    pub(super) fn set_warning_ignored(&mut self, machine: &str, code: &str, ignored: bool, cx: &mut Context<Self>) {
+        match self.engine.set_warning_ignored(machine, code, ignored) {
+            Ok(()) if ignored => {
+                let name = self.snapshot.machines.iter().find(|m| m.id == machine).map_or(machine.to_string(), |m| m.name.clone());
+                let what = crate::fleet::build::warning_name(code).to_lowercase();
+                self.notify_user(format!("{name} won't warn about {what} anymore. Its page can turn it back on."), false, cx);
+            }
+            Ok(()) => {}
+            Err(e) => self.notify_user(e, true, cx),
+        }
+        cx.notify();
     }
 
     /// Asks before a machine shuts down or restarts.

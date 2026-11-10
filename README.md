@@ -148,6 +148,7 @@ runners = ["mac-studio-01", "mac-studio-02"]   # expected runners; missing ones 
 # discover = false                              # don't list runners found but not declared
 # notes = "Under the desk"
 # direct_address = "nas.example.com:47822"      # where a direct connection reaches it (NAT, a forwarded port)
+# ignore_warnings = ["low-disk"]                # warnings it's meant to have (a NAS's small system volume)
 
 [[machine]]
 name = "StudioNAS"   # no runners: shown under "Other machines"
@@ -213,6 +214,7 @@ The MCP server has these tools:
 | `check_machines` | Runs the read-only machine check over ssh now. |
 | `add_machine`, `remove_machine`, `rename_machine` | Edit `config.toml`. Nothing on the machine changes, except that `remove_machine` turns off a direct connection from this app. |
 | `connect_machine` | Disconnect from a machine (`connected: false`) or connect again. Its sessions keep running there. |
+| `ignore_warning` | Stop showing one of a machine's warnings by its code (`low-disk`), or show it again. Saved in `config.toml`. |
 | `machine_ports` | What's listening on a machine: ports, programs or containers, and web servers' page titles. |
 | `machine_processes`, `process_signal` | A machine's busiest processes and its GPUs; stop or kill one. |
 | `run_on_machines` | Runs one shell command on several machines at once, with each one's output and exit status. |
@@ -306,6 +308,7 @@ muxin usage [--days 30] [beelink]             # what the agents used, and the co
 muxin edit beelink:~/code/api [--editor zed] [--print]   # open a folder there in your editor
 muxin disconnect <id>                     # stop connecting to it (its sessions go on there)
 muxin connect <id>                        # connect again, and check it
+muxin ignore <id> low-disk [--undo]       # stop showing one of its warnings (--undo: show it again)
 muxin install <machine-id> [--scope acme] [--count N | --name a --name b] [--label gpu] [--mode auto|service|background|docker] [--image IMAGE] [--docker-socket] [--no-wait]
 muxin runner <start|stop|restart|logs|remove> <runner-id> [--delete-files]
 muxin watch <org|owner/repo>... / unwatch ...

@@ -379,6 +379,26 @@ impl Engine {
         Ok(())
     }
 
+    /// Stops showing a warning (by its code, such as "low-disk") for a
+    /// machine, or shows it again; saved in config.toml (`ignore_warnings`).
+    pub fn set_warning_ignored(self: &Arc<Self>, machine_id: &str, code: &str, ignored: bool) -> Result<(), String> {
+        let code = code.trim();
+        if code.is_empty() || !code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(format!("\"{code}\" isn't a warning's code. Codes look like low-disk or reboot-required."));
+        }
+        let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in config.toml anymore.")?;
+        if spec.ignore_warnings.iter().any(|c| c == code) == ignored {
+            return Ok(());
+        }
+        let edit = |text: &str| inventory_edit::set_warning_ignored(text, &spec.id, code, ignored);
+        match self.demo_world() {
+            Some(w) => w.edit_inventory(edit)?,
+            None => inventory_edit::edit_file(self.inventory_path(), edit)?,
+        }
+        self.reload_inventory_now();
+        Ok(())
+    }
+
     /// Gives a machine a new name in config.toml. Its id doesn't change, so
     /// its runners, sessions, favorites and history stay with it.
     pub fn rename_machine(self: &Arc<Self>, machine_id: &str, name: &str) -> Result<(), String> {

@@ -70,6 +70,8 @@ enum Command {
     Disconnect(MachineArgs),
     /// Connect to a machine again (and check it)
     Connect(MachineArgs),
+    /// Stop showing one of a machine's warnings, such as low-disk (--undo shows it again)
+    Ignore(IgnoreArgs),
     /// List runners
     Runners(RunnersArgs),
     /// Queued and running self-hosted jobs
@@ -260,6 +262,22 @@ struct MachineArgs {
 
     /// Machine id (e.g. mac-studio) or name
     machine_id: String,
+}
+
+#[derive(Args)]
+struct IgnoreArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+
+    /// Machine id (e.g. mac-studio) or name
+    machine_id: String,
+
+    /// The warning's code, as `muxin machine <id>` shows it (e.g. low-disk)
+    warning: String,
+
+    /// Show it again
+    #[arg(long)]
+    undo: bool,
 }
 
 #[derive(Args)]
@@ -1631,6 +1649,14 @@ fn main() -> ExitCode {
         Some(Command::Disconnect(a)) => {
             let req = api::ConnectMachineRequest { machine_id: a.machine_id, connected: false };
             run(&runtime, &a.agent, async move |e| api::connect_machine(&e, req).await, |m| format!("Disconnected from {}. Its sessions go on there; `muxin connect {}` connects again.\n", m.name, m.id))
+        }
+        Some(Command::Ignore(a)) => {
+            let (warning, ignored) = (a.warning.clone(), !a.undo);
+            let req = api::IgnoreWarningRequest { machine_id: a.machine_id, warning: a.warning, ignored };
+            run(&runtime, &a.agent, async move |e| api::ignore_warning(&e, req).await, move |m| match ignored {
+                true => format!("{} won't warn about {warning} anymore. `muxin ignore {} {warning} --undo` shows it again.\n", m.summary.name, m.summary.id),
+                false => format!("{} warns about {warning} again.\n", m.summary.name),
+            })
         }
         Some(Command::RenameMachine(a)) => {
             let req = api::RenameMachineRequest { machine_id: a.machine_id, name: a.name };

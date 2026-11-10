@@ -149,6 +149,8 @@ pub fn build(input: &Inputs) -> Snapshot {
             }
         });
         machine_diagnostics(&mut diagnostics, spec, probe, unreachable.as_ref());
+        // The ones it's meant to have (a NAS's small system volume), as config.toml says.
+        diagnostics.retain(|d| !spec.ignore_warnings.contains(&d.code));
         diagnostics.sort_by_key(|d| level_rank(&d.level));
 
         // A failed check keeps the OS the last one found.
@@ -183,6 +185,7 @@ pub fn build(input: &Inputs) -> Snapshot {
             parent,
             vm: spec.vm.clone(),
             direct_address: spec.direct_address.clone().filter(|a| !a.trim().is_empty()),
+            ignored_warnings: spec.ignore_warnings.clone(),
             tailnet: device.cloned(),
             cloud: spec.cloud.as_ref().map(|c| {
                 use crate::cloud::usage;
@@ -705,6 +708,16 @@ impl Diagnostic {
     }
 }
 
+/// What a warning is, by its code, for "Ignored: …" lines.
+pub fn warning_name(code: &str) -> String {
+    match code {
+        "low-disk" => "Low disk space".into(),
+        "reboot-required" => "Waiting for a reboot".into(),
+        "failed-services" => "Failed services".into(),
+        other => other.replace('-', " "),
+    }
+}
+
 fn level_rank(level: &str) -> u8 {
     match level {
         "error" => 0,
@@ -840,13 +853,15 @@ fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Opt
                 None,
                 None,
             )
-            .act("Open Files", "open_files"));
+            .act("Open Files", "open_files")
+            .act("Ignore", "ignore_warning"));
         }
     }
     if p.reboot_required {
         let d = diag("warning", "reboot-required", "Updates are waiting for a reboot.".into(), Some("sudo reboot  # its sessions end; Muxin reconnects when it's back".into()), None);
         // This computer restarts from its own menu.
-        out.push(if spec.is_local() { d } else { d.act("Restart…", "machine_restart") });
+        let d = if spec.is_local() { d } else { d.act("Restart…", "machine_restart") };
+        out.push(d.act("Ignore", "ignore_warning"));
     }
     if !p.failed_units.is_empty() {
         let n = p.failed_units.len();
@@ -857,7 +872,8 @@ fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Opt
             Some("Machine › Services shows them, with their logs.".into()),
             None,
         )
-        .act("Open Services", "open_services"));
+        .act("Open Services", "open_services")
+        .act("Ignore", "ignore_warning"));
     }
     if let Some(err) = &p.docker_error {
         out.push(diag(
@@ -1322,8 +1338,34 @@ mod tests {
         };
         assert_eq!(reboot(&inv.machines[0]).actions[0].kind, "machine_restart");
         let here = reboot(&inv.machines[1]);
-        assert!(here.actions.is_empty(), "this computer restarts from its own menu");
+        assert!(here.actions.iter().all(|a| a.kind == "ignore_warning"), "this computer restarts from its own menu");
         assert!(here.hint.is_some(), "and the hint stays");
+    }
+
+    #[test]
+    fn ignored_warnings_leave_diagnostics_and_attention() {
+        let inv = inventory(
+            r#"
+            [[machine]]
+            name = "NAS"
+            host = "nas"
+            ignore_warnings = ["low-disk"]
+
+            [[machine]]
+            name = "Box"
+            host = "box"
+            "#,
+        );
+        // Both nearly full: 300 MB free of a 419 MB system volume.
+        let tiny = ProbeResult { disk_total: Some(419_000_000), disk_free: Some(300_000_000), ..probe_with(Vec::new()) };
+        let probes: HashMap<String, ProbeResult> = [("nas".to_string(), tiny.clone()), ("box".to_string(), tiny)].into();
+        let s = run(&inv, &Settings::default(), &probes, None);
+        let machine = |id: &str| s.machines.iter().find(|m| m.id == id).unwrap();
+        assert!(machine("nas").diagnostics.iter().all(|d| d.code != "low-disk"));
+        assert_eq!(machine("nas").ignored_warnings, ["low-disk"]);
+        assert!(machine("box").diagnostics.iter().any(|d| d.code == "low-disk" && d.actions.iter().any(|a| a.kind == "ignore_warning")));
+        assert!(!s.attention.iter().any(|a| a.id == "low-disk-nas"));
+        assert!(s.attention.iter().any(|a| a.id == "low-disk-box"));
     }
 
     #[test]

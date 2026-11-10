@@ -312,7 +312,7 @@ impl Root {
 
         // Being unreachable has its own card above.
         let diags: Vec<Diagnostic> = m.diagnostics.iter().filter(|d| d.code != "unreachable").cloned().collect();
-        body = body.child(diagnostics_section(&theme, &diags, &s, &m.id, cx));
+        body = body.child(diagnostics_section(&theme, &diags, &m.ignored_warnings, &s, &m.id, cx));
         if !m.host.is_empty() {
             body = body.child(self.machine_workspaces(&theme, &s, &m, cx));
         }
@@ -652,7 +652,7 @@ impl Root {
 
         let diags: Vec<Diagnostic> =
             machine.iter().flat_map(|m| m.diagnostics.iter()).filter(|d| d.runner_id.as_deref() == Some(id)).cloned().collect();
-        body = body.child(diagnostics_section(&theme, &diags, &s, r.machine_id.as_deref().unwrap_or_default(), cx));
+        body = body.child(diagnostics_section(&theme, &diags, &[], &s, r.machine_id.as_deref().unwrap_or_default(), cx));
         let rid = r.id.clone();
         body = body.child(self.operations_section(&theme, &s, move |o| o.runner_id.as_deref() == Some(&rid), cx));
         body.into_any_element()
@@ -703,7 +703,9 @@ pub(super) fn op_status_icon(theme: &Theme, o: &Operation) -> AnyElement {
     }
 }
 
-fn diagnostics_section(theme: &Theme, diags: &[Diagnostic], s: &Snapshot, machine: &str, cx: &mut Context<Root>) -> AnyElement {
+/// A machine's or runner's diagnostics, and (on a machine's page) the warnings
+/// it was told to ignore, each with a button to show it again.
+fn diagnostics_section(theme: &Theme, diags: &[Diagnostic], ignored: &[String], s: &Snapshot, machine: &str, cx: &mut Context<Root>) -> AnyElement {
     // What changes the machine waits for what's already changing it; opening a page doesn't.
     let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(machine) && o.kind != "logs");
     let rows: Vec<AnyElement> = diags
@@ -733,17 +735,17 @@ fn diagnostics_section(theme: &Theme, diags: &[Diagnostic], s: &Snapshot, machin
                         .min_w(px(0.))
                         .gap(px(4.))
                         .child(div().text_size(px(12.5)).child(d.message.clone()))
-                        // The hint says how to do it by hand: a button does it.
-                        .children(d.hint.clone().filter(|_| d.actions.is_empty()).map(|h| copyable(theme, i, h))),
+                        // The hint says how to do it by hand: a button does it (Ignore doesn't).
+                        .children(d.hint.clone().filter(|_| d.actions.iter().all(|a| a.kind == "ignore_warning")).map(|h| copyable(theme, i, h))),
                 )
                 .children((!d.actions.is_empty()).then(|| {
                     div().flex().flex_none().items_center().gap(px(6.)).children(d.actions.iter().enumerate().map(|(n, a)| {
-                        let (kind, machine, runner) = (a.kind.clone(), machine.to_string(), d.runner_id.clone());
-                        let changes = !matches!(kind.as_str(), "runner_logs" | "open_services" | "open_processes" | "open_files" | "open_settings");
+                        let (kind, code, machine, runner) = (a.kind.clone(), d.code.clone(), machine.to_string(), d.runner_id.clone());
+                        let changes = !matches!(kind.as_str(), "runner_logs" | "open_services" | "open_processes" | "open_files" | "open_settings" | "ignore_warning");
                         Button::new(SharedString::from(format!("diag-{i}-{n}")), a.label.clone())
-                            .style(ButtonStyle::Outlined)
+                            .style(if kind == "ignore_warning" { ButtonStyle::Ghost } else { ButtonStyle::Outlined })
                             .disabled(changes && busy)
-                            .on_click(cx.listener(move |this, _, window, cx| this.run_diagnostic_action(&kind, &machine, runner.as_deref(), window, cx)))
+                            .on_click(cx.listener(move |this, _, window, cx| this.run_diagnostic_action(&kind, &code, &machine, runner.as_deref(), window, cx)))
                     }))
                 }))
                 .into_any_element()
@@ -755,6 +757,16 @@ fn diagnostics_section(theme: &Theme, diags: &[Diagnostic], s: &Snapshot, machin
         .gap(px(10.))
         .child(section_title(theme, "Diagnostics", Some(diags.len())))
         .child(card(theme).when(rows.is_empty(), |d| d.child(kit::empty_state(theme, "circle-check", "No warnings."))).children(rows))
+        .children((!ignored.is_empty()).then(|| {
+            div().flex().flex_wrap().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child("Ignored:").children(ignored.iter().enumerate().map(|(n, code)| {
+                let (code, machine) = (code.clone(), machine.to_string());
+                Button::new(SharedString::from(format!("diag-ignored-{n}")), crate::fleet::build::warning_name(&code))
+                    .style(ButtonStyle::Ghost)
+                    .icon("eye")
+                    .tooltip("Warn about it again")
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_warning_ignored(&machine, &code, false, cx)))
+            }))
+        }))
         .into_any_element()
 }
 

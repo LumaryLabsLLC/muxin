@@ -780,6 +780,7 @@ mod tests {
             parent: None,
             vm: None,
             direct_address: None,
+            ignored_warnings: Vec::new(),
         }
     }
 

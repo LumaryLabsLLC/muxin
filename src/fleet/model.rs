@@ -228,6 +228,9 @@ pub struct Machine {
     pub vm: Option<crate::config::VmRef>,
     /// Where a direct connection reaches it (a forwarded port), from config.toml.
     pub direct_address: Option<String>,
+    /// Warnings not shown for it, by code (config.toml's `ignore_warnings`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignored_warnings: Vec<String>,
 }
 
 /// The machine another one runs on or is reached through, as Muxin worked it
@@ -431,7 +434,8 @@ pub struct DiagnosticAction {
     pub label: String,
     /// "runner_update" | "runner_start" | "runner_restart" | "runner_logs" |
     /// "runner_install" | "machine_restart" | "open_services" | "open_processes" |
-    /// "open_files" | "open_settings"
+    /// "open_files" | "open_settings" | "ignore_warning" (stops showing this
+    /// one, by its code, for the machine)
     pub kind: String,
 }
 

@@ -349,6 +349,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "add_machine" => ok(api::add_machine(engine, args(a)?, Surface::Mcp).await?),
         "remove_machine" => ok(json!({ "removed": api::remove_machine(engine, args(a)?).await? })),
         "rename_machine" => ok(json!({ "renamed": api::rename_machine(engine, args(a)?).await? })),
+        "ignore_warning" => ok(api::ignore_warning(engine, args(a)?).await?),
         "connect_machine" => ok(json!({ "machine": api::connect_machine(engine, args(a)?).await? })),
         "install_runners" => ok(api::install_runners(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         "runner_action" => ok(api::runner_action(engine, args(a)?, Surface::Mcp, |_| {}).await?),
@@ -532,6 +533,16 @@ pub fn tools() -> Vec<Value> {
                 "name": { "type": "string", "description": "The new display name, e.g. \"Studio\"." }
             }), &["machine_id", "name"]),
             "annotations": annotations("Rename machine", false, false, true, false),
+        }),
+        json!({
+            "name": "ignore_warning",
+            "description": "Stop showing one of a machine's warnings, by its diagnostic code (\"low-disk\" for a NAS whose small system volume is meant to be small, \"reboot-required\", \"failed-services\"), or show it again (ignored: false). It goes from the machine's diagnostics and from status.attention; get_machine lists the ones ignored (ignored_warnings). Saved in config.toml (ignore_warnings); nothing on the machine changes. Only when asked.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "warning": { "type": "string", "description": "The diagnostic's code, e.g. \"low-disk\"." },
+                "ignored": { "type": "boolean", "description": "true (the default) stops showing it; false shows it again." }
+            }), &["machine_id", "warning"]),
+            "annotations": annotations("Ignore a machine's warning", false, false, true, false),
         }),
         json!({
             "name": "connect_machine",
@@ -1361,7 +1372,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 97);
+        assert_eq!(tools.len(), 98);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

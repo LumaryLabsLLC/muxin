@@ -270,6 +270,26 @@ pub fn set_disconnected(text: &str, machine_id: &str, disconnected: bool) -> Res
     finish(doc)
 }
 
+/// Stops showing a warning (by its code) for a machine, or shows it again.
+/// The list goes when it's empty.
+pub fn set_warning_ignored(text: &str, machine_id: &str, code: &str, ignored: bool) -> Result<String, String> {
+    let mut doc = parse(text)?;
+    let machines = machines_mut(&mut doc)?;
+    let index = find_machine(machines, machine_id)?;
+    let table = machines.get_mut(index).ok_or("Machine not found.")?;
+    let mut codes: Vec<String> = table.get("ignore_warnings").and_then(Item::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    codes.retain(|c| c != code);
+    if ignored {
+        codes.push(code.to_string());
+    }
+    if codes.is_empty() {
+        table.remove("ignore_warnings");
+    } else {
+        table["ignore_warnings"] = value(codes.into_iter().collect::<Array>());
+    }
+    finish(doc)
+}
+
 /// Puts the `[[machine]]` tables in this order, by id (tables it doesn't
 /// name keep their order, after it). Comments above a machine go with it;
 /// the file's header stays at the top, and lines right under a table (a
@@ -446,6 +466,18 @@ mod workspace_tests {
         let on = set_disconnected(&off, "box", false).unwrap();
         assert!(!on.contains("disconnected"), "{on}");
         assert!(Inventory::parse(&on).unwrap().machines[0].is_connected());
+    }
+
+    #[test]
+    fn ignores_warnings_and_shows_them_again() {
+        let text = "[[machine]]\nname = \"NAS\" # the qnap\nhost = \"nas\"\n";
+        let one = set_warning_ignored(text, "nas", "low-disk", true).unwrap();
+        assert!(one.contains("# the qnap") && one.contains("ignore_warnings = [\"low-disk\"]"), "{one}");
+        let two = set_warning_ignored(&one, "nas", "reboot-required", true).unwrap();
+        let again = set_warning_ignored(&two, "nas", "low-disk", true).unwrap();
+        assert_eq!(Inventory::parse(&again).unwrap().machines[0].ignore_warnings, ["reboot-required", "low-disk"]);
+        let back = set_warning_ignored(&set_warning_ignored(&again, "nas", "low-disk", false).unwrap(), "nas", "reboot-required", false).unwrap();
+        assert!(!back.contains("ignore_warnings"), "{back}");
     }
 }
 

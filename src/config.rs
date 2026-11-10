@@ -320,6 +320,10 @@ pub struct MachineSpec {
     /// addresses don't: a VM behind its host's NAT, a router's forwarded port.
     #[serde(default)]
     pub direct_address: Option<String>,
+    /// Warnings not to show for it, by their code: `ignore_warnings = ["low-disk"]`
+    /// for a NAS whose small system volume is meant to be small.
+    #[serde(default)]
+    pub ignore_warnings: Vec<String>,
 }
 
 /// Where a cloud machine lives, as config.toml records it:

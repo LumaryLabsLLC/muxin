@@ -691,8 +691,11 @@ mod tests {
             assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), expect, "{session:?} {entrypoint:?}");
         }
         // The other CLIs: only in a session.
-        let out = std::process::Command::new("/bin/sh").arg("-c").arg(command("codex", Path::new("/bin/echo"))).env("MUXEN_SESSION", "").env("CLAUDE_CODE_ENTRYPOINT", "claude-desktop").output().unwrap();
-        assert!(out.status.success() && out.stdout.is_empty());
+        #[cfg(unix)]
+        {
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(command("codex", Path::new("/bin/echo"))).env("MUXEN_SESSION", "").env("CLAUDE_CODE_ENTRYPOINT", "claude-desktop").output().unwrap();
+            assert!(out.status.success() && out.stdout.is_empty());
+        }
         // A failing agent still succeeds.
         #[cfg(unix)]
         assert!(std::process::Command::new("/bin/sh").arg("-c").arg(command("claude", Path::new("/bin/false"))).env("MUXEN_SESSION", "x").status().unwrap().success());

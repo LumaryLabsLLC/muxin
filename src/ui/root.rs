@@ -847,11 +847,40 @@ impl Root {
         if route == self.route {
             return;
         }
+        // A session in a desktop app (Claude's) opens there.
+        if let Route::Session(id) = &route
+            && let Some(s) = self.snapshot.sessions.iter().find(|s| &s.id == id && s.app.is_some()).cloned()
+        {
+            self.open_in_app(&s, cx);
+            return;
+        }
         let previous = std::mem::replace(&mut self.route, route);
         self.back.push(previous);
         self.forward.clear();
         self.page_scroll = ScrollHandle::new();
         cx.notify();
+    }
+
+    /// Opens a session that runs in a desktop app in that app: here, or on its
+    /// machine (then its desktop shows here, with the app in front).
+    pub(super) fn open_in_app(&mut self, s: &crate::fleet::sessions::SessionInfo, cx: &mut Context<Self>) {
+        let Some(link) = s.app_link() else { return };
+        self.engine.ack_session(&s.id);
+        let Some(m) = self.snapshot.machines.iter().find(|m| m.id == s.machine_id).cloned() else { return };
+        if m.local {
+            cx.open_url(&link);
+            return;
+        }
+        let command = if m.platform.starts_with("windows") { format!("Start-Process '{link}'") } else if m.platform.starts_with("darwin") { format!("open '{link}'") } else { format!("xdg-open '{link}'") };
+        if let Err(e) = self.engine.run_command(&m.id, &command, std::time::Duration::from_secs(20)) {
+            self.notify_user(e, true, cx);
+            return;
+        }
+        if super::format::has_desktop(&m) {
+            self.show(Route::Desktop(m.id.clone()), cx);
+        } else {
+            self.notify_user(format!("Opened it in Claude on {}.", m.name), false, cx);
+        }
     }
 
     /// Shows an operation's live output on the Activity page.

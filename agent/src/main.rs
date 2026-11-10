@@ -16,6 +16,7 @@
 //! muxen-agent hooks on|off|status   Muxin's hooks in Claude Code's and Codex's settings
 //! ```
 
+mod apps;
 mod boxes;
 mod carry;
 mod client;

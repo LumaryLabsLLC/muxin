@@ -792,6 +792,8 @@ impl World {
             // Claude on the Forge asked Codex to run the tests beside it.
             parent: (name == "codex-4c1e").then(|| format!("{machine_id}/claude-7f3a")),
             keep: false,
+            app: None,
+            app_session: None,
         };
         let (agents, sessions): (Vec<&str>, Vec<SessionInfo>) = match machine_id {
             "forge" => (
@@ -974,6 +976,8 @@ impl World {
             restored_at: None,
             parent: None,
             keep: false,
+            app: None,
+            app_session: None,
         }
     }
 

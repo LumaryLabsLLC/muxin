@@ -93,6 +93,8 @@ enum Action {
     InstallWith(String, Vec<String>),
     CancelRun(u64),
     CopyAttach(String),
+    /// A session in a desktop app, opened there.
+    OpenInApp(String),
     Restart(String),
     End(String),
     Favorite(String, bool),
@@ -488,6 +490,15 @@ impl Root {
             }
             MenuTarget::Session(id) => {
                 let Some(x) = s.sessions.iter().find(|x| &x.id == id) else { return Vec::new() };
+                // One in Claude's desktop app: open it there, or its folder.
+                if x.app.is_some() {
+                    let mut items = vec![act("Open in Claude", "external-link", Action::OpenInApp(id.clone()))];
+                    if !x.cwd.is_empty() {
+                        items.push(Item::Separator);
+                        items.extend(editor_items(&self.engine.settings().editor, &x.machine_id, &x.cwd, true));
+                    }
+                    return items;
+                }
                 let mut items = Vec::new();
                 if x.agent != "shell" && !x.agent.is_empty() && x.status == "running" {
                     items.push(Item::Note("Ask the agent".into()));
@@ -818,6 +829,11 @@ impl Root {
             }
             Action::ItemToAgent(repo, number, how) => self.gh_item_to_agent(repo, number, how, window, cx),
             Action::OpenUrl(url) => cx.open_url(&url),
+            Action::OpenInApp(id) => {
+                if let Some(x) = self.snapshot.sessions.iter().find(|x| x.id == id).cloned() {
+                    self.open_in_app(&x, cx);
+                }
+            }
             Action::WorkspaceSession(id) => {
                 if let Some(w) = self.snapshot.workspaces.iter().find(|w| w.id == id).cloned() {
                     self.new_workspace_session(&w, window, cx)

@@ -323,6 +323,10 @@ fn discover(req: &Value) -> Value {
             let _ = write_titles(&titles);
         }
     }
+    // Sessions in Claude's desktop app, with the app's own titles (apps.rs).
+    if let Some(list) = sessions.as_array_mut() {
+        list.extend(crate::apps::listed(&reports, now()));
+    }
     json!({
         "ok": true,
         "version": crate::VERSION,

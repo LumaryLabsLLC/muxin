@@ -694,6 +694,9 @@ fn watch(out: Out) {
                 format!("{}|{}|{:?}", sessions.join(","), events.0, events.1)
             }
         };
+        // Claude's desktop app's sessions (apps.rs), with or without a server.
+        let apps: Vec<String> = crate::apps::listed(&crate::states::all(), now).iter().map(|x| format!("{}:{}:{}", x["name"], x["title"], x["state"])).collect();
+        let signature = format!("{signature}|{}", apps.join(","));
         if signature != last {
             last = signature;
             if send_json(&out, &json!({ "event": "sessions" })).is_err() {

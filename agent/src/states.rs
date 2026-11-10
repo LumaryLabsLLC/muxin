@@ -82,9 +82,15 @@ pub fn all() -> Map<String, Value> {
     out
 }
 
+/// Forgets one session's state (an app's session that's over: apps.rs).
+pub fn forget(name: &str) {
+    remove(name);
+}
+
 /// Forgets the states of sessions that are gone (`names`: the ones there are).
+/// Sessions in desktop apps aren't the session server's: apps.rs has their rule.
 pub fn prune(names: &[&str]) {
-    for name in all().keys() {
+    for name in all().keys().filter(|n| !n.starts_with(crate::apps::PREFIX)) {
         if !names.contains(&name.as_str()) {
             remove(name);
         }
@@ -277,14 +283,24 @@ fn state_kept(input: &Value) -> bool {
 /// adds what some hooks print to the conversation, so nothing is printed.)
 pub fn report(args: &[String]) -> i32 {
     let session = std::env::var("MUXIN_SESSION").ok().filter(|s| !s.is_empty()).or_else(|| std::env::var("MUXEN_SESSION").ok().filter(|s| !s.is_empty()));
-    let Some(session) = session else { return 0 };
     let agent = args.first().map(String::as_str).unwrap_or("").chars().filter(char::is_ascii_alphanumeric).take(20).collect::<String>();
+    // Outside Muxin's sessions, only a session in Claude's desktop app (apps.rs).
+    let (session, app_session) = match session {
+        Some(s) => (s, None),
+        None => match crate::apps::from_env(&agent) {
+            Some((name, id)) => (name, Some(id)),
+            None => return 0,
+        },
+    };
     let mut text = String::new();
     let _ = std::io::stdin().take(32 << 20).read_to_string(&mut text);
     let Ok(mut input) = serde_json::from_str::<Value>(&text) else { return 0 };
     normalize(&mut input, args.get(1).map(String::as_str));
     let before = read(&session);
-    if let Some(report) = from_hook(&agent, &input, before.as_ref(), hook_owner(), now(), alive) {
+    if let Some(mut report) = from_hook(&agent, &input, before.as_ref(), hook_owner(), now(), alive) {
+        if let Some(id) = &app_session {
+            crate::apps::annotate_report(&mut report, id, &input);
+        }
         let _ = write(&session, &report);
     }
     0

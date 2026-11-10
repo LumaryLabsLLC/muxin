@@ -3078,10 +3078,20 @@ fn last_lines(text: &str, n: usize) -> String {
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
+/// A session with a terminal: one in a desktop app (Claude's) has none to
+/// read or type into.
+async fn terminal_session(engine: &Arc<Engine>, id: &str) -> ApiResult<SessionInfo> {
+    let s = resolve_session(engine, id).await?;
+    if s.app.is_some() {
+        return Err(ApiError::invalid(format!("{} runs in Claude's desktop app, not in a Muxin terminal: it can't be read or typed into from here.", s.id)).with_hint("The user opens it in Claude (Muxin's app does that when they click it). Its state still shows in session_list, and session_wait works."));
+    }
+    Ok(s)
+}
+
 /// Asks a session's agent to commit, open a pull request, review, ...: types
 /// that action's prompt (the user's, else Muxin's) into it.
 pub async fn session_action(engine: &Arc<Engine>, req: SessionActionRequest) -> ApiResult<SessionActionOut> {
-    let s = resolve_session(engine, &req.session_id).await?;
+    let s = terminal_session(engine, &req.session_id).await?;
     let action = req.action.trim().to_string();
     let prompt = engine.session_action(&s.id, &action).await.map_err(session_error)?;
     Ok(SessionActionOut { session_id: s.id, action, prompt })
@@ -3091,7 +3101,7 @@ pub async fn session_send(engine: &Arc<Engine>, req: SessionSendRequest) -> ApiR
     if req.text.is_empty() && !req.enter {
         return Err(ApiError::invalid("Nothing to send: text is empty and enter is false."));
     }
-    let s = resolve_session(engine, &req.session_id).await?;
+    let s = terminal_session(engine, &req.session_id).await?;
     if s.status != "running" {
         return Err(ApiError::invalid(format!("{} has exited.", s.id)).with_hint("Restart it with session_restart (`muxin session restart`)."));
     }
@@ -3100,7 +3110,7 @@ pub async fn session_send(engine: &Arc<Engine>, req: SessionSendRequest) -> ApiR
 }
 
 pub async fn session_read(engine: &Arc<Engine>, req: SessionReadRequest) -> ApiResult<SessionReadOut> {
-    let s = resolve_session(engine, &req.session_id).await?;
+    let s = terminal_session(engine, &req.session_id).await?;
     let lines = req.lines.unwrap_or(READ_DEFAULT_LINES);
     let text = engine.control_session(&s.id, Control::Read { lines }).await.map_err(session_error)?;
     Ok(SessionReadOut { session_id: s.id, status: s.status, exit_code: s.exit_code, state: s.state, busy: s.busy, text })
@@ -3109,7 +3119,7 @@ pub async fn session_read(engine: &Arc<Engine>, req: SessionReadRequest) -> ApiR
 /// What a session is waiting for: a choice (with the keys that pick each
 /// option) or, when it's simply done, the end of what it said.
 pub async fn session_question(engine: &Arc<Engine>, req: SessionRequest) -> ApiResult<crate::fleet::sessions::question::Question> {
-    let s = resolve_session(engine, &req.session_id).await?;
+    let s = terminal_session(engine, &req.session_id).await?;
     if s.status != "running" {
         return Err(ApiError::invalid(format!("{} has exited.", s.id)));
     }
@@ -3126,7 +3136,7 @@ pub struct SessionAnswerRequest {
 
 /// Picks one of a waiting session's choices, as session_question listed them.
 pub async fn session_answer(engine: &Arc<Engine>, req: SessionAnswerRequest) -> ApiResult<SessionDoneOut> {
-    let s = resolve_session(engine, &req.session_id).await?;
+    let s = terminal_session(engine, &req.session_id).await?;
     let q = engine.session_question(&s.id).await.map_err(session_error)?;
     if !q.options.iter().any(|o| o.key == req.choice) {
         let keys: Vec<String> = q.options.iter().map(|o| format!("{} ({})", o.key, o.label)).collect();
@@ -3137,19 +3147,19 @@ pub async fn session_answer(engine: &Arc<Engine>, req: SessionAnswerRequest) -> 
 }
 
 pub async fn session_stop(engine: &Arc<Engine>, req: SessionRequest) -> ApiResult<SessionDoneOut> {
-    let s = resolve_session(engine, &req.session_id).await?;
+    let s = terminal_session(engine, &req.session_id).await?;
     engine.control_session(&s.id, Control::Stop).await.map_err(session_error)?;
     Ok(SessionDoneOut { session_id: s.id, done: "stopped".into() })
 }
 
 pub async fn session_restart(engine: &Arc<Engine>, req: SessionRequest) -> ApiResult<SessionDoneOut> {
-    let s = resolve_session(engine, &req.session_id).await?;
+    let s = terminal_session(engine, &req.session_id).await?;
     engine.control_session(&s.id, Control::Restart).await.map_err(session_error)?;
     Ok(SessionDoneOut { session_id: s.id, done: "restarted".into() })
 }
 
 pub async fn session_rename(engine: &Arc<Engine>, req: SessionRenameRequest) -> ApiResult<SessionInfo> {
-    let s = resolve_session(engine, &req.session_id).await?;
+    let s = terminal_session(engine, &req.session_id).await?;
     engine.rename_session(&s.id, &req.title).await.map_err(session_error)
 }
 
@@ -3158,7 +3168,7 @@ pub async fn session_rename(engine: &Arc<Engine>, req: SessionRenameRequest) -> 
 pub async fn session_handoff(engine: &Arc<Engine>, req: SessionHandoffRequest) -> ApiResult<sessions::handoff::HandedOff> {
     let id = match engine.find_box(&req.session_id) {
         Ok(b) => b.id,
-        Err(_) => resolve_session(engine, &req.session_id).await?.id,
+        Err(_) => terminal_session(engine, &req.session_id).await?.id,
     };
     engine.handoff_session(&id, &req.agent, req.keep, req.machine_id.as_deref()).await.map_err(session_error)
 }

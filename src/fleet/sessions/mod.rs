@@ -153,6 +153,21 @@ pub struct SessionInfo {
     /// A helper that goes on after the session that started it ends.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub keep: bool,
+    /// The desktop app it runs in rather than Muxin's terminal
+    /// ("claude-desktop": Claude's desktop app), which opens it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    /// That app's own id for the session ("local_…").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_session: Option<String>,
+}
+
+impl SessionInfo {
+    /// The link that opens it in its app, for one that runs in an app.
+    pub fn app_link(&self) -> Option<String> {
+        let id = self.app_session.as_deref().filter(|i| i.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))?;
+        (self.app.as_deref() == Some("claude-desktop")).then(|| format!("claude://code/continue?session={id}"))
+    }
 }
 
 /// What a session shows beside it, the most urgent last: a machine or a list
@@ -779,6 +794,8 @@ impl Engine {
             restored_at: None,
             parent: None,
             keep: false,
+            app: None,
+            app_session: None,
             name,
         };
         self.add_direct(DirectSession { info: info.clone(), run, windows });
@@ -996,7 +1013,8 @@ pub(crate) fn parse_discovery(spec: &MachineSpec, reply: &Value) -> MachineSessi
             clients: s["clients"].as_u64().unwrap_or(0) as u32,
             created_at: ts(&s["created"]),
             last_output_at: last_output.and_then(|t| Utc.timestamp_opt(t, 0).single()),
-            attach_command: user_attach_command(spec, &name),
+            // One in a desktop app has no terminal to attach to.
+            attach_command: if s["app"].is_string() { String::new() } else { user_attach_command(spec, &name) },
             persistent: true,
             git: None,
             box_id: crate::fleet::boxes::box_of_session(&name, &found.boxes).map(|b| b.id.clone()),
@@ -1005,6 +1023,8 @@ pub(crate) fn parse_discovery(spec: &MachineSpec, reply: &Value) -> MachineSessi
             // A parent here is a name; one on another machine is already `<machine-id>/<name>`.
             parent: s["parent"].as_str().filter(|p| !p.is_empty()).map(|p| if p.contains('/') { p.to_string() } else { format!("{}/{p}", spec.id) }),
             keep: s["keep"].as_bool().unwrap_or(false),
+            app: s["app"].as_str().filter(|a| !a.is_empty()).map(str::to_string),
+            app_session: s["app_session"].as_str().filter(|a| !a.is_empty()).map(str::to_string),
             name,
         });
     }
@@ -1104,6 +1124,21 @@ mod tests {
         assert!(claude.busy && claude.persistent);
         assert_eq!(claude.clients, 1);
         assert_eq!(claude.attach_command, "ssh -t beelink ~/.muxen/bin/muxen-agent attach claude-ab12");
+    }
+
+    #[test]
+    fn a_session_in_claudes_desktop_app_opens_there() {
+        let mut r = reply(1000, 998, json!([]));
+        r["sessions"] = json!([{ "name": "desktop-claude-4da6", "agent": "claude", "app": "claude-desktop", "app_session": "local_4da6", "title": "Fix the login", "cwd": "/Users/me/api", "status": "running", "state": "needs_you", "state_source": "hook", "created": 900, "last_output": 990 }]);
+        let found = parse_discovery(&spec("beelink"), &r);
+        let s = &found.sessions[0];
+        assert_eq!((s.id.as_str(), s.agent.as_str(), s.title.as_str(), s.state.as_str()), ("beelink/desktop-claude-4da6", "claude", "Fix the login", "needs_you"));
+        assert_eq!(s.app.as_deref(), Some("claude-desktop"));
+        assert_eq!(s.app_link().as_deref(), Some("claude://code/continue?session=local_4da6"));
+        assert!(s.attach_command.is_empty(), "no terminal to attach to");
+        // Muxin's own sessions have no app.
+        let own = parse_discovery(&spec("beelink"), &reply(1000, 998, json!([])));
+        assert!(own.sessions.iter().all(|s| s.app.is_none() && s.app_link().is_none()));
     }
 
     #[test]

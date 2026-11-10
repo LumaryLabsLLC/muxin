@@ -90,7 +90,12 @@ fn command_for(agent: &str, agent_path: &Path, event: Option<&str>) -> String {
     let path = agent_path.display().to_string();
     let quoted = if path.chars().any(|c| matches!(c, '"' | '$' | '`' | '\\' | '\'' | '!')) { sh_quote(&path) } else { format!("\"{path}\"") };
     let event = event.map(|e| format!(" {e}")).unwrap_or_default();
-    let inner = format!("[ -z \"$MUXEN_SESSION\" ] || {quoted} report {agent}{event} 2>/dev/null || true");
+    let inner = if agent == "claude" {
+        // Claude's desktop app runs Claude Code too, outside Muxin's sessions (apps.rs).
+        format!("[ -n \"$MUXEN_SESSION\" ] || [ \"$CLAUDE_CODE_ENTRYPOINT\" = claude-desktop ] || exit 0; {quoted} report {agent}{event} 2>/dev/null || true")
+    } else {
+        format!("[ -z \"$MUXEN_SESSION\" ] || {quoted} report {agent}{event} 2>/dev/null || true")
+    };
     format!("/bin/sh -c {}", sh_quote(&inner))
 }
 
@@ -666,7 +671,7 @@ pub fn status(dirs: &Dirs) -> Value {
 mod tests {
     use super::*;
 
-    const CMD: &str = "/bin/sh -c '[ -z \"$MUXEN_SESSION\" ] || \"/home/adib/.muxen/bin/muxen-agent\" report claude 2>/dev/null || true'";
+    const CMD: &str = "/bin/sh -c '[ -n \"$MUXEN_SESSION\" ] || [ \"$CLAUDE_CODE_ENTRYPOINT\" = claude-desktop ] || exit 0; \"/home/adib/.muxen/bin/muxen-agent\" report claude 2>/dev/null || true'";
 
     #[test]
     fn the_command_does_nothing_outside_a_session_and_never_fails() {
@@ -680,11 +685,14 @@ mod tests {
         assert!(is_ours(&odd));
         // Run as a CLI runs it, with echo for the agent: quiet outside a session.
         #[cfg(unix)]
-        for (session, expect) in [("", ""), ("claude-1", "report claude")] {
-            let out = std::process::Command::new("/bin/sh").arg("-c").arg(command("claude", Path::new("/bin/echo"))).env("MUXEN_SESSION", session).output().unwrap();
+        for (session, entrypoint, expect) in [("", "", ""), ("claude-1", "", "report claude"), ("", "claude-desktop", "report claude"), ("", "cli", "")] {
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(command("claude", Path::new("/bin/echo"))).env("MUXEN_SESSION", session).env("CLAUDE_CODE_ENTRYPOINT", entrypoint).output().unwrap();
             assert!(out.status.success());
-            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), expect, "{session:?}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), expect, "{session:?} {entrypoint:?}");
         }
+        // The other CLIs: only in a session.
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(command("codex", Path::new("/bin/echo"))).env("MUXEN_SESSION", "").env("CLAUDE_CODE_ENTRYPOINT", "claude-desktop").output().unwrap();
+        assert!(out.status.success() && out.stdout.is_empty());
         // A failing agent still succeeds.
         #[cfg(unix)]
         assert!(std::process::Command::new("/bin/sh").arg("-c").arg(command("claude", Path::new("/bin/false"))).env("MUXEN_SESSION", "x").status().unwrap().success());

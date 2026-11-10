@@ -379,6 +379,63 @@ pub fn combo_keys(keys: &str) -> Option<Vec<u32>> {
     keys.split('+').map(|k| crate::fleet::desktop::keysym(k.trim())).collect()
 }
 
+/// A mouse button pressed or let go here: the mouse's own button and the one
+/// the machine gets (X11's numbers: 1 left, 2 middle, 3 right).
+///
+/// On a Mac, GPUI makes a left press with ⌃ held a right one, as macOS has a
+/// ⌃-click (and takes ⌃ off it), and the same of a left release, each by
+/// whether ⌃ is held at that moment. So the press and the release of one
+/// button could be two: ⌃ let go just after a ⌃-click pressed the right button
+/// there and let go of the left one, and the right one stayed held there
+/// (later clicks were right clicks, or both buttons). `left`: the mouse's own
+/// event is the left button's (see `native_left` in ui/desktop.rs).
+pub fn button_there(button: gpui::MouseButton, left: bool) -> Option<(u64, u64)> {
+    use gpui::MouseButton::*;
+    let sent = match button {
+        Left => 1,
+        Middle => 2,
+        Right => 3,
+        _ => return None,
+    };
+    Some((if left { 1 } else { sent }, sent))
+}
+
+/// The mouse buttons down there, by the button pressed here.
+#[derive(Debug, Default)]
+pub struct Buttons {
+    down: Vec<(u64, u64)>,
+}
+
+impl Buttons {
+    /// `(here, there)` from `button_there`.
+    pub fn press(&mut self, (here, there): (u64, u64)) {
+        self.down.retain(|(h, t)| *h != here && *t != there);
+        self.down.push((here, there));
+    }
+
+    /// The button to let go there: the one its press pressed, whatever GPUI
+    /// calls this release. Without the mouse's own event to say which it is,
+    /// a left or right release that isn't down there is the other, when that
+    /// one is (only a Mac changes them).
+    pub fn release(&mut self, (here, there): (u64, u64)) -> u64 {
+        let other = match here {
+            1 => 3,
+            3 => 1,
+            _ => here,
+        };
+        let i = self.down.iter().position(|(h, _)| *h == here).or_else(|| self.down.iter().position(|(h, _)| *h == other).filter(|_| cfg!(target_os = "macos")));
+        match i {
+            Some(i) => self.down.remove(i).1,
+            None => there,
+        }
+    }
+
+    /// The view is going away from the mouse: every button down there, to let go.
+    pub fn let_go(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.down).into_iter().map(|(_, there)| there).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,5 +681,50 @@ mod tests {
         // A long name doesn't push the rest of the toolbar away.
         let long = switch_label(false, "Adib's MacBook Pro in the living room");
         assert_eq!(long, format!("Send {key} to Adib's MacBook Pro in…"));
+    }
+
+    #[test]
+    fn a_buttons_release_lets_go_of_what_its_press_pressed_there() {
+        use gpui::MouseButton::{Left, Middle, Right};
+        let mut buttons = Buttons::default();
+        // A ⌃-click (GPUI: a right press), with ⌃ let go before the button
+        // (GPUI: a left release). The right button goes down and up there.
+        buttons.press(button_there(Right, true).unwrap());
+        assert_eq!(buttons.release(button_there(Left, true).unwrap()), 3);
+        assert_eq!(buttons.let_go(), Vec::<u64>::new());
+        // ⌃ pressed while the left button is down (GPUI: a right release).
+        buttons.press(button_there(Left, true).unwrap());
+        assert_eq!(buttons.release(button_there(Right, true).unwrap()), 1);
+        assert_eq!(buttons.let_go(), Vec::<u64>::new());
+        // Without the mouse's own event (only a Mac changes them).
+        if cfg!(target_os = "macos") {
+            buttons.press(button_there(Right, false).unwrap());
+            assert_eq!(buttons.release(button_there(Left, false).unwrap()), 3);
+            buttons.press(button_there(Left, false).unwrap());
+            assert_eq!(buttons.release(button_there(Right, false).unwrap()), 1);
+            assert_eq!(buttons.let_go(), Vec::<u64>::new());
+        }
+        // Real right and middle clicks, and two buttons down at once, each its own.
+        assert_eq!(button_there(Right, false), Some((3, 3)));
+        assert_eq!(button_there(Middle, false), Some((2, 2)));
+        buttons.press(button_there(Left, true).unwrap());
+        buttons.press(button_there(Right, false).unwrap());
+        assert_eq!(buttons.release(button_there(Right, false).unwrap()), 3);
+        assert_eq!(buttons.let_go(), vec![1]);
+        // A release with no press here (pressed outside the picture) still goes.
+        assert_eq!(buttons.release(button_there(Left, true).unwrap()), 1);
+    }
+
+    #[test]
+    fn a_click_lets_go_of_a_modifier_this_computer_no_longer_holds() {
+        // ⌃ let go where the desktop didn't hear of it (Mission Control here):
+        // the machine still had it held, and a Mac there took every left click
+        // for a ⌃-click, a right click. The click's modifiers say what's held.
+        let mut mods = Mods::new(Os::Mac, Os::Mac);
+        assert_eq!(mods.set(held(true, false, false, false)), [(CTRL, true)]);
+        assert_eq!(mods.set(NONE), [(CTRL, false)]);
+        // Held, it stays held.
+        assert_eq!(mods.set(held(true, false, false, false)), [(CTRL, true)]);
+        assert_eq!(mods.set(held(true, false, false, false)), []);
     }
 }

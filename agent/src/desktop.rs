@@ -119,6 +119,27 @@ pub(crate) fn level_help(level: u8, shift_held: bool, exact: bool) -> LevelHelp 
     LevelHelp { lift_shift: exact && shift_held && !wants_shift, press_shift: wants_shift && !shift_held, altgr: level >= 2 }
 }
 
+/// The button to press on Windows for one from the app (1 left, 2 middle, 3
+/// right). SendInput's buttons are the mouse's own, which Windows swaps when
+/// the right one is the primary there (Settings › Bluetooth & devices › Mouse).
+/// The app's are already as its user's own mouse has them, so they're swapped
+/// back first: else every left click was a right one there.
+#[cfg(any(windows, test))]
+pub(crate) fn win_button(b: u64, swapped: bool) -> u64 {
+    match (b, swapped) {
+        (1, true) => 3,
+        (3, true) => 1,
+        _ => b,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn windows_with_the_right_button_primary_gets_the_buttons_swapped_back() {
+    assert_eq!([1, 2, 3].map(|b| win_button(b, false)), [1, 2, 3]);
+    assert_eq!([1, 2, 3].map(|b| win_button(b, true)), [3, 2, 1]);
+}
+
 /// How Windows types a "key" event's character.
 #[cfg(any(windows, test))]
 #[derive(Debug, PartialEq)]

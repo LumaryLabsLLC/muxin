@@ -385,7 +385,9 @@ impl WinScreen {
             }
             "button" => {
                 let (x, y) = self.absolute(e, frame);
-                let b = e["b"].as_u64().unwrap_or(1);
+                // The mouse's own button, as SendInput takes it (see `win_button`).
+                let swapped = unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0;
+                let b = crate::desktop::win_button(e["b"].as_u64().unwrap_or(1), swapped);
                 let down = e["down"].as_bool().unwrap_or(false);
                 let flag = match (b, down) {
                     (1, true) => MOUSEEVENTF_LEFTDOWN,

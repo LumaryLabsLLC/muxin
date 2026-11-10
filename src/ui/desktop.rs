@@ -238,7 +238,7 @@ pub struct DesktopView {
     /// Other keys (keysyms) and mouse buttons it has been told are down, let
     /// go when the view loses focus (else they'd stay held there).
     keys_down: Vec<u32>,
-    buttons_down: Vec<u64>,
+    buttons: desktop_keys::Buttons,
     last_move: Instant,
     scroll_rest: f32,
     frames: u64,
@@ -335,7 +335,7 @@ impl DesktopView {
             keys_menu: None,
             composing: Composition::default(),
             keys_down: Vec::new(),
-            buttons_down: Vec::new(),
+            buttons: desktop_keys::Buttons::default(),
             last_move: Instant::now(),
             scroll_rest: 0.,
             frames: 0,
@@ -1018,29 +1018,34 @@ impl DesktopView {
         }
     }
 
-    fn mouse_button(&mut self, button: MouseButton, position: Point<Pixels>, down: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// A mouse button pressed or let go here, with the modifiers its event has.
+    fn mouse_button(&mut self, button: MouseButton, modifiers: Modifiers, position: Point<Pixels>, down: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_control {
             return;
         }
-        let b = match button {
-            MouseButton::Left => 1,
-            MouseButton::Middle => 2,
-            MouseButton::Right => 3,
-            _ => return,
-        };
-        if down {
+        // A ⌃-click is a right click (GPUI makes it one), let go as it was pressed (see `button_there`).
+        let Some(button) = desktop_keys::button_there(button, native_left()) else { return };
+        if !down && button.0 == 1 && std::mem::take(&mut self.moving) {
+            // The press dragged this window (see the left button's listener).
+            return;
+        }
+        let b = if down {
             window.focus(&self.focus);
             cx.notify();
             self.release.other();
             self.keys_menu = None;
+            // What's held now, as the click has it: a modifier let go where the
+            // view didn't hear of it would stay held there, and turn the click
+            // into another (⌃ held on a Mac makes every left click a right one).
+            self.click_modifiers(modifiers, cx);
             self.alt_needed();
             let keys = self.mods.needed();
             self.send_keys(keys);
-        }
-        self.buttons_down.retain(|x| *x != b);
-        if down {
-            self.buttons_down.push(b);
-        }
+            self.buttons.press(button);
+            button.1
+        } else {
+            self.buttons.release(button)
+        };
         if let Some((x, y)) = self.at(position) {
             self.send(json!({ "t": "button", "b": b, "down": down, "x": x, "y": y }));
         } else if !down {
@@ -1065,6 +1070,27 @@ impl DesktopView {
             // Wheel up scrolls content up: X's button 4 (negative dy).
             self.send(json!({ "t": "scroll", "dy": -(notches as i64), "dx": 0, "x": x, "y": y }));
         }
+    }
+
+    /// The modifiers held with a click, when they aren't what the machine was
+    /// told (the view didn't hear them change: macOS kept the event, or it went
+    /// elsewhere). As `on_modifiers_changed` does, but Option let go isn't Alt
+    /// tapped there (that opens a Windows app's menu).
+    fn click_modifiers(&mut self, mut m: Modifiers, cx: &App) {
+        // The Windows key, when the keyboard hook took it (GPUI never hears of it).
+        m.platform |= self.hook_super;
+        let held = self.mods.held();
+        if (Modifiers { function: false, ..m }) == (Modifiers { function: false, ..held }) {
+            return;
+        }
+        if m.shift != held.shift {
+            self.let_go_characters();
+        }
+        if !m.alt {
+            let alt = self.option.let_go();
+            self.tell_alt(alt);
+        }
+        self.modifiers(m, option_may_type(cx));
     }
 
     /// Tells the machine about modifier keys pressed or let go. `may_type`:
@@ -1382,7 +1408,7 @@ impl DesktopView {
         self.hook_super = false;
         let keys = self.mods.let_go();
         self.send_keys(keys);
-        for b in std::mem::take(&mut self.buttons_down) {
+        for b in self.buttons.let_go() {
             self.send(json!({ "t": "button", "b": b, "down": false, "x": 0, "y": 0 }));
         }
     }
@@ -1738,21 +1764,15 @@ impl Render for DesktopView {
                         super::title_bar_press(e, w);
                         return;
                     }
-                    this.mouse_button(e.button, e.position, true, w, cx)
+                    this.mouse_button(e.button, e.modifiers, e.position, true, w, cx)
                 }),
             )
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, w, cx| this.mouse_button(e.button, e.position, true, w, cx)))
-            .on_mouse_down(MouseButton::Middle, cx.listener(|this, e: &MouseDownEvent, w, cx| this.mouse_button(e.button, e.position, true, w, cx)))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, e: &MouseUpEvent, w, cx| {
-                    if !std::mem::take(&mut this.moving) {
-                        this.mouse_button(e.button, e.position, false, w, cx)
-                    }
-                }),
-            )
-            .on_mouse_up(MouseButton::Right, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.position, false, w, cx)))
-            .on_mouse_up(MouseButton::Middle, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.position, false, w, cx)))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, w, cx| this.mouse_button(e.button, e.modifiers, e.position, true, w, cx)))
+            .on_mouse_down(MouseButton::Middle, cx.listener(|this, e: &MouseDownEvent, w, cx| this.mouse_button(e.button, e.modifiers, e.position, true, w, cx)))
+            // (A release after a press that dragged the window goes nowhere: see `mouse_button`.)
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.modifiers, e.position, false, w, cx)))
+            .on_mouse_up(MouseButton::Right, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.modifiers, e.position, false, w, cx)))
+            .on_mouse_up(MouseButton::Middle, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.modifiers, e.position, false, w, cx)))
             .on_scroll_wheel(cx.listener(Self::scroll))
             .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, window, cx| {
                 if e.modifiers.shift != this.mods.held().shift {
@@ -1833,6 +1853,28 @@ fn modifiers_for_key(stroke: &gpui::Keystroke, shift_told: bool) -> Modifiers {
 fn may_wait_for_next_key(stroke: &gpui::Keystroke) -> bool {
     let m = &stroke.modifiers;
     !m.control && !m.platform && !m.alt && !m.function && matches!(stroke.key.as_str(), "`" | "´" | "^" | "¨" | "~")
+}
+
+/// Whether the mouse event being handled is the left button's, as the Mac's own
+/// event has it (GPUI calls a ⌃-click a right one: see `desktop_keys::button_there`).
+/// False off a Mac, where GPUI's button is the mouse's.
+#[allow(unexpected_cfgs)] // objc's msg_send! checks a cfg this crate doesn't declare
+fn native_left() -> bool {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc::runtime::Object;
+        use objc::{class, msg_send, sel, sel_impl};
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let event: *mut Object = msg_send![app, currentEvent];
+        if event.is_null() {
+            return false;
+        }
+        // NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp.
+        let kind: u64 = msg_send![event, type];
+        matches!(kind, 1 | 2)
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
 }
 
 fn option_may_type(cx: &App) -> bool {

@@ -804,7 +804,21 @@ impl World {
                     session("shell-2b81", "shell", "Shell", "Shell · checkout", "/Users/ci/code/checkout", false, 31, 0),
                 ],
             ),
-            "orbit" => (vec!["claude", "codex", "cursor"], vec![session("codex-19be", "codex", "Codex", "Codex · ios-app", "/Users/ci/code/ios-app", false, 48, 0)]),
+            "orbit" => (
+                vec!["claude", "codex", "cursor"],
+                vec![
+                    session("codex-19be", "codex", "Codex", "Codex · ios-app", "/Users/ci/code/ios-app", false, 48, 0),
+                    // One in Claude's desktop app, which finished: it opens there.
+                    SessionInfo {
+                        app: Some("claude-desktop".into()),
+                        app_session: Some("local_8e21c4d0-5b7a-4f19-9d3e-2a6c1f0b7e44".into()),
+                        state: "done".into(),
+                        attention: Some("waiting".into()),
+                        attach_command: String::new(),
+                        ..session("desktop-claude-8e21", "claude", "Claude Code", "Polish the onboarding", "/Users/ci/code/ios-app", false, 20, 0)
+                    },
+                ],
+            ),
             "beacon" => (
                 vec!["claude", "opencode", "copilot", "qwen", "droid"],
                 vec![

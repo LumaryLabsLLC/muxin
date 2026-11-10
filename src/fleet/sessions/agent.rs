@@ -291,7 +291,7 @@ pub async fn ensure(spec: &MachineSpec, probe: Option<&ProbeResult>) -> Result<(
 async fn running_agent(spec: &MachineSpec) -> Result<(), String> {
     match crate::fleet::link::current_or_direct(spec).await {
         Some(_) => Ok(()),
-        None => Err(format!("Can't reach {}. It may be off, or not paired with this iPad.", spec.name)),
+        None => Err(format!("Can't reach {}. It may be off, or not paired with this {}.", spec.name, crate::config::this_device())),
     }
 }
 
@@ -549,7 +549,7 @@ mod tests {
         let mut spec: MachineSpec = toml::from_str("name = \"Beelink\"\nhost = \"beelink.invalid\"").unwrap();
         spec.id = format!("unpaired-{}", std::process::id());
         let err = running_agent(&spec).await.unwrap_err();
-        assert!(err.contains("not paired with this iPad"), "{err}");
+        assert!(err.contains(&format!("not paired with this {}", crate::config::this_device())), "{err}");
     }
 
     #[test]

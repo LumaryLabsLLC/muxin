@@ -527,7 +527,7 @@ async fn an_ipad_pairs_once_allowed() {
     let link = views.borrow().link.clone();
     assert!(super::ticket::is_pair_link(&link));
     // It isn't a share.
-    assert!(guest::join(&link, "Mallory").await.err().is_some_and(|e| e.contains("pairing an iPad")));
+    assert!(guest::join(&link, "Mallory").await.err().is_some_and(|e| e.contains("pairing an iPhone or iPad")));
 
     let updates = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (u, l) = (updates.clone(), link.clone());

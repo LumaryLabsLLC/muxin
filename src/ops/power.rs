@@ -148,7 +148,11 @@ impl Engine {
     fn why_not_back(&self, machine_id: &str) -> &'static str {
         let platform = self.current().machines.iter().find(|m| m.id == machine_id).map(|m| m.platform.clone()).unwrap_or_default();
         if cfg!(target_os = "ios") && !platform.starts_with("linux") {
-            "This iPad reaches it again once someone has signed in there."
+            if crate::config::this_device() == "iPhone" {
+                "This iPhone reaches it again once someone has signed in there."
+            } else {
+                "This iPad reaches it again once someone has signed in there."
+            }
         } else if platform.starts_with("darwin") {
             "With FileVault on, it's waiting at its own screen for a password."
         } else {
@@ -282,7 +286,7 @@ fn power_words(f: &PowerFacts) -> String {
                 words.push("With FileVault on, it waits at its own screen for a password before it comes back.".into());
             }
             if f.on_ipad && !f.platform.starts_with("linux") {
-                words.push("This iPad reaches it again once someone has signed in there.".into());
+                words.push(format!("This {} reaches it again once someone has signed in there.", crate::config::this_device()));
             }
         }
     }
@@ -318,7 +322,7 @@ mod tests {
         assert!(mac.contains("FileVault"), "{mac}");
         assert!(!mac.contains("iPad"), "{mac}");
         let on_ipad = power_words(&PowerFacts { on_ipad: true, ..facts(OsPower::Restart, "windows-x64") });
-        assert!(on_ipad.ends_with("This iPad reaches it again once someone has signed in there."), "{on_ipad}");
+        assert!(on_ipad.ends_with(&format!("This {} reaches it again once someone has signed in there.", crate::config::this_device())), "{on_ipad}");
         assert!(!on_ipad.contains("FileVault"), "{on_ipad}");
     }
 

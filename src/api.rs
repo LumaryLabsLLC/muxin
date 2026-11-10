@@ -3828,7 +3828,7 @@ pub fn ipad_machines(engine: &Arc<Engine>, named: &[String]) -> ApiResult<Vec<St
         for n in named {
             let m = find_machine(&s, n)?;
             if m.local {
-                return Err(ApiError::invalid(format!("{} is this computer; an iPad reaches your other machines.", m.name)));
+                return Err(ApiError::invalid(format!("{} is this computer; an iPhone or iPad reaches your other machines.", m.name)));
             }
             ids.push(m.id.clone());
         }
@@ -3836,7 +3836,7 @@ pub fn ipad_machines(engine: &Arc<Engine>, named: &[String]) -> ApiResult<Vec<St
     }
     let ids: Vec<String> = s.machines.iter().filter(|m| !m.local && m.status == "online").map(|m| m.id.clone()).collect();
     if ids.is_empty() {
-        return Err(ApiError::invalid("No machine is online to pair an iPad with.").with_hint("Check them with `muxin check`, or name one with --machine."));
+        return Err(ApiError::invalid("No machine is online to pair an iPhone or iPad with.").with_hint("Check them with `muxin check`, or name one with --machine."));
     }
     Ok(ids)
 }

@@ -363,7 +363,7 @@ impl Engine {
         }
         // An iPad uses the agent a paired machine already has.
         if reply["error"].as_str().is_some_and(|e| e.contains("unknown request")) {
-            return Err(format!("{} runs an older Muxin agent that can't do this. Connect to it from Muxin on a Mac to update it, or remove it from this iPad and add it again.", spec.name).into());
+            return Err(format!("{} runs an older Muxin agent that can't do this. Connect to it from Muxin on a Mac to update it, or remove it from this {} and add it again.", spec.name, crate::config::this_device()).into());
         }
         Err(refusal(&spec.id, &reply, "The machine couldn't do that."))
     }

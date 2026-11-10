@@ -43,7 +43,8 @@ impl SettingsTab {
             SettingsTab::Terminal => "Terminal",
             SettingsTab::GitHub => "GitHub",
             SettingsTab::Cloud => "Cloud",
-            SettingsTab::Ipads => "iPads",
+            // Muxin for iPhone and Muxin for iPad: "iPhone & iPad" doesn't fit the row.
+            SettingsTab::Ipads => "Mobile",
             SettingsTab::Prompts => "Prompts",
             SettingsTab::Keyboard => "Keyboard",
         }
@@ -56,7 +57,7 @@ impl SettingsTab {
             SettingsTab::Terminal => "terminal",
             SettingsTab::GitHub => "agent-github",
             SettingsTab::Cloud => "cloud",
-            SettingsTab::Ipads => "tablet",
+            SettingsTab::Ipads => "smartphone",
             SettingsTab::Prompts => "message-square",
             SettingsTab::Keyboard => "keyboard",
         }

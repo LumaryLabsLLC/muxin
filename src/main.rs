@@ -108,7 +108,7 @@ enum Command {
     Git(GitCommand),
     /// How Muxin reaches a machine (direct, ssh link); --direct on|off to change it
     Connection(ConnectionArgs),
-    /// iPads that reach your machines (Muxin for iPad): pair one with a QR code, list them, unpair one
+    /// iPhones and iPads that reach your machines (Muxin for iPhone and for iPad): pair one with a QR code, list them, unpair one
     #[command(subcommand)]
     Ipad(IpadCommand),
     /// A machine's desktop: a screenshot, or mouse and keyboard input
@@ -604,11 +604,11 @@ struct VmCreateArgs {
 
 #[derive(Subcommand)]
 enum IpadCommand {
-    /// Pair an iPad: shows a QR code to scan with Muxin on the iPad
+    /// Pair an iPhone or iPad: shows a QR code to scan with Muxin there
     Pair(IpadPairArgs),
-    /// The iPads paired from here
+    /// The iPhones and iPads paired from here
     Ls(AgentArgs),
-    /// Unpair an iPad: the machines that trust it forget its key
+    /// Unpair an iPhone or iPad: the machines that trust it forget its key
     Rm(IpadRmArgs),
 }
 
@@ -619,7 +619,7 @@ struct IpadPairArgs {
     /// A machine to pair it with (again for more) [default: every machine that's online, but this computer]
     #[arg(long = "machine", value_name = "MACHINE")]
     machines: Vec<String>,
-    /// Let the iPad pair without asking (check that it shows the same code)
+    /// Let it pair without asking (check that it shows the same code)
     #[arg(long)]
     yes: bool,
 }
@@ -2402,7 +2402,7 @@ fn ipad_pair(a: IpadPairArgs, runtime: &tokio::runtime::Runtime) -> u8 {
             match v.state.as_str() {
                 "waiting" if !json => {
                     if !asked {
-                        println!("Scan this with Muxin on your iPad, or paste the link there:\n");
+                        println!("Scan this with Muxin on your iPhone or iPad, or paste the link there:\n");
                         if std::io::stdout().is_terminal() {
                             print!("{}", terminal_qr(&v.link));
                         }
@@ -2437,7 +2437,7 @@ fn ipad_pair(a: IpadPairArgs, runtime: &tokio::runtime::Runtime) -> u8 {
                 "done" | "failed" | "denied" | "ended" => {
                     if !json {
                         match v.state.as_str() {
-                            "done" => println!("Paired {} with {}.", v.device.as_deref().unwrap_or("the iPad"), v.paired.join(", ")),
+                            "done" => println!("Paired {} with {}.", v.device.as_deref().unwrap_or("it"), v.paired.join(", ")),
                             "denied" => println!("Not paired."),
                             _ => println!("{}", v.error.as_deref().unwrap_or("Pairing ended.")),
                         }

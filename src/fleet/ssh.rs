@@ -542,7 +542,7 @@ pub async fn authorize(spec: &MachineSpec, windows: bool) -> Result<(), String> 
     let line = public_key_line()?;
     let script = if windows { authorize_ps(&line) } else { authorize_sh(&line) };
     let command = if windows { powershell(&script) } else { format!("sh -c {}", crate::ops::remote::sh_quote(&script)) };
-    run(spec, &command).await.map(drop).map_err(|e| format!("Couldn't let this iPad in on {}: {e}", spec.name))
+    run(spec, &command).await.map(drop).map_err(|e| format!("Couldn't let this {} in on {}: {e}", crate::config::this_device(), spec.name))
 }
 
 /// Takes this app's key off the machine again (removing it from Muxin).

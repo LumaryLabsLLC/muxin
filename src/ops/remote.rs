@@ -382,7 +382,7 @@ pub async fn output(spec: &MachineSpec, shell: Shell, script: String, timeout: D
 /// shell: these scripts are sh, and zsh, say, reads them otherwise (it
 /// doesn't split `$LIST` into words).
 async fn over_link(spec: &MachineSpec, script: String, timeout: Duration) -> Result<(Vec<u8>, Vec<u8>, Option<i32>), String> {
-    let link = crate::fleet::link::current_or_direct(spec).await.ok_or_else(|| format!("Can't reach {}. It may be off, or not paired with this iPad.", spec.name))?;
+    let link = crate::fleet::link::current_or_direct(spec).await.ok_or_else(|| format!("Can't reach {}. It may be off, or not paired with this {}.", spec.name, crate::config::this_device()))?;
     let req = serde_json::json!({ "op": "sh", "script": script, "timeout": timeout.as_secs(), "login": false });
     let reply = link.request(req, timeout + Duration::from_secs(10)).await?;
     if reply["ok"].as_bool() != Some(true) {

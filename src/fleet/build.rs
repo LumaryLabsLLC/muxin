@@ -648,7 +648,7 @@ pub fn explain_unreachable(spec: &MachineSpec, p: &ProbeResult, retrying: bool, 
         _ if spec.is_local() => (format!("Couldn't check {name}"), error.clone(), None),
         _ if error.to_ascii_lowercase().starts_with("timed out after") => (format!("{name} didn't finish the check"), "Very busy, or a poor connection.".to_string(), Some(format!("ssh {host}"))),
         // An iPad has no ssh to try: only its direct connection, which the machine may have stopped trusting.
-        _ if cfg!(target_os = "ios") => (format!("Can't reach {name}"), "Its direct connection didn't answer. If it's on, pair this iPad with it again from your Mac.".to_string(), None),
+        _ if cfg!(target_os = "ios") => (format!("Can't reach {name}"), format!("Its direct connection didn't answer. If it's on, pair this {} with it again from your Mac.", crate::config::this_device()), None),
         _ => (format!("Can't reach {name}"), "Try ssh in a terminal to see why.".to_string(), Some(format!("ssh {host}"))),
     };
     let mut u = Unreachable { kind: kind.into(), title, detail, hint, last_seen_at: p.last_seen_at, error };

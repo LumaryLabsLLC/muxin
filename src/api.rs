@@ -4391,6 +4391,82 @@ pub async fn run_on_machines(engine: &Arc<Engine>, req: RunRequest) -> ApiResult
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Snippets: commands the user saved, in folders (`[[settings.snippets]]`).
+
+#[derive(Debug, Serialize)]
+pub struct SnippetsOut {
+    pub snippets: Vec<crate::config::Snippet>,
+    /// Their folders, in order; "" is the snippets in none.
+    pub folders: Vec<String>,
+}
+
+pub fn snippet_list(engine: &Arc<Engine>) -> ApiResult<SnippetsOut> {
+    let snippets = engine.settings().snippets;
+    Ok(SnippetsOut { folders: crate::config::snippet_folders(&snippets), snippets })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnippetSaveRequest {
+    /// Its name; empty takes the command's first line.
+    #[serde(default)]
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub folder: String,
+    /// The name of the snippet to change; without it, a new one.
+    pub replacing: Option<String>,
+}
+
+/// Adds a snippet, or changes one (`replacing`).
+pub fn snippet_save(engine: &Arc<Engine>, req: SnippetSaveRequest) -> ApiResult<crate::config::Snippet> {
+    let mut settings = engine.settings();
+    let saved = settings.save_snippet(req.replacing.as_deref(), crate::config::Snippet { name: req.name, command: req.command, folder: req.folder }).map_err(snippet_error)?;
+    engine.update_settings(settings).map_err(ApiError::invalid)?;
+    Ok(saved)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnippetNameRequest {
+    pub name: String,
+}
+
+/// Deletes a snippet; the one deleted.
+pub fn snippet_delete(engine: &Arc<Engine>, req: SnippetNameRequest) -> ApiResult<crate::config::Snippet> {
+    let mut settings = engine.settings();
+    let gone = settings.remove_snippet(&req.name).map_err(snippet_error)?;
+    engine.update_settings(settings).map_err(ApiError::invalid)?;
+    Ok(gone)
+}
+
+fn snippet_error(e: String) -> ApiError {
+    if e.starts_with("There's no snippet") { ApiError::new("not_found", e).with_hint("muxin snippet ls") } else { ApiError::invalid(e) }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnippetRunRequest {
+    pub name: String,
+    pub machine_ids: Vec<String>,
+    pub timeout_secs: Option<u64>,
+    pub wait: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SnippetRunOut {
+    pub snippet: crate::config::Snippet,
+    pub machines: Vec<RunOut>,
+}
+
+/// Runs a snippet on machines, as run_on_machines does.
+pub async fn snippet_run(engine: &Arc<Engine>, req: SnippetRunRequest) -> ApiResult<SnippetRunOut> {
+    let snippet = engine.settings().snippet(&req.name).cloned().ok_or_else(|| snippet_error(format!("There's no snippet called \"{}\".", req.name.trim())))?;
+    let machines = run_on_machines(engine, RunRequest { machine_ids: req.machine_ids, command: snippet.command.clone(), timeout_secs: req.timeout_secs, wait: req.wait }).await?;
+    Ok(SnippetRunOut { snippet, machines })
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WakeRequest {

@@ -31,6 +31,8 @@ pub struct Paths {
     /// Cloud machines destroyed lately (see DestroyedCloud). Its own file, so
     /// the processes that write state.json don't save over each other's.
     pub cloud_history: PathBuf,
+    /// The Run page's Recent commands (see read_recent).
+    pub recent_commands: PathBuf,
 }
 
 impl Paths {
@@ -51,6 +53,7 @@ impl Paths {
             state: dir.join("state.json"),
             workspaces: dir.join("workspaces.json"),
             cloud_history: dir.join("cloud-history.json"),
+            recent_commands: dir.join("recent-commands.json"),
             dir,
         }
     }
@@ -616,6 +619,52 @@ pub struct Settings {
     pub share: ShareSettings,
     /// What the agents on the machines may do (Settings › Agents).
     pub agents: AgentSettings,
+    /// Saved commands, run with one click (`[[settings.snippets]]`), in the
+    /// order they were added.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub snippets: Vec<Snippet>,
+}
+
+/// A saved command (`[[settings.snippets]]`): run from the Run page on the
+/// machines picked, from the palette, or typed into a terminal.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Snippet {
+    /// What it's called; names are unique, ignoring case.
+    pub name: String,
+    /// The shell command. Several lines run one after another.
+    pub command: String,
+    /// The folder it's in; empty for none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub folder: String,
+}
+
+impl Snippet {
+    /// Tidied: trimmed, with a name (the command's first line) when it had none.
+    fn tidy(mut self) -> Snippet {
+        self.command = self.command.trim().replace("\r\n", "\n");
+        self.folder = self.folder.split_whitespace().collect::<Vec<_>>().join(" ");
+        self.name = self.name.split_whitespace().collect::<Vec<_>>().join(" ");
+        if self.name.is_empty() {
+            let first = self.command.lines().next().unwrap_or_default().trim();
+            self.name = if first.chars().count() > 40 { format!("{}…", first.chars().take(39).collect::<String>()) } else { first.to_string() };
+        }
+        self
+    }
+}
+
+/// The folders snippets are in, in order of first use; "" (none) first when any has none.
+pub fn snippet_folders(snippets: &[Snippet]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if snippets.iter().any(|s| s.folder.is_empty()) {
+        out.push(String::new());
+    }
+    for s in snippets {
+        if !out.iter().any(|f| f.eq_ignore_ascii_case(&s.folder)) {
+            out.push(s.folder.clone());
+        }
+    }
+    out
 }
 
 /// What the agents on the user's machines may do (`[settings.agents]`).
@@ -781,6 +830,7 @@ impl Default for Settings {
             prompts: Default::default(),
             share: ShareSettings::default(),
             agents: AgentSettings::default(),
+            snippets: Vec::new(),
         }
     }
 }
@@ -856,8 +906,81 @@ impl Settings {
         }
         self.github_poll_seconds = self.github_poll_seconds.clamp(10, 3600);
         self.check_interval_minutes = self.check_interval_minutes.min(24 * 60);
+        // Snippets never make the settings fail to read: empty ones go, and a
+        // name used twice (edited by hand) gets a number.
+        let mut names = HashSet::new();
+        self.snippets = std::mem::take(&mut self.snippets)
+            .into_iter()
+            .map(Snippet::tidy)
+            .filter(|s| !s.command.is_empty())
+            .map(|mut s| {
+                let base = s.name.clone();
+                let mut n = 2;
+                while !names.insert(s.name.to_lowercase()) {
+                    s.name = format!("{base} {n}");
+                    n += 1;
+                }
+                s
+            })
+            .collect();
         Ok(self)
     }
+
+    /// The snippet called `name` (ignoring case).
+    pub fn snippet(&self, name: &str) -> Option<&Snippet> {
+        let name = name.trim();
+        self.snippets.iter().find(|s| s.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Adds a snippet, or (`replacing` its name) changes one, where it was.
+    /// Errs when it has no command, or its name is another snippet's.
+    pub fn save_snippet(&mut self, replacing: Option<&str>, snippet: Snippet) -> Result<Snippet, String> {
+        let snippet = snippet.tidy();
+        if snippet.command.is_empty() {
+            return Err("A snippet needs a command.".into());
+        }
+        let at = match replacing {
+            Some(old) => Some(self.snippets.iter().position(|s| s.name.eq_ignore_ascii_case(old.trim())).ok_or_else(|| format!("There's no snippet called \"{}\".", old.trim()))?),
+            None => None,
+        };
+        if self.snippets.iter().enumerate().any(|(i, s)| Some(i) != at && s.name.eq_ignore_ascii_case(&snippet.name)) {
+            return Err(format!("There's already a snippet called \"{}\".", snippet.name));
+        }
+        match at {
+            Some(i) => self.snippets[i] = snippet.clone(),
+            None => self.snippets.push(snippet.clone()),
+        }
+        Ok(snippet)
+    }
+
+    /// Removes the snippet called `name`; the one removed.
+    pub fn remove_snippet(&mut self, name: &str) -> Result<Snippet, String> {
+        let at = self.snippets.iter().position(|s| s.name.eq_ignore_ascii_case(name.trim())).ok_or_else(|| format!("There's no snippet called \"{}\".", name.trim()))?;
+        Ok(self.snippets.remove(at))
+    }
+}
+
+/// Commands the Run page remembers (Recent), newest first.
+pub const RECENT_COMMANDS: usize = 8;
+
+/// The Run page's Recent commands, from `recent-commands.json`.
+pub fn read_recent(path: &Path) -> Vec<String> {
+    let mut list: Vec<String> = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    list.retain(|c| !c.trim().is_empty());
+    list.truncate(RECENT_COMMANDS);
+    list
+}
+
+/// `command` first in the Recent list (once), the oldest dropping off.
+pub fn remember_command(list: &mut Vec<String>, command: &str) {
+    list.retain(|c| c != command);
+    list.insert(0, command.to_string());
+    list.truncate(RECENT_COMMANDS);
+}
+
+/// Saves the Recent list (readable by this user only: commands can hold secrets).
+pub fn save_recent(path: &Path, list: &[String]) -> Result<()> {
+    write_atomic(path, &serde_json::to_vec(list)?)
 }
 
 /// Accepts "acme", "acme/api", "https://github.com/acme/api(.git)" and returns "acme" / "acme/api".
@@ -1179,5 +1302,69 @@ mod tests {
         assert!(!read("github_poll_seconds = 30\n"));
         // Turned on before it was off by default: it stays on.
         assert!(read("share_clipboard = true\n"));
+    }
+
+    #[test]
+    fn snippets_are_kept_in_config_toml() {
+        let root = std::env::temp_dir().join(format!("muxin-snippets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("config.toml");
+        write_atomic(&path, b"[[machine]]\nname = \"beelink\"\nhost = \"beelink\"\n").unwrap();
+        let mut s = Settings::load(&path);
+        assert!(s.snippets.is_empty());
+        s.save_snippet(None, Snippet { name: "  Disk   space ".into(), command: " df -h /\r\n".into(), folder: String::new() }).unwrap();
+        s.save_snippet(None, Snippet { name: String::new(), command: "docker ps --format '{{.Names}}'\nuptime".into(), folder: " Docker ".into() }).unwrap();
+        assert_eq!(s.snippets[0], Snippet { name: "Disk space".into(), command: "df -h /".into(), folder: String::new() });
+        // No name: the command's first line.
+        assert_eq!((s.snippets[1].name.as_str(), s.snippets[1].folder.as_str()), ("docker ps --format '{{.Names}}'", "Docker"));
+        // Names are unique, ignoring case; a command is needed.
+        assert!(s.save_snippet(None, Snippet { name: "disk SPACE".into(), command: "du".into(), folder: String::new() }).unwrap_err().contains("already"));
+        assert!(s.save_snippet(None, Snippet { name: "Nothing".into(), command: "  ".into(), folder: String::new() }).is_err());
+        // Edited where it is; renamed to its own name in another case is fine.
+        s.save_snippet(Some("disk space"), Snippet { name: "DISK SPACE".into(), command: "df -h".into(), folder: "Checks".into() }).unwrap();
+        assert_eq!((s.snippets[0].name.as_str(), s.snippets[0].command.as_str(), s.snippets[0].folder.as_str()), ("DISK SPACE", "df -h", "Checks"));
+        assert!(s.save_snippet(Some("gone"), Snippet { name: "x".into(), command: "x".into(), folder: String::new() }).is_err());
+        s.save(&path).unwrap();
+        // They survive a restart, and the machines stay.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[[settings.snippets]]") && text.contains("[[machine]]"), "{text}");
+        let again = Settings::load(&path);
+        assert_eq!(again.snippets, s.snippets);
+        assert_eq!(snippet_folders(&again.snippets), vec!["Checks".to_string(), "Docker".to_string()]);
+        assert_eq!(again.snippet("disk space").map(|x| x.command.as_str()), Some("df -h"));
+        let mut again = again;
+        assert_eq!(again.remove_snippet("Disk Space").unwrap().name, "DISK SPACE");
+        assert!(again.remove_snippet("Disk Space").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn snippets_edited_by_hand_still_read() {
+        // The same name twice gets a number; an empty one goes; the rest of the settings stay.
+        let text = "github_poll_seconds = 30\n[[snippets]]\nname = \"Up\"\ncommand = \"uptime\"\n[[snippets]]\nname = \"up\"\ncommand = \"w\"\n[[snippets]]\nname = \"Empty\"\n";
+        let s = toml::from_str::<Settings>(text).unwrap().normalized().unwrap();
+        assert_eq!(s.github_poll_seconds, 30);
+        assert_eq!(s.snippets.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Up", "up 2"]);
+        assert_eq!(snippet_folders(&s.snippets), vec![String::new()]);
+        // None saved: nothing in the file.
+        assert!(!toml::to_string(&Settings::default()).unwrap().contains("snippets"));
+    }
+
+    #[test]
+    fn recent_commands_survive_a_restart() {
+        let root = std::env::temp_dir().join(format!("muxin-recent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("recent-commands.json");
+        assert!(read_recent(&path).is_empty());
+        let mut list = Vec::new();
+        for c in ["a", "b", "a", "c", "d", "e", "f", "g", "h", "i"] {
+            remember_command(&mut list, c);
+        }
+        assert_eq!(list, ["i", "h", "g", "f", "e", "d", "c", "a"]);
+        save_recent(&path, &list).unwrap();
+        assert_eq!(read_recent(&path), list);
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(read_recent(&path).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

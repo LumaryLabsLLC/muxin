@@ -69,6 +69,7 @@ enum Command {
     JoinShare,
     /// The session on screen.
     Share,
+    NewSnippet,
 }
 
 #[derive(Clone)]
@@ -81,6 +82,8 @@ enum Run {
     Connect(String),
     /// A theme, by id.
     Theme(&'static str),
+    /// A snippet's command: into the terminal on screen, else on the Run page.
+    Snippet(String),
 }
 
 enum Glyph {
@@ -287,6 +290,7 @@ impl Root {
             Run::Go(route) => self.navigate(route, window, cx),
             Run::Screen(machine, display) => self.show_display(machine, display, window, cx),
             Run::Connect(machine) => self.set_machine_connected(&machine, true, cx),
+            Run::Snippet(command) => self.palette_snippet(&command, window, cx),
             Run::Do(c) => match c {
                 Command::AddMachine => self.show_add_machine(window, cx),
                 Command::NewCloudMachine => self.show_cloud_dialog(window, cx),
@@ -303,6 +307,7 @@ impl Root {
                 },
                 Command::NewWorkspace => self.show_new_workspace(None, window, cx),
                 Command::CopyFiles => self.show_copy_files(None, None, window, cx),
+                Command::NewSnippet => self.show_snippet_dialog(None, None, window, cx),
                 Command::CheckMachines => self.engine.trigger_check(None),
                 Command::SyncGitHub => self.engine.trigger_sync(),
                 Command::ToggleSidebar => self.toggle_sidebar(cx),
@@ -519,7 +524,53 @@ impl Root {
             item("Theme: Match the system", "palette", None, Run::Do(Command::Theme(Mode::System))),
             item("About Muxin", "info", None, Run::Go(Route::About)),
         ];
-        share.into_iter().chain(rename).chain(all).collect()
+        let snippets = self.snippet_items();
+        share.into_iter().chain(rename).chain(all).chain([item("New snippet…", "code", None, Run::Do(Command::NewSnippet))]).chain(snippets).collect()
+    }
+
+    /// Each snippet, saying where it goes: the terminal on screen, the
+    /// machine on screen, else the Run page (ready to run on the machines picked).
+    fn snippet_items(&self) -> Vec<Item> {
+        let side = match (&self.route, self.snippet_terminal()) {
+            (_, Some(_)) => "Into this terminal".to_string(),
+            (Route::Machine(id), _) => format!("Run on {}", self.snapshot.machines.iter().find(|m| &m.id == id).map(|m| m.name.as_str()).unwrap_or(id)),
+            _ => "Snippet".to_string(),
+        };
+        self.engine
+            .settings()
+            .snippets
+            .into_iter()
+            .map(|s| {
+                let detail = super::snippets::one_line(&s.command);
+                let mut i = Item::new(s.name, detail, side.clone(), Glyph::Icon("code"), Run::Snippet(s.command));
+                i.also = format!("snippet {}", s.folder);
+                i
+            })
+            .collect()
+    }
+
+    /// A snippet picked in the palette: typed into the terminal on screen and
+    /// run; run on the machine on screen; else put on the Run page, where Enter
+    /// runs it on the machines picked.
+    fn palette_snippet(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session) = self.snippet_terminal() {
+            self.type_snippet(&session, command, window, cx);
+            return;
+        }
+        let machine = match &self.route {
+            Route::Machine(id) => Some(id.clone()),
+            _ => None,
+        };
+        let text = super::snippets::one_line(command);
+        if let Some(id) = machine {
+            self.run_picked = Some([id].into());
+            self.navigate(Route::Run, window, cx);
+            self.run_snippet_here(command, cx);
+            return;
+        }
+        self.navigate(Route::Run, window, cx);
+        self.run_input.update(cx, |i, cx| i.set_text(text, cx));
+        window.focus(&self.run_input.read(cx).focus_handle(cx));
     }
 
     pub(super) fn render_palette(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {

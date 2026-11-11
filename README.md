@@ -111,7 +111,7 @@ muxin status
 - **Adding machines (⌘N):** suggestions from your `~/.ssh/config`, your Tailscale network, and this network (machines advertising ssh over Bonjour, and Macs that would be addable once Remote Login is on).
 - **Agent sessions (⌘T):** a real terminal on any machine running Claude Code, Codex, OpenCode, Gemini CLI, Antigravity, Amp, Pi, Copilot CLI, Cursor Agent, Qwen Code, Droid, Kimi Code or a shell. Sessions are listed under their machine in the sidebar (a spinner while the agent works, an amber dot when it needs you, a dot in the accent color when it's done), with its open desktop and one line for its runners, and keep running when you quit the app. A long list shows the first five (and any that need you) with the rest behind **more**, a folded machine still shows what's on screen from it, and right-click › **Hide** takes a session out of the lists until it needs you. Terminal font size, line height and a blinking cursor are in Settings.
 - **Usage (⌃5):** what Claude Code and Codex used on all your machines today or over the last 7, 30 or 90 days, read from their own logs there: tokens and requests by day, model, machine and folder, and what it would cost at Anthropic's and OpenAI's API list prices. With a Claude or ChatGPT plan you don't pay per token; it's what the same use would cost through the API.
-- **Run (⌃6):** one command on several machines at once (`df -h /`, `brew upgrade`, `git -C ~/code/api pull`), each one's output side by side as it comes, and its exit status. It runs in your login shell from your home folder; right-click a machine › **Run a command…** to start with just that one.
+- **Run (⌃6):** one command on several machines at once (`df -h /`, `brew upgrade`, `git -C ~/code/api pull`), each one's output side by side as it comes, and its exit status. It runs in your login shell from your home folder; right-click a machine › **Run a command…** to start with just that one. **Snippets** are commands you save once, in folders, and run with one click: there on the machines picked, from the palette (⇧⌘P), or typed into the terminal you're in from its **Snippets** menu. Recent commands are kept across restarts.
 - **Open in your editor:** sessions, workspaces, GitHub checkouts and Compose projects have a button that lists the editors on this computer (Zed, Cursor, VS Code) and opens their folder in the one you pick, over the editor's own ssh support. Settings › General › Editor picks which comes first (and which `muxin edit` uses).
 - **What's running:** a machine's **Services › Processes** lists its busiest processes (CPU, memory, how long they've run, GPU memory on NVIDIA) and stops or kills one; its page shows its GPU (NVIDIA, AMD on Linux, Apple), how busy it is and its memory.
 - **Fleet warnings and Wake:** a machine's page and the Overview say when it wants a reboot (Linux updates) or has failed services. A machine that's asleep or off has a **Wake** button (Wake on LAN, sent from this computer and from your machines on its network) once Muxin has seen its network card.
@@ -218,6 +218,7 @@ The MCP server has these tools:
 | `machine_ports` | What's listening on a machine: ports, programs or containers, and web servers' page titles. |
 | `machine_processes`, `process_signal` | A machine's busiest processes and its GPUs; stop or kill one. |
 | `run_on_machines` | Runs one shell command on several machines at once, with each one's output and exit status. |
+| `snippet_list`, `snippet_save`, `snippet_delete`, `snippet_run` | Your snippets (saved commands, in folders): list, add or change, delete, and run one on several machines. |
 | `wake_machine` | Wakes a machine that's asleep or off (Wake on LAN). |
 | `machine_power` | Powers a machine on or off, or restarts it: a cloud machine, a VM in a Docker container on another of your machines, or any other machine through its own system (off and restart) |
 | `vm_options`, `vm_create`, `vm_destroy` | VMs on your machines: Windows (Docker with KVM) or Linux containers, added to your machines. |
@@ -298,6 +299,7 @@ muxin rename-machine <id> <new name>      # the id stays the same
 muxin ports beelink                       # what's listening there (web servers first)
 muxin forward beelink 3000                # its port 3000 at localhost:3000 here, until Ctrl-C
 muxin run --on beelink,mac-studio -- df -h /   # one command on several machines (--all: every one online)
+muxin snippet add "Disk space" --folder Checks -- df -h /   # save a snippet (ls, rm, run --on a,b too)
 muxin ps beelink [-n 20]                  # its busiest processes and its GPUs
 muxin kill beelink 4242 [--force]         # stop a process (--force: SIGKILL)
 muxin wake beelink                        # Wake on LAN

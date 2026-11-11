@@ -163,6 +163,14 @@ pub fn paste(text: &str, mode: TermMode) -> Vec<u8> {
     }
 }
 
+/// A command typed in and run (a snippet): pasted, so the program sees it as
+/// typed text whatever is in it, then Enter.
+pub fn typed_command(command: &str, mode: TermMode) -> Vec<u8> {
+    let mut bytes = paste(command.trim_end(), mode);
+    bytes.push(b'\r');
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +194,14 @@ mod tests {
         assert_eq!(to_bytes(&ks("f5"), none).unwrap(), b"\x1b[15~");
         assert!(to_bytes(&ks("cmd-c"), none).is_none());
         assert_eq!(paste("a\nb", TermMode::BRACKETED_PASTE), b"\x1b[200~a\rb\x1b[201~");
+    }
+
+    #[test]
+    fn a_snippet_is_typed_and_run() {
+        assert_eq!(typed_command("df -h\n", TermMode::empty()), b"df -h\r");
+        // Several lines: each runs (or, bracketed, all of them once Enter comes).
+        assert_eq!(typed_command("cd /tmp\nls", TermMode::empty()), b"cd /tmp\rls\r");
+        assert_eq!(typed_command("cd /tmp\nls", TermMode::BRACKETED_PASTE), b"\x1b[200~cd /tmp\rls\x1b[201~\r");
     }
 
     #[test]

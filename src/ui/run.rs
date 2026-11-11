@@ -16,8 +16,6 @@ use crate::fleet::model::{Machine, Operation};
 /// Output lines each machine's card shows, and the one made bigger.
 const LINES: usize = 14;
 const MORE_LINES: usize = 2000;
-/// Commands remembered for the Recent row.
-const HISTORY: usize = 8;
 
 /// The last command run: on which machines, and each one's operation (or why it didn't start).
 pub struct RunBatch {
@@ -43,6 +41,11 @@ impl Root {
     /// Runs what's typed on the machines picked.
     pub(super) fn start_run(&mut self, cx: &mut Context<Self>) {
         let command = self.run_input.read(cx).text().trim().to_string();
+        self.run_command(command, cx);
+    }
+
+    /// Runs `command` on the machines picked.
+    pub(super) fn run_command(&mut self, command: String, cx: &mut Context<Self>) {
         if command.is_empty() {
             return;
         }
@@ -52,15 +55,24 @@ impl Root {
             return;
         }
         let runs = self.engine.run_on_machines(&targets, &command, crate::fleet::command::DEFAULT_TIMEOUT);
-        self.run_history.retain(|c| c != &command);
-        self.run_history.insert(0, command.clone());
-        self.run_history.truncate(HISTORY);
+        crate::config::remember_command(&mut self.run_history, &command);
+        self.save_run_history();
         // The one shown bigger stays so when it runs there again.
         if self.run_expanded.as_ref().is_some_and(|id| !targets.contains(id)) {
             self.run_expanded = None;
         }
         self.run_last = Some(RunBatch { command, runs });
         cx.notify();
+    }
+
+    /// Keeps the Recent row for after a restart.
+    fn save_run_history(&self) {
+        if self.engine.is_demo() {
+            return;
+        }
+        if let Err(e) = crate::config::save_recent(&self.engine.paths().recent_commands, &self.run_history) {
+            tracing::warn!("couldn't save the recent commands: {e:#}");
+        }
     }
 
     fn toggle_run_machine(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -142,6 +154,10 @@ impl Root {
                     .items_center()
                     .gap(px(8.))
                     .child(div().flex_1().min_w(px(0.)).flex().child(self.run_input.clone()))
+                    .child(Button::icon_only("run-save", "star").tooltip("Save it as a snippet").on_click(cx.listener(|this, _, window, cx| {
+                        let command = this.run_input.read(cx).text().trim().to_string();
+                        this.show_snippet_dialog(None, (!command.is_empty()).then_some(command), window, cx);
+                    })))
                     .child(
                         Button::new("run-go", if targets.len() > 1 { format!("Run on {}", targets.len()) } else { "Run".to_string() })
                             .icon("play")
@@ -177,19 +193,22 @@ impl Root {
                             .hover(|st| st.bg(theme.element_hover))
                             .font_family(mono_font())
                             .text_size(px(11.5))
-                            .child(div().w_full().truncate().child(c.clone()))
+                            .child(div().w_full().truncate().child(super::snippets::one_line(c)))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                let text = c2.clone();
+                                let text = super::snippets::one_line(&c2);
                                 this.run_input.update(cx, |i, cx| i.set_text(text, cx));
                                 window.focus(&this.run_input.read(cx).focus_handle(cx));
                             }))
                     }))
                     .child(Button::icon_only("run-forget", "x").tooltip("Forget these").on_click(cx.listener(|this, _, _, cx| {
                         this.run_history.clear();
+                        this.save_run_history();
                         cx.notify();
                     }))),
             );
         }
+        // Snippets come after the last results (which push them down while there are some).
+        let snippets = self.render_snippets(&theme, cx);
         if let Some(batch) = &self.run_last {
             let done = batch.runs.iter().filter(|(_, r)| r.as_ref().is_ok_and(|op| self.op(*op).is_some_and(|o| o.status != "running"))).count();
             let failed = batch.runs.iter().filter(|(_, r)| r.is_err() || r.as_ref().is_ok_and(|op| self.op(*op).is_some_and(|o| o.status == "failed"))).count();
@@ -212,7 +231,7 @@ impl Root {
                             .flex()
                             .items_center()
                             .gap(px(10.))
-                            .child(div().flex_1().min_w(px(0.)).truncate().font_family(mono_font()).text_size(px(13.)).child(format!("$ {}", batch.command)))
+                            .child(div().flex_1().min_w(px(0.)).truncate().font_family(mono_font()).text_size(px(13.)).child(format!("$ {}", super::snippets::one_line(&batch.command))))
                             .child(div().flex_none().text_size(px(12.)).text_color(theme.text_muted).child(summary))
                             .child(Button::new("run-clear", "Clear").icon("x").style(ButtonStyle::Ghost).tooltip("Clear the results").on_click(cx.listener(|this, _, _, cx| {
                                 this.run_last = None;
@@ -225,7 +244,7 @@ impl Root {
         } else if self.runnable().is_empty() {
             body = body.child(section_title(&theme, "No machines online", None)).child(card(&theme).child(kit::empty_state(&theme, "zap", "Commands run on machines that are online.")));
         }
-        body.into_any_element()
+        body.child(snippets).into_any_element()
     }
 
     fn op(&self, id: u64) -> Option<&Operation> {

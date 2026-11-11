@@ -43,6 +43,8 @@ pub enum MenuTarget {
     Joined(String),
     JoinedSession(String, String),
     JoinedDesktop(String),
+    /// The snippets to type into a session's terminal.
+    Snippets(String),
 }
 
 pub struct ContextMenu {
@@ -137,6 +139,12 @@ enum Action {
     ShareOptions(String),
     /// Something to do with a share someone gave you.
     Joined(String, super::share::JoinedAction),
+    /// A snippet's command, typed into a session's terminal and run.
+    TypeSnippet(String, String),
+    /// The New snippet dialog.
+    NewSnippet,
+    /// The Run page, where snippets are changed.
+    EditSnippets,
 }
 
 enum Item {
@@ -211,6 +219,31 @@ fn session_actions(x: &crate::fleet::sessions::SessionInfo) -> Vec<Item> {
         .collect();
     items.push(Item::Separator);
     items.push(Item::Action { label: "Edit the prompts…".into(), glyph: Glyph::Icon("pencil"), action: Action::EditPrompts, danger: false });
+    items
+}
+
+/// The snippets, to type into a session's terminal: those in no folder, then
+/// a row for each folder that opens its own; then a new one, and where to change them.
+fn snippet_items(session: &str, snippets: &[crate::config::Snippet]) -> Vec<Item> {
+    let typed = |s: &crate::config::Snippet| Item::Action { label: s.name.clone(), glyph: Glyph::Icon("code"), action: Action::TypeSnippet(session.to_string(), s.command.clone()), danger: false };
+    let mut items = Vec::new();
+    if snippets.is_empty() {
+        items.push(Item::Note("Save commands you run often, to type them in here".into()));
+    }
+    for folder in crate::config::snippet_folders(snippets) {
+        let inside = snippets.iter().filter(|s| s.folder.eq_ignore_ascii_case(&folder));
+        match folder.is_empty() {
+            true => items.extend(inside.map(typed)),
+            false => items.push(Item::Submenu { label: folder.clone(), value: None, glyph: Glyph::Icon("folder"), items: inside.map(typed).collect() }),
+        }
+    }
+    if !items.is_empty() {
+        items.push(Item::Separator);
+    }
+    items.push(Item::Action { label: "New snippet…".into(), glyph: Glyph::Icon("plus"), action: Action::NewSnippet, danger: false });
+    if !snippets.is_empty() {
+        items.push(Item::Action { label: "Edit snippets…".into(), glyph: Glyph::Icon("pencil"), action: Action::EditSnippets, danger: false });
+    }
     items
 }
 
@@ -453,6 +486,7 @@ impl Root {
                 items.push(Item::Action { label: "Cancel run…".into(), glyph: Glyph::Icon("circle-x"), action: Action::CancelRun(*id), danger: true });
                 items
             }
+            MenuTarget::Snippets(id) => snippet_items(id, &self.engine.settings().snippets),
             MenuTarget::SessionActions(id) => {
                 let Some(x) = s.sessions.iter().find(|x| &x.id == id) else { return Vec::new() };
                 session_actions(x)
@@ -781,6 +815,11 @@ impl Root {
             Action::SessionAction(id, action) => self.run_session_action(&id, action, cx),
             Action::Handoff(id, agent) => self.handoff_session(&id, agent, None, false, window, cx),
             Action::MoveTo(id, machine) => self.show_move_dialog(&id, machine, window, cx),
+            Action::TypeSnippet(session, command) => {
+                self.type_snippet(&session, &command, window, cx);
+            }
+            Action::NewSnippet => self.show_snippet_dialog(None, None, window, cx),
+            Action::EditSnippets => self.navigate(Route::Run, window, cx),
             Action::EditPrompts => self.open_settings_tab(super::settings::SettingsTab::Prompts, window, cx),
             Action::CloudPower(id, on) => self.cloud_power(&id, on, cx),
             Action::MachinePower(id, on) => self.machine_power(&id, on, cx),
@@ -1107,5 +1146,19 @@ mod tests {
         let off = |l: &str| Item::Off { label: l.into(), glyph: Glyph::None };
         let item = group("Desktop", "monitor", vec![(None, off("Show desktop")), (None, off("Add virtual monitor…"))]).unwrap();
         assert!(matches!(&item, Item::Off { label, .. } if label == "Desktop"));
+    }
+
+    #[test]
+    fn snippets_are_typed_from_their_folders() {
+        use crate::config::Snippet;
+        let sn = |name: &str, folder: &str| Snippet { name: name.into(), command: format!("echo {name}"), folder: folder.into() };
+        let snippets = vec![sn("Disk", ""), sn("Logs", "Docker"), sn("Up", ""), sn("Ps", "docker")];
+        let items = snippet_items("beelink/shell-1", &snippets);
+        assert_eq!(labels(&items), ["Disk", "Up", "Docker", "-", "New snippet…", "Edit snippets…"]);
+        let Item::Submenu { items: inside, .. } = &items[2] else { panic!("not a folder") };
+        assert_eq!(labels(inside), ["Logs", "Ps"]);
+        assert!(matches!(&inside[1], Item::Action { action: Action::TypeSnippet(id, c), .. } if id == "beelink/shell-1" && c == "echo Ps"));
+        // None yet: what they're for, and a new one.
+        assert_eq!(labels(&snippet_items("x", &[])), ["Save commands you run often, to type them in here", "-", "New snippet…"]);
     }
 }

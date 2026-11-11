@@ -70,6 +70,17 @@ muxin run --all --timeout 120 --json -- "uptime && free -m"
 
 Runs one shell command on each machine, in its login shell from the home folder, without a terminal (nothing interactive). It waits for all of them and returns each one's `exit_code`, `error` and output (`operation.log_tail`). `--all` is every machine that's online. Show the command to the user first. For work in one place over several steps, use a [workspace](workspaces.md) instead.
 
+## Snippets
+
+```sh
+muxin snippet ls --json                                    # the user's saved commands, by folder
+muxin snippet run "Disk space" --on beelink,mac-studio --json
+muxin snippet add "Disk space" --folder Checks -- df -h /  # only when asked; --replace <name> changes one
+muxin snippet rm "Disk space"                              # only when asked
+```
+
+Snippets are commands the user saved to run with one click in the app. `snippet run` runs one the way `muxin run` does. Show its command (from `ls`) before you run it.
+
 ## Files
 
 ```sh

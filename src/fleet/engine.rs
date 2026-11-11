@@ -331,7 +331,7 @@ impl Engine {
                     super::clipboard::stop_all();
                 }
             }
-            let favorites_only = Settings { favorite_repos: new.favorite_repos.clone(), ..st.settings.clone() } == new;
+            let favorites_only = Settings { favorite_repos: new.favorite_repos.clone(), snippets: new.snippets.clone(), ..st.settings.clone() } == new;
             st.settings = new.clone();
             if scopes_changed && new.github.orgs.is_empty() && new.github.repos.is_empty() {
                 st.github = None;
@@ -339,7 +339,7 @@ impl Engine {
             self.publish(&mut st);
             favorites_only
         };
-        // Starring a repository needn't re-poll GitHub or reschedule checks.
+        // Starring a repository or saving a snippet needn't re-poll GitHub or reschedule checks.
         if !favorites_only {
             self.settings_changed.notify_waiters();
             self.sync_now.notify_one();

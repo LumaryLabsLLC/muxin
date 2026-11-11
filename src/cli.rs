@@ -780,6 +780,26 @@ pub fn github_favorites(f: &crate::api::FavoritesOut) -> String {
     format!("Favorites:\n{}", f.favorites.iter().map(|r| format!("  ★ {r}\n")).collect::<String>())
 }
 
+/// Snippets by folder: each one's name and command (its lines joined with "; ").
+pub fn snippets(out: &crate::api::SnippetsOut) -> String {
+    if out.snippets.is_empty() {
+        return "No snippets yet. Save one with `muxin snippet add <name> -- <command>`.\n".into();
+    }
+    let width = out.snippets.iter().map(|s| s.name.chars().count()).max().unwrap_or(0).min(32);
+    let mut text = String::new();
+    for folder in &out.folders {
+        let indent = if folder.is_empty() { "" } else { "  " };
+        if !folder.is_empty() {
+            text.push_str(&format!("{folder}/\n"));
+        }
+        for s in out.snippets.iter().filter(|s| s.folder.eq_ignore_ascii_case(folder)) {
+            let command = s.command.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ");
+            text.push_str(&format!("{indent}{:<width$}  {command}\n", s.name));
+        }
+    }
+    text
+}
+
 pub fn github_repo(r: &crate::api::RepoOut) -> String {
     let mut out = format!("{} · {}\n", r.repo.full_name, r.repo.description.clone().unwrap_or_default());
     match &r.repo.parent {

@@ -597,6 +597,15 @@ impl TerminalView {
         }
     }
 
+    /// Types a command in and runs it (a snippet). False when the terminal has ended.
+    pub fn type_command(&mut self, command: &str, cx: &mut Context<Self>) -> bool {
+        if self.exited {
+            return false;
+        }
+        self.write_input(keys::typed_command(command, self.mode()), cx);
+        true
+    }
+
     fn paste(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else { return false };
         if !self.exited {

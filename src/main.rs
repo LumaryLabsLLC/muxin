@@ -130,6 +130,9 @@ enum Command {
     Kill(KillArgs),
     /// Run a command on several machines at once (--on a,b or --all)
     Run(FleetRunArgs),
+    /// Snippets: commands you saved to run with one click, in folders
+    #[command(alias = "snippets", subcommand)]
+    Snippet(SnippetCommand),
     /// Wake a machine that's asleep or off (Wake on LAN)
     Wake(MachineArgs),
     /// Power a machine on or off, or restart it. Ordinary machines can shut down and restart, not turn on (see wake)
@@ -772,6 +775,60 @@ struct FleetRunArgs {
     /// The command (quote it, or put it after --)
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     command: Vec<String>,
+}
+
+#[derive(Subcommand)]
+enum SnippetCommand {
+    /// Your snippets, by folder
+    Ls(AgentArgs),
+    /// Save a snippet, or change one with --replace
+    Add(SnippetAddArgs),
+    /// Delete a snippet
+    Rm(SnippetNameArgs),
+    /// Run a snippet on several machines at once (--on a,b or --all)
+    Run(SnippetRunArgs),
+}
+
+#[derive(Args)]
+struct SnippetAddArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// What it's called
+    name: String,
+    /// The folder it goes in
+    #[arg(long, default_value = "")]
+    folder: String,
+    /// The snippet to change (its current name)
+    #[arg(long)]
+    replace: Option<String>,
+    /// The command (quote it, or put it after --)
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    command: Vec<String>,
+}
+
+#[derive(Args)]
+struct SnippetNameArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// The snippet's name
+    name: String,
+}
+
+#[derive(Args)]
+struct SnippetRunArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// The snippet's name
+    name: String,
+    /// Machine ids or names, comma-separated
+    #[arg(long, value_delimiter = ',', required_unless_present = "all")]
+    on: Vec<String>,
+    /// Every machine that's online
+    #[arg(long, conflicts_with = "on")]
+    all: bool,
+    /// Seconds each may run
+    #[arg(long, default_value_t = 600)]
+    timeout: u64,
 }
 
 #[derive(Args)]
@@ -1769,6 +1826,18 @@ fn main() -> ExitCode {
             run(&runtime, &a.agent, async move |e| api::process_signal(&e, req).await, |v| format!("{} {}.\n", if v["done"] == "killed" { "Killed" } else { "Stopped" }, v["pid"]))
         }
         Some(Command::Run(a)) => fleet_run(a, &runtime),
+        Some(Command::Snippet(cmd)) => match cmd {
+            SnippetCommand::Ls(a) => run(&runtime, &a, async move |e| api::snippet_list(&e), cli::snippets),
+            SnippetCommand::Add(a) => {
+                let req = api::SnippetSaveRequest { name: a.name, command: shell_join(&a.command), folder: a.folder, replacing: a.replace };
+                run(&runtime, &a.agent, async move |e| api::snippet_save(&e, req), |s| format!("Saved {}.\n", s.name))
+            }
+            SnippetCommand::Rm(a) => {
+                let req = api::SnippetNameRequest { name: a.name };
+                run(&runtime, &a.agent, async move |e| api::snippet_delete(&e, req), |s| format!("Deleted {}.\n", s.name))
+            }
+            SnippetCommand::Run(a) => snippet_run(a, &runtime),
+        },
         Some(Command::Power(a)) => {
             let req = api::CloudMachineRequest { machine_id: a.machine, power: Some(a.state), wait: true };
             run(&runtime, &a.agent, async move |e| api::machine_power(&e, req, api::Surface::Cli, stream_line).await, cli::action)
@@ -2234,9 +2303,36 @@ fn fleet_run(a: FleetRunArgs, runtime: &tokio::runtime::Runtime) -> u8 {
         a.on.clone()
     };
     let req = api::RunRequest { machine_ids, command: shell_join(&a.command), timeout_secs: Some(a.timeout), wait: Some(true) };
-    match runtime.block_on(api::run_on_machines(&engine, req)) {
+    let out = runtime.block_on(api::run_on_machines(&engine, req));
+    print_runs(&a.agent, &engine, out)
+}
+
+/// `muxin snippet run`: as `muxin run`, with the snippet's command.
+fn snippet_run(a: SnippetRunArgs, runtime: &tokio::runtime::Runtime) -> u8 {
+    let _guard = runtime.enter();
+    let engine = Engine::new(a.agent.common.paths(), a.agent.demo);
+    let machine_ids = if a.all {
+        runtime.block_on(api::status(&engine, api::StatusRequest::default(), CLI)).ok();
+        engine.current().machines.iter().filter(|m| m.status == "online").map(|m| m.id.clone()).collect()
+    } else {
+        a.on.clone()
+    };
+    let req = api::SnippetRunRequest { name: a.name, machine_ids, timeout_secs: Some(a.timeout), wait: Some(true) };
+    match runtime.block_on(api::snippet_run(&engine, req)) {
+        Ok(r) if a.agent.json => {
+            println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+            u8::from(r.machines.iter().any(|m| m.exit_code != Some(0)))
+        }
+        Ok(r) => print_runs(&a.agent, &engine, Ok(r.machines)),
+        Err(e) => report_error(&a.agent, &e),
+    }
+}
+
+/// Each machine's output under its name; 1 when any failed.
+fn print_runs(agent: &AgentArgs, engine: &Arc<Engine>, out: ApiResult<Vec<api::RunOut>>) -> u8 {
+    match out {
         Ok(out) => {
-            if a.agent.json {
+            if agent.json {
                 println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
             } else {
                 let snap = engine.current();
@@ -2257,7 +2353,7 @@ fn fleet_run(a: FleetRunArgs, runtime: &tokio::runtime::Runtime) -> u8 {
             }
             u8::from(out.iter().any(|r| r.exit_code != Some(0)))
         }
-        Err(e) => report_error(&a.agent, &e),
+        Err(e) => report_error(agent, &e),
     }
 }
 

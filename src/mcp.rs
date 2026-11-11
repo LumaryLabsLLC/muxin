@@ -435,6 +435,10 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "machine_processes" => ok(api::machine_processes(engine, args(a)?).await?),
         "process_signal" => ok(api::process_signal(engine, args(a)?).await?),
         "run_on_machines" => ok(json!({ "machines": api::run_on_machines(engine, args(a)?).await? })),
+        "snippet_list" => ok(api::snippet_list(engine)?),
+        "snippet_save" => ok(api::snippet_save(engine, args(a)?)?),
+        "snippet_delete" => ok(api::snippet_delete(engine, args(a)?)?),
+        "snippet_run" => ok(api::snippet_run(engine, args(a)?).await?),
         "wake_machine" => ok(api::wake_machine(engine, args(a)?).await?),
         "direct_connection" => ok(api::set_direct(engine, args(a)?).await?),
         "git_setup" => ok(api::git_setup(engine, args(a)?).await?),
@@ -1268,6 +1272,40 @@ pub fn tools() -> Vec<Value> {
             "annotations": annotations("Run a command on machines", false, true, false, false),
         }),
         json!({
+            "name": "snippet_list",
+            "description": "The user's snippets: commands they saved in Muxin to run with one click (on the Run page, from the palette, typed into a terminal), each with its name, command and folder (\"\" for none), and the folders in order. Read-only.",
+            "inputSchema": schema(json!({}), &[]),
+            "annotations": annotations("List snippets", true, false, true, false),
+        }),
+        json!({
+            "name": "snippet_save",
+            "description": "Save a snippet (a command the user runs often) in Muxin, or change one by passing its current name as replacing. Names are unique, ignoring case; an empty name takes the command's first line. Kept in config.toml. Only when asked.",
+            "inputSchema": schema(json!({
+                "name": { "type": "string" },
+                "command": { "type": "string", "description": "The shell command; several lines run one after another." },
+                "folder": { "type": "string", "description": "The folder it goes in; empty for none." },
+                "replacing": { "type": "string", "description": "The name of the snippet to change." }
+            }), &["command"]),
+            "annotations": annotations("Save a snippet", false, false, true, false),
+        }),
+        json!({
+            "name": "snippet_delete",
+            "description": "Delete one of the user's snippets, by name. Only when asked.",
+            "inputSchema": schema(json!({ "name": { "type": "string" } }), &["name"]),
+            "annotations": annotations("Delete a snippet", false, true, true, false),
+        }),
+        json!({
+            "name": "snippet_run",
+            "description": "Run one of the user's snippets on machines, as run_on_machines does (each machine's login shell, from the home folder, nothing interactive), and return each one's exit_code and log_tail with the snippet that ran. It runs on the user's real machines as the user: only when asked, and show the command first (snippet_list has it).",
+            "inputSchema": schema(json!({
+                "name": { "type": "string", "description": "The snippet's name (ignoring case)." },
+                "machine_ids": { "type": "array", "items": { "type": "string" }, "description": "Machine ids (or names)." },
+                "timeout_secs": { "type": "integer", "description": "How long each may run, default 600, at most 3600." },
+                "wait": { "type": "boolean" }
+            }), &["name", "machine_ids"]),
+            "annotations": annotations("Run a snippet on machines", false, true, false, false),
+        }),
+        json!({
             "name": "wake_machine",
             "description": "Wake a machine that's asleep or shut down (Wake on LAN), when its network card is known (Muxin learns it while the machine is on) and it's set up to wake that way. The signal goes from this computer and from online machines on the same network. Muxin checks it again after 20 and 40 seconds.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
@@ -1373,7 +1411,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 98);
+        assert_eq!(tools.len(), 102);
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();
@@ -1505,6 +1543,27 @@ mod tests {
         assert!(ran["structuredContent"]["machines"].is_array(), "{ran}");
         let listed = tool_result(json!([1, 2]), None, false);
         assert_eq!(listed["structuredContent"], json!({"result": [1, 2]}));
+    }
+
+    #[tokio::test]
+    async fn snippets_are_saved_listed_run_and_deleted() {
+        let engine = demo();
+        engine.run_check(None).await;
+        let session = Session::default();
+        // The demo keeps them in memory.
+        let saved = call_tool(&engine, &session, "snippet_save", json!({"name": "Truth", "command": "true", "folder": "Checks"})).await;
+        assert_eq!(saved["structuredContent"]["name"], "Truth", "{saved}");
+        let again = call_tool(&engine, &session, "snippet_save", json!({"name": "truth", "command": "false"})).await;
+        assert_eq!(again["isError"], true, "{again}");
+        let listed = call_tool(&engine, &session, "snippet_list", json!({})).await;
+        assert_eq!(listed["structuredContent"]["folders"], json!(["Checks"]), "{listed}");
+        let ran = call_tool(&engine, &session, "snippet_run", json!({"name": "TRUTH", "machine_ids": ["forge"]})).await;
+        assert_eq!(ran["structuredContent"]["snippet"]["command"], "true", "{ran}");
+        assert!(ran["structuredContent"]["machines"].is_array(), "{ran}");
+        let gone = call_tool(&engine, &session, "snippet_delete", json!({"name": "truth"})).await;
+        assert_eq!(gone["isError"], false, "{gone}");
+        let missing = call_tool(&engine, &session, "snippet_run", json!({"name": "truth", "machine_ids": ["forge"]})).await;
+        assert_eq!(missing["isError"], true, "{missing}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -797,6 +797,16 @@ impl Root {
                         .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.open_menu(super::menu::MenuTarget::Handoff(sid.clone()), e.position(), cx))),
                 )
             })
+            // Saved commands, typed into its terminal.
+            .when(!exited && offline.is_none() && self.terminals.contains_key(&info.id), |d| {
+                let sid = info.id.clone();
+                d.child(
+                    Button::new("session-snippets", "Snippets")
+                        .icon("code")
+                        .tooltip("Type a saved command into this terminal and run it")
+                        .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.open_menu(super::menu::MenuTarget::Snippets(sid.clone()), e.position(), cx))),
+                )
+            })
             .when(info.persistent, |d| {
                 d.child(
                     Button::icon_only("session-copy-attach", "copy")

@@ -376,6 +376,7 @@ pub enum Modal {
     Power(Entity<PowerDialog>),
     Share(Entity<super::share::ShareDialog>),
     Join(Entity<super::share::JoinDialog>),
+    Snippet(Entity<super::snippets::SnippetDialog>),
 }
 
 pub struct Notice {
@@ -653,6 +654,8 @@ impl Root {
                 this.start_run(cx);
             }
         }));
+        // Recent commands, from before a restart (not in the demo).
+        let run_history = if engine.is_demo() { Vec::new() } else { crate::config::read_recent(&engine.paths().recent_commands) };
         let mut ws = Root {
             engine,
             snapshot,
@@ -718,7 +721,7 @@ impl Root {
             run_input,
             run_picked: None,
             run_last: None,
-            run_history: Vec::new(),
+            run_history,
             run_expanded: None,
             offline_details: Default::default(),
             last_notice: None,
@@ -2087,6 +2090,7 @@ impl Root {
             Modal::Power(d) => d.read(cx).first_focus(cx),
             Modal::Share(d) => d.read(cx).first_focus(cx),
             Modal::Join(d) => d.read(cx).first_focus(cx),
+            Modal::Snippet(d) => d.read(cx).first_focus(cx),
             Modal::Licenses(d) => d.focus_handle(cx),
         };
         window.focus(&focus);
@@ -3930,6 +3934,7 @@ impl Render for Root {
             Modal::NewBox(d) => d.clone().into_any_element(),
             Modal::Move(d) => d.clone().into_any_element(),
             Modal::Rename(d) => d.clone().into_any_element(),
+            Modal::Snippet(d) => d.clone().into_any_element(),
             Modal::AddDisplay(d) => d.clone().into_any_element(),
             Modal::MonitorPassword(d) => d.clone().into_any_element(),
             Modal::Power(d) => d.clone().into_any_element(),

@@ -38,6 +38,7 @@ mod tray;
 mod run;
 mod schedule_dialog;
 mod schedules;
+mod snippets;
 mod updates;
 mod usage;
 mod vm_dialog;

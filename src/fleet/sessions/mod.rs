@@ -304,6 +304,25 @@ pub fn tree<'a>(sessions: &[&'a SessionInfo]) -> Vec<(usize, &'a SessionInfo)> {
     out
 }
 
+/// Which rows of a `tree` a folded list shows: the first `keep` sessions with
+/// their helpers, and any other one that needs you, failed or is `also` (its
+/// helpers too).
+pub fn folded(tree: &[(usize, &SessionInfo)], keep: usize, also: impl Fn(&SessionInfo) -> bool) -> Vec<bool> {
+    let mut shown = vec![false; tree.len()];
+    let mut start = 0;
+    let mut tops = 0;
+    while start < tree.len() {
+        let end = tree[start + 1..].iter().position(|(d, _)| *d == 0).map_or(tree.len(), |p| start + 1 + p);
+        let urgent = tree[start..end].iter().any(|(_, s)| s.mark() >= Mark::Failed || also(s));
+        if tops < keep || urgent {
+            shown[start..end].fill(true);
+        }
+        tops += 1;
+        start = end;
+    }
+    shown
+}
+
 /// The most urgent mark among sessions: needs you, then an error, working, done.
 pub fn rollup<'a>(sessions: impl IntoIterator<Item = &'a SessionInfo>) -> Mark {
     sessions.into_iter().map(SessionInfo::mark).max().unwrap_or(Mark::Idle)
@@ -1041,6 +1060,21 @@ pub(crate) fn parse_discovery(spec: &MachineSpec, reply: &Value) -> MachineSessi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folded_list_keeps_the_first_few_and_whatever_needs_you() {
+        let s = |name: &str, parent: Option<&str>, state: &str| SessionInfo { id: format!("m/{name}"), machine_id: "m".into(), name: name.into(), parent: parent.map(|p| format!("m/{p}")), state: state.into(), status: "running".into(), ..Default::default() };
+        let all = [s("a", None, "idle"), s("a1", Some("a"), "idle"), s("b", None, "working"), s("c", None, "idle"), s("d", None, "needs_you"), s("e", None, "idle")];
+        let refs: Vec<&SessionInfo> = all.iter().collect();
+        let t = tree(&refs);
+        let names = |shown: Vec<bool>| t.iter().zip(shown).filter(|(_, v)| *v).map(|((_, x), _)| x.name.as_str()).collect::<Vec<_>>();
+        // Two sessions with their helpers, then d because it waits for you.
+        assert_eq!(names(folded(&t, 2, |_| false)), ["a", "a1", "b", "d"]);
+        assert_eq!(names(folded(&t, 10, |_| false)).len(), all.len());
+        // The one open stays, with the session above it.
+        assert_eq!(names(folded(&t, 1, |x| x.name == "a1")), ["a", "a1", "d"]);
+        assert_eq!(names(folded(&t, 1, |x| x.name == "e")), ["a", "a1", "d", "e"]);
+    }
 
     #[test]
     fn helpers_on_another_machine_end_once_their_parent_is_gone_there() {

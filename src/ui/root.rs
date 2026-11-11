@@ -102,6 +102,8 @@ actions!(
 
 const WORKSPACE: &str = "Root";
 pub(super) const SIDEBAR_DEFAULT: f32 = 256.;
+/// Sessions listed under a machine before the rest fold behind "N more".
+const SIDEBAR_SESSIONS: usize = 5;
 const SIDEBAR_MIN: f32 = 220.;
 const SIDEBAR_MAX: f32 = 420.;
 /// Utilization samples kept for the overview's pulse chart.
@@ -498,6 +500,12 @@ pub struct Root {
     /// The machine whose output is shown bigger.
     pub(super) run_expanded: Option<String>,
     pub(super) ports_more: std::collections::HashSet<String>,
+    /// Machines whose page lists all their sessions (not just the first few).
+    pub(super) sessions_more: std::collections::HashSet<String>,
+    /// Machines whose page lists their hidden sessions too; and whose sidebar
+    /// rows list all their sessions.
+    pub(super) hidden_open: std::collections::HashSet<String>,
+    pub(super) sidebar_more: std::collections::HashSet<String>,
     /// Each machine's GPUs (its page's GPU card), as last read.
     pub(super) machine_gpus: std::collections::HashMap<String, Vec<crate::fleet::procs::Gpu>>,
     /// Forwarded ports seen listening there (so one that stops can be closed here).
@@ -701,6 +709,9 @@ impl Root {
             usage_data: None,
             usage_at: None,
             ports_more: Default::default(),
+            sessions_more: Default::default(),
+            hidden_open: Default::default(),
+            sidebar_more: Default::default(),
             machine_gpus: Default::default(),
             forward_seen: Default::default(),
             port_input,
@@ -2392,6 +2403,8 @@ impl Root {
                 .iter()
                 // A box's agent shows under Boxes.
                 .filter(|x| x.machine_id == m.id && x.box_id.is_none() && (machine_match || x.title.to_lowercase().contains(&q) || x.agent_name.to_lowercase().contains(&q)))
+                // Hidden ones aren't listed, unless a search finds them.
+                .filter(|x| !q.is_empty() || !self.is_hidden(x, cx))
                 .collect();
             if !machine_match && visible.is_empty() && sessions.is_empty() {
                 continue;
@@ -2418,14 +2431,31 @@ impl Root {
             // Its own rows: the lines of what's above go on past them.
             let first_child_row = rows.len();
             self.sidebar_indent.set(child_indent(pos.depth));
-            if open {
+            // Closed, it still lists what's on screen from it (its desktop, a
+            // session, ...); open, everything.
+            {
                 // Agent sessions first: they're what you come back to. Helpers
-                // under the session that started them.
+                // under the session that started them. A long list shows the
+                // first few, the ones that need you and the one on screen.
                 let tree = crate::fleet::sessions::tree(&sessions);
-                for (n, (depth, x)) in tree.iter().enumerate() {
+                let on_screen = |x: &crate::fleet::sessions::SessionInfo| selected_session.as_deref() == Some(x.id.as_str());
+                let shown = if !open {
+                    tree.iter().map(|(_, x)| on_screen(x)).collect()
+                } else if self.sidebar_more.contains(&m.id) || !q.is_empty() {
+                    vec![true; tree.len()]
+                } else {
+                    crate::fleet::sessions::folded(&tree, SIDEBAR_SESSIONS, on_screen)
+                };
+                // Alone under a closed machine, a helper is a row like the rest.
+                let listed: Vec<(usize, &crate::fleet::sessions::SessionInfo)> = tree.iter().zip(&shown).filter(|(_, v)| **v).map(|((d, x), _)| (if open { *d } else { 0 }, *x)).collect();
+                for (n, (depth, x)) in listed.iter().enumerate() {
                     // The last helper of its parent: none of its siblings below it.
-                    let last = tree[n + 1..].iter().take_while(|(d, _)| *d >= *depth).all(|(d, _)| *d > *depth);
-                    rows.push(self.session_row(&theme, x, selected_session.as_deref() == Some(&x.id), *depth, last, cx));
+                    let last = listed[n + 1..].iter().take_while(|(d, _)| *d >= *depth).all(|(d, _)| *d > *depth);
+                    rows.push(self.session_row(&theme, x, on_screen(x), *depth, last, cx));
+                }
+                let folded_away = shown.iter().filter(|v| !**v).count();
+                if open && q.is_empty() && (folded_away > 0 || self.sidebar_more.contains(&m.id) && crate::fleet::sessions::folded(&tree, SIDEBAR_SESSIONS, on_screen).contains(&false)) {
+                    rows.push(self.more_sessions_row(&theme, m, folded_away, cx));
                 }
                 // Which of its displays the desktop page shows, when it's on screen.
                 let showing = (self.route == Route::Desktop(m.id.clone())).then(|| self.desktops.get(&m.id).map(|v| v.read(cx).display().map(str::to_string))).flatten();
@@ -2433,25 +2463,33 @@ impl Root {
                 // The open desktop: its main screen, then the virtual monitors
                 // (closed together).
                 if has_desktop {
-                    rows.push(self.desktop_row(&theme, m, showing.is_some() && !on_virtual, cx).into_any_element());
+                    if open || showing.is_some() && !on_virtual {
+                        rows.push(self.desktop_row(&theme, m, showing.is_some() && !on_virtual, cx).into_any_element());
+                    }
                     for d in m.displays.iter().filter(|d| d.is_virtual) {
                         let selected = showing.as_ref().is_some_and(|s| s.as_deref() == Some(d.id.as_str()));
-                        rows.push(self.monitor_row(&theme, m, d, selected, cx).into_any_element());
+                        if open || selected {
+                            rows.push(self.monitor_row(&theme, m, d, selected, cx).into_any_element());
+                        }
                     }
                 }
-                if self.logs.contains_key(&m.id) {
+                if self.logs.contains_key(&m.id) && (open || self.route == Route::Logs(m.id.clone())) {
                     let shown = self.logs.get(&m.id).and_then(|v| v.read(cx).source_name().map(str::to_string));
                     rows.push(self.tool_row(&theme, m, Route::Logs(m.id.clone()), "scroll-text", "Logs", shown, cx).into_any_element());
                 }
-                if self.service_pages.contains_key(&m.id) {
+                if self.service_pages.contains_key(&m.id) && (open || self.route == Route::Services(m.id.clone())) {
                     rows.push(self.tool_row(&theme, m, Route::Services(m.id.clone()), "layers", "Services", None, cx).into_any_element());
                 }
                 // Its ports open on this computer.
-                for f in forwards.iter().filter(|f| f.machine_id == m.id) {
+                for f in forwards.iter().filter(|f| open && f.machine_id == m.id) {
                     rows.push(self.forward_row(&theme, m, f, cx));
                 }
                 // Runners as one line; a search shows the ones it found.
-                if !machine_match {
+                if !open {
+                    for r in runners.iter().filter(|r| selected_runner.as_deref() == Some(r.id.as_str())) {
+                        rows.push(self.runner_row(&theme, &s, r, true, cx).into_any_element());
+                    }
+                } else if !machine_match {
                     for r in visible {
                         rows.push(self.runner_row(&theme, &s, r, selected_runner.as_deref() == Some(&r.id), cx).into_any_element());
                     }
@@ -2980,6 +3018,34 @@ impl Root {
 
     /// A machine's runners as one line ("3 runners · 2 busy"). A click opens
     /// the runner when there's one, else lists them below it (or folds them).
+    /// Under a machine's first few sessions: how many more, to list them all
+    /// (or fewer again).
+    fn more_sessions_row(&self, theme: &Theme, m: &Machine, more: usize, cx: &mut Context<Self>) -> AnyElement {
+        let id = m.id.clone();
+        let label = if more > 0 { format!("{more} more") } else { "Show fewer".to_string() };
+        div()
+            .id(SharedString::from(format!("side-more-{}", m.id)))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(26.))
+            .mx(px(10.))
+            .pl(px(CHILD_PAD))
+            .pr(px(8.))
+            .rounded(crate::ui::kit::corner(7.))
+            .cursor_pointer()
+            .hover(|st| st.bg(theme.ghost_hover))
+            .child(div().size(px(16.)).flex().items_center().justify_center().child(icon("ellipsis", 13., theme.text_placeholder)))
+            .child(div().flex_1().text_size(px(12.)).text_color(theme.text_placeholder).child(label))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.sidebar_more.remove(&id) {
+                    this.sidebar_more.insert(id.clone());
+                }
+                cx.notify()
+            }))
+            .into_any_element()
+    }
+
     fn runners_row(&self, theme: &Theme, m: &Machine, runners: &[&Runner], selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let id = m.id.clone();
         let only = (runners.len() == 1).then(|| runners[0].id.clone());

@@ -44,7 +44,9 @@ impl Root {
         let s = self.snapshot.clone();
         let q = self.filter_query(cx);
         let name = |id: &str| s.machines.iter().find(|m| m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.to_string());
-        let rows = list::agents(&s.sessions, &q, name, |id| s.machines.iter().any(|m| m.id == id && m.is_down()));
+        // Hidden ones aren't listed, unless a search finds them.
+        let sessions: Vec<_> = s.sessions.iter().filter(|x| !q.is_empty() || !self.is_hidden(x, cx)).cloned().collect();
+        let rows = list::agents(&sessions, &q, name, |id| s.machines.iter().any(|m| m.id == id && m.is_down()));
         if rows.is_empty() {
             return None;
         }

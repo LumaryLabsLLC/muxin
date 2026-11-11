@@ -95,6 +95,8 @@ enum Action {
     CopyAttach(String),
     /// A session in a desktop app, opened there.
     OpenInApp(String),
+    /// Hide a session from the lists (true), or show it again.
+    HideSession(String, bool),
     Restart(String),
     End(String),
     Favorite(String, bool),
@@ -491,12 +493,16 @@ impl Root {
             MenuTarget::Session(id) => {
                 let Some(x) = s.sessions.iter().find(|x| &x.id == id) else { return Vec::new() };
                 // One in Claude's desktop app: open it there, or its folder.
+                let hidden = cx.global::<super::theme::Appearance>().hidden_sessions.contains(id);
+                let hide = if hidden { act("Show in the lists", "eye", Action::HideSession(id.clone(), false)) } else { act("Hide", "minus", Action::HideSession(id.clone(), true)) };
                 if x.app.is_some() {
                     let mut items = vec![act("Open in Claude", "external-link", Action::OpenInApp(id.clone()))];
                     if !x.cwd.is_empty() {
                         items.push(Item::Separator);
                         items.extend(editor_items(&self.engine.settings().editor, &x.machine_id, &x.cwd, true));
                     }
+                    items.push(Item::Separator);
+                    items.push(hide);
                     return items;
                 }
                 let mut items = Vec::new();
@@ -516,6 +522,9 @@ impl Root {
                     items.push(act("Restart", "rotate-ccw", Action::Restart(id.clone())));
                 }
                 items.push(Item::Separator);
+                if x.box_id.is_none() {
+                    items.push(hide);
+                }
                 // A box's agent: ending it pauses the box (see confirm_end_session).
                 items.push(match &x.box_id {
                     Some(b) if *b == x.name => act("Pause box", "pause", Action::End(id.clone())),
@@ -829,6 +838,7 @@ impl Root {
             }
             Action::ItemToAgent(repo, number, how) => self.gh_item_to_agent(repo, number, how, window, cx),
             Action::OpenUrl(url) => cx.open_url(&url),
+            Action::HideSession(id, hide) => self.set_hidden(&id, hide, cx),
             Action::OpenInApp(id) => {
                 if let Some(x) = self.snapshot.sessions.iter().find(|x| x.id == id).cloned() {
                     self.open_in_app(&x, cx);

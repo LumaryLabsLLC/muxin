@@ -24,6 +24,8 @@ const CHROME_HEIGHT: f32 = 52. + 60.;
 /// Output a hidden terminal may have before it's let go (`pace_terminals`):
 /// more than an agent's spinner or a test run's summary, less than a build log.
 const HIDDEN_OUTPUT: u64 = 256 << 10;
+/// Sessions a machine's page lists before the rest fold away.
+const SESSIONS_SHOWN: usize = 5;
 
 impl Root {
     pub(super) fn show_new_session(&mut self, machine: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
@@ -387,6 +389,36 @@ impl Root {
         cx.notify();
     }
 
+    /// A session the user hid (or a helper of one), unless it needs you or
+    /// it's on screen.
+    pub(super) fn is_hidden(&self, x: &SessionInfo, cx: &App) -> bool {
+        let hidden = &cx.global::<super::theme::Appearance>().hidden_sessions;
+        if hidden.is_empty() || x.mark() >= Mark::Failed || self.route == Route::Session(x.id.clone()) {
+            return false;
+        }
+        // It, or the session that started it (and so on up).
+        let mut at = Some(x);
+        for _ in 0..8 {
+            let Some(s) = at else { break };
+            if hidden.contains(&s.id) {
+                return true;
+            }
+            at = s.parent.as_deref().and_then(|p| self.snapshot.sessions.iter().find(|y| y.id == p));
+        }
+        false
+    }
+
+    /// Hides a session (and its helpers) from the lists, or shows it again.
+    pub(super) fn set_hidden(&mut self, id: &str, hide: bool, cx: &mut Context<Self>) {
+        super::theme::remember(cx, |a| {
+            a.hidden_sessions.retain(|h| h != id);
+            if hide {
+                a.hidden_sessions.push(id.to_string());
+            }
+        });
+        cx.notify();
+    }
+
     /// The sessions as the sidebar lists them: by machine in its order,
     /// helpers under the session that started them. Not boxes' (they're under
     /// Boxes) or ones that open in another app.
@@ -395,7 +427,7 @@ impl Root {
         Self::machine_order(s, cx)
             .into_iter()
             .flat_map(|m| {
-                let here: Vec<&SessionInfo> = s.sessions.iter().filter(|x| x.machine_id == m.id && x.box_id.is_none() && x.app.is_none()).collect();
+                let here: Vec<&SessionInfo> = s.sessions.iter().filter(|x| x.machine_id == m.id && x.box_id.is_none() && x.app.is_none() && !self.is_hidden(x, cx)).collect();
                 crate::fleet::sessions::tree(&here).into_iter().map(|(_, x)| x).filter(|x| !agents_only || (x.agent != "shell" && !x.agent.is_empty())).map(|x| x.id.clone()).collect::<Vec<_>>()
             })
             .collect()
@@ -1197,20 +1229,24 @@ impl Root {
     /// The machine page's list of agent sessions, with a way to start one.
     pub(super) fn machine_sessions(&self, theme: &Theme, s: &Snapshot, m: &Machine, cx: &mut Context<Self>) -> AnyElement {
         // Boxes' agents are on the Boxes page.
-        let sessions: Vec<&SessionInfo> = s.sessions.iter().filter(|x| x.machine_id == m.id && x.box_id.is_none()).collect();
+        let all: Vec<&SessionInfo> = s.sessions.iter().filter(|x| x.machine_id == m.id && x.box_id.is_none()).collect();
+        // The ones the user hid wait behind "N hidden".
+        let n_hidden = all.iter().filter(|x| self.is_hidden(x, cx)).count();
+        let with_hidden = n_hidden > 0 && self.hidden_open.contains(&m.id);
+        let sessions: Vec<&SessionInfo> = all.iter().copied().filter(|x| with_hidden || !self.is_hidden(x, cx)).collect();
         let installed: Vec<&str> = AGENTS.iter().filter(|a| m.agents.iter().any(|i| i == a.id)).map(|a| a.name).collect();
         let mid = m.id.clone();
         let title = div()
             .flex()
             .items_center()
-            .child(section_title(theme, "Agent sessions", Some(sessions.len())))
+            .child(section_title(theme, "Agent sessions", Some(all.len())))
             .child(div().flex_1())
             .when(!installed.is_empty(), |d| {
                 d.child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("Installed: {}", installed.join(", "))))
             });
 
 
-        let content = if sessions.is_empty() {
+        let content = if all.is_empty() {
             let text = match runs_in_app(m) {
                 _ if m.is_disconnected() => format!("Connect to {} to start Claude Code, Codex or a shell there.", m.name),
                 _ if m.is_down() => format!("Start Claude Code, Codex or a shell here once {} is back.", m.name),
@@ -1233,8 +1269,57 @@ impl Root {
                 .into_any_element()
         } else {
             // Helpers under the session that started them.
-            let rows: Vec<AnyElement> = crate::fleet::sessions::tree(&sessions).into_iter().enumerate().map(|(i, (depth, x))| self.machine_session_row_at(theme, x, i, false, depth, cx)).collect();
-            card(theme).children(rows).into_any_element()
+            let tree = crate::fleet::sessions::tree(&sessions);
+            // A long list: the first few, and any that need you; the rest behind Show more.
+            let more = self.sessions_more.contains(&m.id);
+            let folded = crate::fleet::sessions::folded(&tree, SESSIONS_SHOWN, |_| false);
+            let folds = folded.contains(&false);
+            let shown = if more { vec![true; tree.len()] } else { folded };
+            let hidden = shown.iter().filter(|v| !**v).count();
+            let rows: Vec<AnyElement> = tree.iter().zip(&shown).enumerate().filter(|(_, (_, v))| **v).map(|(i, ((depth, x), _))| self.machine_session_row_at(theme, x, i, false, *depth, cx)).collect();
+            let link = |id: &'static str, open: bool, label: String| {
+                div()
+                    .id(id)
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(theme.text_placeholder)
+                    .hover(|st| st.text_color(theme.text_muted))
+                    .child(icon(if open { "chevron-down" } else { "chevron-right" }, 11., theme.text_placeholder))
+                    .child(label)
+            };
+            let more_link = folds.then(|| {
+                let mid = m.id.clone();
+                link("m-sessions-more", more, if more { "Show fewer".to_string() } else { format!("Show {hidden} more") }).on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.sessions_more.remove(&mid) {
+                        this.sessions_more.insert(mid.clone());
+                    }
+                    cx.notify();
+                }))
+            });
+            let hidden_link = (n_hidden > 0).then(|| {
+                let mid = m.id.clone();
+                link("m-sessions-hidden", with_hidden, if with_hidden { format!("Hide the {n_hidden} hidden") } else { format!("{n_hidden} hidden") }).on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.hidden_open.remove(&mid) {
+                        this.hidden_open.insert(mid.clone());
+                    }
+                    cx.notify();
+                }))
+            });
+            let footer = (more_link.is_some() || hidden_link.is_some()).then(|| {
+                div()
+                    .px(px(14.))
+                    .py(px(9.))
+                    .flex()
+                    .items_center()
+                    .when(!rows.is_empty(), |d| d.border_t_1().border_color(theme.border_variant))
+                    .children(more_link)
+                    .child(div().flex_1())
+                    .children(hidden_link)
+            });
+            card(theme).children(rows).children(footer).into_any_element()
         };
         div().flex().flex_col().gap(px(10.)).child(title).child(content).into_any_element()
     }
@@ -1258,8 +1343,10 @@ impl Root {
         } else {
             state_label(theme, format!("ms-spin-{}", x.id), x.mark())
         };
+        let group = SharedString::from(format!("ms-row-{}", x.id));
         div()
             .id(SharedString::from(format!("ms-{}", x.id)))
+            .group(group.clone())
             .flex()
             .items_center()
             .gap(px(12.))
@@ -1298,6 +1385,29 @@ impl Root {
                     .children(x.git.as_ref().map(|g| git_line(theme, &format!("row-{}", x.id), g, false).mt(px(3.)))),
             )
             .child(state)
+            // Hide it from the lists (on hover), or show a hidden one again.
+            .when(depth == 0, |d| {
+                let hidden = self.is_hidden(x, cx);
+                let sid = x.id.clone();
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("ms-hide-{}", x.id)))
+                        .flex_none()
+                        .px(px(7.))
+                        .py(px(2.))
+                        .rounded(crate::ui::kit::corner(5.))
+                        .text_size(px(11.5))
+                        .text_color(theme.text_placeholder)
+                        .hover(|st| st.bg(theme.element_hover).text_color(theme.text_muted))
+                        .when(!hidden, |d| d.invisible().group_hover(group.clone(), |st| st.visible()))
+                        .child(if hidden { "Show" } else { "Hide" })
+                        .tooltip(move |window, cx| kit::Tooltip::view(if hidden { "Show it in the lists again" } else { "Hide it from the lists until it needs you" }.into(), window, cx))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.set_hidden(&sid, !hidden, cx)
+                        })),
+                )
+            })
             .child(icon("chevron-right", 14., theme.text_placeholder))
             .on_mouse_down(gpui::MouseButton::Right, {
                 let sid = x.id.clone();

@@ -172,6 +172,9 @@ pub struct Appearance {
     pub tray: bool,
     /// System notifications when a session needs you or is done (notify.rs).
     pub notifications: bool,
+    /// Sessions the user hid (by id), with their helpers: not in the sidebar
+    /// or the machine's list until they need you (see sessions.rs, is_hidden).
+    pub hidden_sessions: Vec<String>,
     /// Where to save; None in demo mode.
     #[serde(skip)]
     pub path: Option<PathBuf>,
@@ -203,6 +206,7 @@ impl Default for Appearance {
             close_hints: 0,
             tray: true,
             notifications: true,
+            hidden_sessions: Vec::new(),
             path: None,
         }
     }

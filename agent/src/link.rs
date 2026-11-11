@@ -14,6 +14,13 @@
 //! events this side pushes (`{"event": "..."}`). Every other channel is a
 //! terminal attached to a session, carrying the session server's own frame
 //! kinds (DATA, RESIZE, EXIT) until either side sends CLOSE.
+//!
+//! Over a direct connection (QUIC) every stream the app opens is a link of
+//! its own: the machine's link, and one for each terminal it shows (a
+//! "lane"), so a busy terminal doesn't hold up the others. `{"op":
+//! "priority", "priority": n}` puts this side of a stream in line: higher
+//! goes first (the app uses 2 for the terminal it's typing into, 1 for the
+//! machine's link, 0 for the rest).
 
 use std::collections::HashMap;
 use std::io::{self, BufWriter, Read, Write};
@@ -197,12 +204,16 @@ pub fn run() -> i32 {
 
 /// Serves one link until the other side hangs up.
 pub fn serve(input: Box<dyn Read + Send>, output: Box<dyn Write + Send>) -> i32 {
-    serve_for(input, output, None)
+    serve_for(input, output, None, None)
 }
 
+/// Where a direct link's stream goes in line (see `priority` above).
+pub type Priority = Arc<std::sync::atomic::AtomicI32>;
+
 /// The same, for the paired app with this certificate fingerprint (a direct
-/// link; over ssh there's no telling which app it is).
-pub fn serve_for(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>, app: Option<String>) -> i32 {
+/// link; over ssh there's no telling which app it is), on a stream whose
+/// priority the app may set.
+pub fn serve_for(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>, app: Option<String>, priority: Option<Priority>) -> i32 {
     let out: Out = Arc::new(Mutex::new(BufWriter::new(output)));
     let attached: Attached = Arc::new(Mutex::new(HashMap::new()));
     if send_json(&out, &json!({ "event": "hello", "version": crate::VERSION, "now": now() })).is_err() {
@@ -218,6 +229,19 @@ pub fn serve_for(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>,
                 continue;
             }
             let Ok(req) = serde_json::from_slice::<Value>(&payload) else { continue };
+            if req["op"] == "priority" {
+                let reply = match &priority {
+                    Some(p) => {
+                        p.store(req["priority"].as_i64().unwrap_or(0).clamp(-100, 100) as i32, std::sync::atomic::Ordering::Relaxed);
+                        json!({ "ok": true })
+                    }
+                    None => json!({ "ok": false, "error": "only direct links have priorities" }),
+                };
+                let mut reply = reply;
+                reply["id"] = req["id"].clone();
+                let _ = send_json(&out, &reply);
+                continue;
+            }
             let (out, attached, app) = (out.clone(), attached.clone(), app.clone());
             // Requests run side by side; a slow one doesn't hold up the rest.
             thread::spawn(move || {
@@ -741,5 +765,40 @@ mod tests {
         assert_eq!((replies[1]["stdout"].as_str(), replies[1]["stderr"].as_str(), replies[1]["status"].as_i64()), (Some("out\n"), Some("err\n"), Some(4)));
         drop(app);
         assert_eq!(server.join().unwrap(), 0);
+    }
+
+    /// A direct link's stream takes the priority the app asks for; one that
+    /// never asks (an app before 0.14) is served as before, and over ssh
+    /// (no stream of its own) the app is told there's none.
+    #[cfg(unix)]
+    #[test]
+    fn a_direct_stream_takes_a_priority() {
+        use std::os::unix::net::UnixStream;
+        use std::sync::atomic::Ordering;
+        let next = |app: &mut UnixStream| {
+            let (channel, kind, payload) = read_frame(app).unwrap();
+            assert_eq!((channel, kind), (CONTROL, JSON));
+            serde_json::from_slice::<Value>(&payload).unwrap()
+        };
+        for direct in [true, false] {
+            let (mut app, agent) = UnixStream::pair().unwrap();
+            let agent_out = agent.try_clone().unwrap();
+            let priority: Priority = Default::default();
+            let given = direct.then(|| priority.clone());
+            let server = thread::spawn(move || serve_for(Box::new(agent), Box::new(agent_out), None, given));
+            assert_eq!(next(&mut app)["event"], "hello");
+            // An app that never asks.
+            app.write_all(&frame(CONTROL, JSON, br#"{"id":1,"op":"ping"}"#)).unwrap();
+            assert_eq!((next(&mut app)["id"].as_u64(), priority.load(Ordering::Relaxed)), (Some(1), 0));
+            app.write_all(&frame(CONTROL, JSON, br#"{"id":2,"op":"priority","priority":2}"#)).unwrap();
+            let r = next(&mut app);
+            assert_eq!((r["id"].as_u64(), r["ok"].as_bool()), (Some(2), Some(direct)), "{r}");
+            assert_eq!(priority.load(Ordering::Relaxed), if direct { 2 } else { 0 });
+            app.write_all(&frame(CONTROL, JSON, br#"{"id":3,"op":"priority","priority":-7}"#)).unwrap();
+            assert_eq!(next(&mut app)["id"], 3);
+            assert_eq!(priority.load(Ordering::Relaxed), if direct { -7 } else { 0 });
+            drop(app);
+            assert_eq!(server.join().unwrap(), 0);
+        }
     }
 }

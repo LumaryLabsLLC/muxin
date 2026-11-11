@@ -21,6 +21,9 @@ use crate::fleet::sessions::{AGENTS, Control, Mark, SessionInfo, StartSession};
 
 /// Toolbar plus the session header, subtracted when sizing a new session.
 const CHROME_HEIGHT: f32 = 52. + 60.;
+/// Output a hidden terminal may have before it's let go (`pace_terminals`):
+/// more than an agent's spinner or a test run's summary, less than a build log.
+const HIDDEN_OUTPUT: u64 = 256 << 10;
 
 impl Root {
     pub(super) fn show_new_session(&mut self, machine: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
@@ -214,6 +217,40 @@ impl Root {
         }
         self.terminals.insert(id.to_string(), view);
         self.refresh_machine_sessions(id.split('/').next().unwrap_or_default());
+    }
+
+    /// Keeps a slow connection for the terminal being used: its output goes
+    /// first (the page's session; other panes of its split and hidden ones
+    /// after), and a hidden terminal that keeps printing is let go after
+    /// `HIDDEN_OUTPUT` (its session goes on; shown again, it attaches again
+    /// and the session redraws its screen and recent history). Idle hidden
+    /// terminals stay, so going back to one is instant. Runs as the window
+    /// draws (at least once a second).
+    pub(super) fn pace_terminals(&mut self, cx: &mut Context<Self>) {
+        let page = match &self.route {
+            Route::Session(id) => Some(id.as_str()),
+            _ => None,
+        };
+        let shown: Vec<String> = match page {
+            Some(id) => self.pane_layout(id).map(|p| p.ids().into_iter().map(str::to_string).collect()).unwrap_or_else(|| vec![id.to_string()]),
+            None => Vec::new(),
+        };
+        let terminals = &self.terminals;
+        self.hidden_output.retain(|id, _| terminals.contains_key(id));
+        let mut let_go = Vec::new();
+        for (id, view) in &self.terminals {
+            let v = view.read(cx);
+            let (priority, go) = pace(id, page, &shown, v.received(), v.detachable(), &mut self.hidden_output);
+            v.set_priority(priority);
+            if go {
+                let_go.push(id.clone());
+            }
+        }
+        for id in let_go {
+            tracing::debug!("letting go of {id}'s terminal while it's hidden");
+            self.terminals.remove(&id);
+            self.hidden_output.remove(&id);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1729,6 +1766,13 @@ impl super::terminal::RemoteIo for LinkIo {
     fn close(&self) {
         self.link.close_channel(self.channel);
     }
+
+    fn set_priority(&self, priority: i32) {
+        // Not the machine's link, when it had to use that (over ssh nothing changes anyway).
+        if self.link.is_lane() {
+            self.link.set_priority(priority);
+        }
+    }
 }
 
 /// Another session, peeked at over the one shown: watched live (its keys
@@ -1910,6 +1954,8 @@ fn peek_over_link(
     use crate::fleet::link::{DATA, EXIT};
     /// The session's size (agent/src/proto.rs SIZE).
     const SIZE: u8 = 3;
+    // A stream of its own on a direct connection (see `Link::lane`).
+    let link = link.lane().unwrap_or(link);
     let (channel, mut frames) = link.open_channel();
     let (tx, output) = futures::channel::mpsc::unbounded();
     let rt = engine.runtime().clone();
@@ -1952,6 +1998,9 @@ fn attach_over_link(
 ) -> (Arc<dyn super::terminal::RemoteIo>, futures::channel::mpsc::UnboundedReceiver<super::terminal::RemoteOutput>) {
     use super::terminal::RemoteOutput;
     use crate::fleet::link::{DATA, EXIT};
+    // A stream of its own on a direct connection, so a busy terminal beside
+    // it doesn't hold it up (see `Link::lane`).
+    let link = link.lane().unwrap_or(link);
     let (channel, mut frames) = link.open_channel();
     let (tx, output) = futures::channel::mpsc::unbounded();
     let rt = engine.runtime().clone();
@@ -1981,6 +2030,20 @@ fn attach_over_link(
         }
     });
     (Arc::new(LinkIo { link, channel }), output)
+}
+
+/// One terminal's pace (see `Root::pace_terminals`): its stream's priority,
+/// and whether to let it go, given the page's session, what's on screen, the
+/// output it has had and, in `hidden`, what it had when it went out of sight.
+fn pace(id: &str, page: Option<&str>, shown: &[String], received: u64, detachable: bool, hidden: &mut std::collections::HashMap<String, u64>) -> (i32, bool) {
+    use crate::fleet::link::{BACKGROUND, FOCUSED};
+    let priority = if page == Some(id) { FOCUSED } else { BACKGROUND };
+    if shown.iter().any(|s| s == id) {
+        hidden.remove(id);
+        return (priority, false);
+    }
+    let since = *hidden.entry(id.to_string()).or_insert(received);
+    (priority, detachable && received.saturating_sub(since) > HIDDEN_OUTPUT)
 }
 
 /// The session is gone (ended here, by an agent, or on the machine).
@@ -2216,4 +2279,32 @@ pub(super) fn git_line(theme: &Theme, key: &str, g: &GitStatus, full: bool) -> g
         );
     }
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fleet::link::{BACKGROUND, FOCUSED};
+
+    #[test]
+    fn the_page_goes_first_and_busy_hidden_terminals_go() {
+        let mut hidden = std::collections::HashMap::new();
+        let shown = vec!["m/a".to_string(), "m/b".to_string()];
+        let page = Some("m/a");
+        // A split: keys go to the page's pane; the other is shown, so it stays however much it prints.
+        assert_eq!(pace("m/a", page, &shown, 0, true, &mut hidden), (FOCUSED, false));
+        assert_eq!(pace("m/b", page, &shown, 50 << 20, true, &mut hidden), (BACKGROUND, false));
+        // Hidden: kept while it's quiet, let go once it has printed more than HIDDEN_OUTPUT since.
+        assert_eq!(pace("m/c", page, &shown, 1000, true, &mut hidden), (BACKGROUND, false));
+        assert_eq!(pace("m/c", page, &shown, 1000 + HIDDEN_OUTPUT, true, &mut hidden), (BACKGROUND, false));
+        assert_eq!(pace("m/c", page, &shown, 1001 + HIDDEN_OUTPUT, true, &mut hidden), (BACKGROUND, true));
+        // One that can't be attached again (a terminal of its own, a local program) stays.
+        assert_eq!(pace("m/d", page, &shown, 0, false, &mut hidden), (BACKGROUND, false));
+        assert_eq!(pace("m/d", page, &shown, 10 << 20, false, &mut hidden), (BACKGROUND, false));
+        // Shown again, it counts afresh when it's hidden next.
+        assert_eq!(pace("m/c", Some("m/c"), &["m/c".to_string()], 5 << 20, true, &mut hidden), (FOCUSED, false));
+        assert!(!hidden.contains_key("m/c"));
+        assert_eq!(pace("m/c", None, &[], 5 << 20, true, &mut hidden), (BACKGROUND, false));
+        assert_eq!(pace("m/c", None, &[], (5 << 20) + 1000, true, &mut hidden), (BACKGROUND, false));
+    }
 }

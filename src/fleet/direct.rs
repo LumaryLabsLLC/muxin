@@ -336,9 +336,9 @@ fn client_config(p: &Paired) -> Result<quinn::ClientConfig, String> {
     let mut config = quinn::ClientConfig::new(Arc::new(crypto));
     let mut transport = quinn::TransportConfig::default();
     transport.keep_alive_interval(Some(Duration::from_secs(4)));
-    // Everything to a machine shares one stream (terminals, the desktop,
-    // copies): let a lot be in flight, or a slow Wi-Fi round trip caps it at
-    // a few MB/s (quinn's default is 1.25 MB per stream).
+    // The machine's link (requests, the desktop, copies) is one stream, each
+    // terminal another: let a lot be in flight, or a slow Wi-Fi round trip
+    // caps a copy at a few MB/s (quinn's default is 1.25 MB per stream).
     transport.stream_receive_window(quinn::VarInt::from_u32(16 << 20));
     transport.receive_window(quinn::VarInt::from_u32(32 << 20));
     transport.send_window(32 << 20);

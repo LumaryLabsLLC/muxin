@@ -7,11 +7,16 @@
 //! Links are made on first use and replaced when they drop. When one can't be
 //! made (an old agent, the machine away), callers fall back to plain ssh and
 //! it's tried again a little later.
+//!
+//! Over a direct connection each terminal gets a stream of its own (a lane,
+//! `Link::lane`), so a busy one doesn't queue in front of the one being
+//! typed into, and streams take priorities (`set_priority`). A terminal let
+//! go drops its stream, and with it what the agent still had queued for it.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -19,6 +24,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc, oneshot};
+
+use std::pin::Pin;
 
 use crate::config::MachineSpec;
 use crate::probe;
@@ -44,6 +51,14 @@ const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// The first agent version that speaks it.
 const MIN_VERSION: (u32, u32) = (0, 2);
 
+/// Who goes first when a direct link is busy (QUIC stream priorities, both
+/// ways): the terminal the user is typing into, then requests (channel 0 of
+/// the machine's link, with the desktop and copies on it), then terminals in
+/// the background. Over ssh everything shares one stream, in order.
+pub const FOCUSED: i32 = 2;
+pub const CONTROL_PRIORITY: i32 = 1;
+pub const BACKGROUND: i32 = 0;
+
 pub struct Link {
     pub machine: String,
     version: OnceLock<String>,
@@ -65,11 +80,25 @@ pub struct Link {
     transport: &'static str,
     /// The machine's address, as connected to (direct) or as ssh resolves it.
     peer: OnceLock<std::net::SocketAddr>,
+    /// Its stream's priority (direct links), applied before the next write.
+    priority: Arc<AtomicI32>,
+    /// Where its tasks run (a lane's too).
+    rt: tokio::runtime::Handle,
+    /// A stream of its own for one terminal (`lane`), not the machine's link.
+    lane: AtomicBool,
 }
 
 enum Holder {
     Ssh(super::child::Child),
     Direct(quinn::Connection),
+    /// A lane: a stream of the machine's direct connection, which stays.
+    Lane,
+}
+
+/// Where frames to the agent go.
+enum Writer {
+    Pipe(Pin<Box<dyn tokio::io::AsyncWrite + Send>>),
+    Quic(quinn::SendStream),
 }
 
 impl Link {
@@ -134,6 +163,60 @@ impl Link {
         (channel, rx)
     }
 
+    /// A link of its own on the machine's direct connection (a QUIC stream
+    /// the agent serves as one more link), for a terminal: what the others
+    /// send doesn't queue in front of it, and its priority can be its own.
+    /// None over ssh, where there's only the one stream: use this link.
+    ///
+    /// Every agent that connects directly serves each stream as a link, so
+    /// older ones take lanes too; they only keep their side of the streams
+    /// in turn (they answer `priority` with an error).
+    pub fn lane(&self) -> Option<Arc<Link>> {
+        if !self.alive() {
+            return None;
+        }
+        let conn = match self.holder.lock().unwrap().as_ref() {
+            Some(Holder::Direct(c)) => c.clone(),
+            _ => return None,
+        };
+        let (lane, out_rx) = Link::new(&self.machine, Holder::Lane, self.transport, self.rt.clone());
+        lane.lane.store(true, Ordering::Relaxed);
+        let _ = lane.version.set(self.version().to_string());
+        if let Some(peer) = self.peer() {
+            let _ = lane.peer.set(peer);
+        }
+        let weak = Arc::downgrade(&lane);
+        self.rt.spawn(async move {
+            // Opens at once, unless the agent's 100 streams are all in use.
+            let opened = tokio::time::timeout(Duration::from_secs(5), conn.open_bi()).await;
+            let Some(lane) = weak.upgrade() else { return };
+            match opened {
+                Ok(Ok((send, recv))) => {
+                    lane.serve(Box::pin(recv), Writer::Quic(send), out_rx, None);
+                }
+                _ => lane.shut(),
+            }
+        });
+        Some(lane)
+    }
+
+    /// A lane (see `lane`), rather than the machine's link.
+    pub fn is_lane(&self) -> bool {
+        self.lane.load(Ordering::Relaxed)
+    }
+
+    /// Where this link's stream goes in line (`FOCUSED`, `CONTROL_PRIORITY`,
+    /// `BACKGROUND`), here and at the agent. Nothing over ssh.
+    pub fn set_priority(&self, priority: i32) {
+        if self.transport != "direct" || self.priority.swap(priority, Ordering::Relaxed) == priority {
+            return;
+        }
+        // The agent's side: no reply waited for (an older agent says it doesn't know the op).
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let req = json!({ "id": id, "op": "priority", "priority": priority });
+        self.send(CONTROL, JSON, &serde_json::to_vec(&req).unwrap_or_default());
+    }
+
     pub fn send(&self, channel: u32, kind: u8, payload: &[u8]) {
         let mut frame = Vec::with_capacity(9 + payload.len());
         frame.extend(channel.to_be_bytes());
@@ -175,7 +258,7 @@ impl Link {
         match self.holder.lock().unwrap().take() {
             Some(Holder::Ssh(mut c)) => c.start_kill(),
             Some(Holder::Direct(conn)) => conn.close(0u32.into(), b"bye"),
-            None => {}
+            Some(Holder::Lane) | None => {}
         }
     }
 }
@@ -340,8 +423,9 @@ async fn connect_direct(spec: &MachineSpec, paired: &super::direct::Paired) -> R
     frame.extend((ping.len() as u32).to_be_bytes());
     frame.extend(ping);
     send.write_all(&frame).await.map_err(|e| e.to_string())?;
-    let link = start(spec, recv, send, Holder::Direct(conn), "direct").await?;
+    let link = start(spec, Box::pin(recv), Writer::Quic(send), Holder::Direct(conn), "direct").await?;
     let _ = link.peer.set(peer);
+    link.set_priority(CONTROL_PRIORITY);
     Ok(link)
 }
 
@@ -378,7 +462,7 @@ async fn connect_ssh(spec: &MachineSpec) -> Result<Arc<Link>, String> {
     };
     let stdin = child.take_stdin().ok_or("no stdin")?;
     let stdout = child.take_stdout().ok_or("no stdout")?;
-    let link = start(spec, stdout, stdin, Holder::Ssh(child), "ssh").await?;
+    let link = start(spec, stdout, Writer::Pipe(stdin), Holder::Ssh(child), "ssh").await?;
     // Where ssh goes, to say which network the machine is on.
     if spec.is_local() {
         let _ = link.peer.set(std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
@@ -439,6 +523,34 @@ mod tests {
         }
     }
 
+    /// Over ssh there's one stream: no lanes (terminals use channels of the
+    /// machine's link, as before), and no `priority` op for the agent.
+    #[tokio::test]
+    async fn an_ssh_link_has_no_lanes() {
+        let (app, agent) = tokio::io::duplex(1 << 16);
+        let (from_agent, to_agent) = tokio::io::split(app);
+        let (mut agent_in, mut agent_out) = tokio::io::split(agent);
+        let frame = |channel: u32, payload: &[u8]| {
+            let mut f = channel.to_be_bytes().to_vec();
+            f.push(JSON);
+            f.extend((payload.len() as u32).to_be_bytes());
+            f.extend(payload);
+            f
+        };
+        agent_out.write_all(&frame(CONTROL, br#"{"event":"hello","version":"0.13.0"}"#)).await.unwrap();
+        let spec: MachineSpec = toml::from_str("name = \"Piped\"\nhost = \"piped.invalid\"").unwrap();
+        let link = start(&spec, Box::pin(from_agent), Writer::Pipe(Box::pin(to_agent)), Holder::Lane, "ssh").await.unwrap();
+        assert!(link.lane().is_none());
+        link.set_priority(FOCUSED);
+        link.send(CONTROL, JSON, br#"{"id":9,"op":"ping"}"#);
+        // The first thing the agent gets is that ping.
+        let mut head = [0u8; 9];
+        agent_in.read_exact(&mut head).await.unwrap();
+        let mut payload = vec![0u8; u32::from_be_bytes([head[5], head[6], head[7], head[8]]) as usize];
+        agent_in.read_exact(&mut payload).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&payload).unwrap()["op"], "ping");
+    }
+
     #[test]
     fn names_networks() {
         for (ip, want) in [
@@ -456,87 +568,114 @@ mod tests {
     }
 }
 
-/// Runs the link protocol over a connection and waits for the agent's hello.
-async fn start(
-    spec: &MachineSpec,
-    mut stdout: impl tokio::io::AsyncRead + Unpin + Send + 'static,
-    mut stdin: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
-    holder: Holder,
-    transport: &'static str,
-) -> Result<Arc<Link>, String> {
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (events, _) = broadcast::channel(64);
-    let link = Arc::new(Link {
-        machine: spec.id.clone(),
-        version: OnceLock::new(),
-        out: out_tx,
-        pending: Mutex::new(HashMap::new()),
-        channels: Mutex::new(HashMap::new()),
-        next_id: AtomicU64::new(1),
-        next_channel: AtomicU32::new(1),
-        alive: AtomicBool::new(true),
-        down: tokio::sync::watch::channel(false).0,
-        retired: AtomicBool::new(false),
-        events,
-        holder: Mutex::new(Some(holder)),
-        transport,
-        peer: OnceLock::new(),
-    });
+impl Link {
+    fn new(machine: &str, holder: Holder, transport: &'static str, rt: tokio::runtime::Handle) -> (Arc<Link>, mpsc::UnboundedReceiver<Vec<u8>>) {
+        let (out_tx, out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (events, _) = broadcast::channel(64);
+        let link = Arc::new(Link {
+            machine: machine.to_string(),
+            version: OnceLock::new(),
+            out: out_tx,
+            pending: Mutex::new(HashMap::new()),
+            channels: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            next_channel: AtomicU32::new(1),
+            alive: AtomicBool::new(true),
+            down: tokio::sync::watch::channel(false).0,
+            retired: AtomicBool::new(false),
+            events,
+            holder: Mutex::new(Some(holder)),
+            transport,
+            peer: OnceLock::new(),
+            priority: Arc::new(AtomicI32::new(BACKGROUND)),
+            rt,
+            lane: AtomicBool::new(false),
+        });
+        (link, out_rx)
+    }
 
-    // Frames to the agent.
-    tokio::spawn(async move {
-        while let Some(frame) = out_rx.recv().await {
-            if stdin.write_all(&frame).await.is_err() || stdin.flush().await.is_err() {
-                break;
-            }
-        }
-    });
-
-    // Frames from the agent: replies, events, terminal output.
-    let (hello_tx, hello_rx) = oneshot::channel::<Value>();
-    let weak = Arc::downgrade(&link);
-    tokio::spawn(async move {
-        let mut hello = Some(hello_tx);
-        loop {
-            let mut head = [0u8; 9];
-            if stdout.read_exact(&mut head).await.is_err() {
-                break;
-            }
-            let channel = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
-            let kind = head[4];
-            let len = u32::from_be_bytes([head[5], head[6], head[7], head[8]]) as usize;
-            if len > MAX_FRAME {
-                break;
-            }
-            let mut payload = vec![0u8; len];
-            if stdout.read_exact(&mut payload).await.is_err() {
-                break;
-            }
-            let Some(link) = weak.upgrade() else { break };
-            if channel == CONTROL {
-                let Ok(msg) = serde_json::from_slice::<Value>(&payload) else { continue };
-                if let Some(id) = msg["id"].as_u64() {
-                    if let Some(tx) = link.pending.lock().unwrap().remove(&id) {
-                        let _ = tx.send(msg);
+    /// Runs the link protocol over a connection: frames out from `out_rx`,
+    /// frames in to their channels (the agent's hello to `hello`).
+    fn serve(self: &Arc<Self>, mut input: Pin<Box<dyn tokio::io::AsyncRead + Send>>, writer: Writer, mut out_rx: mpsc::UnboundedReceiver<Vec<u8>>, hello: Option<oneshot::Sender<Value>>) {
+        // Frames to the agent; the stream ends when the link is let go.
+        let priority = self.priority.clone();
+        self.rt.spawn(async move {
+            let mut writer = writer;
+            let mut applied = BACKGROUND;
+            while let Some(frame) = out_rx.recv().await {
+                let ok = match &mut writer {
+                    Writer::Pipe(w) => w.write_all(&frame).await.is_ok() && w.flush().await.is_ok(),
+                    Writer::Quic(s) => {
+                        let p = priority.load(Ordering::Relaxed);
+                        if p != applied {
+                            let _ = s.set_priority(p);
+                            applied = p;
+                        }
+                        s.write_all(&frame).await.is_ok()
                     }
-                } else if msg["event"] == "hello" {
-                    if let Some(tx) = hello.take() {
-                        let _ = tx.send(msg);
-                    }
-                } else {
-                    let _ = link.events.send(msg);
+                };
+                if !ok {
+                    break;
                 }
-            } else if kind == CLOSE {
-                link.channels.lock().unwrap().remove(&channel);
-            } else if let Some(tx) = link.channels.lock().unwrap().get(&channel) {
-                let _ = tx.send((kind, payload));
             }
-        }
-        if let Some(link) = weak.upgrade() {
-            tracing::debug!("link to {} closed", link.machine);
-            link.shut();
-        }
-    });
+            if let Writer::Quic(mut s) = writer {
+                let _ = s.finish();
+            }
+        });
+
+        // Frames from the agent: replies, events, terminal output.
+        let weak = Arc::downgrade(self);
+        self.rt.spawn(async move {
+            let mut hello = hello;
+            loop {
+                let mut head = [0u8; 9];
+                if input.read_exact(&mut head).await.is_err() {
+                    break;
+                }
+                let channel = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+                let kind = head[4];
+                let len = u32::from_be_bytes([head[5], head[6], head[7], head[8]]) as usize;
+                if len > MAX_FRAME {
+                    break;
+                }
+                let mut payload = vec![0u8; len];
+                if input.read_exact(&mut payload).await.is_err() {
+                    break;
+                }
+                let Some(link) = weak.upgrade() else { break };
+                if channel == CONTROL {
+                    let Ok(msg) = serde_json::from_slice::<Value>(&payload) else { continue };
+                    if let Some(id) = msg["id"].as_u64() {
+                        if let Some(tx) = link.pending.lock().unwrap().remove(&id) {
+                            let _ = tx.send(msg);
+                        }
+                    } else if msg["event"] == "hello" {
+                        // A lane's hello isn't waited for.
+                        if let Some(tx) = hello.take() {
+                            let _ = tx.send(msg);
+                        }
+                    } else {
+                        let _ = link.events.send(msg);
+                    }
+                } else if kind == CLOSE {
+                    link.channels.lock().unwrap().remove(&channel);
+                } else if let Some(tx) = link.channels.lock().unwrap().get(&channel) {
+                    let _ = tx.send((kind, payload));
+                }
+            }
+            if let Some(link) = weak.upgrade() {
+                tracing::debug!("link to {} closed", link.machine);
+                link.shut();
+            }
+        });
+    }
+}
+
+/// Runs the link protocol over a connection and waits for the agent's hello.
+async fn start(spec: &MachineSpec, stdout: Pin<Box<dyn tokio::io::AsyncRead + Send>>, stdin: Writer, holder: Holder, transport: &'static str) -> Result<Arc<Link>, String> {
+    let (link, out_rx) = Link::new(&spec.id, holder, transport, tokio::runtime::Handle::current());
+    let (hello_tx, hello_rx) = oneshot::channel::<Value>();
+    link.serve(stdout, stdin, out_rx, Some(hello_tx));
 
     let hello = match tokio::time::timeout(CONNECT_TIMEOUT, hello_rx).await {
         Ok(Ok(h)) => h,

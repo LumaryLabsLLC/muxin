@@ -128,6 +128,8 @@ pub trait RemoteIo: Send + Sync {
     fn resize(&self, cols: u16, rows: u16);
     /// Detach; the session keeps running.
     fn close(&self);
+    /// Where its output goes in line on a busy connection (`link::FOCUSED`, `BACKGROUND`).
+    fn set_priority(&self, _priority: i32) {}
 }
 
 /// What arrives for a remote terminal.
@@ -242,6 +244,8 @@ pub struct TerminalView {
     cursor_on: bool,
     typed_at: Instant,
     ime: ime::Composition,
+    /// Bytes of output it has had (a remote terminal's).
+    received: u64,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -303,11 +307,13 @@ impl TerminalView {
                 let mut ended = None;
                 let mut size = None;
                 let mut asked_version = false;
+                let mut bytes = 0;
                 {
                     let mut t = term.lock();
                     for item in batch {
                         match item {
                             RemoteOutput::Bytes(b) => {
+                                bytes += b.len() as u64;
                                 asked_version |= asks_version(&tail, &b);
                                 tail = b[b.len().saturating_sub(4)..].to_vec();
                                 parser.advance(&mut *t, &b)
@@ -332,9 +338,12 @@ impl TerminalView {
                         }
                     });
                 }
-                let alive = this.update(cx, |this, cx| match ended {
-                    Some(code) => this.finish(code, cx),
-                    None => cx.notify(),
+                let alive = this.update(cx, |this, cx| {
+                    this.received += bytes;
+                    match ended {
+                        Some(code) => this.finish(code, cx),
+                        None => cx.notify(),
+                    }
                 });
                 if alive.is_err() || ended.is_some() {
                     return;
@@ -434,6 +443,7 @@ impl TerminalView {
             cursor_on: true,
             typed_at: Instant::now(),
             ime: ime::Composition::default(),
+            received: 0,
             _tasks: vec![events, blink],
             _subscriptions: subscriptions,
         }
@@ -441,6 +451,24 @@ impl TerminalView {
 
     pub fn exited(&self) -> bool {
         self.exited
+    }
+
+    /// Bytes of output it has had (a remote terminal's), to tell a busy one.
+    pub fn received(&self) -> u64 {
+        self.received
+    }
+
+    /// A session's terminal over the machine's link, which can be let go and
+    /// attached again later without the session noticing.
+    pub fn detachable(&self) -> bool {
+        matches!(self.shared.backend, Backend::Remote(_)) && !self.guest && !self.exited
+    }
+
+    /// Where its output goes in line on a busy connection (see `RemoteIo::set_priority`).
+    pub fn set_priority(&self, priority: i32) {
+        if let Backend::Remote(io) = &self.shared.backend {
+            io.set_priority(priority);
+        }
     }
 
     /// Columns and rows that fit `width`×`height` pixels, for sizing a new session.

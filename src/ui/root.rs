@@ -420,6 +420,9 @@ pub struct Root {
     /// Terminals attached to agent sessions, kept while the app runs so
     /// switching pages doesn't drop them.
     pub(super) terminals: HashMap<String, Entity<TerminalView>>,
+    /// Terminals not on screen, and how much output they had had when they
+    /// went out of sight (see `pace_terminals`).
+    pub(super) hidden_output: HashMap<String, u64>,
     /// Another session peeked at over the one shown (⌘-click its id there).
     pub(super) peek: Option<super::sessions::Peek>,
     /// Terminals whose connection dropped, being re-attached: tries so far,
@@ -646,6 +649,7 @@ impl Root {
             show_keys: false,
             keys_soon: None,
             terminals: HashMap::new(),
+            hidden_output: HashMap::new(),
             peek: None,
             resuming: HashMap::new(),
             sessions_requested: HashSet::new(),
@@ -3790,6 +3794,7 @@ impl Render for Root {
             self.finish_split_resize(cx);
         }
         self.content_width = f32::from(window.viewport_size().width) - if self.sidebar_hidden { 0. } else { self.sidebar_width } - 56.;
+        self.pace_terminals(cx);
         // Switching away with ⌘ held (⌘Tab): its release never arrives here.
         let was_active = std::mem::replace(&mut self.window_active, window.is_window_active());
         // No notification for the session you're looking at.

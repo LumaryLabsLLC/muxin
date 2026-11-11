@@ -151,9 +151,9 @@ async fn accept_loop() -> Result<(), String> {
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
     let mut transport = quinn::TransportConfig::default();
     transport.keep_alive_interval(Some(Duration::from_secs(4)));
-    // Everything to a machine shares one stream (terminals, the desktop,
-    // copies): let a lot be in flight, or a slow Wi-Fi round trip caps it at
-    // a few MB/s (quinn's default is 1.25 MB per stream).
+    // The machine's link (requests, the desktop, copies) is one stream, each
+    // terminal another: let a lot be in flight, or a slow Wi-Fi round trip
+    // caps a copy at a few MB/s (quinn's default is 1.25 MB per stream).
     transport.stream_receive_window(quinn::VarInt::from_u32(16 << 20));
     transport.receive_window(quinn::VarInt::from_u32(32 << 20));
     transport.send_window(32 << 20);
@@ -232,7 +232,9 @@ fn udp_socket(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
 async fn bridge(mut send: quinn::SendStream, mut recv: quinn::RecvStream, app: Option<String>) {
     let Ok((ours, theirs)) = stream_pair() else { return };
     let Ok(theirs_out) = theirs.try_clone() else { return };
-    std::thread::spawn(move || crate::link::serve_for(Box::new(theirs), Box::new(theirs_out), app));
+    let priority: crate::link::Priority = Default::default();
+    let asked = priority.clone();
+    std::thread::spawn(move || crate::link::serve_for(Box::new(theirs), Box::new(theirs_out), app, Some(asked)));
     let _ = ours.set_nonblocking(true);
     #[cfg(unix)]
     let Ok(ours) = tokio::net::UnixStream::from_std(ours) else { return };
@@ -248,8 +250,28 @@ async fn bridge(mut send: quinn::SendStream, mut recv: quinn::RecvStream, app: O
         let _ = to_link.shutdown().await;
         r
     };
+    // What the link says goes out in line with the other streams (the app
+    // sets where: the terminal it's typing into first).
     let down = async {
-        let r = tokio::io::copy(&mut from_link, &mut send).await;
+        use std::sync::atomic::Ordering;
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut applied = 0;
+        let r: std::io::Result<()> = loop {
+            let n = match from_link.read(&mut buf).await {
+                Ok(0) => break Ok(()),
+                Ok(n) => n,
+                Err(e) => break Err(e),
+            };
+            let p = priority.load(Ordering::Relaxed);
+            if p != applied {
+                let _ = send.set_priority(p);
+                applied = p;
+            }
+            if let Err(e) = send.write_all(&buf[..n]).await {
+                break Err(e.into());
+            }
+        };
         let _ = send.finish();
         r
     };

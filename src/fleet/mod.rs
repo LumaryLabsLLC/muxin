@@ -10,6 +10,8 @@ pub mod editor;
 pub mod desktop;
 pub mod direct;
 pub mod link;
+#[cfg(test)]
+mod link_e2e;
 pub mod logs;
 pub mod schedules;
 pub mod services;

@@ -1235,6 +1235,32 @@ impl SettingsPage {
             )
     }
 
+    fn connections_section(&self, theme: &Theme) -> impl IntoElement {
+        let on = self.engine.settings().connect_directly;
+        let engine = self.engine.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(section_title(theme, "Connections", None))
+            .child(
+                card(theme)
+                    .px(px(14.))
+                    .py(px(12.))
+                    .gap(px(6.))
+                    .child(kit::checkbox(theme, "connect-directly", on, "Connect to new machines directly", move |on, _, cx| {
+                        let mut s = engine.settings();
+                        s.connect_directly = *on;
+                        let _ = engine.update_settings(s);
+                        cx.refresh_windows();
+                    }))
+                    // Short lines: Settings text doesn't wrap.
+                    .children(["Without ssh in between, terminals and the desktop respond faster.", "Muxin's agent runs there as a service of yours, listening on UDP.", "Machines you already have are asked about once."].map(|line| {
+                        div().text_size(px(11.5)).text_color(theme.text_placeholder).child(line)
+                    })),
+            )
+    }
+
     fn updates_section(&self, theme: &Theme) -> impl IntoElement {
         let on = self.engine.settings().check_updates;
         let engine = self.engine.clone();
@@ -1383,6 +1409,7 @@ impl Render for SettingsPage {
                 .child(self.tray_section(&theme, cx))
                 .child(self.editor_section(&theme))
                 .child(self.code_folders_section(&theme, cx))
+                .child(self.connections_section(&theme))
                 .child(self.updates_section(&theme))
                 .children(self.tailscale_section(&theme))
                 .child(self.checks_section(&theme, false, cx))

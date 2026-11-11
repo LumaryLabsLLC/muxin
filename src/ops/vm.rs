@@ -312,6 +312,7 @@ impl Engine {
             Ok(()) => self.op_log(op, "✓ Agent installed"),
             Err(e) => self.op_log(op, format!("! The agent didn't install yet ({e}); Muxin tries again when you open a terminal")),
         }
+        self.connect_directly_after_setup(op, &id).await;
         self.op_log(op, format!("✓ {name} is ready"));
         Ok(())
     }

@@ -211,6 +211,81 @@ impl Engine {
         Ok(out)
     }
 
+    /// Whether a machine the user just added is to be connected to directly
+    /// (`direct`, or with None the "Connect directly" setting). `Some(false)`
+    /// keeps it on ssh, with no suggestion to switch.
+    pub fn wants_direct(&self, machine_id: &str, direct: Option<bool>) -> bool {
+        if cfg!(target_os = "ios") || self.demo_world().is_some() {
+            return false;
+        }
+        if direct == Some(false) {
+            let _ = direct::set_ssh_only(machine_id, true);
+            self.republish();
+            return false;
+        }
+        direct.unwrap_or_else(|| self.settings().connect_directly)
+    }
+
+    /// Connects to a machine that's up directly, unless a direct connection
+    /// can't reach it, it's paired already or kept on ssh. None: nothing to
+    /// do. A failure leaves it on ssh, and the suggestion to connect directly shows.
+    pub async fn connect_directly_now(self: &Arc<Self>, m: &super::model::Machine) -> Option<Result<Connection, String>> {
+        if m.status != "online" || !m.can_connect_directly() || direct::paired(&m.id).is_some() || direct::ssh_only().contains(&m.id) {
+            return None;
+        }
+        let result = self.set_direct(&m.id, true).await;
+        match &result {
+            Ok(c) => tracing::info!("paired with {} for direct connections (now {})", m.name, c.via),
+            Err(e) => tracing::info!("couldn't connect to {} directly: {e}", m.name),
+        }
+        Some(result)
+    }
+
+    /// A machine the user just added, connected to directly once its first
+    /// check finds it online (within half an hour), when `wants_direct`.
+    pub fn connect_directly_once_up(self: &Arc<Self>, machine_id: &str, direct: Option<bool>) {
+        if cfg!(test) || !self.wants_direct(machine_id, direct) {
+            return;
+        }
+        let (me, id) = (self.clone(), machine_id.to_string());
+        self.runtime().spawn(async move {
+            let mut rx = me.subscribe();
+            let up = tokio::time::timeout(Duration::from_secs(30 * 60), async {
+                loop {
+                    match rx.borrow_and_update().machines.iter().find(|m| m.id == id) {
+                        None => return None,
+                        Some(m) if !m.checking && m.status == "online" => return Some(m.clone()),
+                        Some(_) => {}
+                    }
+                    if rx.changed().await.is_err() {
+                        return None;
+                    }
+                }
+            })
+            .await;
+            if let Ok(Some(m)) = up {
+                me.connect_directly_now(&m).await;
+            }
+        });
+    }
+
+    /// The end of making a machine (a cloud machine, a VM): connected to
+    /// directly when the "Connect directly" setting says so, logged to `op`.
+    pub(crate) async fn connect_directly_after_setup(self: &Arc<Self>, op: u64, machine_id: &str) {
+        if self.demo_world().is_some() || !self.settings().connect_directly {
+            return;
+        }
+        let fits = self.current().machines.iter().any(|m| m.id == machine_id && m.can_connect_directly());
+        if !fits || direct::ssh_only().contains(machine_id) {
+            return;
+        }
+        match self.set_direct(machine_id, true).await {
+            Ok(c) if c.via == "direct" => self.op_log(op, "✓ Connected directly"),
+            Ok(_) => self.op_log(op, "! Paired for direct connections, but it's reached over ssh for now"),
+            Err(e) => self.op_log(op, format!("! Staying on ssh: {e}")),
+        }
+    }
+
     /// Keeps a machine on ssh without changing anything there: Muxin stops
     /// suggesting a direct connection to it (Connect directly on its page
     /// still works).

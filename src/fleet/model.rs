@@ -268,6 +268,12 @@ impl ParentMachine {
 }
 
 impl Machine {
+    /// A direct connection could reach it: not this computer, and not
+    /// inside another machine with nothing forwarded to it.
+    pub fn can_connect_directly(&self) -> bool {
+        !self.local && !(self.parent.as_ref().is_some_and(|p| p.inside()) && self.direct_address.is_none())
+    }
+
     /// Muxin can't use it now: it's offline, or disconnected on purpose.
     pub fn is_down(&self) -> bool {
         matches!(self.status.as_str(), "offline" | "disconnected")

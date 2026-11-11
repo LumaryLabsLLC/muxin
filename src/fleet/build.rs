@@ -1136,19 +1136,24 @@ fn attention(
         }
     }
 
-    // Reached over ssh on this network, where a direct connection would be
-    // quicker: ask once, until the user connects directly or keeps ssh.
+    // Reached over ssh where a direct connection would get through (this
+    // network, the tailnet) and be quicker: ask once, until the user
+    // connects directly or keeps ssh. (Machines added since "Connect
+    // directly" are connected to by themselves; this is for the others.)
     if !input.demo {
-        for m in machines.iter().filter(|m| m.status == "online" && !m.local) {
-            let ssh_here = input.links.get(&m.id).is_some_and(|(via, network)| *via == "ssh" && *network == Some("Local network"));
-            // Inside another machine with nothing forwarded to it: direct can't get in.
-            let shut_in = m.parent.as_ref().is_some_and(|p| p.inside()) && m.direct_address.is_none();
-            if ssh_here && !shut_in && !input.paired.contains(&m.id) && !input.ssh_only.contains(&m.id) {
+        for m in machines.iter().filter(|m| m.status == "online" && m.can_connect_directly()) {
+            let network = input.links.get(&m.id).and_then(|(via, network)| (*via == "ssh").then_some(*network).flatten());
+            let detail = match network {
+                Some("Local network") => "It's on your local network.",
+                Some("Tailscale") => "It's on your tailnet.",
+                _ => continue,
+            };
+            if !input.paired.contains(&m.id) && !input.ssh_only.contains(&m.id) {
                 out.push(Attention {
                     id: format!("direct-{}", m.id),
                     level: "info".into(),
                     title: format!("Connect to {} directly?", m.name),
-                    detail: "It's on your local network. Without ssh in between, its desktop and terminals respond faster.".into(),
+                    detail: format!("{detail} Without ssh in between, its desktop and terminals respond faster."),
                     action: action("Connect directly", "direct", Some(m.id.clone())),
                 });
             }
@@ -1748,7 +1753,7 @@ mod tests {
     /// A machine reached over ssh on this network gets the question; one
     /// that's direct, paired, kept on ssh, or away from this network doesn't.
     #[test]
-    fn suggests_connecting_directly_on_this_network() {
+    fn suggests_connecting_directly_on_this_network_and_the_tailnet() {
         let inv = inventory("[[machine]]\nname = \"Work Mac\"\nhost = \"ahanna@work.local\"\n");
         let probes = HashMap::from([("work-mac".to_string(), probe_with(Vec::new()))]);
         let settings = Settings::default();
@@ -1787,6 +1792,8 @@ mod tests {
         assert!(asks(("direct", Some("Local network")), &[], &[]).is_none(), "already direct");
         assert!(asks(lan, &["work-mac"], &[]).is_none(), "paired (direct didn't come up: its page says why)");
         assert!(asks(lan, &[], &["work-mac"]).is_none(), "kept on ssh");
-        assert!(asks(("ssh", Some("Tailscale")), &[], &[]).is_none(), "not on this network");
+        assert!(asks(("ssh", Some("Tailscale")), &[], &[]).is_some_and(|a| a.detail.starts_with("It's on your tailnet.")), "on the tailnet");
+        assert!(asks(("ssh", Some("Internet")), &[], &[]).is_none(), "through the internet (UDP rarely gets in)");
+        assert!(asks(("ssh", None), &[], &[]).is_none(), "nowhere known");
     }
 }

@@ -511,11 +511,12 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "add_machine",
-            "description": "Add a machine to Muxin (written to config.toml, comments preserved) and check it. `host` is anything the system ssh accepts (user@host, an ~/.ssh/config alias; see list_ssh_hosts) or \"local\" for this computer. Key-based ssh must work without a password prompt. Doesn't install anything.",
+            "description": "Add a machine to Muxin (written to config.toml, comments preserved) and check it. `host` is anything the system ssh accepts (user@host, an ~/.ssh/config alias; see list_ssh_hosts) or \"local\" for this computer. Key-based ssh must work without a password prompt. Checks are read-only; once it answers, Muxin connects to it directly (QUIC: its agent goes on and runs as a service of the user's, listening on UDP) unless `direct` is false or the user turned \"Connect directly\" off.",
             "inputSchema": schema(json!({
                 "name": { "type": "string", "description": "Display name, e.g. \"Mac Studio\"." },
                 "host": { "type": "string", "description": "ssh destination or \"local\"." },
-                "check": { "type": "boolean", "description": "Check it right away and return what was found. Default true." }
+                "check": { "type": "boolean", "description": "Check it right away and return what was found. Default true." },
+                "direct": { "type": "boolean", "description": "Connect to it directly once it answers. Left out: the user's \"Connect directly\" setting (on unless turned off). False keeps it on ssh." }
             }), &["name", "host"]),
             "annotations": annotations("Add machine", false, false, false, true),
         }),

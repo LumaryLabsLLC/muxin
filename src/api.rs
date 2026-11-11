@@ -191,6 +191,11 @@ pub struct AddMachineRequest {
     /// Check the machine right away and return what was found (default true).
     #[serde(default = "yes")]
     pub check: bool,
+    /// Connect to it directly (QUIC) once it answers: true or false; left
+    /// out, the "Connect directly" setting decides (on unless turned off).
+    /// False keeps it on ssh.
+    #[serde(default)]
+    pub direct: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1254,17 +1259,33 @@ pub async fn check(engine: &Arc<Engine>, req: CheckRequest) -> ApiResult<Vec<Mac
 pub async fn add_machine(engine: &Arc<Engine>, req: AddMachineRequest, surface: Surface) -> ApiResult<AddMachineResponse> {
     engine.refresh_from_disk();
     let id = engine.add_machine(NewMachine { name: req.name, host: req.host, port: None }).map_err(op_error)?;
+    // Directly once it answers: here when it's checked now (a CLI run
+    // doesn't wait around), else when it comes up.
+    let mut direct = None;
     let machine = if req.check {
         wait_checked(engine, &id, CHECK_WAIT).await;
+        let up = engine.current().machines.iter().find(|m| m.id == id && m.status == "online").cloned();
+        match up {
+            Some(m) if engine.wants_direct(&id, req.direct) => direct = engine.connect_directly_now(&m).await,
+            Some(_) => {}
+            None => engine.connect_directly_once_up(&id, req.direct),
+        }
         let s = engine.current();
         s.machines.iter().find(|m| m.id == id).map(|m| machine_detail(&s, m))
     } else {
+        engine.connect_directly_once_up(&id, req.direct);
         None
+    };
+    let direct = match direct {
+        Some(Ok(c)) if c.via == "direct" => "Connected to it directly (QUIC). ".to_string(),
+        Some(Ok(_)) => "Paired for direct connections, but it's reached over ssh for now. ".to_string(),
+        Some(Err(e)) => format!("Couldn't connect to it directly ({e}); it's reached over ssh. "),
+        None => String::new(),
     };
     let next = match machine.as_ref().map(|m| m.summary.status.as_str()) {
         Some("online") => surface.say(
-            format!("Machine is reachable. Install runners with install_runners(machine_id=\"{id}\", count=N)."),
-            format!("Machine is reachable. Install runners with `muxin install {id} --count N`."),
+            format!("Machine is reachable. {direct}Install runners with install_runners(machine_id=\"{id}\", count=N)."),
+            format!("Machine is reachable. {direct}Install runners with `muxin install {id} --count N`."),
         ),
         Some("offline") => surface.say(
             "The machine didn't answer over ssh. Make sure key-based `ssh <host>` works without a password prompt, then call check_machines.",
@@ -2465,7 +2486,7 @@ mod tests {
         let engine = demo();
         engine.run_check(None).await;
 
-        let added = add_machine(&engine, AddMachineRequest { name: "Beelink".into(), host: "beelink".into(), check: true }, Surface::Mcp).await.unwrap();
+        let added = add_machine(&engine, AddMachineRequest { name: "Beelink".into(), host: "beelink".into(), check: true, direct: None }, Surface::Mcp).await.unwrap();
         assert_eq!(added.machine_id, "beelink");
         assert_eq!(added.machine.as_ref().unwrap().summary.status, "online");
 

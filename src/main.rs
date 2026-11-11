@@ -60,7 +60,7 @@ enum Command {
     Machines(AgentArgs),
     /// Everything about one machine: runners, diagnostics, resources
     Machine(MachineArgs),
-    /// Add a machine to config.toml (and check it)
+    /// Add a machine to config.toml (and check it, and connect to it directly once it answers)
     AddMachine(AddMachineArgs),
     /// Remove a machine from config.toml (on the machine, only a direct connection from this app is turned off)
     RemoveMachine(MachineArgs),
@@ -308,6 +308,10 @@ struct AddMachineArgs {
     /// Don't check the machine after adding it
     #[arg(long)]
     no_check: bool,
+
+    /// Keep it on ssh: don't connect to it directly once it answers
+    #[arg(long)]
+    ssh_only: bool,
 }
 
 #[derive(Args)]
@@ -1633,7 +1637,7 @@ fn main() -> ExitCode {
             run(&runtime, &a.agent, async move |e| api::machine(&e, req).await, cli::machine)
         }
         Some(Command::AddMachine(a)) => {
-            let req = api::AddMachineRequest { name: a.name, host: a.host, check: !a.no_check };
+            let req = api::AddMachineRequest { name: a.name, host: a.host, check: !a.no_check, direct: a.ssh_only.then_some(false) };
             run(&runtime, &a.agent, async move |e| api::add_machine(&e, req, api::Surface::Cli).await, cli::added_machine)
         }
         Some(Command::RemoveMachine(a)) => {

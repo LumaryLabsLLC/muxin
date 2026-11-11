@@ -112,6 +112,8 @@ pub struct AddMachineDialog {
     note: Option<String>,
     /// A share link pasted where a machine goes: joined instead.
     share_link: Option<String>,
+    /// Connect to it directly once it answers (starts as the setting says).
+    direct: bool,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -152,7 +154,8 @@ impl AddMachineDialog {
         })
         .detach();
         let hosts = if engine.demo_world().is_some() { Vec::new() } else { ssh_hosts() };
-        AddMachineDialog { engine, name, host, hosts, tailnet: Vec::new(), network: None, note: None, share_link: None, error: None, _subscriptions: subs }
+        let direct = engine.settings().connect_directly;
+        AddMachineDialog { engine, name, host, hosts, tailnet: Vec::new(), network: None, note: None, share_link: None, direct, error: None, _subscriptions: subs }
     }
 
     pub fn first_focus(&self, cx: &App) -> FocusHandle {
@@ -166,7 +169,12 @@ impl AddMachineDialog {
         }
         let machine = NewMachine { name: self.name.read(cx).text().to_string(), host: self.host.read(cx).text().to_string(), port: None };
         match self.engine.add_machine(machine) {
-            Ok(id) => cx.emit(DialogEvent::MachineAdded(id)),
+            Ok(id) => {
+                // Only a choice that differs from the setting is kept for it.
+                let choice = (self.direct != self.engine.settings().connect_directly).then_some(self.direct);
+                self.engine.connect_directly_once_up(&id, choice);
+                cx.emit(DialogEvent::MachineAdded(id))
+            }
             Err(e) => {
                 self.error = Some(e);
                 cx.notify();
@@ -204,7 +212,7 @@ impl Render for AddMachineDialog {
         frame(
             &theme,
             "Add a machine",
-            Some("Muxin reaches machines with your system ssh, keys and ~/.ssh/config. Checks are read-only; nothing is installed until you ask.".into()),
+            Some("Muxin reaches machines with your system ssh, keys and ~/.ssh/config. Checks are read-only.".into()),
         )
         .child(field(&theme, "Name", self.name.clone(), None))
         .child(field(&theme, "SSH host", self.host.clone(), Some("Key-based login must work without a password prompt.")))
@@ -277,6 +285,21 @@ impl Render for AddMachineDialog {
         .children(self.note.clone().map(|n| {
             div().flex().items_start().gap(px(8.)).text_size(px(12.)).text_color(theme.text_muted).child(icon("info", 13., theme.info)).child(div().flex_1().min_w(px(0.)).child(n))
         }))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(kit::checkbox(&theme, "am-direct", self.direct, "Connect to it directly once it answers (faster)", cx.listener(|this, on: &bool, _, cx| {
+                    this.direct = *on;
+                    cx.notify();
+                })))
+                .child(div().pl(px(23.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(if self.direct {
+                    "Its agent runs there as a service of yours, on UDP. ssh is the way in where that can't get through."
+                } else {
+                    "It stays on ssh. You can connect directly later from its page."
+                })),
+        )
         // Someone else's machine comes by link: a way there, or the link pasted here.
         .child({
             let (text, button) = match &self.share_link {

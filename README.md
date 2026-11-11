@@ -212,7 +212,7 @@ The MCP server has these tools:
 | `list_runners` | Runners, optionally filtered by machine or state. |
 | `list_jobs` | Queued and running jobs, including which ones no runner can take. |
 | `check_machines` | Runs the read-only machine check over ssh now. |
-| `add_machine`, `remove_machine`, `rename_machine` | Edit `config.toml`. Nothing on the machine changes, except that `remove_machine` turns off a direct connection from this app. |
+| `add_machine`, `remove_machine`, `rename_machine` | Edit `config.toml`. Nothing on the machine changes, except that `add_machine` connects to it directly once it answers (unless `direct: false` or Connect directly is off) and `remove_machine` turns off a direct connection from this app. |
 | `connect_machine` | Disconnect from a machine (`connected: false`) or connect again. Its sessions keep running there. |
 | `ignore_warning` | Stop showing one of a machine's warnings by its code (`low-disk`), or show it again. Saved in `config.toml`. |
 | `machine_ports` | What's listening on a machine: ports, programs or containers, and web servers' page titles. |
@@ -488,7 +488,7 @@ To introduce them through a server of your own instead (`share-server/` in this 
 Muxin first reaches a machine with `ssh`, installs its small agent there, and from then on talks to that agent over **one live connection** instead of a new ssh connection per request: requests take milliseconds instead of ~0.4 s, terminals open instantly, and the sidebar updates the moment a session changes.
 
 - **Over ssh** (the default): one ssh connection per machine, kept open and reconnected when it drops.
-- **Direct**: on a machine's page, **Connect directly** pairs the app with its agent (each trusts only the other's certificate, swapped over ssh) and runs the agent's listener as a user service there (systemd or launchd) on UDP port 47821. Muxin then connects over QUIC, falling back to ssh whenever the direct connection is down.
+- **Direct**: on a machine's page, **Connect directly** pairs the app with its agent (each trusts only the other's certificate, swapped over ssh) and runs the agent's listener as a user service there (systemd or launchd) on UDP port 47821. Muxin then connects over QUIC, falling back to ssh whenever the direct connection is down. Machines you add are connected to directly by themselves once they answer (uncheck it in the Add dialog, or `muxin add-machine --ssh-only`); **Settings › General › Connections** turns that off. Over a direct connection each terminal has a stream of its own, and the one you're typing in goes first.
 - `MUXEN_NO_LINK=1` turns all of this off: one ssh connection per request, as before.
 - **Disconnect** (a machine's right-click menu, or its Connection section) stops all of it for that machine: Muxin closes the connection and stops checking it and reading its sessions, which keep running there. It shows as Disconnected until you **Connect** (its page, its menu, or search). It's kept in `config.toml` as `disconnected = true`.
 

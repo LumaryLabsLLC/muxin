@@ -571,6 +571,13 @@ pub struct Settings {
     pub desktop_shortcuts: bool,
     /// Ask GitHub now and then whether a newer Muxin is out (see crate::update).
     pub check_updates: bool,
+    /// Machines added from now on are connected to directly (QUIC) once
+    /// they answer, without ssh in between: Muxin pairs with their agent,
+    /// which then runs as a service of the user's there, listening on UDP.
+    /// ssh stays the way in when that can't get through. Off, machines stay
+    /// on ssh until the user connects one directly. Machines added before
+    /// are asked about once (see fleet::build).
+    pub connect_directly: bool,
     /// The editor machines' folders open in: "zed", "cursor", "vscode", or "" for the first one installed.
     pub editor: String,
     /// Cloud machines: how Muxin signs in, what new ones come with, what happens when they sit idle.
@@ -742,6 +749,7 @@ impl Default for Settings {
             share_clipboard: false,
             desktop_shortcuts: true,
             check_updates: true,
+            connect_directly: true,
             editor: String::new(),
             cloud: CloudSettings::default(),
             prompts: Default::default(),
@@ -1062,6 +1070,20 @@ mod tests {
         let inv = Inventory::parse(&default_inventory()).unwrap();
         assert_eq!(inv.machines.len(), 1);
         assert!(inv.machines[0].is_local());
+    }
+
+    /// New machines are connected to directly unless that's turned off,
+    /// in config files from before the setting too.
+    #[test]
+    fn connects_directly_unless_turned_off() {
+        let dir = std::env::temp_dir().join(format!("muxin-direct-setting-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[settings]\ncheck_interval_minutes = 5\n").unwrap();
+        assert!(Settings::load(&path).connect_directly);
+        std::fs::write(&path, "[settings]\nconnect_directly = false\n").unwrap();
+        assert!(!Settings::load(&path).connect_directly);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

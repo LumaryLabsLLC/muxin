@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{AnyElement, ClipboardItem, Context, Focusable, FontWeight, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, ClipboardItem, Context, Focusable, FontWeight, SharedString, Window, div, prelude::*, px};
 
 use super::dialogs::{ConfirmDialog, NewSessionDialog};
 use super::format;
@@ -304,12 +304,17 @@ impl Root {
         let Some(ids) = self.pane_layout(&id).map(|p| p.ids().into_iter().map(str::to_string).collect::<Vec<_>>()) else { return };
         let at = ids.iter().position(|x| *x == id).unwrap_or(0) as isize;
         let next = ids[(at + step).rem_euclid(ids.len() as isize) as usize].clone();
+        // Like tmux: going to another pane shows the whole split again.
+        self.zoomed = None;
         self.focus_pane(&next, window, cx);
     }
 
     /// Takes a pane out of its layout; the session goes on (in the sidebar).
     fn close_pane(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(i) = self.panes.iter().position(|p| p.contains(id)) else { return };
+        if self.zoomed.as_deref() == Some(id) {
+            self.zoomed = None;
+        }
         let layout = self.panes.remove(i);
         let rest = layout.without(id);
         let next = rest.as_ref().and_then(|p| p.ids().first().map(|x| x.to_string()));
@@ -323,6 +328,101 @@ impl Root {
             self.focus_pane(&next, window, cx);
         }
         cx.notify();
+    }
+
+    /// Closes the pane on screen (the session goes on), when it's split.
+    pub(super) fn close_shown_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Route::Session(id) = self.route.clone()
+            && self.pane_layout(&id).is_some()
+        {
+            self.zoomed = None;
+            self.close_pane(&id, window, cx);
+        }
+    }
+
+    /// Shows the pane on screen alone, or its whole split again.
+    pub(super) fn toggle_zoom(&mut self, cx: &mut Context<Self>) {
+        let Route::Session(id) = &self.route else { return };
+        if self.pane_layout(id).is_none() {
+            return;
+        }
+        self.zoomed = if self.zoomed.as_ref() == Some(id) { None } else { Some(id.clone()) };
+        cx.notify();
+    }
+
+    /// The sessions as the sidebar lists them: by machine in its order,
+    /// helpers under the session that started them. Not boxes' (they're under
+    /// Boxes) or ones that open in another app.
+    pub(super) fn sidebar_sessions(&self, agents_only: bool, cx: &App) -> Vec<String> {
+        let s = &self.snapshot;
+        Self::machine_order(s, cx)
+            .into_iter()
+            .flat_map(|m| {
+                let here: Vec<&SessionInfo> = s.sessions.iter().filter(|x| x.machine_id == m.id && x.box_id.is_none() && x.app.is_none()).collect();
+                crate::fleet::sessions::tree(&here).into_iter().map(|(_, x)| x).filter(|x| !agents_only || (x.agent != "shell" && !x.agent.is_empty())).map(|x| x.id.clone()).collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// The next (or previous) session in the sidebar, or agent with
+    /// `agents_only` (not shells), going round. From a machine's page: its
+    /// first (or last) one.
+    pub(super) fn step_session(&mut self, step: isize, agents_only: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = self.sidebar_sessions(agents_only, cx);
+        let at = match &self.route {
+            Route::Session(id) => ids.iter().position(|x| x == id),
+            _ => None,
+        };
+        let next = match at {
+            Some(i) => ids.get((i as isize + step).rem_euclid(ids.len() as isize) as usize),
+            None => {
+                // Those of the machine on screen, else all of them.
+                let machine = self.machine_on_screen();
+                let here: Vec<&String> = ids.iter().filter(|x| machine.as_deref().is_some_and(|m| x.split('/').next() == Some(m))).collect();
+                let pool: Vec<&String> = if here.is_empty() { ids.iter().collect() } else { here };
+                if step > 0 { pool.first().copied() } else { pool.last().copied() }
+            }
+        };
+        if let Some(id) = next.cloned() {
+            self.navigate(Route::Session(id), window, cx);
+        }
+    }
+
+    /// The n-th session (1-based) of the machine on screen, as the sidebar
+    /// lists them; of all of them when no machine is.
+    pub(super) fn go_to_session(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = self.sidebar_sessions(false, cx);
+        let machine = self.machine_on_screen();
+        let mut here = ids.iter().filter(|x| machine.as_deref().is_none_or(|m| x.split('/').next() == Some(m)));
+        if let Some(id) = here.nth(n.saturating_sub(1)).cloned() {
+            self.navigate(Route::Session(id), window, cx);
+        }
+    }
+
+    /// The machine whose page (or session, desktop, logs or services) is on screen.
+    pub(super) fn machine_on_screen(&self) -> Option<String> {
+        match &self.route {
+            Route::Machine(id) | Route::Desktop(id) | Route::Logs(id) | Route::Services(id) => Some(id.clone()),
+            Route::Session(id) => self.snapshot.sessions.iter().find(|s| &s.id == id).map(|s| s.machine_id.clone()).or_else(|| id.split('/').next().map(str::to_string)),
+            _ => None,
+        }
+    }
+
+    /// Renames the machine or session on screen.
+    pub(super) fn rename_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((target, _)) = self.rename_target() {
+            self.show_rename(target, window, cx);
+        }
+    }
+
+    /// Ends the session on screen, after asking.
+    pub(super) fn end_shown_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Route::Session(id) = &self.route else { return };
+        if let Some(s) = self.snapshot.sessions.iter().find(|x| &x.id == id).cloned()
+            && s.app.is_none()
+        {
+            self.confirm_end_session(&s, window, cx);
+        }
     }
 
     /// Sessions that ended leave their layouts (once their machine has been
@@ -696,6 +796,8 @@ impl Root {
 
         // The terminal, or the panes of its split.
         let body = match self.pane_layout(id).cloned() {
+            // Zoomed: this pane alone, still under its bar.
+            Some(_) if self.zoomed.as_deref() == Some(id) => self.render_panes(&Panes::One(id.to_string()), id, window, cx),
             Some(layout) => self.render_panes(&layout, id, window, cx),
             None => self.session_body(&info, window, cx).into_any_element(),
         };
@@ -893,6 +995,12 @@ impl Root {
                 let on = id == focused;
                 let body = self.session_body(&info, window, cx);
                 let (pick, close) = (id.clone(), id.clone());
+                let zoomed = self.zoomed.as_deref() == Some(id.as_str());
+                let zoom_id = id.clone();
+                let zoom_tip: SharedString = match super::shortcuts::label_for(cx, "zoom-pane") {
+                    k if k.is_empty() => if zoomed { "Show the whole split".into() } else { "Show this pane alone".into() },
+                    k => format!("{} ({k})", if zoomed { "Show the whole split" } else { "Show this pane alone" }).into(),
+                };
                 let bar = div()
                     .flex_none()
                     .h(px(24.))
@@ -907,6 +1015,22 @@ impl Root {
                     .text_size(px(11.5))
                     .text_color(if on { theme.text } else { theme.text_placeholder })
                     .child(div().flex_1().min_w(px(0.)).overflow_hidden().whitespace_nowrap().child(info.title.clone()))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("pane-zoom-{id}")))
+                            .flex_none()
+                            .p(px(3.))
+                            .rounded(crate::ui::kit::corner(4.))
+                            .cursor_pointer()
+                            .hover(|st| st.bg(theme.ghost_hover))
+                            .tooltip(move |window, cx| kit::Tooltip::view(zoom_tip.clone(), window, cx))
+                            .child(icon(if zoomed { "minimize" } else { "maximize" }, 11., theme.text_placeholder))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.focus_pane(&zoom_id, window, cx);
+                                this.toggle_zoom(cx);
+                            })),
+                    )
                     .child(
                         div()
                             .id(SharedString::from(format!("pane-close-{id}")))

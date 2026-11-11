@@ -531,10 +531,36 @@ host = "local"
     )
 }
 
+/// What the core runs on when it's in Muxin for iPhone or for iPad: "iPhone"
+/// or "iPad", from the hardware model ("iPhone17,2"; in the simulator, the
+/// model it stands in for). Words the app shows say "this iPhone" with it.
+/// Elsewhere it's "iPad", which nothing there shows.
+pub fn this_device() -> &'static str {
+    static DEVICE: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(|| {
+        let model = std::env::var("SIMULATOR_MODEL_IDENTIFIER").ok().unwrap_or_else(hardware_model);
+        if model.starts_with("iPhone") { "iPhone" } else { "iPad" }
+    });
+    *DEVICE
+}
+
+/// The hardware model uname gives on iOS ("iPhone17,2", "iPad17,1").
+fn hardware_model() -> String {
+    #[cfg(unix)]
+    {
+        // SAFETY: uname fills the struct it's given; machine is NUL-terminated.
+        let mut info: libc::utsname = unsafe { std::mem::zeroed() };
+        if unsafe { libc::uname(&mut info) } == 0 {
+            let machine = unsafe { std::ffi::CStr::from_ptr(info.machine.as_ptr()) };
+            return machine.to_string_lossy().into_owned();
+        }
+    }
+    String::new()
+}
+
 pub fn local_hostname() -> String {
-    // An iPad can't run `hostname` (and isn't one of its own machines).
+    // An iPhone or iPad can't run `hostname` (and isn't one of its own machines).
     if cfg!(target_os = "ios") {
-        return "This iPad".into();
+        return format!("This {}", this_device());
     }
     let raw = std::process::Command::new("hostname")
         .arg("-s")

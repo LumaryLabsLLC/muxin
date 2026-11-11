@@ -1,13 +1,16 @@
 //! The app's keyboard shortcuts: what each one does, its keys by default, and
 //! the user's own keys from Settings (saved in config.toml). ⌘1…⌘9 go to the
 //! machines in the sidebar; holding ⌘ shows every shortcut where it applies.
+//! A preset sets them all at once: herdr's keys, for people coming from it.
 
 use gpui::{App, KeyBinding, Keystroke};
 
 use super::root::{
-    AddMachine, CheckNow, CommandPalette, FocusFilter, GoBack, GoForward, GoToMachine1, GoToMachine2, GoToMachine3, GoToMachine4, GoToMachine5, GoToMachine6,
-    GoToMachine7, GoToMachine8, GoToMachine9, NewSession, NextPane, OpenSettings, PreviousPane, ShowGithub, ShowJobs, ShowRun, ShowSchedules, ShowUsage, ShowOverview, ShowWorkspaces, ShowBoxes,
-    SplitDown, SplitRight, SyncGitHub, QuickOpen, ToggleActivity, ToggleSidebar,
+    AddMachine, CheckNow, ClosePane, CommandPalette, EndSession, FocusFilter, GoBack, GoForward, GoToMachine1, GoToMachine2, GoToMachine3, GoToMachine4, GoToMachine5,
+    GoToMachine6, GoToMachine7, GoToMachine8, GoToMachine9, GoToSession1, GoToSession2, GoToSession3, GoToSession4, GoToSession5, GoToSession6, GoToSession7,
+    GoToSession8, GoToSession9, NewSession, NextAgent, NextPane, NextSession, OpenSettings, PreviousAgent, PreviousPane, PreviousSession, RenameShown, ShowGithub,
+    ShowJobs, ShowRun, ShowSchedules, ShowUsage, ShowOverview, ShowWorkspaces, ShowBoxes, SplitDown, SplitRight, SyncGitHub, QuickOpen, ToggleActivity, ToggleSidebar,
+    ZoomPane,
 };
 use super::theme::Appearance;
 
@@ -54,6 +57,14 @@ pub const ALL: &[Shortcut] = &[
     shortcut!("split-down", "Split the terminal down", "secondary-shift-d", SplitDown),
     shortcut!("next-pane", "Next pane", "secondary-alt-right", NextPane),
     shortcut!("previous-pane", "Previous pane", "secondary-alt-left", PreviousPane),
+    shortcut!("zoom-pane", "Show the pane alone, or the whole split", "secondary-shift-enter", ZoomPane),
+    shortcut!("close-pane", "Close the pane (the session goes on)", "secondary-shift-w", ClosePane),
+    shortcut!("next-session", "Next session", "secondary-shift-]", NextSession),
+    shortcut!("previous-session", "Previous session", "secondary-shift-[", PreviousSession),
+    shortcut!("next-agent", "Next agent (not shells)", "", NextAgent),
+    shortcut!("previous-agent", "Previous agent", "", PreviousAgent),
+    shortcut!("rename", "Rename the machine or session on screen", "", RenameShown),
+    shortcut!("end-session", "End the session on screen", "", EndSession),
     shortcut!("filter", "Search machines and sessions", "secondary-f", FocusFilter),
     shortcut!("sidebar", "Hide or show the sidebar", "secondary-b", ToggleSidebar),
     shortcut!("back", "Back", "secondary-[", GoBack),
@@ -62,9 +73,26 @@ pub const ALL: &[Shortcut] = &[
 
 /// The machines' shortcuts: this modifier with 1…9 (in Appearance under this id).
 pub const MACHINES: &str = "machines";
-const MACHINES_DEFAULT: &str = "secondary";
+/// The sessions of the machine on screen: this modifier with 1…9 (off unless
+/// the user or a preset turns it on).
+pub const SESSIONS: &str = "sessions";
+/// The shortcuts that are a modifier with 1…9.
+pub const GROUPS: [&str; 2] = [MACHINES, SESSIONS];
 
-/// Choices for the machines' modifier: (keys, how Settings shows them).
+fn group_default(group: &str) -> &'static str {
+    if group == MACHINES { "secondary" } else { "" }
+}
+
+pub fn is_group(id: &str) -> bool {
+    GROUPS.contains(&id)
+}
+
+/// "Machine 3" or "Session 3".
+fn group_item(group: &str, n: usize) -> String {
+    format!("{} {n}", if group == MACHINES { "Machine" } else { "Session" })
+}
+
+/// Choices for a group's modifier: (keys, how Settings shows them).
 pub fn machine_modifiers() -> &'static [(&'static str, &'static str)] {
     if cfg!(target_os = "macos") {
         &[("cmd", "⌘"), ("ctrl", "⌃"), ("alt-cmd", "⌥⌘"), ("", "Off")]
@@ -78,14 +106,14 @@ pub fn keys(cx: &App, id: &str) -> String {
     let a = cx.global::<Appearance>();
     match a.shortcuts.get(id) {
         Some(k) => k.clone(),
-        None if id == MACHINES => MACHINES_DEFAULT.into(),
+        None if is_group(id) => group_default(id).into(),
         None => ALL.iter().find(|s| s.id == id).map(|s| s.default.to_string()).unwrap_or_default(),
     }
 }
 
-/// The modifier for ⌘1…⌘9, normalized ("secondary" is ⌘ or Ctrl).
-pub fn machine_modifier(cx: &App) -> String {
-    modifier(&keys(cx, MACHINES))
+/// A group's modifier, normalized ("" when it's off).
+pub fn group_modifier(cx: &App, group: &str) -> String {
+    modifier(&keys(cx, group))
 }
 
 fn modifier(m: &str) -> String {
@@ -98,17 +126,22 @@ fn modifier(m: &str) -> String {
 
 /// The keys that go to the n-th machine (1-based), if any.
 pub fn machine_keys(cx: &App, n: usize) -> Option<String> {
-    let m = machine_modifier(cx);
+    group_keys(cx, MACHINES, n)
+}
+
+/// The keys that go to a group's n-th item (1-based), if any.
+pub fn group_keys(cx: &App, group: &str, n: usize) -> Option<String> {
+    let m = group_modifier(cx, group);
     (!m.is_empty() && (1..=9).contains(&n)).then(|| format!("{m}-{n}"))
 }
 
 /// What already uses `keys`, other than `except`: a shortcut's id and label,
-/// or (MACHINES, "Machine 3") for a machine's.
+/// or (MACHINES, "Machine 3") for a group's.
 pub fn used_by(cx: &App, keys_: &str, except: &str) -> Option<(&'static str, String)> {
     let k = normalize(keys_)?;
-    if except != MACHINES {
-        if let Some(n) = (1..=9).find(|n| machine_keys(cx, *n).and_then(|m| normalize(&m)).as_deref() == Some(k.as_str())) {
-            return Some((MACHINES, format!("Machine {n}")));
+    for group in GROUPS.into_iter().filter(|g| *g != except) {
+        if let Some(n) = (1..=9).find(|n| group_keys(cx, group, *n).and_then(|m| normalize(&m)).as_deref() == Some(k.as_str())) {
+            return Some((group, group_item(group, n)));
         }
     }
     ALL.iter().filter(|s| s.id != except).find(|s| normalize(&keys(cx, s.id)).as_deref() == Some(k.as_str())).map(|s| (s.id, s.label.to_string()))
@@ -116,11 +149,7 @@ pub fn used_by(cx: &App, keys_: &str, except: &str) -> Option<(&'static str, Str
 
 /// Sets a shortcut's keys ("" for none), keeping only what differs from the default.
 pub fn set(cx: &mut App, id: &str, keys_: &str) {
-    let same = if id == MACHINES {
-        modifier(keys_) == modifier(MACHINES_DEFAULT)
-    } else {
-        normalize(keys_) == ALL.iter().find(|s| s.id == id).and_then(|s| normalize(s.default))
-    };
+    let same = is_default(id, keys_);
     super::theme::remember(cx, |a| {
         if same {
             a.shortcuts.remove(id);
@@ -128,6 +157,129 @@ pub fn set(cx: &mut App, id: &str, keys_: &str) {
             a.shortcuts.insert(id.to_string(), keys_.to_string());
         }
     });
+}
+
+/// Whether `keys_` are what `id` has by default.
+fn is_default(id: &str, keys_: &str) -> bool {
+    if is_group(id) {
+        modifier(keys_) == modifier(group_default(id))
+    } else {
+        normalize(keys_) == ALL.iter().find(|s| s.id == id).and_then(|s| normalize(s.default))
+    }
+}
+
+/// Every id a preset sets: the shortcuts and the groups.
+fn all_ids() -> impl Iterator<Item = &'static str> {
+    ALL.iter().map(|s| s.id).chain(GROUPS)
+}
+
+/// A set of keys for every shortcut: (name, keys by id). A shortcut the
+/// preset leaves out keeps its default.
+pub struct Preset {
+    pub name: &'static str,
+    keys: &'static [(&'static str, &'static str)],
+}
+
+impl Preset {
+    fn keys_for(&self, id: &str) -> &'static str {
+        match self.keys.iter().find(|(i, _)| *i == id) {
+            Some((_, k)) => k,
+            None if is_group(id) => group_default(id),
+            None => ALL.iter().find(|s| s.id == id).map(|s| s.default).unwrap_or_default(),
+        }
+    }
+}
+
+/// Muxin's own keys, and herdr's (its desktop app's) where Muxin does the
+/// same thing: a herdr space is a machine, a tab a session.
+pub const PRESETS: &[Preset] = &[Preset { name: "Muxin", keys: &[] }, Preset { name: "herdr", keys: HERDR }];
+
+const HERDR: &[(&str, &str)] = if cfg!(target_os = "macos") { HERDR_MAC } else { HERDR_OTHER };
+
+/// From herdr-app's defaults/keys.macos.json.
+const HERDR_MAC: &[(&str, &str)] = &[
+    ("quick-open", "cmd-p"),
+    ("commands", "cmd-shift-p"),
+    // ⌃1…⌃9 are herdr's spaces (our machines); the pages move to ⌥⌘.
+    ("overview", "alt-cmd-1"),
+    ("jobs", "alt-cmd-2"),
+    ("boxes", "alt-cmd-3"),
+    ("github", "alt-cmd-4"),
+    ("usage", "alt-cmd-5"),
+    ("run", "alt-cmd-6"),
+    ("schedules", "alt-cmd-7"),
+    ("add-machine", "cmd-n"),
+    ("new-session", "cmd-t"),
+    ("split-right", "cmd-d"),
+    ("split-down", "cmd-shift-d"),
+    ("next-pane", "alt-cmd-right"),
+    ("previous-pane", "alt-cmd-left"),
+    ("zoom-pane", "cmd-shift-enter"),
+    ("close-pane", "cmd-shift-w"),
+    ("end-session", "cmd-w"),
+    ("next-session", "cmd-shift-]"),
+    ("previous-session", "cmd-shift-["),
+    // ⌘[ and ⌘] are herdr's agents; Back and Forward move to ⌃⌘.
+    ("next-agent", "cmd-]"),
+    ("previous-agent", "cmd-["),
+    ("back", "ctrl-cmd-["),
+    ("forward", "ctrl-cmd-]"),
+    ("rename", "f2"),
+    ("sidebar", "cmd-b"),
+    ("settings", "cmd-,"),
+    (MACHINES, "ctrl"),
+    (SESSIONS, "cmd"),
+];
+
+/// From herdr-app's defaults/keys.json (Linux and Windows).
+const HERDR_OTHER: &[(&str, &str)] = &[
+    ("quick-open", "ctrl-shift-k"),
+    ("commands", "ctrl-shift-p"),
+    // Alt+1…9 are herdr's spaces (our machines); the pages move to Ctrl+Alt.
+    ("overview", "ctrl-alt-1"),
+    ("jobs", "ctrl-alt-2"),
+    ("boxes", "ctrl-alt-3"),
+    ("github", "ctrl-alt-4"),
+    ("usage", "ctrl-alt-5"),
+    ("run", "ctrl-alt-6"),
+    ("schedules", "ctrl-alt-7"),
+    ("add-machine", "ctrl-shift-n"),
+    ("new-session", "ctrl-shift-t"),
+    ("split-right", "ctrl-shift-o"),
+    ("split-down", "ctrl-shift-e"),
+    ("next-pane", "alt-right"),
+    ("previous-pane", "alt-left"),
+    ("zoom-pane", "ctrl-shift-z"),
+    ("close-pane", "ctrl-shift-x"),
+    ("end-session", "ctrl-shift-w"),
+    ("next-session", "ctrl-pagedown"),
+    ("previous-session", "ctrl-pageup"),
+    ("next-agent", "alt-down"),
+    ("previous-agent", "alt-up"),
+    ("rename", "f2"),
+    ("sidebar", "ctrl-shift-b"),
+    ("settings", "ctrl-,"),
+    (MACHINES, "alt"),
+    (SESSIONS, "ctrl"),
+];
+
+/// Sets every shortcut to a preset's keys.
+pub fn use_preset(cx: &mut App, preset: &Preset) {
+    let own: Vec<(String, String)> = all_ids().map(|id| (id, preset.keys_for(id))).filter(|(id, k)| !is_default(id, k)).map(|(id, k)| (id.to_string(), k.to_string())).collect();
+    super::theme::remember(cx, |a| {
+        a.shortcuts.clear();
+        a.shortcuts.extend(own);
+    });
+}
+
+/// The preset the keys are now, if they're exactly one.
+pub fn preset_in_use(cx: &App) -> Option<&'static Preset> {
+    PRESETS.iter().find(|p| {
+        all_ids().all(|id| {
+            let (now, want) = (keys(cx, id), p.keys_for(id));
+            if is_group(id) { modifier(&now) == modifier(want) } else { normalize(&now) == normalize(want) }
+        })
+    })
 }
 
 /// Whether the user changed this one.
@@ -160,6 +312,22 @@ pub fn bindings(cx: &App) -> Vec<KeyBinding> {
             out.push(bind(&k));
         }
     }
+    let sessions: [fn(&str) -> KeyBinding; 9] = [
+        |k| KeyBinding::new(k, GoToSession1, None),
+        |k| KeyBinding::new(k, GoToSession2, None),
+        |k| KeyBinding::new(k, GoToSession3, None),
+        |k| KeyBinding::new(k, GoToSession4, None),
+        |k| KeyBinding::new(k, GoToSession5, None),
+        |k| KeyBinding::new(k, GoToSession6, None),
+        |k| KeyBinding::new(k, GoToSession7, None),
+        |k| KeyBinding::new(k, GoToSession8, None),
+        |k| KeyBinding::new(k, GoToSession9, None),
+    ];
+    for (i, bind) in sessions.iter().enumerate() {
+        if let Some(k) = group_keys(cx, SESSIONS, i + 1).and_then(|k| normalize(&k)) {
+            out.push(bind(&k));
+        }
+    }
     out
 }
 
@@ -167,8 +335,20 @@ pub fn bindings(cx: &App) -> Vec<KeyBinding> {
 /// and remote desktops, where Ctrl keys mean something).
 pub fn ctrl_keys(cx: &App) -> Vec<String> {
     let mut keys: Vec<String> = ALL.iter().filter_map(|s| normalize(&keys(cx, s.id))).collect();
-    keys.extend((1..=9).filter_map(|n| machine_keys(cx, n).and_then(|k| normalize(&k))));
+    keys.extend(GROUPS.into_iter().flat_map(|g| (1..=9).filter_map(move |n| group_keys(cx, g, n).and_then(|k| normalize(&k)))));
     keys.retain(|k| k.split('-').any(|p| p == "ctrl"));
+    keys
+}
+
+/// The Ctrl shortcuts a terminal program gets instead of the app: not those
+/// with Shift, or on PageUp and PageDown, which terminal apps keep for
+/// themselves too (herdr's keys on Linux and Windows are Ctrl+Shift ones).
+pub fn terminal_ctrl_keys(cx: &App) -> Vec<String> {
+    let mut keys = ctrl_keys(cx);
+    keys.retain(|k| {
+        let parts: Vec<&str> = k.split('-').collect();
+        !parts.contains(&"shift") && !matches!(parts.last(), Some(&"pageup") | Some(&"pagedown"))
+    });
     keys
 }
 
@@ -261,6 +441,61 @@ mod tests {
         }
         assert_eq!(normalize("secondary-r"), normalize(if cfg!(target_os = "macos") { "cmd-r" } else { "ctrl-r" }));
         assert_eq!(normalize(""), None);
+    }
+
+    /// Every key a preset (or the defaults) binds, with what it does.
+    fn bound(p: &Preset) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for id in all_ids() {
+            let k = p.keys_for(id);
+            if is_group(id) {
+                let m = modifier(k);
+                if !m.is_empty() {
+                    out.extend((1..=9).map(|n| (normalize(&format!("{m}-{n}")).unwrap(), format!("{id} {n}"))));
+                }
+            } else if !k.is_empty() {
+                out.push((normalize(k).unwrap_or_else(|| panic!("{} doesn't parse: {k}", id)), id.to_string()));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn presets_bind_each_key_once() {
+        for p in PRESETS {
+            let keys = bound(p);
+            for (i, (k, what)) in keys.iter().enumerate() {
+                if let Some((_, other)) = keys[i + 1..].iter().find(|(x, _)| x == k) {
+                    panic!("{}: {k} is both {what} and {other}", p.name);
+                }
+            }
+        }
+        // Both platforms' tables: only shortcuts there are, keys that parse,
+        // each set once (on its own, apart from the defaults).
+        for table in [HERDR_MAC, HERDR_OTHER] {
+            for (i, (id, k)) in table.iter().enumerate() {
+                assert!(all_ids().any(|x| x == *id), "no shortcut {id}");
+                assert!(table[i + 1..].iter().all(|(x, _)| x != id), "{id} twice");
+                if !is_group(id) {
+                    assert!(normalize(k).is_some(), "{id}: {k} doesn't parse");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn herdrs_own_keys() {
+        let herdr = PRESETS.iter().find(|p| p.name == "herdr").unwrap();
+        let k = |id: &str| normalize(herdr.keys_for(id));
+        if cfg!(target_os = "macos") {
+            assert_eq!(k("new-session"), normalize("cmd-t"));
+            assert_eq!(k("next-agent"), normalize("cmd-]"));
+            assert_eq!(modifier(herdr.keys_for(SESSIONS)), "cmd");
+        } else {
+            assert_eq!(k("new-session"), normalize("ctrl-shift-t"));
+            assert_eq!(modifier(herdr.keys_for(SESSIONS)), "ctrl");
+        }
+        assert_eq!(k("rename"), normalize("f2"));
     }
 
     #[test]

@@ -1,9 +1,9 @@
-//! iPads paired from this computer: Muxin for iPad reaches the machines
-//! directly with a key of its own, which each machine's agent trusts. This
-//! app vouches for it, over the connections it already has (`share::pair`
-//! is the iPad's side of that). `ipads.json` in Muxin's config folder keeps
-//! each iPad's name, key and the machines that trust it, so removing one
-//! takes its key off them.
+//! iPhones and iPads paired from this computer: Muxin for iPhone and Muxin
+//! for iPad reach the machines directly with a key of their own, which each
+//! machine's agent trusts. This app vouches for it, over the connections it
+//! already has (`share::pair` is the device's side of that). `ipads.json` in
+//! Muxin's config folder keeps each one's name, key and the machines that
+//! trust it, so removing one takes its key off them.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,6 +29,17 @@ pub struct Ipad {
     pub machines: Vec<String>,
 }
 
+/// Whether a device is an iPhone rather than an iPad, by the name it paired
+/// with (iOS gives apps "iPhone" or "iPad", or the name the user gave it).
+pub fn is_phone(name: &str) -> bool {
+    name.to_lowercase().contains("iphone")
+}
+
+/// The icon for a paired device, by its name.
+pub fn icon(name: &str) -> &'static str {
+    if is_phone(name) { "smartphone" } else { "tablet" }
+}
+
 fn path(dir: &Path) -> PathBuf {
     dir.join("ipads.json")
 }
@@ -39,7 +50,7 @@ pub fn list(dir: &Path) -> Vec<Ipad> {
 
 fn write(dir: &Path, all: &[Ipad]) -> Result<(), String> {
     let text = serde_json::to_string_pretty(all).map_err(|e| e.to_string())?;
-    crate::config::write_atomic(&path(dir), text.as_bytes()).map_err(|e| format!("Couldn't save the iPads: {e:#}"))
+    crate::config::write_atomic(&path(dir), text.as_bytes()).map_err(|e| format!("Couldn't save the paired iPhones and iPads: {e:#}"))
 }
 
 /// Notes an iPad that paired: pairing one again adds its new machines.
@@ -69,8 +80,8 @@ pub fn find<'a>(all: &'a [Ipad], name_or_key: &str) -> Result<&'a Ipad, String> 
     let named: Vec<&Ipad> = all.iter().filter(|i| i.name.eq_ignore_ascii_case(want)).collect();
     match named.as_slice() {
         [one] => Ok(one),
-        [] => Err(format!("No iPad called {want} is paired.")),
-        _ => Err(format!("More than one iPad is called {want}: use its key (muxin ipad ls --json).")),
+        [] => Err(format!("No iPhone or iPad called {want} is paired.")),
+        _ => Err(format!("More than one paired device is called {want}: use its key (muxin ipad ls --json).")),
     }
 }
 
@@ -84,7 +95,7 @@ impl Engine {
     /// as a QR code, and how it goes.
     pub async fn pair_ipad(self: &Arc<Self>, machine_ids: &[String]) -> Result<watch::Receiver<pair::View>, String> {
         if self.demo_world().is_some() {
-            return Err("The demo's machines are made up, so there's nothing to pair an iPad with.".into());
+            return Err("The demo's machines are made up, so there's nothing to pair an iPhone or iPad with.".into());
         }
         let mut machines = Vec::new();
         for id in machine_ids {
@@ -113,7 +124,7 @@ impl Engine {
     pub async fn trust_app(self: &Arc<Self>, machine_id: &str, client: &str) -> Result<pair::Machine, String> {
         let (spec, probe) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
         if spec.is_local() {
-            return Err("This computer isn't a machine the iPad reaches.".into());
+            return Err("This computer isn't a machine the iPhone or iPad reaches.".into());
         }
         spec.refuse_if_disconnected()?;
         agent::ensure(&spec, probe.as_ref()).await?;
@@ -199,6 +210,9 @@ mod tests {
         assert_eq!(all[0].machines, vec!["beelink".to_string(), "forge".to_string()]);
         assert_eq!(find(&all, "studio ipad").unwrap().fingerprint, key);
         assert_eq!(find(&all, &key.to_uppercase()).unwrap().name, "Studio iPad");
+        assert_eq!(icon("Studio iPad"), "tablet");
+        assert_eq!(icon("iPhone"), "smartphone");
+        assert_eq!(icon("Adib's iPhone"), "smartphone");
         assert!(find(&all, "kitchen").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }

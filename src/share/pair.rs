@@ -131,7 +131,7 @@ fn current() -> &'static Mutex<Option<Arc<Pairing>>> {
 pub async fn start(server: &str, machines: Vec<(String, String)>, hooks: Hooks) -> Result<watch::Receiver<View>, String> {
     stop();
     if machines.is_empty() {
-        return Err("There's no machine to pair an iPad with yet. Add one first (this computer itself doesn't count).".into());
+        return Err("There's no machine to pair an iPhone or iPad with yet. Add one first (this computer itself doesn't count).".into());
     }
     let (cert, fingerprint) = rtc::certificate()?;
     let ticket = Ticket::new(server, fingerprint)?;
@@ -202,7 +202,7 @@ async fn serve(p: Arc<Pairing>) {
             _ = tokio::time::sleep_until((tokio::time::Instant::now() + wait).min(deadline)) => {}
         }
         if tokio::time::Instant::now() >= deadline {
-            break Some("The link expired. Make a new one to pair an iPad.");
+            break Some("The link expired. Make a new one to pair an iPhone or iPad.");
         }
         if p.bad_proofs.load(Ordering::Relaxed) >= MAX_BAD_PROOFS {
             break Some("Someone kept trying a wrong link, so this one stopped working. Make a new one.");
@@ -309,7 +309,7 @@ async fn talk(p: &Arc<Pairing>, dc: &Arc<dyn DataChannel>, host_fp: &str, guest_
     }
     let key = hello["fingerprint"].as_str().unwrap_or("").trim().to_lowercase();
     if key.len() != 64 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
-        let _ = rtc::send(dc, rtc::error_frame("The iPad didn't send its key.")).await;
+        let _ = rtc::send(dc, rtc::error_frame("The device didn't send its key.")).await;
         return;
     }
     let name = clean_name(hello["name"].as_str().unwrap_or(""));
@@ -370,7 +370,7 @@ async fn talk(p: &Arc<Pairing>, dc: &Arc<dyn DataChannel>, host_fp: &str, guest_
     p.update(|v| {
         v.state = if paired.is_empty() { "failed" } else { "done" }.into();
         if paired.is_empty() {
-            v.error = Some("None of the machines could pair with the iPad.".into());
+            v.error = Some(format!("None of the machines could pair with {}.", v.device.as_deref().unwrap_or("it")));
         }
         v.paired = paired;
         v.failed = failed;
@@ -418,7 +418,7 @@ async fn left(from: &mut mpsc::UnboundedReceiver<Value>, events: &mut mpsc::Unbo
 fn clean_name(name: &str) -> String {
     let name: String = name.chars().filter(|c| !c.is_control()).take(60).collect();
     let name = name.trim();
-    if name.is_empty() { "iPad".into() } else { name.into() }
+    if name.is_empty() { "Device".into() } else { name.into() }
 }
 
 /// What the iPad hears while it pairs.
@@ -518,7 +518,7 @@ async fn paired_with(
                 rtc::forget(&dc);
                 return Ok((machines, failed));
             }
-            "denied" => return Err("Your Mac didn't allow this iPad.".into()),
+            "denied" => return Err(format!("Your Mac didn't allow this {}.", crate::config::this_device())),
             "error" => return Err(msg["error"].as_str().unwrap_or("Pairing didn't work.").to_string()),
             "ended" => return Err(msg["why"].as_str().unwrap_or(ended).to_string()),
             _ => {}

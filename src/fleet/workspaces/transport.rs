@@ -127,7 +127,7 @@ pub async fn run(
     // direct link, and output to stream comes when the script is done. (One
     // it's adding, not paired yet, takes them over its own ssh, as below.)
     if cfg!(target_os = "ios") && !spec.is_local() && crate::fleet::direct::paired(&spec.id).is_some() {
-        let link = crate::fleet::link::current_or_direct(spec).await.ok_or_else(|| format!("Can't reach {}. It may be off, or not paired with this iPad.", spec.name))?;
+        let link = crate::fleet::link::current_or_direct(spec).await.ok_or_else(|| format!("Can't reach {}. It may be off, or not paired with this {}.", spec.name, crate::config::this_device()))?;
         let req = serde_json::json!({ "op": "sh", "script": script, "timeout": timeout.as_secs() });
         let reply = link.request(req, timeout + Duration::from_secs(10)).await?;
         if reply["ok"].as_bool() != Some(true) {

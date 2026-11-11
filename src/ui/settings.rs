@@ -43,7 +43,8 @@ impl SettingsTab {
             SettingsTab::Terminal => "Terminal",
             SettingsTab::GitHub => "GitHub",
             SettingsTab::Cloud => "Cloud",
-            SettingsTab::Ipads => "iPads",
+            // Muxin for iPhone and Muxin for iPad: "iPhone & iPad" doesn't fit the row.
+            SettingsTab::Ipads => "Mobile",
             SettingsTab::Prompts => "Prompts",
             SettingsTab::Keyboard => "Keyboard",
         }
@@ -56,7 +57,7 @@ impl SettingsTab {
             SettingsTab::Terminal => "terminal",
             SettingsTab::GitHub => "agent-github",
             SettingsTab::Cloud => "cloud",
-            SettingsTab::Ipads => "tablet",
+            SettingsTab::Ipads => "smartphone",
             SettingsTab::Prompts => "message-square",
             SettingsTab::Keyboard => "keyboard",
         }
@@ -1438,38 +1439,58 @@ impl SettingsPage {
         let any_changed = !cx.global::<theme_mod::Appearance>().shortcuts.is_empty();
         let row = |label: SharedString| div().flex().items_center().gap(px(8.)).min_h(px(34.)).text_size(px(12.5)).child(div().flex_1().text_color(theme.text_muted).child(label));
 
-        // ⌘1…⌘9: one modifier for all nine.
-        let chosen = shortcuts::machine_modifier(cx);
-        let options: Vec<AnyElement> = shortcuts::machine_modifiers()
+        let chip = |id: SharedString, text: &'static str, on: bool| {
+            div()
+                .id(id)
+                .h(px(24.))
+                .min_w(px(36.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(crate::ui::kit::corner(5.))
+                .border_1()
+                .border_color(if on { theme.accent } else { theme.border_variant })
+                .bg(if on { theme.accent.opacity(0.12) } else { theme.element })
+                .cursor_pointer()
+                .text_size(px(12.))
+                .text_color(if on { theme.text } else { theme.text_muted })
+                .child(text)
+        };
+
+        // Every key at once: Muxin's, or herdr's for people coming from it.
+        let in_use = shortcuts::preset_in_use(cx).map(|p| p.name);
+        let presets: Vec<AnyElement> = shortcuts::PRESETS
             .iter()
-            .map(|(value, shown)| {
-                let on = chosen == *value;
-                div()
-                    .id(SharedString::from(format!("sc-m-{shown}")))
-                    .h(px(24.))
-                    .min_w(px(36.))
-                    .px(px(8.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(crate::ui::kit::corner(5.))
-                    .border_1()
-                    .border_color(if on { theme.accent } else { theme.border_variant })
-                    .bg(if on { theme.accent.opacity(0.12) } else { theme.element })
-                    .cursor_pointer()
-                    .font_family(mono_font())
-                    .text_size(px(12.))
-                    .text_color(if on { theme.text } else { theme.text_muted })
-                    .child(*shown)
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_machine_keys(value, cx)))
-                    .into_any_element()
-            })
+            .enumerate()
+            .map(|(i, p)| chip(SharedString::from(format!("sc-preset-{}", p.name)), p.name, in_use == Some(p.name)).on_click(cx.listener(move |this, _, _, cx| this.use_preset(i, cx))).into_any_element())
             .collect();
+        let preset_row = row("Keys like".into()).child(div().flex().gap(px(4.)).children(presets));
+
+        // ⌘1…⌘9: one modifier for all nine; the sessions' likewise.
+        let group_row = |group: &'static str, label: String, cx: &mut Context<Self>| {
+            let chosen = shortcuts::group_modifier(cx, group);
+            let options: Vec<AnyElement> = shortcuts::machine_modifiers()
+                .iter()
+                .map(|(value, shown)| {
+                    chip(SharedString::from(format!("sc-{group}-{shown}")), shown, chosen == *value)
+                        .font_family(mono_font())
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_group_keys(group, value, cx)))
+                        .into_any_element()
+                })
+                .collect();
+            row(label.into()).child(div().flex().gap(px(4.)).children(options))
+        };
         let machines_label = match shortcuts::machine_keys(cx, 1) {
             Some(k) => format!("Go to machine 1–9 ({} …)", shortcuts::label(&k)),
             None => "Go to machine 1–9".to_string(),
         };
-        let machines = row(machines_label.into()).child(div().flex().gap(px(4.)).children(options));
+        let machines = group_row(shortcuts::MACHINES, machines_label, cx);
+        let sessions_label = match shortcuts::group_keys(cx, shortcuts::SESSIONS, 1) {
+            Some(k) => format!("Go to session 1–9 of the machine on screen ({} …)", shortcuts::label(&k)),
+            None => "Go to session 1–9 of the machine on screen".to_string(),
+        };
+        let sessions = group_row(shortcuts::SESSIONS, sessions_label, cx);
 
         let rows: Vec<AnyElement> = ALL
             .iter()
@@ -1527,7 +1548,17 @@ impl SettingsPage {
                 card(theme)
                     .px(px(14.))
                     .py(px(4.))
+                    .child(preset_row)
+                    .children(in_use.filter(|n| *n == "herdr").map(|_| {
+                        div()
+                            .pb(px(6.))
+                            .text_size(px(12.))
+                            .text_color(theme.text_placeholder)
+                            .child("herdr's keys where Muxin does the same: a space is a machine here, a tab a session.")
+                    }))
+                    .child(div().h(px(1.)).my(px(4.)).bg(theme.border_variant))
                     .child(machines)
+                    .child(sessions)
                     .child(div().h(px(1.)).my(px(4.)).bg(theme.border_variant))
                     .children(rows)
                     .child(fixed),
@@ -1567,7 +1598,7 @@ impl SettingsPage {
     /// A key pressed while recording: Esc cancels, ⌫ clears, anything with
     /// ⌘, ⌃ or ⌥ becomes the shortcut (taken from whatever had it).
     fn pressed(&mut self, k: &gpui::Keystroke, cx: &mut Context<Self>) {
-        use super::shortcuts::{self, MACHINES};
+        use super::shortcuts;
         let Some(id) = self.recording else { return };
         let m = &k.modifiers;
         let plain = !(m.platform || m.control || m.alt || m.shift);
@@ -1581,7 +1612,7 @@ impl SettingsPage {
             _ => match shortcuts::from_press(k) {
                 None => self.shortcut_note = Some(if cfg!(target_os = "macos") { "Add ⌘, ⌃ or ⌥." } else { "Add Ctrl or Alt." }.into()),
                 Some(keys) => match shortcuts::used_by(cx, &keys, id) {
-                    Some((MACHINES, what)) => self.shortcut_note = Some(format!("{} goes to {what}.", shortcuts::label(&keys))),
+                    Some((group, what)) if shortcuts::is_group(group) => self.shortcut_note = Some(format!("{} goes to {what}.", shortcuts::label(&keys))),
                     taken => {
                         if let Some((other, what)) = taken {
                             shortcuts::set(cx, other, "");
@@ -1598,11 +1629,11 @@ impl SettingsPage {
     }
 
     fn reset_shortcut(&mut self, id: &'static str, cx: &mut Context<Self>) {
-        use super::shortcuts::{self, ALL, MACHINES};
+        use super::shortcuts::{self, ALL};
         let default = ALL.iter().find(|s| s.id == id).map(|s| s.default).unwrap_or_default();
         self.shortcut_note = None;
         match shortcuts::used_by(cx, default, id) {
-            Some((MACHINES, what)) => {
+            Some((group, what)) if shortcuts::is_group(group) => {
                 self.shortcut_note = Some(format!("{} goes to {what}.", shortcuts::label(default)));
                 cx.notify();
                 return;
@@ -1626,15 +1657,27 @@ impl SettingsPage {
         cx.notify();
     }
 
-    /// The modifier for ⌘1…⌘9; shortcuts on those keys give way.
-    fn set_machine_keys(&mut self, modifier: &'static str, cx: &mut Context<Self>) {
-        use super::shortcuts::{self, MACHINES};
-        shortcuts::set(cx, MACHINES, modifier);
+    /// Every shortcut as a preset has them.
+    fn use_preset(&mut self, i: usize, cx: &mut Context<Self>) {
+        if let Some(p) = super::shortcuts::PRESETS.get(i) {
+            super::shortcuts::use_preset(cx, p);
+            super::shortcuts::apply(cx);
+        }
+        self.recording = None;
+        self.shortcut_note = None;
+        cx.notify();
+    }
+
+    /// The modifier for a group's 1…9; shortcuts on those keys give way (and
+    /// the other group, when it had the same modifier).
+    fn set_group_keys(&mut self, group: &'static str, modifier: &'static str, cx: &mut Context<Self>) {
+        use super::shortcuts;
+        shortcuts::set(cx, group, modifier);
         let mut freed = Vec::new();
         for n in 1..=9 {
-            if let Some((other, what)) = shortcuts::machine_keys(cx, n).and_then(|k| shortcuts::used_by(cx, &k, MACHINES)) {
+            if let Some((other, what)) = shortcuts::group_keys(cx, group, n).and_then(|k| shortcuts::used_by(cx, &k, group)) {
                 shortcuts::set(cx, other, "");
-                freed.push(what);
+                freed.push(if shortcuts::is_group(other) { what.trim_end_matches(char::is_numeric).trim_end().to_string() + "s" } else { what });
             }
         }
         shortcuts::apply(cx);

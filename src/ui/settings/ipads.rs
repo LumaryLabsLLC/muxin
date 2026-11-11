@@ -136,10 +136,8 @@ impl SettingsPage {
             .p(px(14.))
             .gap(px(12.))
             .child(div().w_full().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(
-                "Muxin for iPad reaches your machines directly, with a key of its own. On the iPad, tap Pair with your Mac and scan the code that shows here.",
+                "Muxin for iPhone and Muxin for iPad reach your machines directly, each with a key of its own. On the iPhone or iPad, tap Pair with your Mac and scan the code that shows here.",
             ))
-            // Until it is: then its App Store link.
-            .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child("Muxin for iPad isn't on the App Store yet."))
             .child(match going {
                 Some(v) => self.pairing_now(v, theme),
                 None => self.pair_form(theme, cx),
@@ -158,7 +156,7 @@ impl SettingsPage {
                     .items_center()
                     .gap(px(10.))
                     .py(px(8.))
-                    .child(icon("tablet", 16., theme.text_muted))
+                    .child(icon(crate::fleet::ipads::icon(&i.name), 16., theme.text_muted))
                     .child(
                         div()
                             .flex_1()
@@ -179,17 +177,17 @@ impl SettingsPage {
         let list = card(theme)
             .px(px(14.))
             .py(px(6.))
-            .when(rows.is_empty(), |c| c.child(div().py(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child("No iPads yet.")))
+            .when(rows.is_empty(), |c| c.child(div().py(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child("Nothing paired yet.")))
             .children(rows)
             .children(self.ipad.note.clone().map(|n| div().pb(px(8.)).text_size(px(12.)).text_color(theme.text_muted).child(n)));
         div()
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Pair an iPad", None))
+            .child(section_title(theme, "Pair an iPhone or iPad", None))
             .child(pairing)
             .child(div().h(px(10.)))
-            .child(section_title(theme, "Paired iPads", Some(self.ipad.ipads.len())))
+            .child(section_title(theme, "Paired iPhones and iPads", Some(self.ipad.ipads.len())))
             .child(list)
             .into_any_element()
     }
@@ -218,7 +216,7 @@ impl SettingsPage {
             .collect();
         let outcome = self.ipad.pairing.as_ref().map(|v| {
             let (glyph, color, line) = match v.state.as_str() {
-                "done" => ("circle-check", theme.success, format!("Paired {} with {}.", v.device.as_deref().unwrap_or("the iPad"), v.paired.join(", "))),
+                "done" => ("circle-check", theme.success, format!("Paired {} with {}.", v.device.as_deref().unwrap_or("it"), v.paired.join(", "))),
                 "denied" => ("circle-x", theme.text_muted, "Not paired: you didn't allow it.".to_string()),
                 _ => ("triangle-alert", theme.warning, v.error.clone().unwrap_or_else(|| "The pairing ended.".into())),
             };
@@ -233,12 +231,12 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .when(boxes.is_empty(), |d| d.child(div().text_size(px(12.5)).text_color(theme.text_muted).child("Add a machine first: the iPad reaches your other machines, not this computer.")))
+            .when(boxes.is_empty(), |d| d.child(div().text_size(px(12.5)).text_color(theme.text_muted).child("Add a machine first: the iPhone or iPad reaches your other machines, not this computer.")))
             .children(boxes)
             .child(
                 div().flex().child(
-                    Button::new("ipad-pair", "Pair an iPad")
-                        .icon("tablet")
+                    Button::new("ipad-pair", "Pair an iPhone or iPad")
+                        .icon("smartphone")
                         .style(ButtonStyle::Primary)
                         .loading(self.ipad.starting)
                         .disabled(picked == 0)
@@ -261,8 +259,8 @@ impl SettingsPage {
                     .flex()
                     .flex_col()
                     .gap(px(10.))
-                    .child(div().flex().items_center().gap(px(8.)).text_size(px(14.)).child(icon("tablet", 16., theme.accent)).child(format!("{} wants to pair.", v.device.as_deref().unwrap_or("An iPad"))))
-                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child("Allow it only if the iPad shows this code:"))
+                    .child(div().flex().items_center().gap(px(8.)).text_size(px(14.)).child(icon(crate::fleet::ipads::icon(v.device.as_deref().unwrap_or("")), 16., theme.accent)).child(format!("{} wants to pair.", v.device.as_deref().unwrap_or("A device"))))
+                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(format!("Allow it only if the {} shows this code:", device_word(v.device.as_deref()))))
                     .child(div().font_family(mono_font()).text_size(px(28.)).child(spaced))
                     .child(
                         div()
@@ -279,7 +277,7 @@ impl SettingsPage {
                 .gap(px(8.))
                 .text_size(px(12.5))
                 .child(icon("loader-circle", 14., theme.text_muted))
-                .child(format!("Pairing {} with {}…", v.device.as_deref().unwrap_or("the iPad"), v.machines.join(", ")))
+                .child(format!("Pairing {} with {}…", v.device.as_deref().unwrap_or("it"), v.machines.join(", ")))
                 .into_any_element(),
             _ => {
                 let link = v.link.clone();
@@ -294,9 +292,9 @@ impl SettingsPage {
                             .flex()
                             .flex_col()
                             .gap(px(10.))
-                            .child(div().text_size(px(13.)).child("Scan this with Muxin on your iPad."))
+                            .child(div().text_size(px(13.)).child("Scan this with Muxin on your iPhone or iPad."))
                             .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(format!("It gets {}. You'll see the same code on both screens before anything is paired.", v.machines.join(", "))))
-                            .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child("No camera? Copy the link and paste it on the iPad. It works for 10 minutes."))
+                            .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child("No camera? Copy the link and paste it in Muxin there. It works for 10 minutes."))
                             .child(
                                 div()
                                     .flex()
@@ -326,4 +324,9 @@ fn qr_image(link: &str) -> Option<Arc<RenderImage>> {
         if inside && colors[(my - quiet) * width + (mx - quiet)] == qrcode::Color::Dark { image::Rgba([0, 0, 0, 255]) } else { image::Rgba([255, 255, 255, 255]) }
     });
     Some(Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(picture)])))
+}
+
+/// "iPhone" or "iPad", for a device by the name it paired with.
+fn device_word(name: Option<&str>) -> &'static str {
+    if name.is_some_and(crate::fleet::ipads::is_phone) { "iPhone" } else { "iPad" }
 }

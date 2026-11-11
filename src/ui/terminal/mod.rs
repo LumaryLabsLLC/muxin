@@ -61,11 +61,12 @@ const CONTEXT: &str = "Terminal";
 
 /// Keys the app binds without ⌘ that a terminal program needs, released in
 /// terminals. On Linux and Windows the app's shortcuts use Ctrl, so those go
-/// to the program too (the app's menu and ⌘ on macOS still work).
+/// to the program too (the app's menu and ⌘ on macOS still work), except
+/// Ctrl+Shift ones and Ctrl+PageUp/PageDown, which terminals leave to the app.
 pub fn bind_keys(cx: &mut App) {
     let mut keys: Vec<String> = vec!["escape".into(), "/".into()];
     if !cfg!(target_os = "macos") {
-        keys.extend(super::shortcuts::ctrl_keys(cx));
+        keys.extend(super::shortcuts::terminal_ctrl_keys(cx));
         keys.push("ctrl-q".into());
     }
     cx.bind_keys(keys.iter().map(|k| KeyBinding::new(k, NoAction, Some(CONTEXT))));

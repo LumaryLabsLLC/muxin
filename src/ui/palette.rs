@@ -457,7 +457,7 @@ impl Root {
     }
 
     /// The machine or session on screen, and its name.
-    fn rename_target(&self) -> Option<(super::dialogs::RenameTarget, String)> {
+    pub(super) fn rename_target(&self) -> Option<(super::dialogs::RenameTarget, String)> {
         use super::dialogs::RenameTarget;
         let s = &self.snapshot;
         match &self.route {
@@ -476,7 +476,7 @@ impl Root {
             i
         };
         // The machine or session on screen comes first.
-        let rename = self.rename_target().map(|(_, name)| item(&format!("Rename {name}…"), "pencil", None, Run::Do(Command::Rename)));
+        let rename = self.rename_target().map(|(_, name)| item(&format!("Rename {name}…"), "pencil", Some("rename"), Run::Do(Command::Rename)));
         let share = match &self.route {
             Route::Session(id) if !self.engine.is_demo() => self.snapshot.sessions.iter().find(|x| &x.id == id && x.persistent).map(|x| item(&format!("Share {}…", x.title), "link", None, Run::Do(Command::Share))),
             Route::Machine(id) if !self.engine.is_demo() => self.snapshot.machines.iter().find(|m| &m.id == id && !m.is_down()).map(|m| item(&format!("Share {}…", m.name), "link", None, Run::Do(Command::Share))),

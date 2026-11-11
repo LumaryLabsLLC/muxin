@@ -60,6 +60,23 @@ actions!(
         SplitDown,
         NextPane,
         PreviousPane,
+        ClosePane,
+        ZoomPane,
+        NextSession,
+        PreviousSession,
+        NextAgent,
+        PreviousAgent,
+        GoToSession1,
+        GoToSession2,
+        GoToSession3,
+        GoToSession4,
+        GoToSession5,
+        GoToSession6,
+        GoToSession7,
+        GoToSession8,
+        GoToSession9,
+        RenameShown,
+        EndSession,
         QuickOpen,
         CommandPalette,
         ShowAbout,
@@ -158,6 +175,17 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("Add Machine…", AddMachine),
                 MenuItem::action("New Session…", NewSession),
+                MenuItem::separator(),
+                MenuItem::action("Next Session", NextSession),
+                MenuItem::action("Previous Session", PreviousSession),
+                MenuItem::action("Next Agent", NextAgent),
+                MenuItem::action("Previous Agent", PreviousAgent),
+                MenuItem::separator(),
+                MenuItem::action("Zoom Pane", ZoomPane),
+                MenuItem::action("Close Pane", ClosePane),
+                MenuItem::separator(),
+                MenuItem::action("Rename…", RenameShown),
+                MenuItem::action("End Session…", EndSession),
                 MenuItem::separator(),
                 MenuItem::action("Join a Share…", JoinShare),
             ],
@@ -443,6 +471,8 @@ pub struct Root {
     pub(super) service_pages: HashMap<String, Entity<super::services::ServicesView>>,
     /// Terminals split into panes (see panes.rs); a session page shows the layout it's in.
     pub(super) panes: Vec<super::panes::Panes>,
+    /// The pane of a split shown alone (⌘⇧↵), while it's the one on screen.
+    pub(super) zoomed: Option<String>,
     /// The terminal's share of a split page, and whether its divider is being dragged.
     pub(super) split_ratio: f32,
     pub(super) split_resizing: bool,
@@ -659,6 +689,7 @@ impl Root {
             logs: HashMap::new(),
             service_pages: HashMap::new(),
             panes: cx.global::<super::theme::Appearance>().panes.iter().filter_map(|t| super::panes::Panes::decode(t)).filter(|p| p.ids().len() > 1).collect(),
+            zoomed: None,
             split_ratio: cx.global::<super::theme::Appearance>().split_ratio.clamp(0.2, 0.8),
             split_resizing: false,
             machine_git: Default::default(),
@@ -3882,6 +3913,23 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &SplitDown, window, cx| this.split_session(true, window, cx)))
             .on_action(cx.listener(|this, _: &NextPane, window, cx| this.step_pane(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousPane, window, cx| this.step_pane(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &ClosePane, window, cx| this.close_shown_pane(window, cx)))
+            .on_action(cx.listener(|this, _: &ZoomPane, _, cx| this.toggle_zoom(cx)))
+            .on_action(cx.listener(|this, _: &NextSession, window, cx| this.step_session(1, false, window, cx)))
+            .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, false, window, cx)))
+            .on_action(cx.listener(|this, _: &NextAgent, window, cx| this.step_session(1, true, window, cx)))
+            .on_action(cx.listener(|this, _: &PreviousAgent, window, cx| this.step_session(-1, true, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToSession1, window, cx| this.go_to_session(1, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToSession2, window, cx| this.go_to_session(2, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToSession3, window, cx| this.go_to_session(3, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToSession4, window, cx| this.go_to_session(4, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToSession5, window, cx| this.go_to_session(5, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToSession6, window, cx| this.go_to_session(6, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToSession7, window, cx| this.go_to_session(7, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToSession8, window, cx| this.go_to_session(8, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToSession9, window, cx| this.go_to_session(9, window, cx)))
+            .on_action(cx.listener(|this, _: &RenameShown, window, cx| this.rename_shown(window, cx)))
+            .on_action(cx.listener(|this, _: &EndSession, window, cx| this.end_shown_session(window, cx)))
             .on_action(cx.listener(|this, _: &QuickOpen, window, cx| this.open_palette(false, window, cx)))
             .on_action(cx.listener(|this, _: &CommandPalette, window, cx| this.open_palette(true, window, cx)))
             .on_action(cx.listener(|this, _: &ShowAbout, window, cx| this.navigate(Route::About, window, cx)))

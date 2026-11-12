@@ -108,7 +108,7 @@ enum Command {
     /// Whether git on a machine can commit and push, and setting that up
     #[command(subcommand)]
     Git(GitCommand),
-    /// Which of Muxin's components (git, Node.js, agent CLIs, ...) a machine has
+    /// Which of Muxin's components (git, Node.js, agent CLIs, ...) a machine has, and installing the missing ones
     #[cfg(feature = "recipes")]
     #[command(subcommand)]
     Recipe(RecipeCommand),
@@ -1075,6 +1075,8 @@ struct GitSetupArgs {
 enum RecipeCommand {
     /// Run the components' checks on a machine (changes nothing): present, missing or unsupported
     Check(RecipeCheckArgs),
+    /// Install the components a machine is missing, requirements first (removes and updates nothing)
+    Apply(RecipeApplyArgs),
 }
 
 #[cfg(feature = "recipes")]
@@ -1086,6 +1088,21 @@ struct RecipeCheckArgs {
     machine: String,
     /// Component ids (what they require is checked too); none: all of them
     components: Vec<String>,
+}
+
+#[cfg(feature = "recipes")]
+#[derive(Args)]
+struct RecipeApplyArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// Component ids (what they require is installed first)
+    #[arg(required = true)]
+    components: Vec<String>,
+    /// Return right away with the operation id
+    #[arg(long)]
+    no_wait: bool,
 }
 
 #[derive(Args)]
@@ -1842,6 +1859,11 @@ fn main() -> ExitCode {
         Some(Command::Recipe(RecipeCommand::Check(a))) => {
             let req = api::RecipeCheckRequest { machine_id: a.machine, components: a.components };
             run(&runtime, &a.agent, async move |e| api::recipe_check(&e, req).await, cli::recipe_check)
+        }
+        #[cfg(feature = "recipes")]
+        Some(Command::Recipe(RecipeCommand::Apply(a))) => {
+            let req = api::RecipeApplyRequest { machine_id: a.machine, components: a.components, wait: !a.no_wait, timeout_secs: None };
+            run(&runtime, &a.agent, async move |e| api::recipe_apply(&e, req, api::Surface::Cli, stream_line).await, cli::recipe_apply)
         }
         Some(Command::Desktop(cmd)) => desktop(cmd, &runtime),
         Some(Command::Logs(a)) => logs(a, &runtime),

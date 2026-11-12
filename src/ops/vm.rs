@@ -185,6 +185,8 @@ impl Engine {
             return Err(format!("You already have a machine called \"{name}\"."));
         }
         let system = system(&req.system).ok_or_else(|| format!("Muxin doesn't know the system \"{}\". It knows: {}.", req.system, SYSTEMS.iter().map(|s| s.id).collect::<Vec<_>>().join(", ")))?;
+        #[cfg(feature = "recipes")]
+        crate::recipe::catalog()?.resolve(&req.install)?;
         let options = self.vm_options();
         let host = match req.host.as_deref().filter(|h| !h.trim().is_empty()) {
             Some(h) => {
@@ -240,6 +242,9 @@ impl Engine {
         let disk = req.disk_gb.unwrap_or(64).clamp(32, 4096);
         // The agent CLIs asked for, as npm packages (Linux; Windows has its own ways).
         let npm = if windows { String::new() } else { req.install.iter().filter_map(|a| crate::cloud::setup::npm_package(a)).collect::<Vec<_>>().join(" ") };
+        // With recipes, they're applied over ssh once it answers instead.
+        #[cfg(feature = "recipes")]
+        let npm = { drop(npm); String::new() };
 
         let script = with_params(
             Shell::Sh,
@@ -303,6 +308,8 @@ impl Engine {
         } else {
             self.op_log(op, if npm.is_empty() { "▸ Waiting for it to answer ssh".to_string() } else { format!("▸ Installing {} and waiting for it to answer ssh (a few minutes)", req.install.join(", ")) });
             wait_for_ssh(&spec, Duration::from_secs(12 * 60)).await.map_err(|_| format!("{name} didn't answer ssh within 12 minutes. Its log: `docker logs {container}` on {}.", host.name))?;
+            #[cfg(feature = "recipes")]
+            self.recipe_setup(op, &id, &req.install).await;
         }
 
         // Muxin's agent, so terminals, sessions and files work right away.

@@ -1,0 +1,7 @@
+id = "deno"
+name = "Deno"
+# Its installer needs unzip.
+requires = ["unzip"]
+# In ~/.deno/bin, which the installer adds to the shell's rc file.
+check = 'PATH="$PATH:$HOME/.deno/bin" deno --version'
+install = "curl -fsSL https://deno.land/install.sh | sh -s -- -y"

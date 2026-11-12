@@ -1,0 +1,6 @@
+id = "ruby"
+name = "Ruby"
+os = ["linux"]
+root = true
+check = "ruby --version"
+install = "pkg_install ruby-full"

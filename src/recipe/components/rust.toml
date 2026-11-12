@@ -1,0 +1,6 @@
+id = "rust"
+name = "Rust"
+# rustup, as the user, into ~/.cargo; it adds ~/.cargo/bin to PATH from the
+# next login.
+check = 'PATH="$PATH:$HOME/.cargo/bin" cargo --version'
+install = "curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"

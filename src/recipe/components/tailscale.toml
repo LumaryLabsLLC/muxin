@@ -1,0 +1,7 @@
+id = "tailscale"
+name = "Tailscale"
+os = ["linux"]
+root = true
+# Installing only: joining a tailnet needs its auth key or a person's approval.
+check = "tailscale version"
+install = "curl -fsSL https://tailscale.com/install.sh | sh"

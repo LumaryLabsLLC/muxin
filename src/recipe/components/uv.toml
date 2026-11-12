@@ -1,0 +1,5 @@
+id = "uv"
+name = "uv"
+# In ~/.local/bin, which the installer adds to PATH from the next login.
+check = 'PATH="$PATH:$HOME/.local/bin" uv --version'
+install = "curl -LsSf https://astral.sh/uv/install.sh | sh"

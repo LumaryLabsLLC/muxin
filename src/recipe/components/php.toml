@@ -1,0 +1,9 @@
+id = "php"
+name = "PHP"
+os = ["linux"]
+root = true
+check = "php --version && command -v composer"
+install = '''
+pkg_install php-cli php-mbstring php-xml php-curl php-zip php-sqlite3 php-intl
+curl -fsSL https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+'''

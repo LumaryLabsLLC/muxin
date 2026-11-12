@@ -109,6 +109,13 @@ enum Target {
 }
 
 impl Target {
+    fn of(engine: &Engine) -> Target {
+        match engine.demo_world() {
+            Some(w) => Target::Demo(w.clone()),
+            None => Target::Machine,
+        }
+    }
+
     /// "root" | "passwordless" | "password", from a machine check run now (the last one may be old).
     async fn sudo(&self, spec: &MachineSpec, probe: Option<ProbeResult>) -> Option<String> {
         match self {
@@ -245,10 +252,7 @@ impl Engine {
         }
         let ids: Vec<&str> = components.iter().map(|c| c.id.as_str()).collect();
         let op = self.begin_op("recipe", format!("Apply {} to {}", ids.join(", "), spec.name), Some(spec.id.clone()), None);
-        let target = match self.demo_world() {
-            Some(w) => Target::Demo(w.clone()),
-            None => Target::Machine,
-        };
+        let target = Target::of(self);
         let (tx, rx) = oneshot::channel();
         let me = self.clone();
         self.runtime().spawn(async move {
@@ -263,6 +267,36 @@ impl Engine {
             me.op_finish(op, result);
         });
         Ok((op, rx))
+    }
+
+    /// Applies `ids` to a machine Muxin has just made and added (cloud_create,
+    /// vm_create), inside the operation making it, once it answers ssh. As
+    /// with a cloud machine's extras, what doesn't install is a warning in
+    /// that log, and the machine is still ready.
+    pub async fn recipe_setup(self: &Arc<Self>, op: u64, machine_id: &str, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        let done = async {
+            let catalog = super::catalog()?;
+            let components = catalog.resolve(ids)?;
+            let others: Vec<Component> = catalog.conflicting(&components).into_iter().cloned().collect();
+            let components: Vec<Component> = components.into_iter().cloned().collect();
+            let (spec, probe) = self.machine(machine_id).ok_or("The new machine went missing from config.toml.")?;
+            apply(self, op, &spec, probe, &components, &others, &Target::of(self)).await
+        }
+        .await;
+        match done {
+            Ok(done) => {
+                let missed: Vec<&Applied> = done.iter().filter(|a| matches!(a.result, "failed" | "skipped")).collect();
+                if !missed.is_empty() {
+                    let names: Vec<&str> = missed.iter().map(|a| a.name.as_str()).collect();
+                    let ids: Vec<&str> = missed.iter().map(|a| a.id.as_str()).collect();
+                    self.op_log(op, format!("! {} didn't install. Try again with `muxin recipe apply {machine_id} {}`.", names.join(", "), ids.join(" ")));
+                }
+            }
+            Err(e) => self.op_log(op, format!("! Nothing was installed: {e}")),
+        }
     }
 }
 
@@ -422,13 +456,50 @@ mod tests {
 
         // Refused before any operation starts.
         let none = apply_tool(&engine, json!({"machine_id": "dev-1", "components": []})).await;
-        assert_eq!((none["structuredContent"]["error"]["code"].as_str(), none["structuredContent"]["error"]["hint"].as_str()), (Some("invalid"), Some("Known components: git, gh, node, claude")));
-        let unknown = apply_tool(&engine, json!({"machine_id": "dev-1", "components": ["docker"]})).await;
+        assert_eq!(none["structuredContent"]["error"]["code"], "invalid");
+        assert!(none["structuredContent"]["error"]["hint"].as_str().unwrap().starts_with("Known components: git, docker, gh, node,"), "{none}");
+        let unknown = apply_tool(&engine, json!({"machine_id": "dev-1", "components": ["podman"]})).await;
         assert_eq!(unknown["structuredContent"]["error"]["code"], "invalid");
         let no_wait = apply_tool(&engine, json!({"machine_id": "pebble", "components": ["claude"], "wait": false})).await;
         assert_eq!((no_wait["structuredContent"]["finished"].as_bool(), results(&no_wait["structuredContent"]).len()), (Some(false), 0));
         let busy = apply_tool(&engine, json!({"machine_id": "pebble", "components": ["gh"]})).await;
         assert_eq!(busy["structuredContent"]["error"]["code"], "busy", "{busy}");
         assert!(catalog().unwrap().get("claude").unwrap().root_unless.is_some());
+    }
+
+    /// The log of the operation `op`.
+    fn op_log(engine: &Arc<Engine>, op: u64) -> Vec<String> {
+        engine.republish();
+        engine.current().operations.iter().find(|o| o.id == op).map(|o| o.log.clone()).unwrap_or_default()
+    }
+
+    /// As cloud_create and vm_create run it, inside their own operation.
+    #[tokio::test]
+    async fn a_new_machine_gets_its_recipe_inside_the_operation_making_it() {
+        let engine = Engine::new(Paths::resolve(Some(std::env::temp_dir().join("muxen-recipe-setup-test")), None), true);
+        engine.run_check(None).await;
+        let ids = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        let op = engine.begin_op("vm-create", "Create dev-1".into(), None, None);
+        Box::pin(engine.recipe_setup(op, "dev-1", &ids(&["codex", "gh"]))).await;
+        let log = op_log(&engine, op);
+        let at = |line: &str| log.iter().position(|l| l == line).unwrap_or_else(|| panic!("no {line:?} in {log:?}"));
+        assert!(at("✓ Node.js is installed") < at("✓ Codex is installed"), "{log:?}");
+        assert!(log.contains(&"✓ GitHub CLI was already there".to_string()) && !log.iter().any(|l| l.starts_with('!')), "{log:?}");
+        assert_eq!(engine.current().operations.iter().find(|o| o.id == op).unwrap().status, "running", "the caller finishes it");
+
+        // sudo wants a password: a warning with the way to try again, and nothing ran.
+        let op = engine.begin_op("cloud-create", "Create beacon".into(), None, None);
+        Box::pin(engine.recipe_setup(op, "beacon", &ids(&["pi"]))).await;
+        let log = op_log(&engine, op);
+        assert_eq!(log.last().map(String::as_str), Some("! Node.js, Pi didn't install. Try again with `muxin recipe apply beacon node pi`."), "{log:?}");
+        assert!(!log.iter().any(|l| l.starts_with("▸ Installing")), "{log:?}");
+
+        // Nothing asked for: nothing to do, not even a check. Unknown ids were refused before the machine was made.
+        let op = engine.begin_op("vm-create", "Create pebble".into(), None, None);
+        Box::pin(engine.recipe_setup(op, "pebble", &[])).await;
+        assert!(op_log(&engine, op).is_empty());
+        Box::pin(engine.recipe_setup(op, "pebble", &ids(&["podman"]))).await;
+        assert_eq!(op_log(&engine, op), ["! Nothing was installed: No component called \"podman\"."]);
     }
 }

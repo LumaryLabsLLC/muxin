@@ -1,0 +1,8 @@
+id = "amp"
+name = "Amp"
+requires = ["node"]
+root = true
+root_unless = 'test -w "$(npm prefix -g)"'
+check = "command -v amp"
+install = "npm install -g @sourcegraph/amp"
+update = "npm install -g @sourcegraph/amp@latest"

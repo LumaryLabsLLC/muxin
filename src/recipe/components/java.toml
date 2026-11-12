@@ -1,0 +1,6 @@
+id = "java"
+name = "Java"
+os = ["linux"]
+root = true
+check = "javac -version && command -v mvn"
+install = "pkg_install default-jdk-headless maven"

@@ -1,0 +1,5 @@
+id = "unzip"
+name = "unzip"
+root = true
+check = "command -v unzip"
+install = "pkg_install unzip"

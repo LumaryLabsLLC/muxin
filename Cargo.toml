@@ -123,6 +123,8 @@ default = ["gui"]
 # The native window. Build with `--no-default-features` for a headless CLI + MCP
 # server that needs no GUI libraries (Linux servers, CI, agent boxes).
 gui = ["dep:gpui", "dep:unicode-segmentation", "dep:cocoa", "dep:objc", "dep:block", "dep:raw-window-handle", "dep:alacritty_terminal", "dep:image", "dep:smallvec", "dep:ksni", "dep:zbus", "dep:windows", "dep:tray-icon", "dep:resvg", "dep:x11rb", "dep:wayland-client", "dep:wayland-backend", "dep:wayland-protocols"]
+# Recipes (src/recipe): components a machine can have, and checking which it has. Off until they can install too.
+recipes = []
 
 [profile.release]
 lto = "thin"

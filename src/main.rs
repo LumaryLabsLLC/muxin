@@ -13,6 +13,8 @@ mod instance;
 mod mcp;
 mod ops;
 mod probe;
+#[cfg(feature = "recipes")]
+mod recipe;
 #[cfg(feature = "gui")]
 mod renamed;
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
@@ -106,6 +108,10 @@ enum Command {
     /// Whether git on a machine can commit and push, and setting that up
     #[command(subcommand)]
     Git(GitCommand),
+    /// Which of Muxin's components (git, Node.js, agent CLIs, ...) a machine has
+    #[cfg(feature = "recipes")]
+    #[command(subcommand)]
+    Recipe(RecipeCommand),
     /// How Muxin reaches a machine (direct, ssh link); --direct on|off to change it
     Connection(ConnectionArgs),
     /// iPhones and iPads that reach your machines (Muxin for iPhone and for iPad): pair one with a QR code, list them, unpair one
@@ -1064,6 +1070,24 @@ struct GitSetupArgs {
     credentials: bool,
 }
 
+#[cfg(feature = "recipes")]
+#[derive(Subcommand)]
+enum RecipeCommand {
+    /// Run the components' checks on a machine (changes nothing): present, missing or unsupported
+    Check(RecipeCheckArgs),
+}
+
+#[cfg(feature = "recipes")]
+#[derive(Args)]
+struct RecipeCheckArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// Component ids (what they require is checked too); none: all of them
+    components: Vec<String>,
+}
+
 #[derive(Args)]
 struct GhUseArgs {
     #[command(flatten)]
@@ -1814,6 +1838,11 @@ fn main() -> ExitCode {
         Some(Command::Github(cmd)) => github(cmd, &runtime),
         Some(Command::Checkouts(a)) => checkouts(a, &runtime),
         Some(Command::Git(cmd)) => git(cmd, &runtime),
+        #[cfg(feature = "recipes")]
+        Some(Command::Recipe(RecipeCommand::Check(a))) => {
+            let req = api::RecipeCheckRequest { machine_id: a.machine, components: a.components };
+            run(&runtime, &a.agent, async move |e| api::recipe_check(&e, req).await, cli::recipe_check)
+        }
         Some(Command::Desktop(cmd)) => desktop(cmd, &runtime),
         Some(Command::Logs(a)) => logs(a, &runtime),
         Some(Command::Services(a)) => services(a, &runtime),

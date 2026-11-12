@@ -3820,6 +3820,38 @@ pub async fn git_setup(engine: &Arc<Engine>, req: GitSetupRequest) -> ApiResult<
     Ok(git_out(engine, &m, setup).await)
 }
 
+#[cfg(feature = "recipes")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecipeCheckRequest {
+    pub machine_id: String,
+    /// Component ids; what they require is checked too. None: every component.
+    #[serde(default)]
+    pub components: Vec<String>,
+}
+
+#[cfg(feature = "recipes")]
+#[derive(Debug, Serialize)]
+pub struct RecipeCheckOut {
+    pub machine_id: String,
+    #[serde(flatten)]
+    pub check: crate::recipe::MachineCheck,
+}
+
+/// Which components a machine has: their checks, run in one go. Changes nothing.
+#[cfg(feature = "recipes")]
+pub async fn recipe_check(engine: &Arc<Engine>, req: RecipeCheckRequest) -> ApiResult<RecipeCheckOut> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    let catalog = crate::recipe::catalog().map_err(|e| ApiError::new("internal", e))?;
+    let components = catalog.resolve(&req.components).map_err(|e| {
+        let unknown = e.starts_with("No component");
+        let err = ApiError::invalid(e);
+        if unknown { err.with_hint(format!("Known components: {}", catalog.ids().join(", "))) } else { err }
+    })?;
+    let check = engine.recipe_check(&m.id, &components).await.map_err(session_error)?;
+    Ok(RecipeCheckOut { machine_id: m.id, check })
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DirectRequest {

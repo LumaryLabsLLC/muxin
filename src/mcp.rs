@@ -442,6 +442,8 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "wake_machine" => ok(api::wake_machine(engine, args(a)?).await?),
         "direct_connection" => ok(api::set_direct(engine, args(a)?).await?),
         "git_setup" => ok(api::git_setup(engine, args(a)?).await?),
+        #[cfg(feature = "recipes")]
+        "recipe_check" => ok(api::recipe_check(engine, args(a)?).await?),
         other => Err(ApiError::not_found(format!("Unknown tool: {other}"))),
     }
 }
@@ -477,7 +479,7 @@ pub fn tools() -> Vec<Value> {
     let agent_list = agent_ids.join(", ");
     let agent_names = crate::fleet::sessions::AGENTS.iter().filter(|a| a.id != "shell").map(|a| a.name).collect::<Vec<_>>().join(", ");
     let handoff_list = agent_ids.iter().filter(|a| **a != "shell").copied().collect::<Vec<_>>().join(", ");
-    vec![
+    let tools = vec![
         json!({
             "name": "status",
             "description": "Overview of all the user's machines: counts of working/idle/offline runners, queued jobs, GitHub connection, every machine with CPU/memory/disk/uptime and a runner summary, and an `attention` list of problems (unreachable machines, stopped runners, jobs no runner can take, low disk). Call this first. Uses the last machine check unless refresh=true, which re-checks every machine over ssh first.",
@@ -1375,7 +1377,19 @@ pub fn tools() -> Vec<Value> {
             }), &["machine_id", "path", "action"]),
             "annotations": annotations("Git fetch/pull/push", false, false, false, true),
         }),
-    ]
+    ];
+    #[cfg(feature = "recipes")]
+    let tools = [tools, vec![json!({
+        "name": "recipe_check",
+        "description": "Which of Muxin's components (git, the GitHub CLI, Node.js, Claude Code) a machine has: each is present, missing, or unsupported on its system. Runs their read-only checks in one go, in the user's login shell over ssh (or locally for host \"local\"). Changes nothing.",
+        "inputSchema": schema(json!({
+            "machine_id": { "type": "string", "description": MACHINE_ID },
+            "components": { "type": "array", "items": { "type": "string", "enum": crate::recipe::catalog().map(|c| c.ids()).unwrap_or_default() }, "description": "Component ids; what they require is checked too. Omit for all." }
+        }), &["machine_id"]),
+        "annotations": annotations("Check components", true, false, true, true),
+    })]]
+    .concat();
+    tools
 }
 
 /// Ready-to-paste setup for common MCP clients.
@@ -1411,7 +1425,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), 102);
+        assert_eq!(tools.len(), if cfg!(feature = "recipes") { 103 } else { 102 });
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

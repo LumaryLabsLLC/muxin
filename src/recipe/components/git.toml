@@ -1,0 +1,11 @@
+id = "git"
+name = "git"
+root = true
+# A Mac's /usr/bin/git asks to install the developer tools when they're
+# missing, so there it only counts once they're installed.
+check = '''
+command -v git >/dev/null || exit 1
+[ "$(command -v git)" != /usr/bin/git ] || [ "$(uname -s)" != Darwin ] || xcode-select -p >/dev/null || exit 1
+git --version
+'''
+install = "pkg_install git"

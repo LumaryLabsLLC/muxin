@@ -886,6 +886,20 @@ pub fn recipe_check(r: &crate::api::RecipeCheckOut) -> String {
     out
 }
 
+/// What applying did (its log already streamed to stderr while it ran).
+#[cfg(feature = "recipes")]
+pub fn recipe_apply(r: &crate::api::RecipeApplyOut) -> String {
+    let o = &r.operation;
+    let mut out = if r.finished { format!("✓ {} (operation {})\n", o.title, o.id) } else { format!("… {} is still running (operation {})\n", o.title, o.id) };
+    for c in &r.components {
+        let _ = writeln!(out, "  {:<14}{}", c.name, c.result);
+    }
+    if let Some(n) = &r.next {
+        let _ = writeln!(out, "{n}");
+    }
+    out
+}
+
 pub fn git_setup(g: &crate::api::GitSetupOut) -> String {
     let Some(version) = &g.setup.git else {
         return format!("git isn't installed on {}.\n", g.machine_id);

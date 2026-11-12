@@ -444,6 +444,8 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "git_setup" => ok(api::git_setup(engine, args(a)?).await?),
         #[cfg(feature = "recipes")]
         "recipe_check" => ok(api::recipe_check(engine, args(a)?).await?),
+        #[cfg(feature = "recipes")]
+        "recipe_apply" => ok(api::recipe_apply(engine, args(a)?, Surface::Mcp, |_| {}).await?),
         other => Err(ApiError::not_found(format!("Unknown tool: {other}"))),
     }
 }
@@ -1387,6 +1389,16 @@ pub fn tools() -> Vec<Value> {
             "components": { "type": "array", "items": { "type": "string", "enum": crate::recipe::catalog().map(|c| c.ids()).unwrap_or_default() }, "description": "Component ids; what they require is checked too. Omit for all." }
         }), &["machine_id"]),
         "annotations": annotations("Check components", true, false, true, true),
+    }), json!({
+        "name": "recipe_apply",
+        "description": "Install what's missing of Muxin's components (git, the GitHub CLI, Node.js, Claude Code) on a machine, as an operation: checks first, installs only what's missing in order (requirements first) in the user's login shell, checks each again, and says per component already, installed, failed, skipped (not tried; error says why, often with a hint) or unsupported. Never removes, updates or rolls back anything, so a second run changes nothing. On Linux, steps that need root run through `sudo -n` and are skipped when sudo asks for a password. Changes the real machine: confirm with the user first unless they asked for exactly that.",
+        "inputSchema": schema(json!({
+            "machine_id": { "type": "string", "description": MACHINE_ID },
+            "components": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": crate::recipe::catalog().map(|c| c.ids()).unwrap_or_default() }, "description": "Component ids to install where missing; what they require goes first." },
+            "wait": { "type": "boolean", "description": "Wait for it to finish. Default true." },
+            "timeout_secs": { "type": "integer", "minimum": 1, "description": "How long to wait. Default 900." }
+        }), &["machine_id", "components"]),
+        "annotations": annotations("Apply components", false, false, true, true),
     })]]
     .concat();
     tools
@@ -1425,7 +1437,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), if cfg!(feature = "recipes") { 103 } else { 102 });
+        assert_eq!(tools.len(), if cfg!(feature = "recipes") { 104 } else { 102 });
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

@@ -3852,6 +3852,79 @@ pub async fn recipe_check(engine: &Arc<Engine>, req: RecipeCheckRequest) -> ApiR
     Ok(RecipeCheckOut { machine_id: m.id, check })
 }
 
+#[cfg(feature = "recipes")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecipeApplyRequest {
+    pub machine_id: String,
+    /// Component ids to install where they're missing; what they require goes first.
+    pub components: Vec<String>,
+    /// Wait for it to finish (default true).
+    #[serde(default = "yes")]
+    pub wait: bool,
+    /// How long to wait, in seconds (default 900).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[cfg(feature = "recipes")]
+#[derive(Debug, Serialize)]
+pub struct RecipeApplyOut {
+    pub machine_id: String,
+    pub operation: OperationOut,
+    /// False when `wait` was off or the timeout passed; poll get_operation.
+    pub finished: bool,
+    /// Once finished, each component (requirements first) and what became of it.
+    pub components: Vec<crate::recipe::Applied>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+}
+
+/// Installs what's missing of some components on a machine, as an operation:
+/// checks, installs in order, checks each again. Fails when any component
+/// failed or was skipped; `details` then holds every component's result.
+#[cfg(feature = "recipes")]
+pub async fn recipe_apply(engine: &Arc<Engine>, req: RecipeApplyRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<RecipeApplyOut> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    let catalog = crate::recipe::catalog().map_err(|e| ApiError::new("internal", e))?;
+    let known = || format!("Known components: {}", catalog.ids().join(", "));
+    if req.components.is_empty() {
+        return Err(ApiError::invalid("Say which components to apply.").with_hint(known()));
+    }
+    let components = catalog.resolve(&req.components).map_err(|e| {
+        let unknown = e.starts_with("No component");
+        let err = ApiError::invalid(e);
+        if unknown { err.with_hint(known()) } else { err }
+    })?;
+    let others = catalog.conflicting(&components).into_iter().cloned().collect();
+    let (op, mut results) = engine.recipe_apply(&m.id, components.into_iter().cloned().collect(), others).map_err(op_error)?;
+    let operation = if req.wait {
+        wait_operation(engine, op, Duration::from_secs(req.timeout_secs.unwrap_or(INSTALL_TIMEOUT_SECS).max(1)), on_line).await
+    } else {
+        engine.current().operations.iter().find(|o| o.id == op).cloned()
+    }
+    .ok_or_else(|| ApiError::new("internal", format!("Operation {op} disappeared.")))?;
+    let finished = operation.status != "running";
+    let out = RecipeApplyOut {
+        machine_id: m.id.clone(),
+        operation: operation_out(&operation, DEFAULT_TAIL),
+        finished,
+        components: if finished { results.try_recv().unwrap_or_default() } else { Vec::new() },
+        next: (!finished).then(|| {
+            surface.say(
+                format!("Still running. Poll get_operation(operation_id={op}) until status isn't \"running\"; its log ends with a line per component."),
+                format!("Still running in the background; this command stopped waiting. See what's there with `muxin recipe check {}`.", m.id),
+            )
+        }),
+    };
+    if operation.status == "failed" {
+        let message = operation.error.clone().unwrap_or_else(|| "The operation failed.".into());
+        let hint = out.components.iter().find_map(|c| c.hint.clone()).or_else(|| failure_hint(&message));
+        return Err(ApiError { code: "operation_failed", message, hint, details: serde_json::to_value(&out).ok() });
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DirectRequest {

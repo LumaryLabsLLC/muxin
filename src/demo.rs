@@ -172,6 +172,9 @@ pub struct World {
     inventory: Mutex<String>,
     /// Files in the demo's agent workspaces, by workspace id (see fleet::workspaces).
     pub(crate) workspace_files: Mutex<std::collections::HashMap<String, crate::fleet::workspaces::DemoTree>>,
+    /// Components installed in the demo, as (machine id, component id) (see recipe::apply).
+    #[cfg(feature = "recipes")]
+    pub(crate) recipes: Mutex<std::collections::HashSet<(String, String)>>,
 }
 
 /// Machines added in the demo get these specs.
@@ -256,6 +259,8 @@ impl World {
             sim: Mutex::new(sim),
             inventory: Mutex::new(inventory_text(now)),
             workspace_files: Mutex::new(std::collections::HashMap::new()),
+            #[cfg(feature = "recipes")]
+            recipes: Mutex::new(std::collections::HashSet::new()),
         }
     }
 

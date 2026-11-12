@@ -5,9 +5,12 @@
 //! root. A recipe is a list of component ids, never paths. Muxin's own
 //! components are the TOML files in components/, built into the binary.
 //!
-//! For now Muxin reads them and checks machines: every check of a recipe runs
-//! in one script (`recipe_check`), changing nothing. `install` and `update`
-//! are read and checked, not run.
+//! Muxin checks machines with them (every check of a recipe in one script,
+//! `recipe_check`, changing nothing) and applies them (`recipe_apply`, in
+//! apply.rs: installs what's missing). `update` is read and checked, not run.
+
+mod apply;
+pub use apply::Applied;
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -52,6 +55,11 @@ pub struct Component {
     /// run as the user, as Homebrew wants.) Steps never call sudo themselves.
     #[serde(default)]
     pub root: bool,
+    /// With root: a test, run as the user like `check`, that lets the steps run
+    /// as the user when it exits 0. For tools that live where whoever installed
+    /// them put them: npm's global folder is the user's own when their Node.js
+    /// is (mise, nvm, Homebrew), and only root's when it's the system's.
+    pub root_unless: Option<String>,
     /// Exits 0 when the component is there. Fast, no network, changes nothing.
     pub check: String,
     pub install: String,
@@ -111,7 +119,10 @@ pub fn parse(file: &str, text: &str) -> Result<Component, String> {
             return bad(format!("{} conflicts with {} without saying why.", c.id, x.id));
         }
     }
-    if [Some(&c.install), c.update.as_ref()].into_iter().flatten().any(|s| calls_sudo(s)) {
+    if c.root_unless.as_ref().is_some_and(|test| !c.root || test.trim().is_empty()) {
+        return bad(format!("{}'s root_unless needs root = true and a test.", c.id));
+    }
+    if [Some(&c.install), c.update.as_ref(), c.root_unless.as_ref()].into_iter().flatten().any(|s| calls_sudo(s)) {
         return bad(if c.root {
             format!("{}'s steps run as root already; leave out sudo.", c.id)
         } else {
@@ -174,6 +185,13 @@ impl Catalog {
             }
         }
         Ok(order)
+    }
+
+    /// The other components that can't be on a machine with any of `picked`,
+    /// whichever side says so: applying looks for them first.
+    pub fn conflicting(&self, picked: &[&Component]) -> Vec<&Component> {
+        let apart = |a: &Component, b: &Component| a.conflicts.iter().any(|x| x.id == b.id) || b.conflicts.iter().any(|x| x.id == a.id);
+        self.components.iter().filter(|o| !picked.iter().any(|p| p.id == o.id) && picked.iter().any(|p| apart(p, o))).collect()
     }
 
     fn order<'a>(&'a self, picked: &[&'a Component]) -> Result<Vec<&'a Component>, String> {
@@ -273,9 +291,13 @@ impl Engine {
             // Steps are sh: no component has any for Windows.
             return Ok(MachineCheck { os: "windows".into(), components: components.iter().map(|c| state(c, "unsupported")).collect() });
         }
-        if self.demo_world().is_some() {
-            let os = probe.and_then(|p| p.os).unwrap_or_default();
-            let components = components.iter().map(|c| state(c, if c.os.contains(&os) { "present" } else { "unsupported" })).collect();
+        if let Some(world) = self.demo_world() {
+            // A CLI run hasn't checked its machines yet: ask the demo's check.
+            let os = match probe.and_then(|p| p.os) {
+                Some(os) => os,
+                None => world.probe(&spec).await.os.unwrap_or_default(),
+            };
+            let components = components.iter().map(|c| state(c, apply::demo_state(world, &spec.id, &os, c))).collect();
             return Ok(MachineCheck { os, components });
         }
         if !spec.is_checkable() {
@@ -360,6 +382,11 @@ mod tests {
         let err = parse("x.toml", &component("x", "root = true").replace("install = \"true\"", "install = \"/usr/bin/sudo -n apk add x\"")).unwrap_err();
         assert!(err.contains("run as root already"), "{err}");
         assert!(parse("x.toml", &component("x", "root = true").replace("install = \"true\"", "install = \"echo x > /etc/sudoers.d/x\"")).is_ok());
+        let refused = |extra: &str| parse("x.toml", &component("x", extra)).unwrap_err();
+        assert!(refused("root_unless = \"test -w /x\"").contains("needs root = true and a test"));
+        assert!(refused("root = true\nroot_unless = \" \"").contains("needs root = true and a test"));
+        assert!(refused("root = true\nroot_unless = \"sudo -n true\"").contains("run as root already"));
+        assert_eq!(parse("x.toml", &component("x", "root = true\nroot_unless = \"test -w /x\"")).unwrap().root_unless.as_deref(), Some("test -w /x"));
     }
 
     #[test]
@@ -384,6 +411,11 @@ mod tests {
         let catalog = load(&[component("a", reason), component("b", ""), component("c", "requires = [\"b\"]")]).unwrap();
         assert_eq!(catalog.resolve(&["c".into(), "a".into()]).unwrap_err(), "B and A can't go together: both own the docker command");
         assert_eq!(ids(&catalog.resolve(&["a".into()]).unwrap()), ["a"]);
+        // Applying looks for what a recipe can't go with, whichever side says so.
+        let pick = |id: &str| vec![catalog.get(id).unwrap()];
+        assert_eq!(ids(&catalog.conflicting(&pick("a"))), ["b"]);
+        assert_eq!(ids(&catalog.conflicting(&pick("b"))), ["a"]);
+        assert!(catalog.conflicting(&pick("c")).is_empty(), "c requires b; only a conflicts with b");
     }
 
     #[test]
@@ -447,5 +479,17 @@ mod tests {
         assert_eq!(unknown["structuredContent"]["error"]["hint"], "Known components: git, gh, node, claude");
         let nowhere = call_tool(&engine, &session, "recipe_check", json!({"machine_id": "nope"})).await;
         assert_eq!(nowhere["structuredContent"]["error"]["code"], "not_found");
+    }
+
+    /// As from the CLI: no machine has been checked yet.
+    #[tokio::test]
+    async fn the_demo_knows_a_machines_system_before_any_check() {
+        let engine = Engine::new(Paths::resolve(Some(std::env::temp_dir().join("muxen-recipe-test-unchecked")), None), true);
+        let all = catalog().unwrap().resolve(&[]).unwrap();
+        let mac = engine.recipe_check("forge", &all).await.unwrap();
+        assert_eq!((mac.os.as_str(), mac.components.iter().all(|c| c.result == "present")), ("darwin", true));
+        let linux = engine.recipe_check("dev-1", &all).await.unwrap();
+        let results: Vec<&str> = linux.components.iter().map(|c| c.result).collect();
+        assert_eq!((linux.os.as_str(), results), ("linux", vec!["present", "present", "missing", "missing"]));
     }
 }

@@ -1,0 +1,7 @@
+id = "claude"
+name = "Claude Code"
+requires = ["node"]
+root = true
+check = "command -v claude"
+install = "npm install -g @anthropic-ai/claude-code"
+update = "npm install -g @anthropic-ai/claude-code@latest"

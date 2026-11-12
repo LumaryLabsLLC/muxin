@@ -1,0 +1,20 @@
+id = "gh"
+name = "GitHub CLI"
+root = true
+check = "gh --version"
+# Debian and Ubuntu: GitHub's own apt repository, as cloud machines get it.
+# Elsewhere: the system's package (github-cli on Alpine and Arch).
+install = '''
+if command -v apt-get >/dev/null 2>&1; then
+  install -d -m 755 /etc/apt/keyrings
+  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
+  apt-get -o DPkg::Lock::Timeout=600 update -y
+  pkg_install gh
+elif command -v apk >/dev/null 2>&1 || command -v pacman >/dev/null 2>&1; then
+  pkg_install github-cli
+else
+  pkg_install gh
+fi
+'''

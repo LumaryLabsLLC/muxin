@@ -1,0 +1,16 @@
+id = "node"
+name = "Node.js"
+root = true
+check = "node --version && command -v npm"
+# Debian and Ubuntu: Node.js 22 from NodeSource, as cloud machines get it.
+# A Mac: Homebrew's. Elsewhere: the system's packages, as VMs get it.
+install = '''
+if command -v brew >/dev/null 2>&1; then
+  pkg_install node
+elif command -v apt-get >/dev/null 2>&1; then
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  pkg_install nodejs
+else
+  pkg_install nodejs npm
+fi
+'''

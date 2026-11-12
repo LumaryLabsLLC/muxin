@@ -877,6 +877,15 @@ pub fn connection(c: &crate::fleet::connection::Connection) -> String {
     out
 }
 
+#[cfg(feature = "recipes")]
+pub fn recipe_check(r: &crate::api::RecipeCheckOut) -> String {
+    let mut out = format!("{} ({})\n", r.machine_id, r.check.os);
+    for c in &r.check.components {
+        let _ = writeln!(out, "  {:<14}{}", c.name, c.result);
+    }
+    out
+}
+
 pub fn git_setup(g: &crate::api::GitSetupOut) -> String {
     let Some(version) = &g.setup.git else {
         return format!("git isn't installed on {}.\n", g.machine_id);

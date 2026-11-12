@@ -16,6 +16,7 @@ RUN userdel -r node 2>/dev/null; \
  && mkdir -p /opt/agents && chown "$UID:$GID" /opt/agents
 ENV NPM_CONFIG_PREFIX=/opt/agents PATH=/opt/agents/bin:$PATH
 USER box
-RUN npm install -g @anthropic-ai/claude-code @openai/codex @sourcegraph/amp opencode-ai @google/gemini-cli @mariozechner/pi-coding-agent \
+RUN npm install -g @anthropic-ai/claude-code @openai/codex @sourcegraph/amp opencode-ai @google/gemini-cli \
+ && npm install -g --ignore-scripts @earendil-works/pi-coding-agent \
  && npm cache clean --force
 USER root

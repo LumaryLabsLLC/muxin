@@ -633,10 +633,14 @@ pub struct Settings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ChatSettings {
-    /// What answers: "claude" (Claude Code) or "codex", or "" for the first
-    /// one installed on this computer.
+    /// What answers: "claude" (Claude Code), "codex", or "chatgpt" (Muxin's
+    /// own, on a ChatGPT plan signed in to); "" for the first there is.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub brain: String,
+    /// The model that answers on a ChatGPT plan, by its id; "" for the first
+    /// one the account lists.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub model: String,
     /// "bypass": new chats start without asking before tools that change
     /// things. Anything else (the default): they ask.
     #[serde(skip_serializing_if = "String::is_empty")]

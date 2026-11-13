@@ -18,7 +18,7 @@ use crate::fleet::Engine;
 
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS: &str = "\
+pub(crate) const INSTRUCTIONS: &str = "\
 Muxin is one app for all of the user's machines (reached with the system ssh, or directly for \
 host \"local\"): agent sessions, desktops, files, GitHub, workspaces, cloud machines, and the \
 self-hosted GitHub Actions runners on them.

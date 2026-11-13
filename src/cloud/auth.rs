@@ -173,19 +173,6 @@ async fn oauth_token(dir: &Path) -> Result<String, String> {
     Ok(fresh.access_token)
 }
 
-/// PKCE: a random verifier, and its SHA-256 (base64url) for the authorization request.
-fn pkce() -> (String, String) {
-    let verifier = crate::util::random_token(64);
-    let challenge = challenge_for(&verifier);
-    (verifier, challenge)
-}
-
-fn challenge_for(verifier: &str) -> String {
-    use base64::Engine as _;
-    let digest = ring::digest::digest(&ring::digest::SHA256, verifier.as_bytes());
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.as_ref())
-}
-
 async fn exchange(params: &[(&str, &str)]) -> Result<OAuthTokens, String> {
     #[derive(Deserialize)]
     struct Answer {
@@ -217,7 +204,7 @@ pub async fn oauth_sign_in(dir: &Path, open: impl FnOnce(&str)) -> Result<(), St
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let callback = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
     let state = crate::util::random_token(24);
-    let (verifier, challenge) = pkce();
+    let (verifier, challenge) = crate::oauth::pkce();
     let url = reqwest::Url::parse_with_params(
         "https://cloud.digitalocean.com/v1/oauth/authorize",
         &[
@@ -269,15 +256,6 @@ pub async fn oauth_sign_in(dir: &Path, open: impl FnOnce(&str)) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pkce_matches_the_rfc() {
-        // RFC 7636, appendix B.
-        assert_eq!(challenge_for("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
-        let (v, c) = pkce();
-        assert_eq!(v.len(), 64);
-        assert_eq!(c, challenge_for(&v));
-    }
 
     #[test]
     fn reads_doctl_contexts() {

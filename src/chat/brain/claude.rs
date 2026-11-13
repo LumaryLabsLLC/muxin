@@ -118,6 +118,9 @@ pub(crate) fn read(line: &Value) -> (Vec<Event>, Option<Result<(), String>>) {
             if let Some(id) = line["session_id"].as_str() {
                 events.push(Event::Session(id.to_string()));
             }
+            if let Some(model) = line["model"].as_str().filter(|m| !m.is_empty()) {
+                events.push(Event::Model(model.to_string()));
+            }
         }
         "stream_event" => {
             let delta = &line["event"]["delta"];
@@ -298,6 +301,7 @@ mod tests {
             all,
             [
                 Event::Session("b59117ac-3099".into()),
+                Event::Model("claude-opus-5-5".into()),
                 Event::Tool { id: "toolu_01".into(), name: "runner_action".into(), args: json!({"runner_id": "beelink/beelink-01", "action": "restart"}) },
                 Event::Result { id: "toolu_01".into(), text: "restarted".into(), is_error: false },
                 Event::Delta("Done: ".into()),

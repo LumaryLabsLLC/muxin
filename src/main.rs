@@ -12,6 +12,7 @@ mod github;
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 mod instance;
 mod mcp;
+mod oauth;
 mod ops;
 mod probe;
 #[cfg(feature = "recipes")]
@@ -1653,9 +1654,21 @@ struct ChatArgs {
     #[arg(long, value_name = "ID")]
     chat: Option<String>,
 
-    /// What answers: claude (Claude Code) or codex [default: your setting, else the first one installed]
+    /// What answers: claude (Claude Code), codex, or chatgpt (your ChatGPT plan, after --sign-in) [default: your setting, else the first there is]
     #[arg(long, value_name = "NAME")]
     brain: Option<String>,
+
+    /// Sign in with ChatGPT, so chats can answer on your ChatGPT plan (opens your browser)
+    #[arg(long)]
+    sign_in: bool,
+
+    /// Sign out of ChatGPT
+    #[arg(long, conflicts_with = "sign_in")]
+    sign_out: bool,
+
+    /// With --sign-out: also forget which account Muxin was registered for, to sign in with another
+    #[arg(long, requires = "sign_out")]
+    forget: bool,
 
     /// Don't ask before tools that change things
     #[arg(long)]
@@ -3125,6 +3138,9 @@ fn chat(args: ChatArgs, runtime: &tokio::runtime::Runtime) -> u8 {
         prompt: args.prompt.join(" "),
         options: chat::Options { chat: args.chat, brain: args.brain, mode: args.bypass.then_some(chat::gate::Mode::Bypass) },
         list: args.list,
+        sign_in: args.sign_in,
+        sign_out: args.sign_out,
+        forget: args.forget,
     };
     runtime.block_on(chat::term::run(engine, ask))
 }

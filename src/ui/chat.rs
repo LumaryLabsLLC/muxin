@@ -15,6 +15,7 @@ use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, card, icon, spinner};
 use super::markdown::markdown;
 use super::theme::{ActiveTheme, Theme, mono_font};
+use crate::chat::account::{self, Account, Endpoints, USAGE_URL, Vault};
 use crate::chat::gate::{Answer, Mode, Request};
 use crate::chat::live::{Event, Live};
 use crate::chat::risk::{self, Risk};
@@ -70,6 +71,18 @@ pub struct ChatView {
     /// Keep the newest line in view (until the user scrolls up).
     stick: bool,
     listening: Option<Task<()>>,
+    /// The ChatGPT account signed in to, if any (read when the page opens and
+    /// after a sign-in, not on every draw: it's in the Keychain).
+    account: Option<Account>,
+    /// A sign-in is under way in the browser; and why the last one failed.
+    signing_in: Option<Task<()>>,
+    sign_in_trouble: Option<String>,
+    /// Tell the user, once, that requests here use their ChatGPT plan.
+    welcome: bool,
+    /// What answers in the next new chat, when the user chose (else the first there is).
+    brain_choice: Option<String>,
+    /// The model answering in the open chat, once its brain said.
+    model: Option<String>,
     _subs: Vec<Subscription>,
 }
 
@@ -90,7 +103,28 @@ impl ChatView {
             InputEvent::Cancel => {}
         })];
         let mode = Mode::from_setting(&engine.settings().chat.mode);
-        let mut view = ChatView { engine, input, live: None, meta: None, rows: Vec::new(), busy: false, mode, trouble: None, width: 800., scroll: ScrollHandle::new(), stick: true, listening: None, _subs: subs };
+        let account = account::current(&Vault::of(&engine.paths().dir));
+        let mut view = ChatView {
+            engine,
+            input,
+            live: None,
+            meta: None,
+            rows: Vec::new(),
+            busy: false,
+            mode,
+            trouble: None,
+            width: 800.,
+            scroll: ScrollHandle::new(),
+            stick: true,
+            listening: None,
+            account,
+            signing_in: None,
+            sign_in_trouble: None,
+            welcome: false,
+            brain_choice: None,
+            model: None,
+            _subs: subs,
+        };
         // The chat used last opens with the page.
         if let Some(last) = crate::chat::store(&view.engine).list().into_iter().next() {
             view.open(Some(last.id), window, cx);
@@ -107,7 +141,9 @@ impl ChatView {
     /// couldn't; `trouble` says why.
     fn open(&mut self, chat: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.close();
-        match Live::open(&self.engine, Options { chat, brain: None, mode: Some(self.mode) }) {
+        // A chat from before goes on with its own brain; a new one takes the one chosen.
+        let brain = if chat.is_none() { self.brain_choice.clone() } else { None };
+        match Live::open(&self.engine, Options { chat, brain, mode: Some(self.mode) }) {
             Ok((live, meta, thread, mut events)) => {
                 self.rows = rows_from(thread);
                 self.meta = Some(meta);
@@ -150,6 +186,7 @@ impl ChatView {
         self.rows.clear();
         self.busy = false;
         self.trouble = None;
+        self.model = None;
     }
 
     fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -189,6 +226,98 @@ impl ChatView {
         }
     }
 
+    /// The user may answer on their ChatGPT plan: signed in, and allowed it.
+    fn plan(&self) -> bool {
+        self.account.as_ref().is_some_and(|a| a.plan)
+    }
+
+    /// What answers: the open chat's brain, else the one a new chat would
+    /// get (the one picked here, else the one set in Settings, else the first there is).
+    fn brain(&self) -> Option<&'static brain::Kind> {
+        match &self.meta {
+            Some(meta) => brain::kind(&meta.brain),
+            None => {
+                let set = self.engine.settings().chat.brain;
+                let usable = brain::available(self.plan());
+                let wanted = self.brain_choice.as_deref().or(Some(set.as_str()).filter(|b| !b.is_empty()));
+                wanted.and_then(|id| usable.iter().find(|k| k.id == id).copied()).or_else(|| usable.into_iter().next())
+            }
+        }
+    }
+
+    /// Takes in what may have changed in Settings while the page wasn't
+    /// shown: the ChatGPT account, and how new chats start.
+    pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.account = account::current(&Vault::of(&self.engine.paths().dir));
+        if self.live.is_none() {
+            self.mode = Mode::from_setting(&self.engine.settings().chat.mode);
+            // A brain picked here that's gone (signed out) is no longer the pick.
+            if let Some(pick) = &self.brain_choice
+                && !brain::available(self.plan()).iter().any(|k| k.id == pick)
+            {
+                self.brain_choice = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// The next of the brains there are, for the next new chat.
+    fn next_brain(&mut self, cx: &mut Context<Self>) {
+        let all = brain::available(self.plan());
+        let now = self.brain().map(|k| k.id);
+        let at = all.iter().position(|k| Some(k.id) == now).map(|n| n + 1).unwrap_or(0);
+        if let Some(next) = all.get(at % all.len().max(1)) {
+            self.brain_choice = Some(next.id.to_string());
+            cx.notify();
+        }
+    }
+
+    /// "Continue with ChatGPT": the sign-in, in the user's browser.
+    fn sign_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.signing_in.is_some() {
+            return;
+        }
+        self.sign_in_trouble = None;
+        let vault = Vault::of(&self.engine.paths().dir);
+        let job = self.engine.runtime().spawn(async move { account::sign_in(&vault, &Endpoints::default(), |address| crate::util::open_url(address)).await });
+        self.signing_in = Some(cx.spawn_in(window, async move |this, cx| {
+            let outcome = job.await.unwrap_or_else(|e| Err(format!("The sign-in stopped: {e}")));
+            let _ = this.update(cx, |this, cx| {
+                this.signing_in = None;
+                match outcome {
+                    Ok(account) => {
+                        if account.plan {
+                            // Told once that requests here use the plan; and that's what answers next.
+                            this.welcome = !account.welcomed;
+                            this.brain_choice = Some(brain::CHATGPT.to_string());
+                            this.trouble = None;
+                        } else {
+                            this.sign_in_trouble = Some("You signed in, but didn't allow Muxin to use your ChatGPT plan. Sign in again and allow it.".into());
+                        }
+                        this.account = Some(account);
+                    }
+                    Err(why) => this.sign_in_trouble = Some(why),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn got_it(&mut self, cx: &mut Context<Self>) {
+        self.welcome = false;
+        account::welcomed(&Vault::of(&self.engine.paths().dir));
+        if let Some(account) = &mut self.account {
+            account.welcomed = true;
+        }
+        cx.notify();
+    }
+
+    /// "Continue with ChatGPT", or the wait for it to finish in the browser.
+    fn chatgpt_button(&self, id: &'static str, cx: &mut Context<Self>) -> Button {
+        Button::new(id, "Continue with ChatGPT").style(ButtonStyle::Primary).loading(self.signing_in.is_some()).disabled(self.signing_in.is_some()).tooltip("Sign in with ChatGPT in your browser, to answer on your ChatGPT plan").on_click(cx.listener(|this, _, window, cx| this.sign_in(window, cx)))
+    }
+
     fn toggle_mode(&mut self, cx: &mut Context<Self>) {
         self.mode = match self.mode {
             Mode::Ask => Mode::Bypass,
@@ -223,6 +352,7 @@ impl ChatView {
                 self.busy = true;
                 self.stick = true;
             }
+            Event::Update(Update::Model(name)) => self.model = Some(name),
             Event::Update(update) => apply(&mut self.rows, update),
             Event::Ended(outcome) => {
                 self.busy = false;
@@ -277,6 +407,8 @@ fn apply(rows: &mut Vec<Row>, update: Update) {
             rows.push(Row::Note(format!("{} tokens in, {} out{cost}", term::count(input), term::count(output))));
         }
         Update::Limit(text) => rows.push(Row::Note(text)),
+        // Shown beside the brain's name, not in the conversation.
+        Update::Model(_) => {}
     }
 }
 
@@ -529,6 +661,18 @@ impl ChatView {
             starters = starters.child(Button::new(row_id("chat-starter", n), label).on_click(cx.listener(move |this, _, window, cx| this.say(text.to_string(), window, cx))));
         }
         body = body.child(starters);
+        if !self.plan() {
+            body = body.child(
+                card(theme)
+                    .w(px(width))
+                    .p(px(14.))
+                    .gap(px(8.))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Use your ChatGPT plan"))
+                    .child(div().w(px(width - 28.)).text_size(px(12.5)).text_color(theme.text_muted).child("Answer here with usage included in your ChatGPT plan, with nothing else to install."))
+                    .children(self.sign_in_trouble.clone().map(|why| div().w(px(width - 28.)).text_size(px(12.5)).text_color(theme.error).child(why)))
+                    .child(div().flex().child(self.chatgpt_button("chat-signin-start", cx))),
+            );
+        }
 
         let recent: Vec<Meta> = crate::chat::store(&self.engine).list().into_iter().filter(|m| !m.title.is_empty()).take(RECENT).collect();
         if !recent.is_empty() {
@@ -564,8 +708,11 @@ impl ChatView {
 
     /// No brain on this computer: what's needed, and where to get it.
     fn needs(&self, theme: &Theme, why: &str, width: f32, cx: &mut Context<Self>) -> AnyElement {
-        let mut buttons = div().flex().items_center().gap(px(8.));
-        for (n, kind) in brain::KINDS.iter().enumerate() {
+        let mut buttons = div().flex().flex_wrap().items_center().gap(px(8.));
+        if !self.plan() {
+            buttons = buttons.child(self.chatgpt_button("chat-signin-card", cx));
+        }
+        for (n, kind) in brain::KINDS.iter().filter(|k| k.program.is_some()).enumerate() {
             let url = kind.get;
             buttons = buttons.child(Button::new(row_id("chat-get", n), format!("Get {}", kind.name)).icon("external-link").on_click(cx.listener(move |_, _, _, cx| cx.open_url(url))));
         }
@@ -580,7 +727,20 @@ impl ChatView {
             .gap(px(12.))
             .child(div().flex().items_center().gap(px(8.)).text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(icon("circle-alert", 15., theme.warning)).child("The assistant can't start yet"))
             .child(div().w(px(width - 32.)).text_size(px(13.)).text_color(theme.text_muted).child(why.to_string()))
+            .children(self.sign_in_trouble.clone().map(|why| div().w(px(width - 32.)).text_size(px(12.5)).text_color(theme.error).child(why)))
             .child(buttons)
+            .into_any_element()
+    }
+
+    /// Said once after the first sign-in: requests here use the user's plan.
+    fn welcome_card(&self, theme: &Theme, width: f32, cx: &mut Context<Self>) -> AnyElement {
+        card(theme)
+            .w(px(width))
+            .p(px(14.))
+            .gap(px(8.))
+            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("You're using your ChatGPT plan"))
+            .child(div().w(px(width - 28.)).text_size(px(12.5)).text_color(theme.text_muted).child("Eligible requests in this chat use your ChatGPT plan. Manage usage in your ChatGPT settings."))
+            .child(div().flex().child(Button::new("chat-got-it", "Got it").style(ButtonStyle::Primary).on_click(cx.listener(|this, _, _, cx| this.got_it(cx)))))
             .into_any_element()
     }
 
@@ -588,7 +748,10 @@ impl ChatView {
         let focused = self.input.focus_handle(cx).is_focused(window);
         let has_text = !self.input.read(cx).text().trim().is_empty();
         let bypass = self.mode == Mode::Bypass;
-        let name = self.meta.as_ref().and_then(|m| brain::kind(&m.brain)).or_else(|| brain::installed().into_iter().next()).map(|k| k.name);
+        let kind = self.brain();
+        let on_plan = kind.is_some_and(|k| k.id == brain::CHATGPT);
+        // Which brain a new chat gets can be changed, when there's more than one; an open chat keeps its own.
+        let choosing = self.live.is_none() && brain::available(self.plan()).len() > 1;
         let action = if self.busy && !has_text {
             Button::icon_only("chat-stop", "square").style(ButtonStyle::Outlined).tooltip("Stop").on_click(cx.listener(|this, _, _, _| this.stop()))
         } else {
@@ -627,7 +790,24 @@ impl ChatView {
                             .tooltip(if bypass { "Every tool runs without asking, the ones that delete things too. Click to have it ask." } else { "It asks before a tool changes anything. Click to let it run without asking." })
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_mode(cx))),
                     )
-                    .children(name.map(|name| div().px(px(6.)).text_size(px(12.)).text_color(theme.text_placeholder).child(name)))
+                    .children(kind.filter(|_| !on_plan).map(|kind| {
+                        if choosing {
+                            Button::new("chat-brain", kind.name).style(ButtonStyle::Ghost).tooltip("What answers in this chat. Click for the next one.").on_click(cx.listener(|this, _, _, cx| this.next_brain(cx))).into_any_element()
+                        } else {
+                            div().px(px(6.)).text_size(px(12.)).text_color(theme.text_placeholder).child(kind.name).into_any_element()
+                        }
+                    }))
+                    .children(self.model.clone().filter(|_| !on_plan).map(|model| div().text_size(px(12.)).text_color(theme.text_placeholder).child(model)))
+                    // On the user's plan: said where they type, with where to manage it.
+                    .when(on_plan, |d| {
+                        d.child(if choosing {
+                            Button::new("chat-brain", "Using ChatGPT plan").style(ButtonStyle::Ghost).tooltip("What answers in this chat. Click for the next one.").on_click(cx.listener(|this, _, _, cx| this.next_brain(cx))).into_any_element()
+                        } else {
+                            div().px(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child("Using ChatGPT plan").into_any_element()
+                        })
+                        .children(self.model.clone().map(|model| div().text_size(px(12.)).text_color(theme.text_placeholder).child(model)))
+                        .child(Button::new("chat-usage", "Manage usage").icon("external-link").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.open_url(USAGE_URL))))
+                    })
                     .child(div().flex_1())
                     .when(self.live.is_some(), |d| d.child(Button::new("chat-new", "New chat").icon("plus").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx))))),
             )
@@ -673,7 +853,7 @@ impl Render for ChatView {
                     .items_start()
                     .gap(px(8.))
                     .child(div().flex_none().h(px(18.)).flex().items_center().child(icon("circle-alert", 14., theme.error)))
-                    .child(div().flex_1().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text).child(why.clone()))
+                    .child(div().flex_1().min_w(px(0.)).child(markdown(&theme, why, width - 22., format!("chat-failed-{n}"), "")))
                     .into_any_element(),
             });
         }
@@ -713,7 +893,18 @@ impl Render for ChatView {
                     .pb(px(20.))
                     .child(thread),
             )
-            .child(div().flex_none().flex().flex_col().items_center().px(px(PADDING)).pb(px(18.)).child(self.composer(&theme, width, window, cx)))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(PADDING))
+                    .pb(px(18.))
+                    .when(self.welcome, |d| d.child(self.welcome_card(&theme, width, cx)))
+                    .child(self.composer(&theme, width, window, cx)),
+            )
     }
 }
 

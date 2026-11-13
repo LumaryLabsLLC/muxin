@@ -1002,6 +1002,8 @@ impl Root {
             }
             Route::Chat => {
                 let view = self.chat_view(window, cx);
+                // What Settings changed meanwhile (a sign-in, how new chats start) shows.
+                view.update(cx, |view, cx| view.refresh(cx));
                 window.focus(&view.focus_handle(cx));
             }
             Route::Services(id) => {
@@ -1175,6 +1177,7 @@ impl Root {
                     "terminal" => SettingsTab::Terminal,
                     "github" => SettingsTab::GitHub,
                     "cloud" => SettingsTab::Cloud,
+                    "chat" | "assistant" => SettingsTab::Chat,
                     "prompts" => SettingsTab::Prompts,
                     "keyboard" => SettingsTab::Keyboard,
                     _ => SettingsTab::General,

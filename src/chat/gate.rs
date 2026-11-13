@@ -140,7 +140,7 @@ impl Gate {
             Answer::No(note) => {
                 let note = note.trim();
                 Err(if note.is_empty() {
-                    "The user said no to this, so it didn't run. Don't try it again; ask what they'd like instead.".to_string()
+                    "The user said no to this, so it didn't run. Leave it, unless they ask for it again.".to_string()
                 } else {
                     format!("The user said no to this, so it didn't run. They said: {note}")
                 })

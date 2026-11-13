@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, App, Context, Entity, Focusable, SharedString, Subscription, Task, Window, div, prelude::*, px};
 
+mod assistant;
 mod cloud;
 mod ipads;
 mod prompts;
@@ -29,12 +30,14 @@ pub enum SettingsTab {
     GitHub,
     Cloud,
     Ipads,
+    /// The assistant's chat.
+    Chat,
     Prompts,
     Keyboard,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 8] = [SettingsTab::General, SettingsTab::Appearance, SettingsTab::Terminal, SettingsTab::GitHub, SettingsTab::Cloud, SettingsTab::Ipads, SettingsTab::Prompts, SettingsTab::Keyboard];
+    const ALL: [SettingsTab; 9] = [SettingsTab::General, SettingsTab::Appearance, SettingsTab::Terminal, SettingsTab::GitHub, SettingsTab::Cloud, SettingsTab::Ipads, SettingsTab::Chat, SettingsTab::Prompts, SettingsTab::Keyboard];
 
     fn label(self) -> &'static str {
         match self {
@@ -45,6 +48,7 @@ impl SettingsTab {
             SettingsTab::Cloud => "Cloud",
             // Muxin for iPhone and Muxin for iPad: "iPhone & iPad" doesn't fit the row.
             SettingsTab::Ipads => "Mobile",
+            SettingsTab::Chat => "Chat",
             SettingsTab::Prompts => "Prompts",
             SettingsTab::Keyboard => "Keyboard",
         }
@@ -58,6 +62,7 @@ impl SettingsTab {
             SettingsTab::GitHub => "agent-github",
             SettingsTab::Cloud => "cloud",
             SettingsTab::Ipads => "smartphone",
+            SettingsTab::Chat => "bot",
             SettingsTab::Prompts => "message-square",
             SettingsTab::Keyboard => "keyboard",
         }
@@ -95,6 +100,8 @@ pub struct SettingsPage {
     shortcut_note: Option<String>,
     /// The session action prompt being changed (see prompts.rs).
     prompt_edit: Option<prompts::PromptEdit>,
+    /// The assistant's chat: its ChatGPT account (see assistant.rs).
+    assistant: assistant::AssistantState,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -177,6 +184,7 @@ impl SettingsPage {
             catch_keys: None,
             shortcut_note: None,
             prompt_edit: None,
+            assistant: assistant::AssistantState::default(),
             _tasks: vec![updates],
             _subscriptions: subs,
         };
@@ -205,6 +213,9 @@ impl SettingsPage {
             }
             if tab == SettingsTab::Ipads {
                 self.load_ipads(cx);
+            }
+            if tab == SettingsTab::Chat {
+                self.load_assistant(cx);
             }
             cx.notify();
         }
@@ -1380,6 +1391,7 @@ impl Render for SettingsPage {
                 let selected = self.tab == tab;
                 div()
                     .id(SharedString::from(format!("settings-tab-{}", tab.label())))
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap(px(7.))
@@ -1397,8 +1409,9 @@ impl Render for SettingsPage {
                     .into_any_element()
             })
             .collect();
-        let bar = div().flex_none().px(px(28.)).pt(px(18.)).pb(px(14.)).border_b_1().border_color(theme.border_variant).child(
-            div().flex().w_full().max_w(px(760.)).gap(px(2.)).p(px(3.)).rounded(crate::ui::kit::corner(9.)).bg(theme.element).border_1().border_color(theme.border_variant).children(tabs),
+        // As wide as its tabs: they don't all fit the page's width, and in a narrow window the row scrolls sideways.
+        let bar = div().id("settings-tabs").flex_none().flex().overflow_x_scroll().px(px(28.)).pt(px(18.)).pb(px(14.)).border_b_1().border_color(theme.border_variant).child(
+            div().flex_none().flex().gap(px(2.)).p(px(3.)).rounded(crate::ui::kit::corner(9.)).bg(theme.element).border_1().border_color(theme.border_variant).children(tabs),
         );
         let body = div().w_full().max_w(px(760.)).flex().flex_col().gap(px(28.));
         let body = match self.tab {
@@ -1420,6 +1433,7 @@ impl Render for SettingsPage {
             SettingsTab::GitHub => body.child(self.github_section(&theme, cx)).child(self.checks_section(&theme, true, cx)),
             SettingsTab::Cloud => body.child(self.cloud_usage_section(&theme, cx)).child(self.cloud_section(&theme, cx)),
             SettingsTab::Ipads => body.child(self.ipads_section(&theme, cx)),
+            SettingsTab::Chat => body.child(self.assistant_section(&theme, cx)),
             SettingsTab::Prompts => body.child(self.prompts_section(&theme, cx)),
             SettingsTab::Keyboard => body.child(self.keyboard_section(&theme, cx)),
         };

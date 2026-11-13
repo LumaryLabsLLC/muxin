@@ -516,6 +516,7 @@ impl Root {
             item("Settings: Terminal", "terminal", None, Run::Do(Command::Settings(SettingsTab::Terminal))),
             item("Settings: GitHub", "agent-github", None, Run::Do(Command::Settings(SettingsTab::GitHub))),
             item("Settings: Cloud", "cloud", None, Run::Do(Command::Settings(SettingsTab::Cloud))),
+            item("Settings: Chat", "bot", None, Run::Do(Command::Settings(SettingsTab::Chat))),
             item("Settings: Keyboard shortcuts", "keyboard", None, Run::Do(Command::Settings(SettingsTab::Keyboard))),
             item("Cloud usage and cost", "cloud", None, Run::Do(Command::Settings(SettingsTab::Cloud))),
             item("Install the muxin command", "terminal", None, Run::Do(Command::Settings(SettingsTab::General))),

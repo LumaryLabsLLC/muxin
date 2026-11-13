@@ -9,6 +9,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::account::{self, Endpoints, USAGE_URL, Vault};
 use super::gate::{Answer, Mode, Request};
 use super::risk::{self, Risk};
 use super::{Chat, Options, Update, brain, store};
@@ -21,6 +22,10 @@ pub struct Ask {
     pub options: Options,
     /// Show the chats instead.
     pub list: bool,
+    /// Sign in with ChatGPT instead (or out; `forget`: and forget which account).
+    pub sign_in: bool,
+    pub sign_out: bool,
+    pub forget: bool,
 }
 
 /// Dim, when stderr is a terminal.
@@ -59,6 +64,12 @@ pub async fn run(engine: Arc<Engine>, ask: Ask) -> u8 {
     if ask.list {
         return list(&engine);
     }
+    if ask.sign_out {
+        return sign_out(&Vault::of(&engine.paths().dir), ask.forget).await;
+    }
+    if ask.sign_in {
+        return sign_in(&Vault::of(&engine.paths().dir)).await;
+    }
     let stop = watch_ctrl_c();
     let mut chat = match Chat::open(&engine, ask.options) {
         Ok(chat) => chat,
@@ -73,6 +84,9 @@ pub async fn run(engine: Arc<Engine>, ask: Ask) -> u8 {
         Mode::Bypass => "doesn't ask before it changes things",
     };
     eprintln!("{}", dim(&format!("Chat {} · {name} · {mode}", chat.meta.id)));
+    if chat.meta.brain == brain::CHATGPT {
+        eprintln!("{}", dim(&format!("Using ChatGPT plan. Manage usage: {USAGE_URL}")));
+    }
 
     if !ask.prompt.trim().is_empty() {
         return match turn(&mut chat, &ask.prompt, &stop).await {
@@ -115,6 +129,55 @@ pub async fn run(engine: Arc<Engine>, ask: Ask) -> u8 {
         }
     }
     eprintln!("{}", dim(&format!("Go on with it later: muxin chat --chat {}", chat.meta.id)));
+    0
+}
+
+/// `muxin chat --sign-in`: signs in with ChatGPT, in the browser.
+async fn sign_in(vault: &Vault) -> u8 {
+    eprintln!("Opening ChatGPT's sign-in in your browser…");
+    let outcome = account::sign_in(vault, &Endpoints::default(), |address| {
+        crate::util::open_url(address);
+        // Not when it says which account it's for: that part isn't for a screen or a log.
+        if !address.contains("id_token_hint=") {
+            eprintln!("{}\n{address}", dim("If it didn't open, go to:"));
+        }
+    })
+    .await;
+    match outcome {
+        Ok(account) if account.plan => {
+            let who = if account.email.is_empty() { String::new() } else { format!(" as {}", account.email) };
+            println!("Signed in{who}.");
+            if !account.welcomed {
+                // Said once, the first time.
+                println!("You're using your ChatGPT plan: eligible requests in Muxin's chat use it. Manage usage: {USAGE_URL}");
+                account::welcomed(vault);
+            }
+            println!("Ask with it: muxin chat --brain chatgpt \"what needs me?\"");
+            0
+        }
+        Ok(_) => {
+            eprintln!("You signed in, but didn't allow Muxin to use your ChatGPT plan, so the chat can't answer with it. Sign in again and allow it.");
+            1
+        }
+        Err(why) => {
+            eprintln!("error: {why}");
+            1
+        }
+    }
+}
+
+/// `muxin chat --sign-out`.
+async fn sign_out(vault: &Vault, forget: bool) -> u8 {
+    let was = account::current(vault).is_some();
+    match account::sign_out(vault, &Endpoints::default(), forget).await {
+        Ok(_) if !was => println!("{}", if forget { "You weren't signed in. Muxin has forgotten the account it was registered for." } else { "You weren't signed in with ChatGPT." }),
+        Ok(true) => println!("Signed out of ChatGPT."),
+        Ok(false) => println!("Signed out here. ChatGPT couldn't be told, so Muxin may still be listed there: you can disconnect it in ChatGPT's settings."),
+        Err(why) => {
+            eprintln!("error: {why}");
+            return 1;
+        }
+    }
     0
 }
 
@@ -212,6 +275,10 @@ impl Screen {
             Update::Limit(text) => {
                 self.end_line();
                 eprintln!("{}", dim(&format!("  {text}")));
+            }
+            Update::Model(name) => {
+                self.end_line();
+                eprintln!("{}", dim(&format!("  Answering with {name}")));
             }
         }
     }

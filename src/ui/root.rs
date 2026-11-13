@@ -1003,7 +1003,7 @@ impl Root {
             Route::Chat => {
                 let view = self.chat_view(window, cx);
                 // What Settings changed meanwhile (a sign-in, how new chats start) shows.
-                view.update(cx, |view, cx| view.refresh(cx));
+                view.update(cx, |view, cx| view.refresh(window, cx));
                 window.focus(&view.focus_handle(cx));
             }
             Route::Services(id) => {
@@ -1051,6 +1051,66 @@ impl Root {
         cx.notify();
     }
 
+    /// Runs a `script:` view's steps in order (see `open_view`).
+    fn run_script(&mut self, script: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let steps: Vec<String> = script.split('|').map(|step| step.trim().to_string()).filter(|step| !step.is_empty()).collect();
+        cx.spawn_in(window, async move |this, cx| {
+            let executor = cx.background_executor().clone();
+            let wait = |ms: u64| executor.timer(std::time::Duration::from_millis(ms));
+            for step in steps {
+                let (verb, rest) = step.split_once(' ').map(|(verb, rest)| (verb, rest.trim())).unwrap_or((step.as_str(), ""));
+                // The chat has finished what it was doing, and nothing waits for an answer.
+                let idle = async |this: &gpui::WeakEntity<Root>, cx: &mut gpui::AsyncWindowContext| loop {
+                    match this.update(cx, |root, cx| root.chat.as_ref().is_none_or(|chat| chat.read(cx).is_idle())) {
+                        Ok(false) => wait(150).await,
+                        _ => break,
+                    }
+                };
+                match verb {
+                    "wait" => wait(rest.parse().unwrap_or(1000)).await,
+                    "idle" => idle(&this, cx).await,
+                    "type" => {
+                        idle(&this, cx).await;
+                        let letters: Vec<char> = rest.chars().collect();
+                        for end in 1..=letters.len() {
+                            let so_far: String = letters[..end].iter().collect();
+                            let typed = this.update_in(cx, |root, window, cx| {
+                                let chat = root.chat_view(window, cx);
+                                chat.update(cx, |chat, cx| chat.draft(&so_far, cx));
+                            });
+                            if typed.is_err() {
+                                return;
+                            }
+                            wait(if letters[end - 1] == ' ' { 70 } else { 38 }).await;
+                        }
+                        wait(450).await;
+                        let sent = this.update_in(cx, |root, window, cx| {
+                            let chat = root.chat_view(window, cx);
+                            chat.update(cx, |chat, cx| chat.send_draft(window, cx));
+                        });
+                        if sent.is_err() {
+                            return;
+                        }
+                        // The turn has to begin before it can be waited for.
+                        wait(600).await;
+                    }
+                    _ => {
+                        let view = match verb {
+                            "go" => rest.to_string(),
+                            "pick" => format!("chat-pick:{rest}"),
+                            "menu" => format!("chat-menu:{}", rest.replacen(' ', ":", 1)),
+                            other => format!("{other}:{rest}"),
+                        };
+                        if this.update_in(cx, |root, window, cx| root.open_view(&view, window, cx)).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Opens a view by name; see `--view` in main.rs.
     pub fn open_view(&mut self, view: &str, window: &mut Window, cx: &mut Context<Self>) {
         let (kind, arg) = view.split_once(':').unwrap_or((view, ""));
@@ -1060,6 +1120,77 @@ impl Root {
                 self.navigate(Route::Chat, window, cx);
                 let view = self.chat_view(window, cx);
                 view.update(cx, |view, cx| view.say(arg.to_string(), window, cx));
+            }
+            // A script of steps, one after another, " | " between them, to
+            // film the app or check it without a click:
+            //   go <view> · wait <ms> · type <text> (into the chat, once it's
+            //   idle, then sent) · idle (until the chat is) · pick <brain>/<model>/<effort>
+            //   · menu model [Brain] · menu effort · menu close
+            "script" => self.run_script(arg, window, cx),
+            // "chat-brain:grok": what answers in the next new chat.
+            "chat-brain" => {
+                let view = self.chat_view(window, cx);
+                view.update(cx, |view, cx| view.choose_brain(arg, cx));
+            }
+            // "chat-pick:codex/gpt-6.1-sol/high": the brain, and its model and
+            // effort when given ("codex//high": its own model), as the pickers set them.
+            "chat-pick" => {
+                let mut parts = arg.splitn(3, '/');
+                let (brain, model, effort) = (parts.next().unwrap_or_default().to_string(), parts.next().filter(|m| !m.is_empty()).map(str::to_string), parts.next().filter(|e| !e.is_empty()).map(str::to_string));
+                let view = self.chat_view(window, cx);
+                view.update(cx, |view, cx| {
+                    view.pick(&brain, model, window, cx);
+                    if effort.is_some() {
+                        view.pick_effort(effort, cx);
+                    }
+                });
+            }
+            // "chat-attach:/path/to/file": a file that goes with the next message.
+            "chat-attach" => {
+                let view = self.chat_view(window, cx);
+                view.update(cx, |view, cx| view.attach(vec![arg.into()], cx));
+            }
+            // "chat-menu:model" opens the model picker, "chat-menu:model:Codex"
+            // with that brain's models showing, "chat-menu:effort" the effort
+            // picker, "chat-menu:close" closes it.
+            "chat-menu" => {
+                let (which, brain) = arg.split_once(':').unwrap_or((arg, ""));
+                if which == "close" {
+                    self.context_menu = None;
+                    cx.notify();
+                    return;
+                }
+                let effort = which == "effort";
+                let view = self.chat_view(window, cx);
+                let position = view.read(cx).picker_anchor(effort, window);
+                let target = if effort { super::menu::MenuTarget::ChatEffort } else { super::menu::MenuTarget::ChatModel };
+                self.open_menu(target, position, cx);
+                self.open_submenu_named(brain, cx);
+            }
+            // Typed a letter at a time, then sent: "chat-type:What needs me?",
+            // or "chat-type:4000:What needs me?" to start after that many milliseconds.
+            // "chat-type:First | Second": the second once the first is answered.
+            "chat-type" => {
+                self.navigate(Route::Chat, window, cx);
+                let (after, text) = match arg.split_once(':') {
+                    Some((ms, text)) if !ms.is_empty() && ms.chars().all(|c| c.is_ascii_digit()) => (ms.parse().unwrap_or(1500), text),
+                    _ => (1500, arg),
+                };
+                let view = self.chat_view(window, cx);
+                view.update(cx, |view, cx| view.type_and_send(text.to_string(), after, window, cx));
+            }
+            // "chat-answer:yes:1500": each question it asks is answered (yes,
+            // always or no) once it's been shown that many milliseconds.
+            "chat-answer" => {
+                let (what, shown) = arg.split_once(':').unwrap_or((arg, "1500"));
+                let answer = match what {
+                    "always" => crate::chat::gate::Answer::Always,
+                    "no" => crate::chat::gate::Answer::No(String::new()),
+                    _ => crate::chat::gate::Answer::Yes,
+                };
+                let shown = shown.parse().unwrap_or(1500);
+                let view = self.chat_view(window, cx);
+                view.update(cx, |view, cx| view.answer_each(answer, shown, window, cx));
             }
             // What's typed but not sent; "\n" in it is a new line.
             "chat-draft" => {
@@ -3754,7 +3885,16 @@ impl Root {
     fn chat_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<super::chat::ChatView> {
         if self.chat.is_none() {
             let engine = self.engine.clone();
-            self.chat = Some(cx.new(|cx| super::chat::ChatView::new(engine, window, cx)));
+            let view = cx.new(|cx| super::chat::ChatView::new(engine, window, cx));
+            // Its pickers are menus of this window's.
+            self._subscriptions.push(cx.subscribe(&view, |this, _, event: &super::chat::ChatEvent, cx| match event {
+                super::chat::ChatEvent::Menu { effort, position } => {
+                    let target = if *effort { super::menu::MenuTarget::ChatEffort } else { super::menu::MenuTarget::ChatModel };
+                    // Just above the button that was clicked.
+                    this.open_menu(target, gpui::point(position.x - px(14.), position.y - px(18.)), cx);
+                }
+            }));
+            self.chat = Some(view);
         }
         self.chat.clone().expect("just made")
     }

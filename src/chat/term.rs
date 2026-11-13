@@ -22,10 +22,20 @@ pub struct Ask {
     pub options: Options,
     /// Show the chats instead.
     pub list: bool,
+    /// Show the models there are to answer with instead (of `options.brain`, when given).
+    pub models: bool,
+    /// Files that go with the first message.
+    pub attach: Vec<std::path::PathBuf>,
     /// Sign in with ChatGPT instead (or out; `forget`: and forget which account).
     pub sign_in: bool,
     pub sign_out: bool,
     pub forget: bool,
+}
+
+/// What a turn would cost through the API, in words after its token counts.
+pub(crate) fn priced(cost: f64) -> String {
+    // A cent rounds to nothing below half of one.
+    if cost < 0.005 { " · under $0.01 at API prices".to_string() } else { format!(" · ${cost:.2} at API prices") }
 }
 
 /// Dim, when stderr is a terminal.
@@ -64,6 +74,9 @@ pub async fn run(engine: Arc<Engine>, ask: Ask) -> u8 {
     if ask.list {
         return list(&engine);
     }
+    if ask.models {
+        return models(&engine, ask.options.brain.as_deref()).await;
+    }
     if ask.sign_out {
         return sign_out(&Vault::of(&engine.paths().dir), ask.forget).await;
     }
@@ -88,6 +101,11 @@ pub async fn run(engine: Arc<Engine>, ask: Ask) -> u8 {
         eprintln!("{}", dim(&format!("Using ChatGPT plan. Manage usage: {USAGE_URL}")));
     }
 
+    // What's attached goes with the first message said.
+    if let Err(why) = chat.attach(&ask.attach) {
+        eprintln!("error: {why}");
+        return 2;
+    }
     if !ask.prompt.trim().is_empty() {
         return match turn(&mut chat, &ask.prompt, &stop).await {
             Ok(()) => 0,
@@ -107,7 +125,7 @@ pub async fn run(engine: Arc<Engine>, ask: Ask) -> u8 {
             Err(_) => 1,
         };
     }
-    eprintln!("{}", dim("Type a message. /bypass and /ask change whether it asks first; /quit ends."));
+    eprintln!("{}", dim("Type a message. /attach <file> adds a file to the next one; /bypass and /ask change whether it asks first; /quit ends."));
     loop {
         eprint!("{} ", bold("›"));
         let _ = std::io::stderr().flush();
@@ -122,6 +140,18 @@ pub async fn run(engine: Arc<Engine>, ask: Ask) -> u8 {
             "/ask" => {
                 chat.gate().set_mode(Mode::Ask);
                 eprintln!("{}", dim("It asks before it changes anything."));
+            }
+            attach if attach.starts_with("/attach") => {
+                // A path as a shell would give it: quoted, or with "~" for the home folder.
+                let named = attach["/attach".len()..].trim().trim_matches(|c| c == '"' || c == '\'');
+                let path = match named.strip_prefix("~/") {
+                    Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
+                    None => named.into(),
+                };
+                match if named.is_empty() { Err("Which file? /attach <file>".to_string()) } else { chat.attach(&[path]) } {
+                    Ok(()) => eprintln!("{}", dim(&format!("{named} goes with your next message."))),
+                    Err(why) => eprintln!("{}", dim(&format!("  ✗ {why}"))),
+                }
             }
             text => {
                 let _ = turn(&mut chat, text, &stop).await;
@@ -269,7 +299,7 @@ impl Screen {
             Update::Usage { input, output, cached, cost } => {
                 self.end_line();
                 let cached = if cached > 0 { format!(" ({} read from cache)", count(cached)) } else { String::new() };
-                let cost = cost.map(|c| format!(" · ${c:.2} at API prices")).unwrap_or_default();
+                let cost = cost.map(priced).unwrap_or_default();
                 eprintln!("{}", dim(&format!("  {} tokens in{cached}, {} out{cost}", count(input), count(output))));
             }
             Update::Limit(text) => {
@@ -369,6 +399,50 @@ pub(crate) fn count(n: u64) -> String {
         1000..=999_999 => format!("{:.1}k", n as f64 / 1000.0),
         _ => format!("{:.1}M", n as f64 / 1_000_000.0),
     }
+}
+
+/// `--models`: each brain there is here, and the models it can answer with,
+/// with the efforts each takes (the model's own marked `*`).
+async fn models(engine: &Engine, only: Option<&str>) -> u8 {
+    use brain::catalog;
+    let vault = Vault::of(&engine.paths().dir);
+    let plan = account::current(&vault).is_some_and(|a| a.plan);
+    let brains: Vec<&brain::Kind> = brain::available(plan).into_iter().filter(|k| only.is_none_or(|id| id == k.id)).collect();
+    if brains.is_empty() {
+        eprintln!("error: {}", match only {
+            Some(id) if brain::kind(id).is_none() => format!("\"{id}\" isn't a brain Muxin knows. Use {}.", brain::ids()),
+            Some(id) => format!("{} isn't here to answer with.", brain::kind(id).map(|k| k.name).unwrap_or(id)),
+            None => brain::none_here(),
+        });
+        return 1;
+    }
+    for (n, kind) in brains.iter().enumerate() {
+        if n > 0 {
+            println!();
+        }
+        println!("{} (--brain {})", kind.name, kind.id);
+        let list = match kind.program {
+            Some(_) => catalog::of(kind.id),
+            None => match brain::responses::models(&vault, &Endpoints::default()).await {
+                Ok(list) => list,
+                Err(why) => {
+                    println!("  {why}");
+                    continue;
+                }
+            },
+        };
+        if list.is_empty() {
+            println!("  It doesn't say which models it has. It answers with its own choice.");
+        }
+        let wide = list.iter().map(|m| m.id.chars().count()).max().unwrap_or(0);
+        for model in list {
+            let efforts: Vec<String> = model.efforts.iter().map(|e| if model.effort.as_deref() == Some(e.id.as_str()) { format!("{}*", e.id) } else { e.id.clone() }).collect();
+            let name = if model.name == model.id { String::new() } else { model.name.clone() };
+            println!("  {:<wide$}  {:<16}  {}", model.id, name, efforts.join(" "));
+        }
+    }
+    println!("\nPick one: muxin chat --brain <brain> --model <id> --effort <level> \"...\"");
+    0
 }
 
 fn list(engine: &Engine) -> u8 {

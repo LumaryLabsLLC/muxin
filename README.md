@@ -14,6 +14,7 @@
 
 Point it at the machines you own (a Mac Studio under the desk, a NUC, a Linux box, a few MacBooks, a Windows laptop) and Muxin becomes the hub for all of them:
 
+- **Chat:** ask in plain words ("what needs me?", "restart the runner on the NUC", "start Codex on that issue"). Muxin's assistant works across all your machines with Muxin's own tools, and asks before it changes anything. It answers on a plan you already have: Claude Code, Codex, Grok Build, or your ChatGPT plan.
 - **Agent sessions:** Claude Code, Codex, OpenCode, Gemini CLI, Antigravity, Amp, Pi, Copilot CLI, Cursor Agent, Qwen Code, Droid, Kimi Code or a shell on any machine, in a real terminal, still running after you close the app.
 - **Boxes:** hand a task to an agent that works on it by itself, in a container of its own on one of your machines. A box pauses when it's quiet and picks up where it left off when you ask it more.
 - **Desktops:** see a Linux machine's screen live and use it, beside an agent's terminal or in its own window. While a desktop has the keyboard, the shortcuts your own computer keeps (⌘Tab and Mission Control on a Mac, Alt+Tab and the Windows key elsewhere) go to the machine; Ctrl+Alt (⌃⌥) by themselves gives them back, and the **Keys** menu sends combinations by a click. On a Mac, that needs Muxin allowed under Privacy & Security › Accessibility.
@@ -102,10 +103,12 @@ muxin add-machine --name "Mac Studio" --host ci@mac-studio.local
 muxin watch acme                   # live runner status and jobs for the acme org
 muxin install mac-studio --count 2 # two runners, registered with acme, as services
 muxin status
+muxin chat "what needs me?"        # ask the assistant; it asks before it changes anything
 ```
 
 ## The app
 
+- **Chat (⌃0):** the first page. Ask about your machines, or ask for something to be done: the assistant looks, does it with Muxin's own tools, and shows each call it makes (see [Chat](#chat)).
 - **Overview:** the day in one line (machines online, agents working, runners busy), a few notices for what needs a look (each with a button that fixes or explains it), a card per machine with what's running on it (its agents, desktop and runners) and live CPU, memory and disk, and every agent session across your machines. The Jobs page shows how busy your runners have been over the last few minutes.
 - **Machines and runners:** install runners on a machine, and start, stop, restart, show logs for or remove each one. A machine that's off or out of reach says so in plain words (offline, Remote Login off, ssh key not accepted, Tailscale off on this Mac, …), with when it was last seen and what to do; Muxin picks it back up by itself when it returns.
 - **Adding machines (⌘N):** suggestions from your `~/.ssh/config`, your Tailscale network, and this network (machines advertising ssh over Bonjour, and Macs that would be addable once Remote Login is on).
@@ -125,17 +128,57 @@ muxin status
 
   The macOS themes also switch to the system fonts (SF Pro, and SF Mono when it's installed). The Terminal themes make Muxin look like a TUI in a terminal: one monospace font, square corners, `[ Buttons ]` and `── Headings ──`. The choice is saved in `config.toml` (`[ui]`).
 
-Keyboard: ⌘P goes to any machine, session or desktop by name, and ⇧⌘P (or ⌘P then `>`) runs any command, including **Theme: Choose…**, which previews each theme as you move through the list · ⌘1…⌘9 go to your machines · ⌃1…⌃7 overview, jobs, boxes, GitHub, usage, run, schedules (Alt on Linux and Windows) · ⌘J activity · ⌘R check machines · ⇧⌘R sync GitHub · ⌘N add machine · ⌘T new session · ⌘F or `/` search your machines and sessions · ⌘B sidebar · ⌘[ / ⌘] back / forward · ⇧⌘] / ⇧⌘[ next / previous session · ⌘, settings. Hold ⌘ to see them in the app, and change them in Settings › Keyboard. On Linux and Windows, use Ctrl instead of ⌘. Coming from herdr? **Keys like › herdr** at the top of Settings › Keyboard uses herdr's keys wherever Muxin does the same thing (a herdr space is a machine here, a tab a session).
+Keyboard: ⌘P goes to any machine, session or desktop by name, and ⇧⌘P (or ⌘P then `>`) runs any command, including **Theme: Choose…**, which previews each theme as you move through the list · ⌘1…⌘9 go to your machines · ⌃0 chat · ⌃1…⌃7 overview, jobs, boxes, GitHub, usage, run, schedules (Alt on Linux and Windows) · ⌘J activity · ⌘R check machines · ⇧⌘R sync GitHub · ⌘N add machine · ⌘T new session · ⌘F or `/` search your machines and sessions · ⌘B sidebar · ⌘[ / ⌘] back / forward · ⇧⌘] / ⇧⌘[ next / previous session · ⌘, settings. Hold ⌘ to see them in the app, and change them in Settings › Keyboard. On Linux and Windows, use Ctrl instead of ⌘. Coming from herdr? **Keys like › herdr** at the top of Settings › Keyboard uses herdr's keys wherever Muxin does the same thing (a herdr space is a machine here, a tab a session).
+
+## Chat
+
+Ask Muxin in plain words, on the app's first page or with `muxin chat`. The assistant is a model with Muxin's tools, the same ones agents get over MCP: it looks at your machines, runners and GitHub, starts and answers agent sessions, hands tasks to boxes, reads logs and files. It has no shell and no files of its own. Long work goes to an agent session or a box, and it tells you which.
+
+- **It asks first.** Looking runs at once. A call that changes something shows what it would run and waits for your yes. **Yes, and don't ask again** remembers that kind of call (`snippet_save`, `runner_action:restart`); Settings › Chat lists them, each removable. Calls that delete something, stop running work, cost money, or run or type whatever text they're given ask every time.
+- **Or it doesn't.** Under the box you type in, **Asks first** switches that chat to **Doesn't ask first**: every tool runs at once, the ones that delete things too. Settings › Chat sets how new chats start.
+- **What answers** is your choice, on a plan you already have. No API key:
+  - **Claude Code**, **Codex** or **Grok Build**, when the program is on this computer and signed in. Muxin runs it without its terminal and with its own tools off, so it's only a model with Muxin's tools. (Codex keeps a shell that can only read. Grok Build needs to be 1.0.13 or later: `grok update`.)
+  - **ChatGPT**, with nothing to install. **Continue with ChatGPT** signs you in with OpenAI in your browser, and the chat then uses your ChatGPT plan. The sign-in is kept in the Keychain on a Mac, elsewhere in a file only you can read. **Manage usage** opens your ChatGPT settings.
+
+  With none chosen, Muxin takes the first there is: Claude Code, Codex, ChatGPT, then Grok Build. A chat keeps what it started with.
+- **Which model, and how hard it thinks.** Two menus under the box you type in. The first lists what can answer here, each with its models; the second, the effort that model takes (Low to Max). A pick holds from the next message, and new chats start with it (`[settings.chat.picked]`). A model of another program starts a new chat. The lists are the programs' own: Codex's and Grok Build's as they keep them on this computer, Claude Code's short names (Fable, Opus, Sonnet, Haiku), and your ChatGPT account's.
+- **Attach files.** The paperclip, files dropped on the box, or a pasted picture go with your next message, up to 10 of them. The chat keeps its own copy of each.
+  - **Text** (code, logs, notes; up to 256 KB each) goes into the message under its name, so every model reads it.
+  - **Pictures** (PNG, JPEG, GIF, WebP; up to 5 MB each) go to all four. Grok Build takes 600 KB of pictures with one message.
+  - **PDFs** (up to 10 MB each) are read by Claude Code and ChatGPT.
+
+  A file that what answers can't take isn't sent, and the chat says why.
+- **Every call is shown.** Each tool the assistant calls is a row in the chat, with its arguments and what came back, and a call you refused says so. Under each answer is what it used: tokens in and out, and for some what that would cost at API prices.
+- **Its rules are yours.** What answers, whether it asks, and what runs without asking are in Settings › Chat (`[settings.chat]` in `config.toml`). They aren't among its tools, so it can't change them.
+- **Chats are kept** on this computer, in `chats/` beside `config.toml`. An empty chat page lists them under **Go on with**.
+- **Your other setups stay out.** The programs run in the chat's own folder, without the hooks and MCP servers you set up for them. Grok Build is the exception: its own hooks, skills and plugins still load, though only Muxin's tools can run.
+- **Windows:** Claude Code, Codex and Grok Build can't answer in the chat there yet.
+
+```sh
+muxin chat "what needs me?"                  # one question, answered in this terminal
+muxin chat                                   # a conversation: type line by line (/bypass, /ask, /quit)
+muxin chat --chat last "and restart it"      # go on with the last chat (or --chat <id>)
+muxin chat --brain codex "is anything offline?"   # what answers: claude, codex, grok or chatgpt
+muxin chat --models                          # the models each can answer with, and their effort levels
+muxin chat --model opus --effort high "why did the deploy fail?"   # a model and an effort, kept by that chat
+muxin chat --attach build.log --attach shot.png "what broke?"      # files with the message (/attach <file> in a conversation)
+muxin chat --bypass "restart forge-03"       # don't ask before tools that change things
+muxin chat --list                            # your chats
+muxin chat --sign-in                         # sign in with ChatGPT (--sign-out; add --forget to use another account)
+```
+
+In a script, where nobody can answer, a call that needs a yes doesn't run and the assistant is told so; `--bypass` runs it.
 
 ## Your settings: `config.toml`
 
 Muxin keeps everything you set in one file, `config.toml`, in `~/.config/muxin/` (`%APPDATA%\muxin\` on Windows), or in `$MUXIN_HOME` if that's set. Run `muxin paths` to see where it is. Older versions kept `fleet.toml`, `settings.json` and `ui.json` in `~/.config/muxen/`; the first run brings them into `config.toml` and leaves the old folder as it was.
 
 - `[[machine]]` tables list your machines. Edit them by hand if you like: Muxin also edits them when you add machines or install runners, and keeps your comments.
-- `[settings]` holds the watched GitHub orgs and repos, the polling intervals, whether the clipboard is shared, and cloud machine options.
+- `[settings]` holds the watched GitHub orgs and repos, the polling intervals, whether the clipboard is shared, cloud machine options, and the chat's choices (`[settings.chat]`).
 - `[ui]` holds the app's look: theme, icons, terminal font and size, shortcuts, favorite machines.
 - `state.json` holds the last machine check, and what Tailscale last said about each machine.
 - `direct.json` holds the machines paired for direct connections, and their addresses.
+- `chats/` holds the assistant's [chats](#chat), a folder each, with the files attached in it.
 
 ```toml
 [[machine]]
@@ -290,6 +333,7 @@ Every command takes `--json`. In that mode stdout carries JSON only, and errors 
 
 ```sh
 muxin status [--refresh]                 # overview + what needs attention
+muxin chat "what needs me?"              # ask the assistant (see Chat above; no --json)
 muxin machines | machine <id>
 muxin runners [--machine <id>] [--state offline]
 muxin jobs
@@ -699,6 +743,7 @@ Source layout:
 - `src/ops`: installs and runner control.
 - `src/fleet/workspaces/`: agent workspaces (host and Docker).
 - `src/api.rs`: the agent API.
+- `src/chat`: the assistant. What answers (`brain/`: Claude Code, Codex, Grok Build, a ChatGPT plan, and the models of each in `catalog.rs`), what goes with a message (`attach.rs`), the gate that asks before a tool changes something (`gate.rs`, `risk.rs`), the tools it's given (`tools.rs`), and the bridge the programs reach them through (`bridge.rs`).
 - `src/mcp.rs`: the MCP server.
 - `src/ui`: the GPUI window.
 

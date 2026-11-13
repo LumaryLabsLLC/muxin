@@ -26,6 +26,7 @@ use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use super::{Brain, Event, Setup, result_text, tail};
+use crate::chat::attach::{Attached, Kind};
 
 const SERVER: &str = "muxin";
 /// How long a tool call may take, waiting for the user included.
@@ -39,12 +40,14 @@ pub struct Codex {
     /// The turn's process, kept here so a turn that was dropped halfway
     /// (the user stopped it) can still be ended by `stop`.
     child: Option<Child>,
+    /// The pictures that go with the next message.
+    images: Vec<PathBuf>,
 }
 
 impl Codex {
     pub fn new(program: PathBuf, setup: Setup) -> Codex {
         let thread = setup.resume.clone();
-        Codex { program, setup, thread, child: None }
+        Codex { program, setup, thread, child: None, images: Vec::new() }
     }
 
     /// What Codex is started with for a turn. The message itself goes in on
@@ -56,7 +59,17 @@ impl Codex {
         if let Some(id) = &self.thread {
             args.extend(["resume".to_string(), id.clone()]);
         }
+        // Before the other flags: `-i` takes every value after it, up to the next flag.
+        for image in &self.images {
+            args.extend(["-i".to_string(), image.to_string_lossy().into_owned()]);
+        }
         args.extend(["--json", "--skip-git-repo-check", "--ignore-user-config"].map(String::from));
+        if let Some(model) = &self.setup.model {
+            args.extend(["-m".to_string(), model.clone()]);
+        }
+        if let Some(effort) = &self.setup.effort {
+            args.extend(["-c".to_string(), format!("model_reasoning_effort={}", json!(effort))]);
+        }
         args.extend(set("command", json!(self.setup.exe.to_string_lossy())));
         args.extend(set("args", json!(["mcp", "--chat", self.setup.bridge.to_string_lossy()])));
         args.extend(set("default_tools_approval_mode", json!("approve")));
@@ -118,8 +131,11 @@ pub(crate) fn read(line: &Value) -> (Vec<Event>, Option<Result<(), String>>) {
 #[async_trait::async_trait]
 impl Brain for Codex {
     async fn turn(&mut self, text: &str, events: &mpsc::UnboundedSender<Event>) -> Result<(), String> {
+        let args = self.args();
+        // They went with this message only.
+        self.images.clear();
         let mut child = tokio::process::Command::new(&self.program)
-            .args(self.args())
+            .args(args)
             .current_dir(&self.setup.work)
             .env("PATH", super::path_for_child())
             .stdin(Stdio::piped())
@@ -179,6 +195,20 @@ impl Brain for Codex {
             let _ = child.wait().await;
         }
     }
+
+    // Each turn is its own process, started with what's chosen now.
+    fn choose(&mut self, model: Option<String>, effort: Option<String>) {
+        self.setup.model = model;
+        self.setup.effort = effort;
+    }
+
+    fn attach(&mut self, files: Vec<Attached>) -> Result<(), String> {
+        if let Some(file) = files.iter().find(|f| !matches!(f.kind, Kind::Image(_))) {
+            return Err(format!("Codex can't be given {} here: it takes pictures and text. Claude Code and your ChatGPT plan read PDFs.", file.name));
+        }
+        self.images = files.into_iter().map(|f| f.path).collect();
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -186,7 +216,7 @@ mod tests {
     use super::*;
 
     fn setup() -> Setup {
-        Setup { exe: "/opt/Muxin \"beta\"/muxin".into(), bridge: "/tmp/c.sock".into(), work: "/tmp/chats/c-1/work".into(), prompt: "You are Muxin's assistant.\nBe brief.".into(), resume: None }
+        Setup { exe: "/opt/Muxin \"beta\"/muxin".into(), bridge: "/tmp/c.sock".into(), work: "/tmp/chats/c-1/work".into(), prompt: "You are Muxin's assistant.\nBe brief.".into(), ..Default::default() }
     }
 
     #[test]
@@ -203,8 +233,41 @@ mod tests {
         assert!(args.contains(&r#"sandbox_mode="read-only""#.to_string()));
         assert!(args.contains(&"--ignore-user-config".to_string()));
 
+        assert!(!args.contains(&"-m".to_string()) && !args.iter().any(|a| a.starts_with("model_reasoning_effort")));
+
         codex.thread = Some("01a1d587-1799".into());
         assert_eq!(codex.args()[..4], ["exec", "resume", "01a1d587-1799", "--json"]);
+        // The model and effort chosen go with every turn from then on.
+        codex.choose(Some("gpt-6.1-sol".into()), Some("high".into()));
+        let args = codex.args();
+        assert_eq!(args.iter().position(|a| a == "-m").map(|i| args[i + 1].as_str()), Some("gpt-6.1-sol"));
+        assert!(args.contains(&r#"model_reasoning_effort="high""#.to_string()), "{args:?}");
+    }
+
+
+    /// A picture and a PDF in a folder of their own, as a chat keeps them.
+    fn attached(name: &str) -> Vec<Attached> {
+        let dir = std::env::temp_dir().join(format!("muxin-{name}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("shot.png"), [1u8, 2, 3]).unwrap();
+        std::fs::write(dir.join("paper.pdf"), b"%PDF").unwrap();
+        vec![Attached { name: "shot.png".into(), path: dir.join("shot.png"), kind: Kind::Image("image/png") }, Attached { name: "paper.pdf".into(), path: dir.join("paper.pdf"), kind: Kind::Pdf }]
+    }
+
+    #[test]
+    fn pictures_go_by_a_flag_and_a_pdf_is_refused_in_words() {
+        let mut codex = Codex::new("codex".into(), setup());
+        let files = attached("codex-attach");
+        // A PDF can't be given to it: nothing is taken, and the user is told what can read one.
+        let why = codex.attach(files.clone()).unwrap_err();
+        assert!(why.starts_with("Codex can't be given paper.pdf here") && why.contains("Claude Code"), "{why}");
+        assert!(codex.images.is_empty());
+        // A picture is a `-i`, ahead of the other flags so it doesn't swallow them.
+        codex.attach(vec![files[0].clone()]).unwrap();
+        let args = codex.args();
+        assert_eq!(args[..3], ["exec".to_string(), "-i".to_string(), files[0].path.to_string_lossy().into_owned()]);
+        assert_eq!(args[3], "--json");
+        assert_eq!(args.last().map(String::as_str), Some("-"));
     }
 
     /// Lines as Codex 0.166 printed them, shortened.

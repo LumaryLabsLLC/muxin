@@ -1654,9 +1654,25 @@ struct ChatArgs {
     #[arg(long, value_name = "ID")]
     chat: Option<String>,
 
-    /// What answers: claude (Claude Code), codex, or chatgpt (your ChatGPT plan, after --sign-in) [default: your setting, else the first there is]
+    /// What answers: claude (Claude Code), codex, grok (Grok Build), or chatgpt (your ChatGPT plan, after --sign-in) [default: your setting, else the first there is]
     #[arg(long, value_name = "NAME")]
     brain: Option<String>,
+
+    /// The model to answer with, by its id (sonnet, gpt-6.1-sol, grok-4.7, ...) [default: the one picked last, else the brain's own]
+    #[arg(long, value_name = "ID")]
+    model: Option<String>,
+
+    /// How hard it's asked to think (low, medium, high, ...; what each model takes differs) [default: the model's own]
+    #[arg(long, value_name = "LEVEL")]
+    effort: Option<String>,
+
+    /// List the models there are to answer with, and the efforts each takes (with --brain: that one's)
+    #[arg(long)]
+    models: bool,
+
+    /// A file that goes with the message: text, a picture (PNG, JPEG, GIF, WebP) or a PDF (repeat for more)
+    #[arg(long, value_name = "FILE")]
+    attach: Vec<std::path::PathBuf>,
 
     /// Sign in with ChatGPT, so chats can answer on your ChatGPT plan (opens your browser)
     #[arg(long)]
@@ -3136,8 +3152,10 @@ fn chat(args: ChatArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     let engine = Engine::new(args.common.paths(), args.demo);
     let ask = chat::term::Ask {
         prompt: args.prompt.join(" "),
-        options: chat::Options { chat: args.chat, brain: args.brain, mode: args.bypass.then_some(chat::gate::Mode::Bypass) },
+        options: chat::Options { chat: args.chat, brain: args.brain, mode: args.bypass.then_some(chat::gate::Mode::Bypass), model: args.model, effort: args.effort },
         list: args.list,
+        models: args.models,
+        attach: args.attach,
         sign_in: args.sign_in,
         sign_out: args.sign_out,
         forget: args.forget,

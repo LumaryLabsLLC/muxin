@@ -45,6 +45,10 @@ pub enum MenuTarget {
     JoinedDesktop(String),
     /// The snippets to type into a session's terminal.
     Snippets(String),
+    /// What answers in the chat: each program or plan there is, and its models.
+    ChatModel,
+    /// How hard the chat's model is asked to think.
+    ChatEffort,
 }
 
 pub struct ContextMenu {
@@ -53,10 +57,17 @@ pub struct ContextMenu {
     pub position: Point<Pixels>,
     /// The submenu that's open, by its row.
     pub submenu: Option<usize>,
+    /// It opens upward from `position` (a picker at the bottom of a page),
+    /// not downward from it.
+    pub above: bool,
 }
 
 #[derive(Clone)]
 enum Action {
+    /// The chat answers with this brain, and this one of its models (None: its own choice).
+    ChatPick(String, Option<String>),
+    /// The chat's model is asked to think this hard (None: its own choice).
+    ChatEffort(Option<String>),
     NewTerminal(String),
     ShowDesktop(String),
     /// The machine's own remote desktop (RDP, VNC), in this computer's app for it.
@@ -289,8 +300,21 @@ impl Root {
     }
 
     pub(super) fn open_menu(&mut self, target: MenuTarget, position: Point<Pixels>, cx: &mut Context<Self>) {
-        self.context_menu = Some(ContextMenu { target, position, submenu: None });
+        let above = matches!(target, MenuTarget::ChatModel | MenuTarget::ChatEffort);
+        self.context_menu = Some(ContextMenu { target, position, submenu: None, above });
         cx.notify();
+    }
+
+    /// Opens the open menu's submenu whose row is named `label` (for a hidden `--view` hook).
+    pub(super) fn open_submenu_named(&mut self, label: &str, cx: &mut Context<Self>) {
+        if label.is_empty() {
+            return;
+        }
+        let row = self.menu_items(cx).iter().position(|item| matches!(item, Item::Submenu { label: named, .. } if named.eq_ignore_ascii_case(label)));
+        if let (Some(menu), Some(row)) = (&mut self.context_menu, row) {
+            menu.submenu = Some(row);
+            cx.notify();
+        }
     }
 
     fn menu_items(&self, cx: &gpui::App) -> Vec<Item> {
@@ -487,6 +511,31 @@ impl Root {
                 items
             }
             MenuTarget::Snippets(id) => snippet_items(id, &self.engine.settings().snippets),
+            MenuTarget::ChatModel => {
+                let Some(chat) = &self.chat else { return Vec::new() };
+                let brains = chat.read(cx).model_choices();
+                let models = |b: &super::chat::BrainChoice| -> Vec<Item> {
+                    b.models.iter().map(|m| Item::Action { label: m.name.clone(), glyph: if m.picked { Glyph::Selected } else { Glyph::None }, action: Action::ChatPick(b.id.to_string(), m.id.clone()), danger: false }).collect()
+                };
+                match brains.as_slice() {
+                    [] => vec![Item::Note("Nothing to answer with yet".into())],
+                    // One brain: its models, right away.
+                    [only] => models(only),
+                    many => {
+                        let mut items: Vec<Item> = many.iter().map(|b| Item::Submenu { label: b.name.to_string(), value: if b.current { Some(b.model.clone().unwrap_or_else(|| "default".into())) } else { None }, glyph: Glyph::Agent(b.id), items: models(b) }).collect();
+                        // Another brain knows nothing of the chat that's open.
+                        if chat.read(cx).has_chat() {
+                            items.push(Item::Separator);
+                            items.push(Item::Note("Another one answers in a new chat".into()));
+                        }
+                        items
+                    }
+                }
+            }
+            MenuTarget::ChatEffort => {
+                let Some(chat) = &self.chat else { return Vec::new() };
+                chat.read(cx).effort_choices().into_iter().map(|e| Item::Action { label: e.name, glyph: if e.picked { Glyph::Selected } else { Glyph::None }, action: Action::ChatEffort(e.id), danger: false }).collect()
+            }
             MenuTarget::SessionActions(id) => {
                 let Some(x) = s.sessions.iter().find(|x| &x.id == id) else { return Vec::new() };
                 session_actions(x)
@@ -781,6 +830,16 @@ impl Root {
     fn run_menu_action(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         self.context_menu = None;
         match action {
+            Action::ChatPick(brain, model) => {
+                if let Some(chat) = self.chat.clone() {
+                    chat.update(cx, |view, cx| view.pick(&brain, model, window, cx));
+                }
+            }
+            Action::ChatEffort(effort) => {
+                if let Some(chat) = self.chat.clone() {
+                    chat.update(cx, |view, cx| view.pick_effort(effort, cx));
+                }
+            }
             Action::NewTerminal(machine) => {
                 // A shell in the home folder, right away.
                 let direct = self.snapshot.machines.iter().find(|m| m.id == machine).is_some_and(super::sessions::runs_in_app);
@@ -915,7 +974,7 @@ impl Root {
 
     /// The open menu, drawn above everything, with a backdrop that closes it.
     pub(super) fn render_menu(&mut self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (position, open) = self.context_menu.as_ref().map(|m| (m.position, m.submenu))?;
+        let (position, open, above) = self.context_menu.as_ref().map(|m| (m.position, m.submenu, m.above))?;
         let items = self.menu_items(cx);
         if items.is_empty() {
             self.context_menu = None;
@@ -1001,7 +1060,7 @@ impl Root {
                 .absolute()
                 .inset_0()
                 .child(div().id("menu-backdrop").absolute().inset_0().occlude().on_mouse_down(MouseButton::Left, cx.listener(close)).on_mouse_down(MouseButton::Right, cx.listener(close)))
-                .child(deferred(anchored().position(position).snap_to_window_with_margin(px(8.)).child(menu)).with_priority(1))
+                .child(deferred(anchored().anchor(if above { Corner::BottomLeft } else { Corner::TopLeft }).position(position).snap_to_window_with_margin(px(8.)).child(menu)).with_priority(1))
                 .into_any_element(),
         )
     }

@@ -18,6 +18,7 @@
 //! `Chat` puts them together: it holds one conversation and runs its turns.
 
 pub mod account;
+pub mod attach;
 pub mod brain;
 pub mod bridge;
 pub mod gate;
@@ -48,11 +49,16 @@ use store::{Item, Meta, Store};
 pub struct Options {
     /// A chat's id to go on with, or "last" for the one used last. None: a new chat.
     pub chat: Option<String>,
-    /// "claude" or "codex". None: the chat's own, else the user's setting,
+    /// "claude", "codex", "chatgpt" or "grok". None: the chat's own, else the user's setting,
     /// else the first one installed.
     pub brain: Option<String>,
     /// None: the user's setting (asking, unless they chose otherwise).
     pub mode: Option<Mode>,
+    /// The model to answer with, by the brain's id for it (brain/catalog.rs),
+    /// and how hard it's asked to think. None: the chat's own, else what was
+    /// picked last for that brain, else the brain's own choice.
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 /// What happens during a turn, for whoever shows the chat. (A call's `id`
@@ -86,6 +92,8 @@ pub struct Chat {
     brain: Box<dyn brain::Brain>,
     /// The last thing said about the plan's limits, so it's said once.
     limit: Option<String>,
+    /// The files that go with the next message (`attach`).
+    staged: Vec<attach::Attached>,
     /// How a brain that's another program reaches Muxin's tools. Muxin's own needs none.
     _bridge: Option<Bridge>,
 }
@@ -131,9 +139,22 @@ impl Chat {
             Some(meta) => meta,
             None => store.create(&brain_id).map_err(|e| format!("Couldn't make the chat: {e}"))?,
         };
-        if meta.brain != brain_id {
-            // Another brain takes over: it starts without the other's memory of the conversation.
+        let other_brain = meta.brain != brain_id;
+        if other_brain {
+            // Another brain takes over: it starts without the other's memory
+            // of the conversation, and with a model of its own.
             meta.brain = brain_id.clone();
+            meta.model = None;
+            meta.effort = None;
+        }
+        let some = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let (picked_model, picked_effort) = settings.pick(&brain_id);
+        let model = some(options.model).or_else(|| meta.model.clone()).or(picked_model);
+        // An effort belongs to a model: one picked for another model isn't carried over.
+        let effort = some(options.effort).or_else(|| meta.effort.clone()).or(picked_effort);
+        if other_brain || (&meta.model, &meta.effort) != (&model, &effort) {
+            meta.model = model.clone();
+            meta.effort = effort.clone();
             let _ = store.save(&meta);
         }
         let mode = options.mode.unwrap_or_else(|| Mode::from_setting(&settings.mode));
@@ -142,25 +163,54 @@ impl Chat {
         let (brain, bridge): (Box<dyn brain::Brain>, Option<Bridge>) = match kind.program {
             // Another program: it reaches Muxin's tools through a bridge to this Muxin.
             Some(_) => {
-                let bridge = Bridge::start(engine.clone(), tools::Short::new(gate.clone()), &engine.paths().dir).map_err(|e| format!("Couldn't open the chat's way to Muxin's tools: {e}"))?;
+                // The short list, or all of them for a program that finds tools by itself.
+                let front: Arc<dyn crate::mcp::Front> = if kind.finds_tools { tools::Whole::new(gate.clone()) } else { tools::Short::new(gate.clone()) };
+                let bridge = Bridge::start(engine.clone(), front, &engine.paths().dir).map_err(|e| format!("Couldn't open the chat's way to Muxin's tools: {e}"))?;
                 let setup = brain::Setup {
                     exe: std::env::current_exe().map_err(|e| format!("Couldn't find this Muxin's own program: {e}"))?,
                     bridge: bridge.path().to_path_buf(),
                     work,
                     prompt: prompt::system(),
                     resume: meta.sessions.get(&brain_id).cloned(),
+                    model,
+                    effort,
                 };
                 (brain::start(&brain_id, setup)?, Some(bridge))
             }
             // Muxin's own: it calls the tools right here, and keeps the conversation in the chat's folder.
             None => {
                 let folder = work.parent().unwrap_or(&work).to_path_buf();
-                let model = Some(settings.model.clone()).filter(|m| !m.trim().is_empty());
-                let own = brain::responses::ChatGpt::new(engine.clone(), gate.clone(), vault, account::Endpoints::default(), folder, prompt::system(), model);
+                let own = brain::responses::ChatGpt::new(engine.clone(), gate.clone(), vault, account::Endpoints::default(), folder, prompt::system(), model).effort(effort);
                 (Box::new(own), None)
             }
         };
-        Ok(Chat { meta, store, engine: engine.clone(), gate, gate_events, brain, limit: None, _bridge: bridge })
+        Ok(Chat { meta, store, engine: engine.clone(), gate, gate_events, brain, limit: None, staged: Vec::new(), _bridge: bridge })
+    }
+
+    /// Answers with this model, at this effort, from the next turn on (None:
+    /// the brain's own choice). The conversation goes on as it was.
+    pub fn choose(&mut self, model: Option<String>, effort: Option<String>) {
+        let some = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let (model, effort) = (some(model), some(effort));
+        self.meta.model = model.clone();
+        self.meta.effort = effort.clone();
+        let _ = self.store.save(&self.meta);
+        self.brain.choose(model, effort);
+    }
+
+    /// Attaches files to the next message: each is checked, and copied into
+    /// the chat's folder. `Err` says, for the user, which one can't be
+    /// attached and why; none of them is then.
+    pub fn attach(&mut self, paths: &[std::path::PathBuf]) -> Result<(), String> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        if self.staged.len() + paths.len() > attach::MOST_FILES {
+            return Err(format!("That's {} files. A message takes {}.", self.staged.len() + paths.len(), attach::MOST_FILES));
+        }
+        let home = self.store.home(&self.meta.id).ok_or("This chat has no folder to keep files in.")?;
+        self.staged.extend(attach::take(&home, paths)?);
+        Ok(())
     }
 
     /// The chat's gate: its mode, and where answers to waiting calls go.
@@ -179,7 +229,8 @@ impl Chat {
     ///
     /// To stop a turn, drop this future and call `stop`.
     pub async fn send(&mut self, text: &str, on: &mut (dyn FnMut(Update) + Send)) -> Result<(), String> {
-        let Chat { meta, store, engine, gate, gate_events, brain, limit, .. } = self;
+        let Chat { meta, store, engine, gate, gate_events, brain, limit, staged, .. } = self;
+        let files = std::mem::take(staged);
         // A call that came in while no turn was running isn't this turn's to ask about.
         while let Ok(event) = gate_events.try_recv() {
             if let gate::Event::Asked(request) = &event {
@@ -187,16 +238,23 @@ impl Chat {
             }
         }
         while gate_events.try_recv().is_ok() {}
-        let _ = store.append(&meta.id, &Item::User { at: store::now(), text: text.to_string() });
+        let _ = store.append(&meta.id, &Item::User { at: store::now(), text: text.to_string(), files: files.iter().map(|f| f.name.clone()).collect() });
         if meta.title.is_empty() {
             meta.title = store::title_from(text);
         }
         meta.updated = store::now();
         let _ = store.save(meta);
 
+        // Text files go in the message's own words; pictures and PDFs, the brain's own way.
+        let message = attach::with_text(text, &files);
+        if let Err(why) = brain.attach(files.into_iter().filter(|f| f.kind != attach::Kind::Text).collect()) {
+            let _ = store.append(&meta.id, &Item::Error { at: store::now(), text: why.clone() });
+            return Err(why);
+        }
+
         let (tx, mut said) = mpsc::unbounded_channel();
         let outcome = {
-            let turn = brain.turn(text, &tx);
+            let turn = brain.turn(&message, &tx);
             tokio::pin!(turn);
             loop {
                 tokio::select! {
@@ -358,7 +416,7 @@ pub(crate) mod tests {
         let (gate, gate_events) = Gate::new(Mode::Ask, vec![]);
         let bridge = Bridge::start(engine.clone(), tools::Short::new(gate.clone()), &dir).unwrap();
         let brain = Box::new(Scripted { gate: gate.clone(), turns });
-        Chat { meta, store, engine, gate, gate_events, brain, limit: None, _bridge: Some(bridge) }
+        Chat { meta, store, engine, gate, gate_events, brain, limit: None, staged: Vec::new(), _bridge: Some(bridge) }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -452,6 +510,72 @@ pub(crate) mod tests {
         assert!(stray.await.unwrap().unwrap_err().contains("no turn was running"));
     }
 
+    /// A brain that keeps what it was told, and takes pictures but not PDFs.
+    struct Listening {
+        heard: Arc<std::sync::Mutex<Vec<String>>>,
+        given: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl brain::Brain for Listening {
+        fn attach(&mut self, files: Vec<attach::Attached>) -> Result<(), String> {
+            if let Some(pdf) = files.iter().find(|f| f.kind == attach::Kind::Pdf) {
+                return Err(format!("It can't be given {}.", pdf.name));
+            }
+            self.given.lock().unwrap().extend(files.into_iter().map(|f| f.name));
+            Ok(())
+        }
+
+        async fn turn(&mut self, text: &str, _events: &mpsc::UnboundedSender<brain::Event>) -> Result<(), String> {
+            self.heard.lock().unwrap().push(text.to_string());
+            Ok(())
+        }
+
+        async fn stop(&mut self) {}
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attached_files_go_with_one_message_text_in_its_words_and_the_rest_the_brains_way() {
+        let mut chat = chat("attach", vec![]);
+        let (heard, given) = (Arc::new(std::sync::Mutex::new(Vec::new())), Arc::new(std::sync::Mutex::new(Vec::new())));
+        chat.brain = Box::new(Listening { heard: heard.clone(), given: given.clone() });
+        let dir = std::env::temp_dir().join(format!("muxin-chat-attach-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("build.log"), "error: nope\n").unwrap();
+        std::fs::write(dir.join("shot.png"), [1u8, 2, 3]).unwrap();
+        std::fs::write(dir.join("paper.pdf"), b"%PDF").unwrap();
+        std::fs::write(dir.join("x.bin"), [0u8, 1]).unwrap();
+
+        chat.attach(&[dir.join("build.log"), dir.join("shot.png")]).unwrap();
+        chat.send("Why does this fail?", &mut |_| {}).await.unwrap();
+        // The log is in the message's own words; the picture went the brain's way.
+        assert_eq!(heard.lock().unwrap()[0], "Why does this fail?\n\nAttached file: build.log\n```\nerror: nope\n```");
+        assert_eq!(*given.lock().unwrap(), ["shot.png"]);
+        // What was said keeps their names, and the chat its own copies.
+        assert!(matches!(&chat.thread()[0], Item::User { text, files, .. } if text == "Why does this fail?" && files == &["build.log", "shot.png"]));
+        let home = chat.store.home(&chat.meta.id).unwrap();
+        assert!(home.join("files/build.log").exists() && home.join("files/shot.png").exists());
+
+        // They went with that message, not the next one.
+        chat.send("And now?", &mut |_| {}).await.unwrap();
+        assert_eq!(heard.lock().unwrap()[1], "And now?");
+        assert_eq!(given.lock().unwrap().len(), 1);
+
+        // One this brain can't take: the message isn't sent, and the chat says why.
+        chat.attach(&[dir.join("paper.pdf")]).unwrap();
+        assert_eq!(chat.send("Read this", &mut |_| {}).await.unwrap_err(), "It can't be given paper.pdf.");
+        assert_eq!(heard.lock().unwrap().len(), 2);
+        assert!(matches!(chat.thread().last(), Some(Item::Error { text, .. }) if text == "It can't be given paper.pdf."));
+        // And it isn't still waiting to go with the message after.
+        chat.send("Never mind", &mut |_| {}).await.unwrap();
+        assert_eq!(heard.lock().unwrap()[2], "Never mind");
+
+        // A file no brain could read is refused when it's attached.
+        assert!(chat.attach(&[dir.join("x.bin")]).unwrap_err().starts_with("x.bin isn't text"));
+        assert!(chat.attach(&vec![dir.join("build.log"); 11]).unwrap_err().starts_with("That's 11 files."));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_failed_turn_is_said_and_kept() {
         let mut chat = chat("fail", vec![vec![Step::Say("Looking…"), Step::Fail("Claude Code ended before it answered.")]]);
@@ -468,7 +592,7 @@ pub(crate) mod tests {
         let err = |options| Chat::open(&engine, options).err().unwrap();
         assert!(err(Options { chat: Some("last".into()), ..Default::default() }).contains("no chat to go on with"));
         assert!(err(Options { chat: Some("c-nope12".into()), ..Default::default() }).contains("no chat c-nope12"));
-        assert!(err(Options { brain: Some("gpt".into()), ..Default::default() }).contains("claude, codex or chatgpt"));
+        assert!(err(Options { brain: Some("gpt".into()), ..Default::default() }).contains("claude, codex, chatgpt or grok"));
         // Nothing was made along the way.
         assert!(store(&engine).list().is_empty());
     }

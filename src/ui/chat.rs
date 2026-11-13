@@ -6,16 +6,19 @@
 //! The chat itself runs in a task of its own (chat::live): this page shows
 //! what that reports and sends it what the user types.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{AnyElement, ClipboardItem, Context, ElementId, Entity, FocusHandle, Focusable, FontWeight, ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, Window, div, prelude::*, px};
+use gpui::{AnyElement, ClickEvent, ClipboardItem, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Pixels, Point, ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, Window, div, prelude::*, px};
 use serde_json::Value;
 
-use super::input::{InputEvent, TextInput};
+use super::input::{InputEvent, PastedOther, TextInput};
 use super::kit::{self, Button, ButtonStyle, card, icon, spinner};
 use super::markdown::markdown;
 use super::theme::{ActiveTheme, Theme, mono_font};
 use crate::chat::account::{self, Account, Endpoints, USAGE_URL, Vault};
+use crate::chat::attach;
+use crate::chat::brain::catalog::{self, Model};
 use crate::chat::gate::{Answer, Mode, Request};
 use crate::chat::live::{Event, Live};
 use crate::chat::risk::{self, Risk};
@@ -42,6 +45,8 @@ const STARTERS: [(&str, &str); 3] = [
 #[derive(Clone, Debug, PartialEq)]
 enum Row {
     User(String),
+    /// The files that went with what the user said, by name.
+    Files(Vec<String>),
     /// What the assistant said; `writing` while more of it is coming.
     Said { text: String, writing: bool },
     /// A tool it called, and what came back (text, whether it failed).
@@ -51,6 +56,31 @@ enum Row {
     /// A small line: what a turn used, a plan's limit.
     Note(String),
     Failed(String),
+}
+
+/// What the page asks its window for: a menu where the user clicked, to
+/// pick what answers (`effort`: how hard it thinks).
+pub enum ChatEvent {
+    Menu { effort: bool, position: Point<Pixels> },
+}
+
+/// One line of a picker: what picking it sets (None: the brain's, or the
+/// model's, own choice), and whether it's the one in use.
+pub(super) struct Choice {
+    pub id: Option<String>,
+    pub name: String,
+    pub picked: bool,
+}
+
+/// A brain in the model picker, with its models.
+pub(super) struct BrainChoice {
+    pub id: &'static str,
+    pub name: &'static str,
+    /// It's what answers now.
+    pub current: bool,
+    /// The model it answers with, or would, when one is picked.
+    pub model: Option<String>,
+    pub models: Vec<Choice>,
 }
 
 pub struct ChatView {
@@ -83,8 +113,20 @@ pub struct ChatView {
     brain_choice: Option<String>,
     /// The model answering in the open chat, once its brain said.
     model: Option<String>,
+    /// The files that go with the next message, and why the last one that
+    /// was tried can't.
+    attached: Vec<PathBuf>,
+    attach_trouble: Option<String>,
+    /// Each program's models, as that program lists them on this computer
+    /// (read when the page opens and when it's shown again, not on every draw).
+    catalog: Vec<(&'static str, Vec<Model>)>,
+    /// The models the ChatGPT account lists, once it answered.
+    plan_models: Vec<Model>,
+    plan_models_asked: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
+
+impl EventEmitter<ChatEvent> for ChatView {}
 
 impl Focusable for ChatView {
     fn focus_handle(&self, cx: &gpui::App) -> FocusHandle {
@@ -96,12 +138,16 @@ impl ChatView {
     pub fn new(engine: Arc<Engine>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Several lines: it grows as far as eight rows, then scrolls. Enter sends, Shift+Enter starts a new line.
         let input = cx.new(|cx| TextInput::new(cx, "Ask about your machines, or ask for something to be done").bare().lines(8));
-        let subs = vec![cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
-            InputEvent::Submit => this.submit(window, cx),
-            // The send button follows whether there's something to send.
-            InputEvent::Changed => cx.notify(),
-            InputEvent::Cancel => {}
-        })];
+        let subs = vec![
+            cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Submit => this.submit(window, cx),
+                // The send button follows whether there's something to send.
+                InputEvent::Changed => cx.notify(),
+                InputEvent::Cancel => {}
+            }),
+            // A picture pasted where text goes is attached instead.
+            cx.subscribe_in(&input, window, |this, _, _: &PastedOther, _, cx| this.attach_pasted(cx)),
+        ];
         let mode = Mode::from_setting(&engine.settings().chat.mode);
         let account = account::current(&Vault::of(&engine.paths().dir));
         let mut view = ChatView {
@@ -123,8 +169,14 @@ impl ChatView {
             welcome: false,
             brain_choice: None,
             model: None,
+            attached: Vec::new(),
+            attach_trouble: None,
+            catalog: Vec::new(),
+            plan_models: Vec::new(),
+            plan_models_asked: None,
             _subs: subs,
         };
+        view.load_models(window, cx);
         // The chat used last opens with the page.
         if let Some(last) = crate::chat::store(&view.engine).list().into_iter().next() {
             view.open(Some(last.id), window, cx);
@@ -143,7 +195,7 @@ impl ChatView {
         self.close();
         // A chat from before goes on with its own brain; a new one takes the one chosen.
         let brain = if chat.is_none() { self.brain_choice.clone() } else { None };
-        match Live::open(&self.engine, Options { chat, brain, mode: Some(self.mode) }) {
+        match Live::open(&self.engine, Options { chat, brain, mode: Some(self.mode), ..Default::default() }) {
             Ok((live, meta, thread, mut events)) => {
                 self.rows = rows_from(thread);
                 self.meta = Some(meta);
@@ -200,8 +252,73 @@ impl ChatView {
         if text.is_empty() {
             return;
         }
-        self.say(text, window, cx);
+        let files = std::mem::take(&mut self.attached);
+        self.attach_trouble = None;
+        self.say_with(text, files, window, cx);
         self.input.update(cx, |input, cx| input.set_text("", cx));
+    }
+
+    /// Adds files to the next message. One that can't be attached is left
+    /// out, and the page says why.
+    pub(super) fn attach(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.attach_trouble = None;
+        for path in paths {
+            if self.attached.contains(&path) {
+                continue;
+            }
+            if self.attached.len() >= attach::MOST_FILES {
+                self.attach_trouble = Some(format!("A message takes {} files.", attach::MOST_FILES));
+                break;
+            }
+            match attach::kind(&path) {
+                Ok(_) => self.attached.push(path),
+                Err(why) => self.attach_trouble = Some(why),
+            }
+        }
+        cx.notify();
+    }
+
+    /// The paperclip: asks which files, in the system's own picker.
+    fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let asked = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Attach".into()) });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = asked.await {
+                let _ = this.update(cx, |this, cx| this.attach(paths, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// A picture on the clipboard, pasted into the field: kept as a file
+    /// beside the chats, and attached.
+    fn attach_pasted(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = cx.read_from_clipboard() else { return };
+        let Some(image) = item.entries().iter().find_map(|entry| match entry {
+            gpui::ClipboardEntry::Image(image) => Some(image.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        let ext = match image.format {
+            gpui::ImageFormat::Png => "png",
+            gpui::ImageFormat::Jpeg => "jpg",
+            gpui::ImageFormat::Gif => "gif",
+            gpui::ImageFormat::Webp => "webp",
+            _ => {
+                self.attach_trouble = Some("That kind of picture can't be attached. PNG, JPEG, GIF and WebP can.".into());
+                cx.notify();
+                return;
+            }
+        };
+        let dir = self.engine.paths().dir.join("chats").join("pasted");
+        let file = dir.join(format!("Pasted {}.{ext}", chrono::Local::now().format("%Y-%m-%d %H.%M.%S%.3f")));
+        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, &image.bytes)) {
+            Ok(()) => self.attach(vec![file], cx),
+            Err(e) => {
+                self.attach_trouble = Some(format!("Couldn't keep the pasted picture: {e}"));
+                cx.notify();
+            }
+        }
     }
 
     /// Puts `text` in the field as if typed (a hidden `--view` hook uses it to check the page).
@@ -209,13 +326,128 @@ impl ChatView {
         self.input.update(cx, |input, cx| input.set_text(text.to_string(), cx));
     }
 
+    /// Where the pickers under the box are, about, in the window: for a
+    /// hidden `--view` hook that opens one without a click.
+    pub(super) fn picker_anchor(&self, effort: bool, window: &Window) -> Point<Pixels> {
+        let size = window.viewport_size();
+        let column = (self.width - PADDING * 2.).clamp(280., MAX_WIDTH);
+        let left = f32::from(size.width) - self.width + (self.width - column) / 2.;
+        // After the "Asks first" button; the effort picker after the model's, whose width goes by its words.
+        let mode = if self.mode == Mode::Bypass { 148. } else { 108. };
+        let label = match (self.brain(), self.model_label()) {
+            (Some(kind), Some(model)) => format!("{} · {model}", kind.name),
+            (Some(kind), None) => kind.name.to_string(),
+            _ => String::new(),
+        };
+        let model = label.chars().count() as f32 * 6.9 + 36.;
+        gpui::point(px(left + mode + if effort { model + 4. } else { 0. }), size.height - px(48.))
+    }
+
+    /// Nothing is being answered, and nothing waits for a yes or no.
+    pub(super) fn is_idle(&self) -> bool {
+        !self.busy && !self.rows.iter().any(|row| matches!(row, Row::Ask { answer: None, .. }))
+    }
+
+    /// Sends what's in the field, as Return does.
+    pub(super) fn send_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.submit(window, cx);
+    }
+
+    /// A chat is open, with something said in it.
+    pub(super) fn has_chat(&self) -> bool {
+        self.live.is_some() && !self.rows.is_empty()
+    }
+
+    /// What answers in the next new chat, by its id, as if picked under the
+    /// box (a hidden `--view` hook: demo mode reads no settings).
+    pub(super) fn choose_brain(&mut self, id: &str, cx: &mut Context<Self>) {
+        if brain::available(self.plan()).iter().any(|kind| kind.id == id) {
+            self.brain_choice = Some(id.to_string());
+            cx.notify();
+        }
+    }
+
+    /// Types `text` into the field a letter at a time, then sends it, as
+    /// someone at the keyboard would, starting `after_ms` from now. Several
+    /// messages, with " | " between them, are a conversation: each is typed
+    /// once the answer to the one before is done. (A hidden `--view` hook,
+    /// to check the page and to film it without touching the window.)
+    pub(super) fn type_and_send(&mut self, text: String, after_ms: u64, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let executor = cx.background_executor().clone();
+            let wait = |ms: u64| executor.timer(std::time::Duration::from_millis(ms));
+            wait(after_ms).await;
+            for (n, message) in text.split('|').map(str::trim).filter(|m| !m.is_empty()).enumerate() {
+                if n > 0 {
+                    // The turn before has to have begun, then ended, with nothing left waiting for an answer.
+                    wait(1500).await;
+                    loop {
+                        match this.update(cx, |this, _| this.busy || this.rows.iter().any(|row| matches!(row, Row::Ask { answer: None, .. }))) {
+                            Ok(true) => wait(150).await,
+                            Ok(false) => break,
+                            Err(_) => return,
+                        }
+                    }
+                    wait(2200).await;
+                }
+                let letters: Vec<char> = message.chars().collect();
+                for end in 1..=letters.len() {
+                    let so_far: String = letters[..end].iter().collect();
+                    if this.update(cx, |this, cx| this.draft(&so_far, cx)).is_err() {
+                        return;
+                    }
+                    wait(if letters[end - 1] == ' ' { 70 } else { 38 }).await;
+                }
+                wait(450).await;
+                if this.update_in(cx, |this, window, cx| this.submit(window, cx)).is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Answers each call that waits for the user, once it's been on the page
+    /// for `shown_ms` (a hidden `--view` hook, as `type_and_send`).
+    pub(super) fn answer_each(&mut self, answer: Answer, shown_ms: u64, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let executor = cx.background_executor().clone();
+            let wait = |ms: u64| executor.timer(std::time::Duration::from_millis(ms));
+            loop {
+                wait(100).await;
+                let waiting = this.update(cx, |this, _| {
+                    this.rows.iter().find_map(|row| match row {
+                        Row::Ask { request, answer: None } => Some(request.id),
+                        _ => None,
+                    })
+                });
+                match waiting {
+                    Ok(Some(id)) => {
+                        wait(shown_ms).await;
+                        if this.update(cx, |this, cx| this.answer(id, answer.clone(), cx)).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => return,
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Says `text` to the assistant, in the open chat or a new one.
     pub(super) fn say(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.say_with(text, Vec::new(), window, cx);
+    }
+
+    /// Says `text`, with these files attached.
+    fn say_with(&mut self, text: String, files: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         if self.live.is_none() && !self.open(None, window, cx) {
             return;
         }
         if let Some(live) = &self.live {
-            live.send(text);
+            live.send_with(text, files);
             self.stick = true;
         }
     }
@@ -247,8 +479,9 @@ impl ChatView {
 
     /// Takes in what may have changed in Settings while the page wasn't
     /// shown: the ChatGPT account, and how new chats start.
-    pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.account = account::current(&Vault::of(&self.engine.paths().dir));
+        self.load_models(window, cx);
         if self.live.is_none() {
             self.mode = Mode::from_setting(&self.engine.settings().chat.mode);
             // A brain picked here that's gone (signed out) is no longer the pick.
@@ -261,15 +494,163 @@ impl ChatView {
         cx.notify();
     }
 
-    /// The next of the brains there are, for the next new chat.
-    fn next_brain(&mut self, cx: &mut Context<Self>) {
-        let all = brain::available(self.plan());
-        let now = self.brain().map(|k| k.id);
-        let at = all.iter().position(|k| Some(k.id) == now).map(|n| n + 1).unwrap_or(0);
-        if let Some(next) = all.get(at % all.len().max(1)) {
-            self.brain_choice = Some(next.id.to_string());
-            cx.notify();
+    /// Reads each program's list of models, and asks the ChatGPT account
+    /// for its own when the user answers on their plan.
+    fn load_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.catalog = brain::KINDS.iter().filter(|k| k.program.is_some()).map(|k| (k.id, catalog::of(k.id))).collect();
+        if !self.plan() {
+            self.plan_models.clear();
+            return;
         }
+        if self.plan_models_asked.is_some() || !self.plan_models.is_empty() {
+            return;
+        }
+        let vault = Vault::of(&self.engine.paths().dir);
+        let job = self.engine.runtime().spawn(async move { crate::chat::brain::responses::models(&vault, &Endpoints::default()).await });
+        self.plan_models_asked = Some(cx.spawn_in(window, async move |this, cx| {
+            let listed = job.await.ok().and_then(Result::ok).unwrap_or_default();
+            let _ = this.update(cx, |this, cx| {
+                this.plan_models = listed;
+                this.plan_models_asked = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    fn models_of(&self, brain: &str) -> &[Model] {
+        if brain == brain::CHATGPT {
+            return &self.plan_models;
+        }
+        self.catalog.iter().find(|(id, _)| *id == brain).map(|(_, models)| models.as_slice()).unwrap_or(&[])
+    }
+
+    /// The model and effort picked: the open chat's own, else what a new
+    /// chat with this brain would start with. None: the brain's own choice.
+    fn picked(&self) -> (Option<String>, Option<String>) {
+        match &self.meta {
+            Some(meta) => (meta.model.clone(), meta.effort.clone()),
+            None => self.engine.settings().chat.pick(self.brain().map(|k| k.id).unwrap_or_default()),
+        }
+    }
+
+    /// The model that answers, as far as it's known: the one picked, else
+    /// the one the brain said it's using, else the first it lists.
+    fn current_model(&self) -> Option<&Model> {
+        let models = self.models_of(self.brain()?.id);
+        let id = self.picked().0.or_else(|| self.model.clone());
+        id.and_then(|id| catalog::find(models, &id)).or(models.first())
+    }
+
+    /// What the model picker's button says: the model by its name.
+    fn model_label(&self) -> Option<String> {
+        let id = self.picked().0.or_else(|| self.model.clone())?;
+        let models = self.brain().map(|k| self.models_of(k.id)).unwrap_or(&[]);
+        Some(catalog::find(models, &id).map(|m| m.name.clone()).unwrap_or(id))
+    }
+
+    /// What the effort picker's button says; None when the model has no such choice.
+    fn effort_label(&self) -> Option<String> {
+        let model = self.current_model()?;
+        let named = |id: &str| model.efforts.iter().find(|e| e.id == id).map(|e| e.name.clone());
+        if model.efforts.is_empty() {
+            return None;
+        }
+        Some(self.picked().1.as_deref().and_then(named).or_else(|| model.effort.as_deref().and_then(named)).unwrap_or_else(|| "Effort".into()))
+    }
+
+    /// The model picker's lines: each brain there is, with its models.
+    pub(super) fn model_choices(&self) -> Vec<BrainChoice> {
+        let now = self.brain().map(|k| k.id);
+        let settings = self.engine.settings().chat;
+        brain::available(self.plan())
+            .into_iter()
+            .map(|kind| {
+                let current = Some(kind.id) == now;
+                let model = if current { self.picked().0 } else { settings.pick(kind.id).0 };
+                let mut models = vec![Choice { id: None, name: "Default".into(), picked: model.is_none() }];
+                models.extend(self.models_of(kind.id).iter().map(|m| Choice { id: Some(m.id.clone()), name: m.name.clone(), picked: model.as_deref() == Some(m.id.as_str()) }));
+                BrainChoice { id: kind.id, name: kind.name, current, model: model.map(|id| catalog::find(self.models_of(kind.id), &id).map(|m| m.name.clone()).unwrap_or(id)), models }
+            })
+            .collect()
+    }
+
+    /// The effort picker's lines, for the model that answers.
+    pub(super) fn effort_choices(&self) -> Vec<Choice> {
+        let Some(model) = self.current_model() else { return Vec::new() };
+        let picked = self.picked().1.filter(|e| model.efforts.iter().any(|x| x.id == *e));
+        let own = match model.effort.as_deref().and_then(|id| model.efforts.iter().find(|e| e.id == id)) {
+            Some(effort) => format!("Default ({})", effort.name),
+            None => "Default".to_string(),
+        };
+        let mut choices = vec![Choice { id: None, name: own, picked: picked.is_none() }];
+        choices.extend(model.efforts.iter().map(|e| Choice { id: Some(e.id.clone()), name: e.name.clone(), picked: picked.as_deref() == Some(e.id.as_str()) }));
+        choices
+    }
+
+    /// Picks what answers: a brain, and one of its models (None: its own
+    /// choice). In the open chat when it's the same brain, from its next
+    /// message on; another brain answers in a new chat, since it knows
+    /// nothing of this one. The pick is what that brain's next chats start with.
+    pub(super) fn pick(&mut self, brain_id: &str, model: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if brain::kind(brain_id).is_none() {
+            return;
+        }
+        // An effort the new model doesn't take isn't carried over to it.
+        let efforts: Vec<String> = match &model {
+            Some(id) => catalog::find(self.models_of(brain_id), id).map(|m| m.efforts.iter().map(|e| e.id.clone()).collect()).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let mut settings = self.engine.settings();
+        let kept = settings.chat.picked.entry(brain_id.to_string()).or_default();
+        kept.model = model.clone().unwrap_or_default();
+        if model.is_some() && !efforts.contains(&kept.effort) {
+            kept.effort.clear();
+        }
+        let effort = Some(kept.effort.clone()).filter(|e| !e.is_empty());
+        let _ = self.engine.update_settings(settings);
+
+        let same = self.meta.as_ref().is_some_and(|meta| meta.brain == brain_id);
+        match (&self.live, same) {
+            (Some(live), true) => {
+                live.choose(model.clone(), effort.clone());
+                if let Some(meta) = &mut self.meta {
+                    meta.model = model;
+                    meta.effort = effort;
+                }
+                // The brain says which model answers once it does; until then, the pick is what's shown.
+                self.model = None;
+            }
+            _ => {
+                if self.live.is_some() {
+                    self.close();
+                    window.focus(&self.input.focus_handle(cx));
+                }
+                self.brain_choice = Some(brain_id.to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Picks how hard the model that answers is asked to think (None: its own choice).
+    pub(super) fn pick_effort(&mut self, effort: Option<String>, cx: &mut Context<Self>) {
+        let Some(brain_id) = self.brain().map(|k| k.id) else { return };
+        let model = self.picked().0;
+        let mut settings = self.engine.settings();
+        let kept = settings.chat.picked.entry(brain_id.to_string()).or_default();
+        kept.effort = effort.clone().unwrap_or_default();
+        // Kept with the model it was picked for.
+        if kept.model.is_empty() {
+            kept.model = model.clone().unwrap_or_default();
+        }
+        let _ = self.engine.update_settings(settings);
+        if let Some(live) = &self.live {
+            live.choose(model.clone(), effort.clone());
+            if let Some(meta) = &mut self.meta {
+                meta.model = model;
+                meta.effort = effort;
+            }
+        }
+        cx.notify();
     }
 
     /// "Continue with ChatGPT": the sign-in, in the user's browser.
@@ -347,8 +728,11 @@ impl ChatView {
     /// Something the running chat reported.
     fn heard(&mut self, event: Event) {
         match event {
-            Event::Started(text) => {
+            Event::Started(text, files) => {
                 self.rows.push(Row::User(text));
+                if !files.is_empty() {
+                    self.rows.push(Row::Files(files));
+                }
                 self.busy = true;
                 self.stick = true;
             }
@@ -375,15 +759,29 @@ fn apply(rows: &mut Vec<Row>, update: Update) {
             Some(Row::Said { text, writing: true }) => text.push_str(&piece),
             _ => rows.push(Row::Said { text: piece, writing: true }),
         },
-        Update::Text(whole) => match rows.last_mut() {
-            // Its pieces were shown as they came: the whole replaces them.
-            Some(Row::Said { text, writing }) if *writing => {
-                *text = whole;
-                *writing = false;
+        Update::Text(whole) => {
+            // Its pieces were shown as they came: the whole replaces them. A
+            // question may have come in between (Grok says the whole only once
+            // the call it asked about has begun): then it's the words above
+            // the question that this is the whole of, not something new.
+            let mut asked = false;
+            let shown = rows.iter_mut().rev().find_map(|row| match row {
+                Row::Ask { .. } => {
+                    asked = true;
+                    None
+                }
+                Row::Said { text, writing } => Some(if *writing || (asked && !text.trim().is_empty() && whole.trim_start().starts_with(text.trim())) { Ok((text, writing)) } else { Err(()) }),
+                _ => Some(Err(())),
+            });
+            match shown {
+                Some(Ok((text, writing))) => {
+                    *text = whole;
+                    *writing = false;
+                }
+                _ if whole.trim().is_empty() => {}
+                _ => rows.push(Row::Said { text: whole, writing: false }),
             }
-            _ if whole.trim().is_empty() => {}
-            _ => rows.push(Row::Said { text: whole, writing: false }),
-        },
+        }
         Update::Tool { id, name, args } => {
             settle(rows);
             push_tool(rows, id, name, args);
@@ -403,7 +801,7 @@ fn apply(rows: &mut Vec<Row>, update: Update) {
             rows.push(Row::Ask { request, answer: None });
         }
         Update::Usage { input, output, cost, .. } => {
-            let cost = cost.map(|c| format!(" · ${c:.2} at API prices")).unwrap_or_default();
+            let cost = cost.map(term::priced).unwrap_or_default();
             rows.push(Row::Note(format!("{} tokens in, {} out{cost}", term::count(input), term::count(output))));
         }
         Update::Limit(text) => rows.push(Row::Note(text)),
@@ -450,7 +848,12 @@ fn rows_from(thread: Vec<Item>) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     for item in thread {
         match item {
-            Item::User { text, .. } => rows.push(Row::User(text)),
+            Item::User { text, files, .. } => {
+                rows.push(Row::User(text));
+                if !files.is_empty() {
+                    rows.push(Row::Files(files));
+                }
+            }
             Item::Text { text, .. } => rows.push(Row::Said { text, writing: false }),
             Item::Tool { id, name, args, .. } => push_tool(&mut rows, id, name, args),
             Item::Result { id, text, is_error, .. } => {
@@ -750,8 +1153,7 @@ impl ChatView {
         let bypass = self.mode == Mode::Bypass;
         let kind = self.brain();
         let on_plan = kind.is_some_and(|k| k.id == brain::CHATGPT);
-        // Which brain a new chat gets can be changed, when there's more than one; an open chat keeps its own.
-        let choosing = self.live.is_none() && brain::available(self.plan()).len() > 1;
+        let (accent, hover) = (theme.accent, theme.ghost_hover);
         let action = if self.busy && !has_text {
             Button::icon_only("chat-stop", "square").style(ButtonStyle::Outlined).tooltip("Stop").on_click(cx.listener(|this, _, _, _| this.stop()))
         } else {
@@ -764,9 +1166,9 @@ impl ChatView {
             .gap(px(6.))
             .child(
                 div()
+                    .id("chat-box")
                     .flex()
-                    // The buttons stay at the bottom as the field grows.
-                    .items_end()
+                    .flex_col()
                     .gap(px(8.))
                     .py(px(8.))
                     .pl(px(14.))
@@ -775,9 +1177,46 @@ impl ChatView {
                     .border_1()
                     .border_color(if bypass { theme.warning.opacity(0.7) } else if focused { theme.border_focused } else { theme.border })
                     .bg(theme.surface)
-                    .child(div().flex_1().min_w(px(0.)).child(self.input.clone()))
-                    .child(action),
+                    // Files dropped on it go with the next message.
+                    .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.border_color(accent))
+                    .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
+                    .when(!self.attached.is_empty(), |d| {
+                        d.child(div().flex().flex_wrap().gap(px(6.)).children(self.attached.iter().enumerate().map(|(n, path)| {
+                            let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                            let remove = div()
+                                .id(("chat-unattach", n))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(18.))
+                                .rounded(kit::corner(4.))
+                                .cursor_pointer()
+                                .hover(move |d| d.bg(hover))
+                                .child(icon("x", 11., theme.text_placeholder))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if n < this.attached.len() {
+                                        this.attached.remove(n);
+                                    }
+                                    this.attach_trouble = None;
+                                    cx.notify();
+                                }))
+                                .into_any_element();
+                            chip(theme, &name, Some(remove))
+                        })))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            // The buttons stay at the bottom as the field grows.
+                            .items_end()
+                            .gap(px(6.))
+                            .child(div().flex_1().min_w(px(0.)).child(self.input.clone()))
+                            .child(Button::icon_only("chat-attach", "paperclip").style(ButtonStyle::Ghost).tooltip("Attach files: text, pictures or PDFs. Dropping them here, or pasting a picture, does the same.").on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx))))
+                            .child(action),
+                    ),
             )
+            // Why a file couldn't be attached.
+            .children(self.attach_trouble.clone().map(|why| div().px(px(4.)).text_size(px(12.)).text_color(theme.warning).child(why)))
             .child(
                 div()
                     .flex()
@@ -790,29 +1229,72 @@ impl ChatView {
                             .tooltip(if bypass { "Every tool runs without asking, the ones that delete things too. Click to have it ask." } else { "It asks before a tool changes anything. Click to let it run without asking." })
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_mode(cx))),
                     )
-                    .children(kind.filter(|_| !on_plan).map(|kind| {
-                        if choosing {
-                            Button::new("chat-brain", kind.name).style(ButtonStyle::Ghost).tooltip("What answers in this chat. Click for the next one.").on_click(cx.listener(|this, _, _, cx| this.next_brain(cx))).into_any_element()
-                        } else {
-                            div().px(px(6.)).text_size(px(12.)).text_color(theme.text_placeholder).child(kind.name).into_any_element()
-                        }
+                    // What answers, and how hard it thinks: two pickers.
+                    .children(kind.map(|kind| {
+                        let label = match self.model_label() {
+                            Some(model) => format!("{} · {model}", kind.name),
+                            None => kind.name.to_string(),
+                        };
+                        picker(theme, "chat-model", label, "What answers in this chat: which program or plan, and which of its models.", cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(ChatEvent::Menu { effort: false, position: e.position() })))
                     }))
-                    .children(self.model.clone().filter(|_| !on_plan).map(|model| div().text_size(px(12.)).text_color(theme.text_placeholder).child(model)))
+                    .children(self.effort_label().map(|effort| picker(theme, "chat-effort", effort, "How hard the model is asked to think. More takes longer.", cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(ChatEvent::Menu { effort: true, position: e.position() })))))
                     // On the user's plan: said where they type, with where to manage it.
                     .when(on_plan, |d| {
-                        d.child(if choosing {
-                            Button::new("chat-brain", "Using ChatGPT plan").style(ButtonStyle::Ghost).tooltip("What answers in this chat. Click for the next one.").on_click(cx.listener(|this, _, _, cx| this.next_brain(cx))).into_any_element()
-                        } else {
-                            div().px(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child("Using ChatGPT plan").into_any_element()
-                        })
-                        .children(self.model.clone().map(|model| div().text_size(px(12.)).text_color(theme.text_placeholder).child(model)))
-                        .child(Button::new("chat-usage", "Manage usage").icon("external-link").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.open_url(USAGE_URL))))
+                        d.child(div().px(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child("Using ChatGPT plan"))
+                            .child(Button::new("chat-usage", "Manage usage").icon("external-link").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.open_url(USAGE_URL))))
                     })
                     .child(div().flex_1())
                     .when(self.live.is_some(), |d| d.child(Button::new("chat-new", "New chat").icon("plus").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx))))),
             )
             .into_any_element()
     }
+}
+
+/// An attached file: a paperclip and its name, and a way to take it off
+/// again while it hasn't been sent.
+fn chip(theme: &Theme, name: &str, remove: Option<AnyElement>) -> AnyElement {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(5.))
+        .h(px(24.))
+        .pl(px(8.))
+        .pr(px(if remove.is_some() { 3. } else { 9. }))
+        .rounded(kit::corner(6.))
+        .bg(theme.element)
+        .border_1()
+        .border_color(theme.border_variant)
+        .text_size(px(12.))
+        .text_color(theme.text_muted)
+        .child(icon("paperclip", 12., theme.text_placeholder))
+        .child(div().max_w(px(220.)).truncate().child(name.to_string()))
+        .children(remove)
+        .into_any_element()
+}
+
+/// A button that opens a list to pick from: what's picked now, and a chevron.
+fn picker(theme: &Theme, id: &'static str, label: String, tip: &'static str, on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static) -> AnyElement {
+    let hover = theme.ghost_hover;
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(4.))
+        .h(px(26.))
+        .px(px(9.))
+        .rounded(kit::corner(6.))
+        .text_size(px(12.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.text_muted)
+        .cursor_pointer()
+        .hover(move |d| d.bg(hover))
+        .child(label)
+        .child(icon("chevron-down", 12., theme.text_placeholder))
+        .tooltip(move |window, cx| kit::Tooltip::view(tip.into(), window, cx))
+        .on_click(on_click)
+        .into_any_element()
 }
 
 impl Render for ChatView {
@@ -843,6 +1325,7 @@ impl Render for ChatView {
                     .text_color(theme.text)
                     .child(div().w(px(width - 24.)).child(text.clone()))
                     .into_any_element(),
+                Row::Files(names) => div().w(px(width)).flex().flex_wrap().gap(px(6.)).children(names.iter().map(|name| chip(&theme, name, None))).into_any_element(),
                 Row::Said { text, .. } => self.said(&theme, n, text, answers.contains(&n), width, cx),
                 Row::Tool { name, args, result, open, .. } => self.tool(&theme, n, name, args, result, *open, width, cx),
                 Row::Ask { request, answer } => self.ask(&theme, n, request, answer, width, cx),
@@ -957,6 +1440,24 @@ mod tests {
     }
 
     #[test]
+    fn words_said_before_a_question_arent_said_twice() {
+        let ask = Request { id: 1, tool: "session_start".into(), args: json!({"machine_id": "beacon", "agent": "codex"}), risk: Risk::Change, rule: Some("session_start".into()) };
+        // As Grok does it: the words as they come, the question, and only then the words whole and the call.
+        let mut rows = vec![Row::User("start codex on beacon".into())];
+        apply(&mut rows, Update::Delta("Beacon is online. ".into()));
+        apply(&mut rows, Update::Delta("Starting Codex there.".into()));
+        apply(&mut rows, Update::Ask(ask.clone()));
+        apply(&mut rows, Update::Text("Beacon is online. Starting Codex there.".into()));
+        apply(&mut rows, Update::Tool { id: "t1".into(), name: "session_start".into(), args: ask.args.clone() });
+        let said: Vec<&str> = rows.iter().filter_map(|r| if let Row::Said { text, .. } = r { Some(text.as_str()) } else { None }).collect();
+        assert_eq!(said, ["Beacon is online. Starting Codex there."], "{rows:?}");
+        // Something new said after a question is its own line, as are the same words said again with no question between.
+        apply(&mut rows, Update::Text("Codex is running.".into()));
+        apply(&mut rows, Update::Text("Codex is running.".into()));
+        assert_eq!(rows.iter().filter(|r| matches!(r, Row::Said { .. })).count(), 3);
+    }
+
+    #[test]
     fn copy_sits_under_a_turns_last_words_only() {
         let said = |text: &str| Row::Said { text: text.into(), writing: false };
         let rows = vec![
@@ -999,14 +1500,14 @@ mod tests {
     fn a_kept_thread_opens_with_nothing_left_waiting() {
         let restart = json!({"runner_id": "a/b", "action": "restart"});
         let rows = rows_from(vec![
-            Item::User { at: 1, text: "restart it".into() },
+            Item::User { at: 1, text: "restart it".into(), files: vec![] },
             Item::Tool { at: 2, id: "t1".into(), name: "runner_action".into(), args: restart.clone() },
             Item::Ask { at: 2, id: 1, tool: "runner_action".into(), args: restart.clone(), risk: Risk::Change },
             Item::Answer { at: 3, id: 1, answer: "no".into(), note: "mid-job".into() },
             Item::Result { at: 3, id: "t1".into(), text: "declined".into(), is_error: true },
             Item::Text { at: 4, text: "Left it alone.".into() },
             Item::Usage { at: 4, input: 1, output: 1, cached: 0, cost: None },
-            Item::User { at: 5, text: "ok, do it".into() },
+            Item::User { at: 5, text: "ok, do it".into(), files: vec![] },
             // The app quit while these two waited.
             Item::Tool { at: 6, id: "t2".into(), name: "runner_action".into(), args: restart.clone() },
             Item::Ask { at: 6, id: 2, tool: "runner_action".into(), args: restart, risk: Risk::Change },

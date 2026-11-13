@@ -274,9 +274,9 @@ impl SettingsPage {
                         .on_click(cx.listener(|this, _, _, cx| this.set_chat(|chat| chat.model.clear(), cx))),
                 );
                 for (n, model) in list.iter().enumerate() {
-                    let slug = model.slug.clone();
+                    let slug = model.id.clone();
                     body = body.child(
-                        choice(theme, format!("chatgpt-model-{n}"), chat.model == model.slug, true, model.name.clone(), if model.name == model.slug { String::new() } else { model.slug.clone() })
+                        choice(theme, format!("chatgpt-model-{n}"), chat.model == model.id, true, model.name.clone(), if model.name == model.id { String::new() } else { model.id.clone() })
                             .on_click(cx.listener(move |this, _, _, cx| this.set_chat(|chat| chat.model = slug.clone(), cx))),
                     );
                 }

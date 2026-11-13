@@ -18,15 +18,18 @@ use super::{Chat, Options, Update};
 use crate::fleet::Engine;
 
 enum Command {
-    Send(String),
+    /// What the user said, and the files that go with it.
+    Send(String, Vec<std::path::PathBuf>),
+    /// Answer with this model, at this effort, from the next turn on.
+    Choose(Option<String>, Option<String>),
     Stop,
 }
 
 /// What a running chat tells the page.
 #[derive(Clone, Debug)]
 pub enum Event {
-    /// A turn began, with this message.
-    Started(String),
+    /// A turn began, with this message and these files (by name).
+    Started(String, Vec<String>),
     /// Something happened in it.
     Update(Update),
     /// The turn is over. `Err` says why it didn't finish ("Stopped." when
@@ -66,8 +69,20 @@ impl Live {
     }
 
     /// Says something to the assistant. While a turn runs, it waits its turn.
+    #[cfg(test)]
     pub fn send(&self, text: impl Into<String>) {
-        let _ = self.commands.send(Command::Send(text.into()));
+        let _ = self.commands.send(Command::Send(text.into(), Vec::new()));
+    }
+
+    /// Says something with files attached (see `Chat::attach`).
+    pub fn send_with(&self, text: impl Into<String>, files: Vec<std::path::PathBuf>) {
+        let _ = self.commands.send(Command::Send(text.into(), files));
+    }
+
+    /// Answers with this model, at this effort (None: the brain's own
+    /// choice), from the next message on. Mid-turn, it waits for the turn.
+    pub fn choose(&self, model: Option<String>, effort: Option<String>) {
+        let _ = self.commands.send(Command::Choose(model, effort));
     }
 
     /// Stops the turn that's running, and drops what was waiting behind it.
@@ -82,18 +97,32 @@ impl Live {
 }
 
 async fn run(mut chat: Chat, mut inbox: mpsc::UnboundedReceiver<Command>, events: mpsc::UnboundedSender<Event>) {
-    let mut waiting: VecDeque<String> = VecDeque::new();
+    let mut waiting: VecDeque<Command> = VecDeque::new();
     loop {
-        let text = match waiting.pop_front() {
-            Some(text) => text,
+        let next = match waiting.pop_front() {
+            Some(next) => next,
             None => match inbox.recv().await {
-                Some(Command::Send(text)) => text,
-                // Nothing is running.
-                Some(Command::Stop) => continue,
+                Some(next) => next,
                 None => return,
             },
         };
-        let _ = events.send(Event::Started(text.clone()));
+        let (text, files) = match next {
+            Command::Send(text, files) => (text, files),
+            Command::Choose(model, effort) => {
+                chat.choose(model, effort);
+                let _ = events.send(Event::Meta(chat.meta.clone()));
+                continue;
+            }
+            // Nothing is running.
+            Command::Stop => continue,
+        };
+        let names: Vec<String> = files.iter().map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).collect();
+        let _ = events.send(Event::Started(text.clone(), names));
+        // A file that can't be attached: the message isn't sent, and the page is told why.
+        if let Err(why) = chat.attach(&files) {
+            let _ = events.send(Event::Ended(Err(why)));
+            continue;
+        }
         let outcome = {
             let out = events.clone();
             let mut on = move |update: Update| {
@@ -125,11 +154,11 @@ async fn run(mut chat: Chat, mut inbox: mpsc::UnboundedReceiver<Command>, events
 
 /// Waits until the user asks to stop; what they send meanwhile waits its
 /// turn. True when the page is gone instead.
-async fn stop_asked(inbox: &mut mpsc::UnboundedReceiver<Command>, waiting: &mut VecDeque<String>) -> bool {
+async fn stop_asked(inbox: &mut mpsc::UnboundedReceiver<Command>, waiting: &mut VecDeque<Command>) -> bool {
     loop {
         match inbox.recv().await {
             Some(Command::Stop) => return false,
-            Some(Command::Send(text)) => waiting.push_back(text),
+            Some(later) => waiting.push_back(later),
             None => return true,
         }
     }
@@ -167,7 +196,7 @@ mod tests {
 
         let (seen, outcome) = turn(&mut events).await;
         assert_eq!(outcome, Ok(()));
-        assert!(matches!(&seen[0], Event::Started(text) if text == "how many machines?"));
+        assert!(matches!(&seen[0], Event::Started(text, _) if text == "how many machines?"));
         assert!(seen.iter().any(|e| matches!(e, Event::Update(Update::Tool { name, .. }) if name == "status")));
         assert!(seen.iter().any(|e| matches!(e, Event::Update(Update::Text(text)) if text == "Nine machines.")));
         // The chat got its title from the first thing asked.
@@ -175,7 +204,7 @@ mod tests {
 
         let (seen, outcome) = turn(&mut events).await;
         assert_eq!(outcome, Ok(()));
-        assert!(matches!(&seen[0], Event::Started(text) if text == "which need me?"));
+        assert!(matches!(&seen[0], Event::Started(text, _) if text == "which need me?"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -214,7 +243,7 @@ mod tests {
         live.send("are you there?");
         let (seen, outcome) = turn(&mut events).await;
         assert_eq!(outcome, Ok(()));
-        assert!(matches!(&seen[0], Event::Started(text) if text == "are you there?"));
+        assert!(matches!(&seen[0], Event::Started(text, _) if text == "are you there?"));
         // A stop with nothing running does nothing.
         live.stop();
         drop(live);

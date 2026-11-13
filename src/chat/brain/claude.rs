@@ -23,7 +23,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
 
-use super::{Brain, Event, Setup, result_text, tail};
+use super::{Brain, Event, Setup, tail};
+use crate::chat::attach::{Attached, Kind};
 
 /// Tools arrive as `mcp__<server>__<tool>`; the server is "muxin".
 const SERVER: &str = "muxin";
@@ -41,12 +42,14 @@ pub struct Claude {
     /// Claude Code's id for the conversation, once it said it.
     session: Option<String>,
     running: Option<Running>,
+    /// The pictures and PDFs that go with the next message.
+    attached: Vec<Attached>,
 }
 
 impl Claude {
     pub fn new(program: PathBuf, setup: Setup) -> Claude {
         let session = setup.resume.clone();
-        Claude { program, setup, session, running: None }
+        Claude { program, setup, session, running: None, attached: Vec::new() }
     }
 
     /// What Claude Code is started with.
@@ -56,6 +59,12 @@ impl Claude {
         args.extend(["--tools".into(), String::new(), "--allowedTools".into(), format!("mcp__{SERVER}")]);
         args.extend(["--setting-sources".into(), "project".into()]);
         args.extend(["--system-prompt".into(), self.setup.prompt.clone()]);
+        if let Some(model) = &self.setup.model {
+            args.extend(["--model".into(), model.clone()]);
+        }
+        if let Some(effort) = &self.setup.effort {
+            args.extend(["--effort".into(), effort.clone()]);
+        }
         if let Some(id) = &self.session {
             args.extend(["--resume".into(), id.clone()]);
         }
@@ -108,76 +117,29 @@ impl Claude {
     }
 }
 
-/// What one line of Claude Code's output means: what to report, and whether
-/// the turn is over (and how).
-pub(crate) fn read(line: &Value) -> (Vec<Event>, Option<Result<(), String>>) {
-    let mut events = Vec::new();
-    let blocks = || line["message"]["content"].as_array().cloned().unwrap_or_default();
-    match line["type"].as_str().unwrap_or("") {
-        "system" if line["subtype"] == "init" => {
-            if let Some(id) = line["session_id"].as_str() {
-                events.push(Event::Session(id.to_string()));
-            }
-            if let Some(model) = line["model"].as_str().filter(|m| !m.is_empty()) {
-                events.push(Event::Model(model.to_string()));
-            }
-        }
-        "stream_event" => {
-            let delta = &line["event"]["delta"];
-            if line["event"]["type"] == "content_block_delta" && delta["type"] == "text_delta" {
-                events.push(Event::Delta(delta["text"].as_str().unwrap_or_default().to_string()));
-            }
-        }
-        "assistant" => {
-            for b in blocks() {
-                match b["type"].as_str() {
-                    Some("text") => events.push(Event::Text(b["text"].as_str().unwrap_or_default().to_string())),
-                    Some("tool_use") => {
-                        let name = b["name"].as_str().unwrap_or_default();
-                        let name = name.strip_prefix(&format!("mcp__{SERVER}__")).unwrap_or(name);
-                        events.push(Event::Tool { id: b["id"].as_str().unwrap_or_default().to_string(), name: name.to_string(), args: b["input"].clone() });
-                    }
-                    _ => {}
-                }
-            }
-        }
-        "user" => {
-            for b in blocks() {
-                if b["type"] == "tool_result" {
-                    events.push(Event::Result {
-                        id: b["tool_use_id"].as_str().unwrap_or_default().to_string(),
-                        text: result_text(&b["content"]),
-                        is_error: b["is_error"].as_bool().unwrap_or(false),
-                    });
-                }
-            }
-        }
-        "rate_limit_event" => {
-            if let Some(text) = limit_text(&line["rate_limit_info"]) {
-                events.push(Event::Limit(text));
-            }
-        }
-        "result" => {
-            let u = &line["usage"];
-            let n = |k: &str| u[k].as_u64().unwrap_or(0);
-            events.push(Event::Usage {
-                input: n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens"),
-                output: n("output_tokens"),
-                cached: n("cache_read_input_tokens"),
-                cost: line["total_cost_usd"].as_f64(),
-            });
-            let failed = line["is_error"].as_bool().unwrap_or(false) || line["subtype"].as_str().is_some_and(|s| s != "success");
-            let end = if failed {
-                let said = line["result"].as_str().filter(|s| !s.trim().is_empty()).map(str::to_string);
-                Err(said.unwrap_or_else(|| format!("Claude Code stopped: {}.", line["subtype"].as_str().unwrap_or("an error").replace('_', " "))))
-            } else {
-                Ok(())
-            };
-            return (events, Some(end));
-        }
-        _ => {}
+/// A message's blocks: its text, then each picture and PDF that goes with it.
+fn content(text: &str, files: &[Attached]) -> Result<Value, String> {
+    let mut blocks = vec![json!({ "type": "text", "text": text })];
+    for file in files {
+        let (block, media) = match &file.kind {
+            Kind::Image(media) => ("image", *media),
+            Kind::Pdf => ("document", "application/pdf"),
+            Kind::Text => continue,
+        };
+        blocks.push(json!({ "type": block, "source": { "type": "base64", "media_type": media, "data": file.base64()? } }));
     }
-    (events, None)
+    Ok(Value::Array(blocks))
+}
+
+/// What one line of Claude Code's output means: what to report, and whether
+/// the turn is over (and how). Its lines are read in messages.rs; what's
+/// Claude Code's alone is here: how it names Muxin's tools, and what it says
+/// about the user's plan.
+pub(crate) fn read(line: &Value) -> (Vec<Event>, Option<Result<(), String>>) {
+    if line["type"] == "rate_limit_event" {
+        return (limit_text(&line["rate_limit_info"]).map(Event::Limit).into_iter().collect(), None);
+    }
+    super::messages::read(line, "Claude Code", &|name, input| (name.strip_prefix(&format!("mcp__{SERVER}__")).unwrap_or(name).to_string(), input.clone()))
 }
 
 /// A plan limit that's near or reached, in words; nothing while there's room.
@@ -209,7 +171,7 @@ impl Brain for Claude {
         if self.running.is_none() {
             self.spawn()?;
         }
-        let message = json!({ "type": "user", "message": { "role": "user", "content": [{ "type": "text", "text": text }] } });
+        let message = json!({ "type": "user", "message": { "role": "user", "content": content(text, &std::mem::take(&mut self.attached))? } });
         let mut bytes = message.to_string().into_bytes();
         bytes.push(b'\n');
         let sent = {
@@ -247,6 +209,24 @@ impl Brain for Claude {
             let _ = running.child.wait().await;
         }
     }
+
+    // A picture or a PDF is a block of the message, beside its text.
+    fn attach(&mut self, files: Vec<Attached>) -> Result<(), String> {
+        self.attached = files;
+        Ok(())
+    }
+
+    fn choose(&mut self, model: Option<String>, effort: Option<String>) {
+        if (&model, &effort) == (&self.setup.model, &self.setup.effort) {
+            return;
+        }
+        self.setup.model = model;
+        self.setup.effort = effort;
+        // A process keeps the model it was started with: this one ends
+        // (it's killed when dropped), and the next turn starts another
+        // that continues the conversation.
+        self.running = None;
+    }
 }
 
 #[cfg(test)]
@@ -254,7 +234,7 @@ mod tests {
     use super::*;
 
     fn setup() -> Setup {
-        Setup { exe: "/Applications/Muxin.app/Contents/MacOS/muxin".into(), bridge: "/tmp/c.sock".into(), work: "/tmp/chats/c-1/work".into(), prompt: "You are Muxin's assistant.".into(), resume: None }
+        Setup { exe: "/Applications/Muxin.app/Contents/MacOS/muxin".into(), bridge: "/tmp/c.sock".into(), work: "/tmp/chats/c-1/work".into(), prompt: "You are Muxin's assistant.".into(), ..Default::default() }
     }
 
     #[test]
@@ -269,10 +249,14 @@ mod tests {
         assert_eq!(after("--system-prompt"), Some("You are Muxin's assistant."));
         assert!(args.contains(&"--strict-mcp-config".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
-        // A conversation it had before is continued.
+        assert!(!args.contains(&"--model".to_string()) && !args.contains(&"--effort".to_string()));
+        // A conversation it had before is continued, with the model and effort chosen since.
         claude.session = Some("b59117ac".into());
+        claude.choose(Some("sonnet".into()), Some("high".into()));
         let args = claude.args("x");
         assert_eq!(args[args.len() - 2..], ["--resume", "b59117ac"]);
+        let after = |flag: &str| args.iter().position(|a| a == flag).map(|i| args[i + 1].as_str());
+        assert_eq!((after("--model"), after("--effort")), (Some("sonnet"), Some("high")));
     }
 
     /// Lines as Claude Code 2.1 printed them, shortened.
@@ -310,6 +294,30 @@ mod tests {
             ]
         );
         assert_eq!(end, Some(Ok(())));
+    }
+
+
+    /// A picture and a PDF in a folder of their own, as a chat keeps them.
+    fn attached(name: &str) -> Vec<Attached> {
+        let dir = std::env::temp_dir().join(format!("muxin-{name}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("shot.png"), [1u8, 2, 3]).unwrap();
+        std::fs::write(dir.join("paper.pdf"), b"%PDF").unwrap();
+        vec![Attached { name: "shot.png".into(), path: dir.join("shot.png"), kind: Kind::Image("image/png") }, Attached { name: "paper.pdf".into(), path: dir.join("paper.pdf"), kind: Kind::Pdf }]
+    }
+
+    #[test]
+    fn a_picture_and_a_pdf_are_blocks_of_the_message() {
+        let blocks = content("What's this?", &attached("claude-attach")).unwrap();
+        assert_eq!(blocks[0], json!({"type": "text", "text": "What's this?"}));
+        assert_eq!(blocks[1], json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AQID"}}));
+        assert_eq!(blocks[2], json!({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERg=="}}));
+        // With nothing attached, the message is its text.
+        assert_eq!(content("hi", &[]).unwrap(), json!([{"type": "text", "text": "hi"}]));
+        // They go with one message: taken by `attach`, used by the next turn.
+        let mut claude = Claude::new("claude".into(), setup());
+        claude.attach(attached("claude-attach")).unwrap();
+        assert_eq!(claude.attached.len(), 2);
     }
 
     #[test]

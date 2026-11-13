@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 
 use super::{Brain, Event};
 use crate::chat::account::{self, Endpoints, USAGE_URL, Vault};
+use crate::chat::attach::{Attached, Kind};
 use crate::chat::gate::Gate;
 use crate::fleet::Engine;
 
@@ -39,14 +40,7 @@ const MOST_OUTPUT: usize = 60_000;
 /// No word from OpenAI for this long, mid-answer: the connection is gone.
 const QUIET: Duration = Duration::from_secs(180);
 
-/// A model the signed-in account may answer with.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Model {
-    /// What requests name it by.
-    pub slug: String,
-    /// What it's shown as.
-    pub name: String,
-}
+pub use super::catalog::Model;
 
 /// The models the signed-in account lists, in its order (the first is what
 /// answers when the user hasn't chosen).
@@ -63,14 +57,9 @@ async fn listed(at: &Endpoints, token: &str) -> Result<Vec<Model>, String> {
         return Err(refusal(status.as_u16(), &resp.text().await.unwrap_or_default()).words());
     }
     let list: Value = resp.json().await.map_err(|_| "ChatGPT's list of models isn't readable.".to_string())?;
-    // The ones meant to be shown, in the order given.
-    Ok(list["models"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|m| m["visibility"] == "list")
-        .filter_map(|m| m["slug"].as_str().map(|slug| Model { slug: slug.to_string(), name: m["display_name"].as_str().filter(|n| !n.is_empty()).unwrap_or(slug).to_string() }))
-        .collect())
+    // In the shape Codex keeps its own list in: the ones meant to be shown,
+    // in the order given, each with the efforts it takes.
+    Ok(super::catalog::openai(&list))
 }
 
 pub struct ChatGpt {
@@ -88,6 +77,10 @@ pub struct ChatGpt {
     prompt: String,
     /// The model that answers; the first one the account lists, until set.
     model: Option<String>,
+    /// How hard it's asked to think; the model's own choice, until set.
+    effort: Option<String>,
+    /// The pictures and PDFs that go with the next message.
+    attached: Vec<Attached>,
     /// The user was told which.
     model_said: bool,
 }
@@ -100,7 +93,13 @@ impl ChatGpt {
         let said = std::fs::read_to_string(&kept_at).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         // The chat's id: nothing about the user, and the same each time.
         let cache_key = format!("muxin-{}", folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-        ChatGpt { engine, gate, vault, at, kept_at, cache_key, said, prompt, model: model.filter(|m| !m.trim().is_empty()), model_said: false }
+        ChatGpt { engine, gate, vault, at, kept_at, cache_key, said, prompt, model: model.filter(|m| !m.trim().is_empty()), effort: None, attached: Vec::new(), model_said: false }
+    }
+
+    /// Asked to think this hard, from the start.
+    pub fn effort(mut self, effort: Option<String>) -> ChatGpt {
+        self.effort = effort.filter(|e| !e.trim().is_empty());
+        self
     }
 
     fn keep(&self) {
@@ -125,10 +124,10 @@ impl ChatGpt {
             return Ok(model.clone());
         }
         let first = listed(&self.at, token).await?.into_iter().next().ok_or("Your ChatGPT account lists no model Muxin can use.")?;
-        self.model = Some(first.slug.clone());
+        self.model = Some(first.id.clone());
         self.model_said = true;
         let _ = events.send(Event::Model(first.name));
-        Ok(first.slug)
+        Ok(first.id)
     }
 
     /// One answer from the model to the conversation as it stands.
@@ -138,7 +137,7 @@ impl ChatGpt {
         loop {
             let token = account::token(&self.vault, &self.at, refused.as_deref()).await?;
             let model = self.model(&token, events).await?;
-            let body = request(&model, &self.prompt, &self.said, &self.cache_key);
+            let body = request(&model, &self.prompt, &self.said, &self.cache_key, self.effort.as_deref());
             let sent = self.http().post(format!("{}/responses", self.at.api)).bearer_auth(&token).json(&body).send().await;
             let resp = match sent {
                 Ok(resp) => resp,
@@ -169,9 +168,27 @@ impl ChatGpt {
     }
 }
 
+/// What the user said, as the conversation keeps it: plain words, or its
+/// parts when a picture or a PDF goes with them (each as a `data:` URL,
+/// kept in the conversation so the model still has it on later turns).
+fn said_by_user(text: &str, files: &[Attached]) -> Result<Value, String> {
+    if files.is_empty() {
+        return Ok(json!({ "role": "user", "content": text }));
+    }
+    let mut parts = vec![json!({ "type": "input_text", "text": text })];
+    for file in files {
+        parts.push(match file.kind {
+            Kind::Image(_) => json!({ "type": "input_image", "image_url": file.data_url()? }),
+            Kind::Pdf => json!({ "type": "input_file", "filename": file.name, "file_data": file.data_url()? }),
+            Kind::Text => continue,
+        });
+    }
+    Ok(json!({ "role": "user", "content": parts }))
+}
+
 /// What's sent for one answer.
-fn request(model: &str, prompt: &str, said: &[Value], cache_key: &str) -> Value {
-    json!({
+fn request(model: &str, prompt: &str, said: &[Value], cache_key: &str, effort: Option<&str>) -> Value {
+    let mut body = json!({
         "model": model,
         // Every request of a conversation starts the same: the tools, the
         // instructions, what was said so far. OpenAI keeps the start of a
@@ -188,7 +205,12 @@ fn request(model: &str, prompt: &str, said: &[Value], cache_key: &str) -> Value 
         // Nothing is stored there, so the model's reasoning comes back sealed,
         // to be sent along with the tool results it led to.
         "include": ["reasoning.encrypted_content"],
-    })
+    });
+    // Unsaid, the model thinks as hard as it would by itself.
+    if let Some(effort) = effort {
+        body["reasoning"] = json!({ "effort": effort });
+    }
+    body
 }
 
 /// Muxin's tools as the model is given them (the chat's short list, see
@@ -385,7 +407,7 @@ fn for_model(mut text: String) -> String {
 impl Brain for ChatGpt {
     async fn turn(&mut self, text: &str, events: &mpsc::UnboundedSender<Event>) -> Result<(), String> {
         mend(&mut self.said);
-        self.said.push(json!({ "role": "user", "content": text }));
+        self.said.push(said_by_user(text, &std::mem::take(&mut self.attached))?);
         self.keep();
         let (mut input, mut output, mut cached) = (0, 0, 0);
         for _ in 0..MOST_STEPS {
@@ -424,6 +446,23 @@ impl Brain for ChatGpt {
 
     async fn stop(&mut self) {
         // Dropping the turn ended its request; `mend` settles what it left open.
+    }
+
+    // A picture or a PDF is a part of the message, beside its text.
+    fn attach(&mut self, files: Vec<Attached>) -> Result<(), String> {
+        self.attached = files;
+        Ok(())
+    }
+
+    // Every request names its model and effort: the next one names these.
+    fn choose(&mut self, model: Option<String>, effort: Option<String>) {
+        let model = model.filter(|m| !m.trim().is_empty());
+        if model != self.model {
+            // Said again, since it's another one now (None: the account's first, found on the next turn).
+            self.model_said = false;
+            self.model = model;
+        }
+        self.effort = effort.filter(|e| !e.trim().is_empty());
     }
 }
 
@@ -528,6 +567,8 @@ mod tests {
         for field in ["temperature", "top_p", "max_output_tokens", "metadata", "user", "truncation", "previous_response_id", "prompt_cache_retention"] {
             assert!(first.get(field).is_none(), "{field}");
         }
+        // No effort was chosen, so none is asked for: the model thinks as it would by itself.
+        assert!(first.get("reasoning").is_none());
         // The second: the same conversation, with the call as the model made it and what it answered.
         let second = sent[1].json();
         let input = second["input"].as_array().unwrap();
@@ -546,6 +587,41 @@ mod tests {
         let later = ChatGpt::new(rig.brain.engine.clone(), rig.gate.clone(), rig.brain.vault.clone(), rig.brain.at.clone(), rig.folder.clone(), String::new(), None);
         assert_eq!(later.said.len(), 4);
         assert_eq!(later.said[3]["type"], "message");
+
+        // A model and an effort chosen since go with the next request, in the same conversation.
+        let request_of = |model: Option<&str>, effort: Option<&str>| {
+            let mut brain = ChatGpt::new(rig.brain.engine.clone(), rig.gate.clone(), rig.brain.vault.clone(), rig.brain.at.clone(), rig.folder.clone(), String::new(), Some("gpt-test".into())).effort(Some("low".into()));
+            brain.choose(model.map(str::to_string), effort.map(str::to_string));
+            (brain.model.clone(), request(brain.model.as_deref().unwrap_or("first"), "", &brain.said, "k", brain.effort.as_deref()))
+        };
+        let (model, body) = request_of(Some("gpt-other"), Some("high"));
+        assert_eq!((model.as_deref(), body["model"].as_str(), body["reasoning"]["effort"].as_str()), (Some("gpt-other"), Some("gpt-other"), Some("high")));
+        assert_eq!(body["input"].as_array().unwrap().len(), 4);
+        // Unpicked again: the account's first model, found on the next turn, and no effort said.
+        let (model, body) = request_of(None, None);
+        assert!(model.is_none() && body.get("reasoning").is_none());
+    }
+
+
+    /// A picture and a PDF in a folder of their own, as a chat keeps them.
+    fn attached(name: &str) -> Vec<Attached> {
+        let dir = std::env::temp_dir().join(format!("muxin-{name}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("shot.png"), [1u8, 2, 3]).unwrap();
+        std::fs::write(dir.join("paper.pdf"), b"%PDF").unwrap();
+        vec![Attached { name: "shot.png".into(), path: dir.join("shot.png"), kind: Kind::Image("image/png") }, Attached { name: "paper.pdf".into(), path: dir.join("paper.pdf"), kind: Kind::Pdf }]
+    }
+
+    #[test]
+    fn a_picture_and_a_pdf_are_parts_of_what_the_user_said() {
+        assert_eq!(said_by_user("hi", &[]).unwrap(), json!({"role": "user", "content": "hi"}));
+        let said = said_by_user("What's this?", &attached("chatgpt-attach")).unwrap();
+        assert_eq!(said["role"], "user");
+        assert_eq!(said["content"], json!([
+            {"type": "input_text", "text": "What's this?"},
+            {"type": "input_image", "image_url": "data:image/png;base64,AQID"},
+            {"type": "input_file", "filename": "paper.pdf", "file_data": "data:application/pdf;base64,JVBERg=="},
+        ]));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -613,7 +689,7 @@ mod tests {
         let api = api(vec![]).await;
         let at = Endpoints { api: format!("{}/v1", api.url), ..Endpoints::default() };
         let got = models(&signed_in("models"), &at).await.unwrap();
-        assert_eq!(got, [Model { slug: "gpt-test".into(), name: "Test".into() }]);
+        assert_eq!(got, [Model { id: "gpt-test".into(), name: "Test".into(), efforts: Vec::new(), effort: None }]);
         assert_eq!(api.asked_at("/v1/models")[0].headers["authorization"], "Bearer access-1");
         // Not signed in: said, and nothing is asked.
         assert!(models(&crate::chat::account::tests::vault("models-none"), &at).await.unwrap_err().contains("Sign in with ChatGPT first"));

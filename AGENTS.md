@@ -122,6 +122,19 @@ The user can open shells in a box beside its agent (`muxin box shell`, or splitt
 
 The CLI equivalents are `muxin box new|ls|send|resume|pause|attach|shell|rm`.
 
+## The chat: Muxin's own assistant
+
+The user can also ask Muxin itself: the chat on the app's first page, or `muxin chat`. Its assistant is a model with these same tools. What answers is the user's choice, on a plan they already have: Claude Code, Codex or Grok Build on their computer, or their ChatGPT plan.
+
+- **In a chat, Muxin does the confirming.** A call that only looks runs. A call that changes something is shown to the user and waits for their yes, unless they turned asking off for that chat. So the assistant calls the tool instead of asking in words first. A result with `code: "declined"` means the user said no and it didn't run: say so and leave it, until they ask again.
+- **The tools it's given.** The everyday ones in full (status, machines, runners, jobs, sessions, boxes, GitHub), and every other tool through `use_tool(name, arguments)`, whose description lists them a line each. `tool_details(names)` gives a listed tool's full description and arguments. A call through `use_tool` is the tool it names: the same rules, the same question to the user. (Grok Build looks tools up by itself, so it gets them all in full.)
+- **No shell, no files.** For long work the assistant starts an agent session or a box and tells the user its id.
+- **Its rules are the user's.** What answers, whether it asks, and the calls that run without asking are in Settings › Chat (`[settings.chat]` in `config.toml`). No tool changes them, `update_settings` included, and don't edit them by hand: tell the user where they are.
+- **Models and files.** `muxin chat --models` lists the models each can answer with and their effort levels; `--model <id>` and `--effort <level>` pick them for that chat. `--attach <file>` (repeatable, 10 at most) sends files with the message: text (up to 256 KB) inside the message, pictures (PNG, JPEG, GIF, WebP) to every one of them, PDFs to Claude Code and ChatGPT only. A file that what answers can't take isn't sent: the error says which.
+- **From another agent.** You have the tools yourself: use them, rather than asking the chat to. A chat runs on the user's own plan, so start one (`muxin chat "..."`) only when they asked, and never pass `--bypass` or sign them in or out (`--sign-in`, `--sign-out`) unless they asked for exactly that.
+
+The CLI is `muxin chat ["..."] [--chat <id>|last] [--brain claude|codex|grok|chatgpt] [--model <id>] [--effort <level>] [--attach <file>]... [--bypass] [--list] [--models] [--sign-in | --sign-out [--forget]]`. Without a question it's a conversation, typed line by line (`/attach <file>` adds a file to the next message). It has no `--json`: the answer is text on stdout, and what it did goes to stderr. Where nobody can answer (a script), a call that needs a yes is refused.
+
 ## Usage and cost
 
 - `agent_usage(days?, machine_id?)` says what Claude Code and Codex used over the last N days (default 7), from their own logs on each machine: tokens (input, output, cache reads and writes) and requests by model and machine, each day's cost (`daily`) and the busiest folders (`folders`), and the cost at Anthropic's and OpenAI's API list prices (`null` for a model whose price isn't known). With a Claude or ChatGPT plan the user doesn't pay per token: say it's what the same use would cost through the API. Read-only.

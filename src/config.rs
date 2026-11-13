@@ -633,8 +633,9 @@ pub struct Settings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ChatSettings {
-    /// What answers: "claude" (Claude Code), "codex", or "chatgpt" (Muxin's
-    /// own, on a ChatGPT plan signed in to); "" for the first there is.
+    /// What answers: "claude" (Claude Code), "codex", "grok" (Grok Build), or
+    /// "chatgpt" (Muxin's own, on a ChatGPT plan signed in to); "" for the
+    /// first there is.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub brain: String,
     /// The model that answers on a ChatGPT plan, by its id; "" for the first
@@ -649,9 +650,33 @@ pub struct ChatSettings {
     /// name, or `tool:action` for a tool with several (`runner_action:restart`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<String>,
+    /// The model and effort picked last for each brain ("claude", "grok",
+    /// ...), which its next new chat starts with.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub picked: std::collections::BTreeMap<String, ChatPick>,
+}
+
+/// A model and how hard it's asked to think; "" for the brain's own choice.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ChatPick {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub effort: String,
 }
 
 impl ChatSettings {
+    /// What a new chat with `brain` starts with: the model and effort picked
+    /// for it last. (The ChatGPT model chosen in Settings, before picks were
+    /// kept, still counts.)
+    pub fn pick(&self, brain: &str) -> (Option<String>, Option<String>) {
+        let some = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+        let picked = self.picked.get(brain);
+        let model = picked.and_then(|p| some(&p.model)).or_else(|| some(&self.model).filter(|_| brain == "chatgpt"));
+        (model, picked.and_then(|p| some(&p.effort)))
+    }
+
     fn is_default(&self) -> bool {
         *self == ChatSettings::default()
     }

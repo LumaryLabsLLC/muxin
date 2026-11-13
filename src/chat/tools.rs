@@ -14,8 +14,11 @@
 //! Nothing is out of reach, and nothing gets past the gate this way: a call
 //! through `use_tool` is asked about as the tool it really is.
 //!
-//! The same for every brain: the programs get these through the bridge, and
-//! Muxin's own brain is handed them directly.
+//! The programs get these through the bridge (`Short`), and Muxin's own
+//! brain is handed them directly. One kind of program gets every tool in
+//! full instead (`Whole`): one that doesn't send its tools to the model at
+//! all, but looks them up as it needs them. There the short list would only
+//! hide tools from what it searches. Its calls pass the gate the same.
 
 use std::sync::Arc;
 
@@ -247,6 +250,29 @@ impl mcp::Front for Short {
     }
 }
 
+/// What the bridge serves a program that finds tools by itself: every tool
+/// in full, and every call past the chat's gate.
+pub struct Whole {
+    gate: Arc<Gate>,
+}
+
+impl Whole {
+    pub fn new(gate: Arc<Gate>) -> Arc<Whole> {
+        Arc::new(Whole { gate })
+    }
+}
+
+#[async_trait::async_trait]
+impl mcp::Front for Whole {
+    fn tools(&self) -> Vec<Value> {
+        mcp::tools()
+    }
+
+    async fn call(&self, engine: &Arc<Engine>, session: &Session, name: &str, args: Value) -> Value {
+        call(engine, session, &self.gate, name, args).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +378,22 @@ mod tests {
         // Text that isn't JSON is left alone, line breaks and all.
         let text = json!({"content": [{"type": "text", "text": "exit code: 0\n{not json\n  indented"}, {"type": "image", "data": "x"}]});
         assert_eq!(close_up(text.clone()), text);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_program_that_finds_tools_itself_gets_them_all_and_is_gated_the_same() {
+        use mcp::Front;
+        let engine = demo("whole");
+        let (gate, mut asks) = Gate::new(Mode::Ask, vec![]);
+        let whole = Whole::new(gate.clone());
+        assert_eq!(whole.tools(), mcp::tools());
+        assert!(whole.tools().iter().any(|t| t["name"] == "snippet_save") && !whole.tools().iter().any(|t| t["name"] == USE));
+        // A change waits for the user, whichever list the tool was found in.
+        let calling = tokio::spawn(async move { whole.call(&engine, &Session::named("chat"), "snippet_save", json!({"name": "Uptime", "command": "uptime"})).await });
+        let Some(gate::Event::Asked(request)) = asks.recv().await else { panic!("asked") };
+        assert_eq!(request.tool, "snippet_save");
+        gate.answer(request.id, Answer::No(String::new()));
+        assert_eq!(calling.await.unwrap()["structuredContent"]["error"]["code"], "declined");
     }
 
     #[tokio::test(flavor = "multi_thread")]

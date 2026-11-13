@@ -2,23 +2,28 @@
 //! happens next, piece by piece: text, the tools it calls and what they
 //! answered, what the turn used.
 //!
-//! Two are agent CLIs already on the user's computer, signed in to the
-//! user's own plan: Claude Code (claude.rs) and Codex (codex.rs). Muxin runs
-//! them without their terminal, with their own tools off, and with Muxin's
-//! tools reached through the chat's bridge (../bridge.rs), so every call
-//! passes the chat's gate.
+//! Three are agent CLIs already on the user's computer, signed in to the
+//! user's own plan: Claude Code (claude.rs), Codex (codex.rs) and Grok Build
+//! (grok.rs). Muxin runs them without their terminal, with their own tools
+//! off, and with Muxin's tools reached through the chat's bridge
+//! (../bridge.rs), so every call passes the chat's gate.
 //!
-//! The third is Muxin's own (responses.rs): no other program, on the user's
+//! The fourth is Muxin's own (responses.rs): no other program, on the user's
 //! ChatGPT plan once they've signed in with ChatGPT (../account.rs).
 
+pub mod catalog;
 pub mod claude;
 pub mod codex;
+pub mod grok;
+mod messages;
 pub mod responses;
 
 use std::path::PathBuf;
 
 use serde_json::Value;
 use tokio::sync::mpsc;
+
+use super::attach::Attached;
 
 /// Something a brain says during a turn.
 #[derive(Clone, Debug, PartialEq)]
@@ -43,7 +48,7 @@ pub enum Event {
 }
 
 /// What a brain needs to start.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Setup {
     /// This Muxin, which the brain runs as its MCP server (`mcp --chat`).
     pub exe: PathBuf,
@@ -55,6 +60,11 @@ pub struct Setup {
     pub prompt: String,
     /// Its own id for the conversation, when there's one to continue.
     pub resume: Option<String>,
+    /// The model to answer with, by the brain's own id for it (catalog.rs).
+    /// None: whichever the brain itself would use.
+    pub model: Option<String>,
+    /// How hard it should think, as that model names it ("high"). None: the model's own.
+    pub effort: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -65,6 +75,20 @@ pub trait Brain: Send {
 
     /// Ends what it's doing now. The conversation can go on afterwards.
     async fn stop(&mut self);
+
+    /// Answers with this model, at this effort, from the next turn on, in
+    /// the same conversation. None: the brain's own choice.
+    fn choose(&mut self, _model: Option<String>, _effort: Option<String>) {}
+
+    /// Takes the pictures and PDFs that go with the next message (text
+    /// files are already in its words: ../attach.rs). `Err` says, for the
+    /// user, that this brain can't be given one; nothing is taken then.
+    fn attach(&mut self, files: Vec<Attached>) -> Result<(), String> {
+        match files.first() {
+            None => Ok(()),
+            Some(file) => Err(format!("What answers here can't be given {}.", file.name)),
+        }
+    }
 }
 
 /// A brain Muxin can use: its id in settings, its name, its program.
@@ -75,18 +99,24 @@ pub struct Kind {
     pub program: Option<&'static str>,
     /// How to get it, for someone who doesn't have it.
     pub get: &'static str,
+    /// It keeps MCP tools out of what it sends the model and looks them up
+    /// as it needs them. So it's given every tool in full, to find them by,
+    /// where the others get the chat's short list (../tools.rs).
+    pub finds_tools: bool,
 }
 
-pub const KINDS: [Kind; 3] = [
-    Kind { id: "claude", name: "Claude Code", program: Some("claude"), get: "https://claude.com/claude-code" },
-    Kind { id: "codex", name: "Codex", program: Some("codex"), get: "https://developers.openai.com/codex/cli" },
-    Kind { id: CHATGPT, name: "ChatGPT", program: None, get: "" },
+/// In the order Muxin prefers them when the user hasn't chosen.
+pub const KINDS: [Kind; 4] = [
+    Kind { id: "claude", name: "Claude Code", program: Some("claude"), get: "https://claude.com/claude-code", finds_tools: false },
+    Kind { id: "codex", name: "Codex", program: Some("codex"), get: "https://developers.openai.com/codex/cli", finds_tools: false },
+    Kind { id: CHATGPT, name: "ChatGPT", program: None, get: "", finds_tools: false },
+    Kind { id: "grok", name: "Grok Build", program: Some("grok"), get: "https://docs.x.ai/build/overview", finds_tools: true },
 ];
 
 /// Muxin's own brain, on the user's ChatGPT plan.
 pub const CHATGPT: &str = "chatgpt";
 
-/// The brains' ids, for saying which there are: "claude, codex or chatgpt".
+/// The brains' ids, for saying which there are: "claude, codex, chatgpt or grok".
 pub fn ids() -> String {
     let ids = KINDS.map(|k| k.id);
     format!("{} or {}", ids[..ids.len() - 1].join(", "), ids[ids.len() - 1])
@@ -95,7 +125,8 @@ pub fn ids() -> String {
 /// What to say when there's nothing to answer with.
 pub fn none_here() -> String {
     let programs: Vec<String> = KINDS.iter().filter(|k| k.program.is_some()).map(|k| format!("{} ({})", k.name, k.get)).collect();
-    format!("The chat needs something to answer with: {} on this computer, signed in, or your ChatGPT plan (`muxin chat --sign-in`).", programs.join(" or "))
+    let programs = format!("{} or {}", programs[..programs.len() - 1].join(", "), programs[programs.len() - 1]);
+    format!("The chat needs something to answer with: {programs} on this computer, signed in, or your ChatGPT plan (`muxin chat --sign-in`).")
 }
 
 pub fn kind(id: &str) -> Option<&'static Kind> {
@@ -124,6 +155,8 @@ fn usual_dirs() -> Vec<PathBuf> {
         home.join(".bun/bin"),
         home.join(".volta/bin"),
         home.join(".cargo/bin"),
+        // Where Grok Build's installer puts it.
+        home.join(".grok/bin"),
     ]
 }
 
@@ -139,9 +172,9 @@ pub fn path_for_child() -> std::ffi::OsString {
     std::env::join_paths(dirs).unwrap_or_default()
 }
 
-/// The brains there are to use here, in the order Muxin prefers them: the
-/// programs this computer has, then ChatGPT when `plan` (the user is signed
-/// in and allowed plan use).
+/// The brains there are to use here, in the order Muxin prefers them: a
+/// program when this computer has it, ChatGPT when `plan` (the user is
+/// signed in and allowed plan use).
 pub fn available(plan: bool) -> Vec<&'static Kind> {
     KINDS.iter().filter(|k| match k.program {
         Some(program) => find(program).is_some(),
@@ -150,7 +183,7 @@ pub fn available(plan: bool) -> Vec<&'static Kind> {
     .collect()
 }
 
-/// Starts a brain that is a program ("claude", "codex"). Nothing runs until
+/// Starts a brain that is a program ("claude", "codex", "grok"). Nothing runs until
 /// its first turn. (Muxin's own is made where the chat is opened: it needs
 /// the chat's gate, not a bridge.)
 pub fn start(id: &str, setup: Setup) -> Result<Box<dyn Brain>, String> {
@@ -159,6 +192,7 @@ pub fn start(id: &str, setup: Setup) -> Result<Box<dyn Brain>, String> {
     let program = find(program).ok_or_else(|| format!("{} isn't on this computer. Get it at {}.", kind.name, kind.get))?;
     Ok(match kind.id {
         "claude" => Box::new(claude::Claude::new(program, setup)),
+        "grok" => Box::new(grok::Grok::new(program, setup)),
         _ => Box::new(codex::Codex::new(program, setup)),
     })
 }
@@ -201,10 +235,21 @@ mod tests {
 
     #[test]
     fn an_unknown_brain_says_which_there_are() {
-        let setup = Setup { exe: "muxin".into(), bridge: "/tmp/x.sock".into(), work: "/tmp".into(), prompt: String::new(), resume: None };
+        let setup = Setup { exe: "muxin".into(), bridge: "/tmp/x.sock".into(), work: "/tmp".into(), prompt: String::new(), ..Default::default() };
         let err = start("gpt", setup).err().unwrap();
-        assert!(err.contains("claude, codex or chatgpt"), "{err}");
-        assert!(none_here().contains("Claude Code (https://claude.com/claude-code) or Codex ("));
+        assert!(err.contains("claude, codex, chatgpt or grok"), "{err}");
+        let none = none_here();
+        assert!(none.contains("Claude Code (https://claude.com/claude-code), Codex (") && none.contains(") or Grok Build (https://docs.x.ai/build/overview) on this computer"), "{none}");
+    }
+
+    #[test]
+    fn every_program_has_a_driver_and_a_place_to_get_it() {
+        for kind in KINDS.iter().filter(|k| k.program.is_some()) {
+            assert!(kind.get.starts_with("https://"), "{}", kind.id);
+        }
+        // What's chosen when the user hasn't: the one never tried against the real program comes last.
+        assert_eq!(KINDS.map(|k| k.id), ["claude", "codex", "chatgpt", "grok"]);
+        assert_eq!(KINDS.iter().filter(|k| k.finds_tools).map(|k| k.id).collect::<Vec<_>>(), ["grok"]);
     }
 
     #[test]

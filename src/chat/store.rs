@@ -30,7 +30,7 @@ pub struct Meta {
     /// The first thing asked, shortened, until the user names it.
     #[serde(default)]
     pub title: String,
-    /// Which brain answers: "claude", "codex".
+    /// Which brain answers: "claude", "codex", "chatgpt", "grok".
     pub brain: String,
     pub created: i64,
     pub updated: i64,
@@ -38,14 +38,26 @@ pub struct Meta {
     /// id, Codex's thread id), to continue it there.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sessions: BTreeMap<String, String>,
+    /// The model it answers with, by the brain's id for it, and how hard
+    /// it's asked to think. None: the brain's, or the model's, own choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// One line of a thread.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Item {
-    /// What the user said.
-    User { at: i64, text: String },
+    /// What the user said, and the files that went with it, by their names
+    /// (the chat's copies are in its `files` folder).
+    User {
+        at: i64,
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
+    },
     /// What the assistant said.
     Text { at: i64, text: String },
     /// A tool the assistant called.
@@ -131,6 +143,11 @@ impl Store {
     }
 
     /// The folder a chat's brain runs in.
+    /// A chat's own folder (its record, its thread, the files attached in it).
+    pub fn home(&self, id: &str) -> Option<PathBuf> {
+        self.folder(id)
+    }
+
     pub fn work(&self, id: &str) -> std::io::Result<PathBuf> {
         let dir = self.folder(id).ok_or_else(|| std::io::Error::other("not a chat id"))?.join("work");
         std::fs::create_dir_all(&dir)?;
@@ -146,7 +163,7 @@ impl Store {
                 continue;
             }
             self.make(&folder)?;
-            let meta = Meta { id, title: String::new(), brain: brain.to_string(), created: now, updated: now, sessions: BTreeMap::new() };
+            let meta = Meta { id, title: String::new(), brain: brain.to_string(), created: now, updated: now, sessions: BTreeMap::new(), model: None, effort: None };
             self.save(&meta)?;
             return Ok(meta);
         }
@@ -257,7 +274,7 @@ mod tests {
         let s = store("thread");
         let id = s.create("claude").unwrap().id;
         let items = [
-            Item::User { at: 1, text: "restart beelink-01".into() },
+            Item::User { at: 1, text: "restart beelink-01".into(), files: vec![] },
             Item::Tool { at: 2, id: "t1".into(), name: "runner_action".into(), args: json!({"runner_id": "beelink/beelink-01", "action": "restart"}) },
             Item::Ask { at: 2, id: 1, tool: "runner_action".into(), args: json!({"action": "restart"}), risk: Risk::Change },
             Item::Answer { at: 3, id: 1, answer: "yes".into(), note: String::new() },

@@ -135,13 +135,13 @@ pub async fn proxy(socket: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 impl Bridge {
     pub fn start(_engine: Arc<Engine>, _front: Arc<dyn Front>, _dir: &Path) -> std::io::Result<Bridge> {
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "The chat can't use Claude Code or Codex on Windows yet."))
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "The chat can't use Claude Code, Codex or Grok Build on Windows yet."))
     }
 }
 
 #[cfg(not(unix))]
 pub async fn proxy(_socket: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "The chat can't use Claude Code or Codex on Windows yet."))
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "The chat can't use Claude Code, Codex or Grok Build on Windows yet."))
 }
 
 #[cfg(all(test, unix))]

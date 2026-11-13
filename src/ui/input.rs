@@ -143,6 +143,10 @@ pub enum InputEvent {
     Cancel,
 }
 
+/// Something that isn't text was pasted (a picture). The field took
+/// nothing; whoever holds it may want what's on the clipboard.
+pub struct PastedOther;
+
 pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
@@ -176,6 +180,7 @@ pub struct TextInput {
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
+impl EventEmitter<PastedOther> for TextInput {}
 
 /// A field's lines as drawn, to measure in: how far across its row a place
 /// in the text is, and which place in a row is nearest to a point.
@@ -567,6 +572,8 @@ impl TextInput {
             // One line takes what was copied as one line; several keep its lines.
             let text = if self.lines.is_some() { text.replace("\r\n", "\n").replace('\r', "\n") } else { text.replace(['\n', '\r'], " ") };
             self.replace_text_in_range(None, &text, window, cx);
+        } else if cx.read_from_clipboard().is_some() {
+            cx.emit(PastedOther);
         }
     }
 

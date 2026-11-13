@@ -81,7 +81,8 @@ impl Focusable for ChatView {
 
 impl ChatView {
     pub fn new(engine: Arc<Engine>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| TextInput::new(cx, "Ask about your machines, or ask for something to be done").bare());
+        // Several lines: it grows as far as eight rows, then scrolls. Enter sends, Shift+Enter starts a new line.
+        let input = cx.new(|cx| TextInput::new(cx, "Ask about your machines, or ask for something to be done").bare().lines(8));
         let subs = vec![cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::Submit => this.submit(window, cx),
             // The send button follows whether there's something to send.
@@ -164,6 +165,11 @@ impl ChatView {
         }
         self.say(text, window, cx);
         self.input.update(cx, |input, cx| input.set_text("", cx));
+    }
+
+    /// Puts `text` in the field as if typed (a hidden `--view` hook uses it to check the page).
+    pub(super) fn draft(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text(text.to_string(), cx));
     }
 
     /// Says `text` to the assistant, in the open chat or a new one.
@@ -586,7 +592,7 @@ impl ChatView {
         let action = if self.busy && !has_text {
             Button::icon_only("chat-stop", "square").style(ButtonStyle::Outlined).tooltip("Stop").on_click(cx.listener(|this, _, _, _| this.stop()))
         } else {
-            Button::icon_only("chat-send", "arrow-up").style(ButtonStyle::Primary).disabled(!has_text).tooltip("Send").on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
+            Button::icon_only("chat-send", "arrow-up").style(ButtonStyle::Primary).disabled(!has_text).tooltip("Send (Return). Shift+Return starts a new line.").on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
         };
         div()
             .w(px(width))
@@ -596,9 +602,10 @@ impl ChatView {
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    // The buttons stay at the bottom as the field grows.
+                    .items_end()
                     .gap(px(8.))
-                    .h(px(44.))
+                    .py(px(8.))
                     .pl(px(14.))
                     .pr(px(8.))
                     .rounded(kit::corner(10.))

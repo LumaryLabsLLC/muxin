@@ -35,6 +35,7 @@ mod share;
 mod settings;
 mod shortcuts;
 mod terminal;
+mod text_rows;
 mod theme;
 mod tray;
 mod run;

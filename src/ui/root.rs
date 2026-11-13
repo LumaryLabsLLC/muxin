@@ -1059,6 +1059,12 @@ impl Root {
                 let view = self.chat_view(window, cx);
                 view.update(cx, |view, cx| view.say(arg.to_string(), window, cx));
             }
+            // What's typed but not sent; "\n" in it is a new line.
+            "chat-draft" => {
+                self.navigate(Route::Chat, window, cx);
+                let view = self.chat_view(window, cx);
+                view.update(cx, |view, cx| view.draft(&arg.replace("\\n", "\n"), cx));
+            }
             "overview" => self.navigate(Route::Overview, window, cx),
             "jobs" => self.navigate(Route::Jobs, window, cx),
             "usage" => self.navigate(Route::Usage, window, cx),

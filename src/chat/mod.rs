@@ -9,12 +9,16 @@
 //! - `store`: chats on disk.
 //! - `prompt`: what the assistant is told about itself.
 //! - `term`: the chat in a terminal (`muxin chat`).
+//! - `live`: a chat running by itself, for the app's page.
 //!
 //! `Chat` puts them together: it holds one conversation and runs its turns.
 
 pub mod brain;
 pub mod bridge;
 pub mod gate;
+// Only the app's page runs a chat this way.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub mod live;
 pub mod prompt;
 pub mod risk;
 pub mod store;
@@ -261,7 +265,7 @@ fn gate_event(event: gate::Event, meta: &Meta, store: &Store, engine: &Arc<Engin
 }
 
 #[cfg(all(test, unix))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::Paths;
     use serde_json::json;
@@ -273,7 +277,7 @@ mod tests {
         turns: Vec<Vec<Step>>,
     }
 
-    enum Step {
+    pub(crate) enum Step {
         Say(&'static str),
         Call(&'static str, Value),
         Fail(&'static str),
@@ -308,7 +312,8 @@ mod tests {
         async fn stop(&mut self) {}
     }
 
-    fn chat(name: &str, turns: Vec<Vec<Step>>) -> Chat {
+    /// A chat on simulated machines whose brain follows a script: a list of steps for each turn.
+    pub(crate) fn chat(name: &str, turns: Vec<Vec<Step>>) -> Chat {
         let dir = std::env::temp_dir().join(format!("muxin-chat-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let engine = Engine::new(Paths::resolve(Some(dir.clone()), None), true);

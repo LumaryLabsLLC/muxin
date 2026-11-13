@@ -30,6 +30,7 @@ actions!(
     [
         CheckNow,
         SyncGitHub,
+        ShowChat,
         ShowOverview,
         ShowJobs,
         ShowWorkspaces,
@@ -198,6 +199,7 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Go to…", QuickOpen),
                 MenuItem::action("Command Palette…", CommandPalette),
                 MenuItem::separator(),
+                MenuItem::action("Chat", ShowChat),
                 MenuItem::action("Overview", ShowOverview),
                 MenuItem::action("Jobs", ShowJobs),
                 MenuItem::action("Boxes", ShowBoxes),
@@ -279,6 +281,8 @@ impl Left {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Route {
+    /// The assistant: the first page.
+    Chat,
     Overview,
     Jobs,
     Workspaces,
@@ -472,6 +476,8 @@ pub struct Root {
     pub(super) logs: HashMap<String, Entity<super::logs::LogsView>>,
     /// Services pages open, by machine (each an item in the sidebar while open).
     pub(super) service_pages: HashMap<String, Entity<super::services::ServicesView>>,
+    /// The assistant's chat, once its page was opened.
+    pub(super) chat: Option<Entity<super::chat::ChatView>>,
     /// Terminals split into panes (see panes.rs); a session page shows the layout it's in.
     pub(super) panes: Vec<super::panes::Panes>,
     /// The pane of a split shown alone (⌘⇧↵), while it's the one on screen.
@@ -660,7 +666,7 @@ impl Root {
             engine,
             snapshot,
             focus: cx.focus_handle(),
-            route: Route::Overview,
+            route: Route::Chat,
             back: Vec::new(),
             forward: Vec::new(),
             filter,
@@ -699,6 +705,7 @@ impl Root {
             split: Default::default(),
             logs: HashMap::new(),
             service_pages: HashMap::new(),
+            chat: None,
             panes: cx.global::<super::theme::Appearance>().panes.iter().filter_map(|t| super::panes::Panes::decode(t)).filter(|p| p.ids().len() > 1).collect(),
             zoomed: None,
             split_ratio: cx.global::<super::theme::Appearance>().split_ratio.clamp(0.2, 0.8),
@@ -993,6 +1000,10 @@ impl Root {
                 let view = self.logs_view(&id, window, cx);
                 window.focus(&view.focus_handle(cx));
             }
+            Route::Chat => {
+                let view = self.chat_view(window, cx);
+                window.focus(&view.focus_handle(cx));
+            }
             Route::Services(id) => {
                 if !self.service_pages.contains_key(&id) {
                     let engine = self.engine.clone();
@@ -1042,6 +1053,13 @@ impl Root {
     pub fn open_view(&mut self, view: &str, window: &mut Window, cx: &mut Context<Self>) {
         let (kind, arg) = view.split_once(':').unwrap_or((view, ""));
         match kind {
+            "chat" => self.navigate(Route::Chat, window, cx),
+            "chat-say" => {
+                self.navigate(Route::Chat, window, cx);
+                let view = self.chat_view(window, cx);
+                view.update(cx, |view, cx| view.say(arg.to_string(), window, cx));
+            }
+            "overview" => self.navigate(Route::Overview, window, cx),
             "jobs" => self.navigate(Route::Jobs, window, cx),
             "usage" => self.navigate(Route::Usage, window, cx),
             // "schedules", or "schedules:<machine>/<id>" with that one's runs open.
@@ -2174,6 +2192,10 @@ impl Root {
         self.engine.trigger_sync();
     }
 
+    fn show_chat(&mut self, _: &ShowChat, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(Route::Chat, window, cx);
+    }
+
     fn show_overview(&mut self, _: &ShowOverview, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate(Route::Overview, window, cx);
     }
@@ -2598,6 +2620,7 @@ impl Root {
                     .gap(px(2.))
                     .px(px(10.))
                     .pt(px(6.))
+                    .child(self.nav_item("nav-chat", "message-square", kit::tiles::CHAT, "Chat", None, Route::Chat, "chat", cx))
                     .child(self.nav_item("nav-overview", "gauge", kit::tiles::OVERVIEW, "Overview", None, Route::Overview, "overview", cx))
                     .child(self.nav_item("nav-jobs", "workflow", kit::tiles::JOBS, "Jobs", Some(s.counts.queued + s.counts.running), Route::Jobs, "jobs", cx))
                     .child(self.nav_item("nav-boxes", "box", super::boxes::TILE, "Boxes", Some(s.boxes.iter().filter(|b| b.state != "paused").count()), Route::Boxes, "boxes", cx))
@@ -3719,6 +3742,14 @@ impl Root {
     }
 
     /// The machine's log viewer, opened if it isn't.
+    fn chat_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<super::chat::ChatView> {
+        if self.chat.is_none() {
+            let engine = self.engine.clone();
+            self.chat = Some(cx.new(|cx| super::chat::ChatView::new(engine, window, cx)));
+        }
+        self.chat.clone().expect("just made")
+    }
+
     pub(super) fn logs_view(&mut self, machine: &str, window: &mut Window, cx: &mut Context<Self>) -> Entity<super::logs::LogsView> {
         let engine = self.engine.clone();
         self.logs.entry(machine.to_string()).or_insert_with(|| cx.new(|cx| super::logs::LogsView::new(engine, machine.to_string(), window, cx))).clone()
@@ -3840,6 +3871,13 @@ impl Root {
 
     fn render_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.route.clone() {
+            Route::Chat => {
+                let view = self.chat_view(window, cx);
+                // Text only wraps in a width it knows: the page's, less the sidebar.
+                let width = f32::from(window.viewport_size().width) - if self.sidebar_hidden { 0. } else { self.sidebar_width };
+                view.update(cx, |view, _| view.set_width(width));
+                view.into_any_element()
+            }
             Route::Overview => self.render_overview(window, cx).into_any_element(),
             Route::Jobs => self.render_jobs(cx).into_any_element(),
             Route::Workspaces => self.render_workspaces(cx).into_any_element(),
@@ -3952,6 +3990,7 @@ impl Render for Root {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::check_now))
             .on_action(cx.listener(Self::sync_github))
+            .on_action(cx.listener(Self::show_chat))
             .on_action(cx.listener(Self::show_overview))
             .on_action(cx.listener(Self::show_jobs))
             .on_action(cx.listener(|this, _: &ShowWorkspaces, window, cx| this.navigate(Route::Workspaces, window, cx)))
@@ -4100,6 +4139,7 @@ pub(super) fn github_status(theme: &Theme, s: &Snapshot) -> (gpui::Hsla, String)
 /// (section, title) for the toolbar.
 fn route_title(s: &Snapshot, route: &Route) -> (Option<&'static str>, String) {
     match route {
+        Route::Chat => (None, "Chat".into()),
         Route::Overview => (None, "Overview".into()),
         Route::Jobs => (None, "Jobs".into()),
         Route::Workspaces => (Some("Boxes"), "Agents' workspaces".into()),

@@ -11,6 +11,7 @@ use super::dialogs::{Prefill, WorkspacePlan};
 use super::format;
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, card, icon, section_title, spinner};
+use super::markdown::markdown;
 use super::menu::{self, MenuTarget};
 use super::root::{Root, Route};
 use super::theme::{ActiveTheme, Appearance, Theme, mono_font, remember};
@@ -1319,7 +1320,7 @@ impl Root {
                     }))),
             );
         }
-        body = body.child(card(theme).p(px(16.)).child(markdown(theme, &d.body, width - 32.)));
+        body = body.child(card(theme).p(px(16.)).child(markdown(theme, &d.body, width - 32., "github-body", "No description.")));
         for (i, c) in d.comments.iter().enumerate() {
             body = body.child(
                 card(theme)
@@ -1336,7 +1337,7 @@ impl Root {
                             .child(div().flex_1())
                             .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(format!("#{}", i + 1))),
                     )
-                    .child(markdown(theme, &c.body, width - 32.)),
+                    .child(markdown(theme, &c.body, width - 32., format!("github-comment-{i}"), "No description.")),
             );
         }
         body.into_any_element()
@@ -1464,178 +1465,6 @@ fn failed(theme: &Theme, error: &str) -> AnyElement {
         .child(icon("circle-alert", 15., theme.error))
         .child(div().flex_1().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text).child(error.to_string()))
         .into_any_element()
-}
-
-/// GitHub-flavored Markdown, simplified for reading: paragraphs, headings,
-/// lists, quotes and code blocks; links and emphasis as plain text; images
-/// and HTML comments left out.
-fn markdown(theme: &Theme, text: &str, width: f32) -> AnyElement {
-    let text = strip_comments(text);
-    let mut blocks: Vec<AnyElement> = Vec::new();
-    let mut paragraph: Vec<String> = Vec::new();
-    let mut code: Option<Vec<String>> = None;
-    let flush = |paragraph: &mut Vec<String>, blocks: &mut Vec<AnyElement>| {
-        if !paragraph.is_empty() {
-            let text = paragraph.join(" ");
-            blocks.push(div().w(px(width)).text_size(px(13.)).text_color(theme.text).child(inline(&text)).into_any_element());
-            paragraph.clear();
-        }
-    };
-    for line in text.lines() {
-        if line.trim_start().starts_with("```") {
-            match code.take() {
-                Some(lines) => blocks.push(
-                    div()
-                        .w(px(width))
-                        .p(px(10.))
-                        .rounded(crate::ui::kit::corner(6.))
-                        .bg(theme.element)
-                        .font_family(mono_font())
-                        .text_size(px(12.))
-                        .text_color(theme.text_muted)
-                        .children(lines.into_iter().map(|l| div().child(if l.is_empty() { " ".to_string() } else { l })))
-                        .into_any_element(),
-                ),
-                None => {
-                    flush(&mut paragraph, &mut blocks);
-                    code = Some(Vec::new());
-                }
-            }
-            continue;
-        }
-        if let Some(lines) = code.as_mut() {
-            lines.push(line.to_string());
-            continue;
-        }
-        let t = line.trim();
-        if t.is_empty() {
-            flush(&mut paragraph, &mut blocks);
-        } else if let Some(h) = ["###### ", "##### ", "#### ", "### ", "## ", "# "].iter().find_map(|p| t.strip_prefix(p)) {
-            flush(&mut paragraph, &mut blocks);
-            blocks.push(div().w(px(width)).pt(px(4.)).text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(inline(h)).into_any_element());
-        } else if let Some(item) = list_item(t) {
-            flush(&mut paragraph, &mut blocks);
-            blocks.push(
-                div()
-                    .w(px(width))
-                    .flex()
-                    .gap(px(8.))
-                    .text_size(px(13.))
-                    .text_color(theme.text)
-                    .child(div().flex_none().text_color(theme.text_placeholder).child(item.0))
-                    .child(div().flex_1().min_w(px(0.)).child(inline(&item.1)))
-                    .into_any_element(),
-            );
-        } else if let Some(q) = t.strip_prefix('>') {
-            flush(&mut paragraph, &mut blocks);
-            blocks.push(
-                div()
-                    .w(px(width))
-                    .pl(px(10.))
-                    .border_l_2()
-                    .border_color(theme.border)
-                    .text_size(px(13.))
-                    .text_color(theme.text_muted)
-                    .child(inline(q.trim()))
-                    .into_any_element(),
-            );
-        } else {
-            paragraph.push(t.to_string());
-        }
-    }
-    if let Some(lines) = code {
-        blocks.push(div().w(px(width)).font_family(mono_font()).text_size(px(12.)).children(lines.into_iter().map(|l| div().child(l))).into_any_element());
-    }
-    flush(&mut paragraph, &mut blocks);
-    if blocks.is_empty() {
-        blocks.push(div().text_size(px(12.5)).text_color(theme.text_placeholder).child("No description.").into_any_element());
-    }
-    div().flex().flex_col().gap(px(8.)).children(blocks).into_any_element()
-}
-
-fn strip_comments(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("<!--") {
-        out.push_str(&rest[..start]);
-        match rest[start..].find("-->") {
-            Some(end) => rest = &rest[start + end + 3..],
-            None => {
-                rest = "";
-                break;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// "- [x] done" -> ("☑", "done"), "1. step" -> ("1.", "step"), "* x" -> ("•", "x").
-fn list_item(t: &str) -> Option<(String, String)> {
-    for marker in ["- ", "* ", "+ "] {
-        if let Some(rest) = t.strip_prefix(marker) {
-            return Some(match rest {
-                r if r.starts_with("[ ] ") => ("☐".into(), r[4..].to_string()),
-                r if r.starts_with("[x] ") || r.starts_with("[X] ") => ("☑".into(), r[4..].to_string()),
-                r => ("•".into(), r.to_string()),
-            });
-        }
-    }
-    let (num, rest) = t.split_once(". ")?;
-    (num.len() <= 3 && num.chars().all(|c| c.is_ascii_digit())).then(|| (format!("{num}."), rest.to_string()))
-}
-
-/// Links as their text, images as their description, emphasis and code marks dropped.
-fn inline(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let chars: Vec<char> = text.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let image = chars[i] == '!' && chars.get(i + 1) == Some(&'[');
-        if chars[i] == '[' || image {
-            let open = if image { i + 1 } else { i };
-            if let Some(close) = chars[open..].iter().position(|c| *c == ']').map(|p| open + p) {
-                if chars.get(close + 1) == Some(&'(') {
-                    if let Some(end) = chars[close..].iter().position(|c| *c == ')').map(|p| close + p) {
-                        let label: String = chars[open + 1..close].iter().collect();
-                        if image {
-                            out.push_str(&format!("[image{}]", if label.is_empty() { String::new() } else { format!(": {label}") }));
-                        } else {
-                            out.push_str(&label);
-                        }
-                        i = end + 1;
-                        continue;
-                    }
-                }
-            }
-        }
-        if chars[i] == '<' {
-            // Inline HTML (<br>, <img ...>, <details>): drop the tag.
-            if let Some(end) = chars[i..].iter().position(|c| *c == '>') {
-                let tag: String = chars[i..i + end + 1].iter().collect();
-                if tag.starts_with("<img") {
-                    out.push_str("[image]");
-                }
-                i += end + 1;
-                continue;
-            }
-        }
-        if chars[i] == '`' {
-            // Inline code stays as written (it may contain <angle brackets>).
-            if let Some(end) = chars[i + 1..].iter().position(|c| *c == '`').map(|p| i + 1 + p) {
-                out.extend(&chars[i + 1..end]);
-                i = end + 1;
-                continue;
-            }
-        }
-        if matches!(chars[i], '*' | '`') || (chars[i] == '_' && chars.get(i + 1) == Some(&'_')) {
-            i += 1;
-            continue;
-        }
-        out.push(chars[i]);
-        i += 1;
-    }
-    out
 }
 
 /// New box for an issue: its repository (or `fork`, when that's where the work
@@ -1862,15 +1691,5 @@ mod tests {
         assert_eq!(issue_branch(910, "[Feature] The content in excalidraw cannot be searched globally."), "issue-910-content-excalidraw-searched-globally");
         assert_eq!(issue_branch(7, "支持中文"), "issue-7");
         assert!(issue_branch(1, &"averyveryverylongwordindeed ".repeat(5)).len() <= 48);
-    }
-
-    #[test]
-    fn simplifies_markdown() {
-        assert_eq!(inline("See [the docs](https://x.y) and **bold** `code`"), "See the docs and bold code");
-        assert_eq!(inline("commands like `:tag <tag_name>` work<br>"), "commands like :tag <tag_name> work");
-        assert_eq!(inline("![screenshot](a.png)"), "[image: screenshot]");
-        assert_eq!(list_item("- [x] done"), Some(("☑".into(), "done".into())));
-        assert_eq!(list_item("12. step"), Some(("12.".into(), "step".into())));
-        assert_eq!(strip_comments("a<!-- hidden -->b"), "ab");
     }
 }

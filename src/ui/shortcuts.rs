@@ -9,7 +9,7 @@ use super::root::{
     AddMachine, CheckNow, ClosePane, CommandPalette, EndSession, FocusFilter, GoBack, GoForward, GoToMachine1, GoToMachine2, GoToMachine3, GoToMachine4, GoToMachine5,
     GoToMachine6, GoToMachine7, GoToMachine8, GoToMachine9, GoToSession1, GoToSession2, GoToSession3, GoToSession4, GoToSession5, GoToSession6, GoToSession7,
     GoToSession8, GoToSession9, NewSession, NextAgent, NextPane, NextSession, OpenSettings, PreviousAgent, PreviousPane, PreviousSession, RenameShown, ShowGithub,
-    ShowJobs, ShowRun, ShowSchedules, ShowUsage, ShowOverview, ShowWorkspaces, ShowBoxes, SplitDown, SplitRight, SyncGitHub, QuickOpen, ToggleActivity, ToggleSidebar,
+    ShowChat, ShowJobs, ShowRun, ShowSchedules, ShowUsage, ShowOverview, ShowWorkspaces, ShowBoxes, SplitDown, SplitRight, SyncGitHub, QuickOpen, ToggleActivity, ToggleSidebar,
     ZoomPane,
 };
 use super::theme::Appearance;
@@ -39,6 +39,7 @@ const fn page(mac: &'static str, other: &'static str) -> &'static str {
 pub const ALL: &[Shortcut] = &[
     shortcut!("quick-open", "Go to a machine, session or desktop", "secondary-p", QuickOpen),
     shortcut!("commands", "Command palette", "secondary-shift-p", CommandPalette),
+    shortcut!("chat", "Chat", page("ctrl-0", "alt-0"), ShowChat),
     shortcut!("overview", "Overview", page("ctrl-1", "alt-1"), ShowOverview),
     shortcut!("jobs", "Jobs", page("ctrl-2", "alt-2"), ShowJobs),
     shortcut!("boxes", "Boxes", page("ctrl-3", "alt-3"), ShowBoxes),
@@ -201,6 +202,7 @@ const HERDR_MAC: &[(&str, &str)] = &[
     ("quick-open", "cmd-p"),
     ("commands", "cmd-shift-p"),
     // ⌃1…⌃9 are herdr's spaces (our machines); the pages move to ⌥⌘.
+    ("chat", "alt-cmd-0"),
     ("overview", "alt-cmd-1"),
     ("jobs", "alt-cmd-2"),
     ("boxes", "alt-cmd-3"),

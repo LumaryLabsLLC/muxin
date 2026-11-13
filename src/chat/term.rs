@@ -257,7 +257,7 @@ fn parse_answer(line: &str, may_always: bool) -> Option<Answer> {
 /// Why a tool failed, on one line: Muxin's own error message (and its hint)
 /// when that's what came back, else the first line of what did. None for a
 /// call the user declined.
-fn failure(text: &str) -> Option<String> {
+pub(crate) fn failure(text: &str) -> Option<String> {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text)
         && let Some(error) = value.get("error")
     {
@@ -275,7 +275,7 @@ fn failure(text: &str) -> Option<String> {
 }
 
 /// A tool call on one line: its name and the arguments that say what it's about.
-fn brief(name: &str, args: &serde_json::Value) -> String {
+pub(crate) fn brief(name: &str, args: &serde_json::Value) -> String {
     let mut parts = vec![name.to_string()];
     if let Some(map) = args.as_object() {
         for key in ["action", "power", "machine_id", "runner_id", "session", "box_id", "workspace_id", "repo", "agent", "name", "path", "command"] {
@@ -296,7 +296,7 @@ fn shorten(text: &str, max: usize) -> String {
 }
 
 /// 950, 12.3k, 1.2M.
-fn count(n: u64) -> String {
+pub(crate) fn count(n: u64) -> String {
     match n {
         0..=999 => n.to_string(),
         1000..=999_999 => format!("{:.1}k", n as f64 / 1000.0),

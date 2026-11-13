@@ -497,6 +497,7 @@ impl Root {
             item("New workspace…", "layers", None, Run::Do(Command::NewWorkspace)),
             item("Join a share…", "link", None, Run::Do(Command::JoinShare)),
             item("Copy files between machines…", "folder", None, Run::Do(Command::CopyFiles)),
+            item("Go to Chat", "message-square", Some("chat"), Run::Go(Route::Chat)),
             item("Go to Overview", "gauge", Some("overview"), Run::Go(Route::Overview)),
             item("Go to Jobs", "workflow", Some("jobs"), Run::Go(Route::Jobs)),
             item("Go to Workspaces", "layers", Some("workspaces"), Run::Go(Route::Workspaces)),

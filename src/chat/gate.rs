@@ -59,7 +59,7 @@ impl Answer {
 }
 
 /// A call waiting for the user.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Request {
     pub id: u64,
     pub tool: String,

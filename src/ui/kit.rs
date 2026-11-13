@@ -204,6 +204,7 @@ fn luminance(c: u32) -> f32 {
 
 /// Tile colors per navigation destination.
 pub mod tiles {
+    pub const CHAT: (u32, u32) = (0x8fa8ff, 0x3b5bdb);
     pub const OVERVIEW: (u32, u32) = (0x9d8cff, 0x5b47e0);
     pub const JOBS: (u32, u32) = (0xffbf55, 0xff7a3d);
     pub const WORKSPACES: (u32, u32) = (0x4be3b9, 0x14a083);

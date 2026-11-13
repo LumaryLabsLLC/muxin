@@ -84,9 +84,9 @@ pub struct Session {
 }
 
 impl Session {
-    /// A session for an app calling the tools in-process (Muxin for iPad):
-    /// what it makes is the user's, "app", as the Mac app's is.
-    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+    /// A session for a caller Muxin knows: an app calling the tools in-process
+    /// (Muxin for iPad: what it makes is the user's, "app", as the Mac app's
+    /// is), or the assistant's chat ("chat").
     pub fn named(client: &str) -> Session {
         Session { client: Mutex::new(Some(client.to_string())) }
     }
@@ -103,12 +103,30 @@ pub async fn serve_stdio(engine: Arc<Engine>) -> anyhow::Result<()> {
     serve(engine, stdin, tokio::io::stdout()).await
 }
 
-pub async fn serve<R, W>(engine: Arc<Engine>, mut reader: R, mut writer: W) -> anyhow::Result<()>
+pub async fn serve<R, W>(engine: Arc<Engine>, reader: R, writer: W) -> anyhow::Result<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let session = Arc::new(Session::default());
+    serve_as(engine, reader, writer, Session::default(), None).await
+}
+
+/// Decides whether a tool call may run, before it does: the chat's gate
+/// (crate::chat::gate), which asks the user about calls that change things.
+/// `Err` is what the model is told instead of the tool's result.
+#[async_trait::async_trait]
+pub trait Guard: Send + Sync {
+    async fn allow(&self, tool: &str, args: &Value) -> Result<(), String>;
+}
+
+/// `serve` for a client Muxin knows (`session`), with every tool call passing
+/// `guard` first when there is one.
+pub async fn serve_as<R, W>(engine: Arc<Engine>, mut reader: R, mut writer: W, session: Session, guard: Option<Arc<dyn Guard>>) -> anyhow::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let session = Arc::new(session);
     let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
     let writer_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
@@ -153,9 +171,10 @@ where
         }
         let engine = engine.clone();
         let session = session.clone();
+        let guard = guard.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
-            let reply = match handle(&engine, &session, &method, params).await {
+            let reply = match handle(&engine, &session, guard.as_deref(), &method, params).await {
                 Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
                 Err((code, message)) => error_response(id, code, &message),
             };
@@ -171,11 +190,12 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-async fn handle(engine: &Arc<Engine>, session: &Session, method: &str, params: Value) -> Result<Value, (i64, String)> {
+async fn handle(engine: &Arc<Engine>, session: &Session, guard: Option<&dyn Guard>, method: &str, params: Value) -> Result<Value, (i64, String)> {
     match method {
         "initialize" => {
+            // A client Muxin started itself keeps the name Muxin gave it.
             let client = params.pointer("/clientInfo/name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty());
-            if let Some(name) = client {
+            if let Some(name) = client.filter(|_| session.client.lock().unwrap().is_none()) {
                 *session.client.lock().unwrap() = Some(name.chars().take(64).collect());
             }
             let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or_default();
@@ -195,6 +215,11 @@ async fn handle(engine: &Arc<Engine>, session: &Session, method: &str, params: V
                 return Err((-32602, format!("Unknown tool: {name}")));
             }
             let args = params.get("arguments").cloned().filter(|a| !a.is_null()).unwrap_or_else(|| json!({}));
+            if let Some(guard) = guard
+                && let Err(why) = guard.allow(name, &args).await
+            {
+                return Ok(tool_result(json!({ "error": { "code": "declined", "message": why } }), None, true));
+            }
             Ok(call_tool(engine, session, name, args).await)
         }
         "resources/list" => Ok(json!({ "resources": [] })),
@@ -1511,7 +1536,7 @@ mod tests {
         let engine = demo();
         let session = Session::default();
         assert_eq!(session.owner(), "mcp");
-        handle(&engine, &session, "initialize", json!({"protocolVersion":"2025-06-18","clientInfo":{"name":"claude-code","version":"2"}})).await.unwrap();
+        handle(&engine, &session, None, "initialize", json!({"protocolVersion":"2025-06-18","clientInfo":{"name":"claude-code","version":"2"}})).await.unwrap();
         assert_eq!(session.owner(), "claude-code");
     }
 
@@ -1522,7 +1547,7 @@ mod tests {
         let engine = demo();
         engine.run_check(None).await;
         let session = Session::default();
-        handle(&engine, &session, "initialize", json!({"clientInfo":{"name":"codex"}})).await.unwrap();
+        handle(&engine, &session, None, "initialize", json!({"clientInfo":{"name":"codex"}})).await.unwrap();
         let created = call_tool(&engine, &session, "workspace_create", json!({"platform":"linux","repo":"acme/api"})).await;
         assert_eq!(created["isError"], false, "{created}");
         let id = created["structuredContent"]["workspace"]["id"].as_str().unwrap().to_string();

@@ -623,6 +623,34 @@ pub struct Settings {
     /// order they were added.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub snippets: Vec<Snippet>,
+    /// The assistant's chat (see crate::chat): what it runs on, and what it
+    /// may do without asking.
+    #[serde(skip_serializing_if = "ChatSettings::is_default")]
+    pub chat: ChatSettings,
+}
+
+/// The assistant's chat (`[settings.chat]`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ChatSettings {
+    /// What answers: "claude" (Claude Code) or "codex", or "" for the first
+    /// one installed on this computer.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub brain: String,
+    /// "bypass": new chats start without asking before tools that change
+    /// things. Anything else (the default): they ask.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    /// Tool calls the user answered "Yes, and don't ask again" to: a tool's
+    /// name, or `tool:action` for a tool with several (`runner_action:restart`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+}
+
+impl ChatSettings {
+    fn is_default(&self) -> bool {
+        *self == ChatSettings::default()
+    }
 }
 
 /// A saved command (`[[settings.snippets]]`): run from the Run page on the
@@ -831,6 +859,7 @@ impl Default for Settings {
             share: ShareSettings::default(),
             agents: AgentSettings::default(),
             snippets: Vec::new(),
+            chat: ChatSettings::default(),
         }
     }
 }

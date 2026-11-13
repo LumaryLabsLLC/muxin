@@ -1,5 +1,6 @@
 mod api;
 mod capture;
+mod chat;
 mod cli;
 mod cloud;
 mod config;
@@ -160,6 +161,8 @@ enum Command {
     /// Boxes: hand a task to an agent that works on it in a container of its own
     #[command(name = "box", alias = "boxes", subcommand)]
     Boxes(BoxCommand),
+    /// Ask Muxin's assistant: it works across your machines with Muxin's own tools, and asks before it changes anything
+    Chat(ChatArgs),
     /// Run the MCP server on stdio for AI agents (Claude Code, Codex, ...)
     Mcp(McpArgs),
     /// The Muxin skill that teaches agents (Claude Code, Codex, Hermes, ...) this CLI: its guide, and a stub in their skills folders that reads it
@@ -1627,6 +1630,40 @@ struct McpArgs {
     /// Print setup snippets for Claude Code, Codex and other MCP clients, then exit
     #[arg(long)]
     print_config: bool,
+
+    /// Serve the tools of the Muxin that holds a chat, through its socket
+    /// (what a chat's own Claude Code or Codex is started with; see chat::bridge)
+    #[arg(long, value_name = "SOCKET", hide = true)]
+    chat: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct ChatArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
+    /// Use simulated machines (safe to experiment with; nothing touches real machines or GitHub)
+    #[arg(long)]
+    demo: bool,
+
+    /// What to ask. Without it, a conversation starts: type it line by line
+    prompt: Vec<String>,
+
+    /// Go on with a chat from before, by its id (`last`: the one used last)
+    #[arg(long, value_name = "ID")]
+    chat: Option<String>,
+
+    /// What answers: claude (Claude Code) or codex [default: your setting, else the first one installed]
+    #[arg(long, value_name = "NAME")]
+    brain: Option<String>,
+
+    /// Don't ask before tools that change things
+    #[arg(long)]
+    bypass: bool,
+
+    /// List the chats
+    #[arg(long)]
+    list: bool,
 }
 
 #[derive(Subcommand)]
@@ -2003,6 +2040,7 @@ fn main() -> ExitCode {
                 None => run(&runtime, &a.agent, async move |e| api::machine_connection(&e, &machine).await, cli::connection),
             }
         }
+        Some(Command::Chat(a)) => chat(a, &runtime),
         Some(Command::Mcp(a)) => mcp(a, &runtime),
         Some(Command::Skill(cmd)) => skill(cmd),
         Some(Command::Check(args)) => {
@@ -3079,10 +3117,33 @@ fn exec_attach(cmd: fleet::sessions::AttachCommand) -> u8 {
     }
 }
 
+/// `muxin chat`: the assistant, in the terminal.
+fn chat(args: ChatArgs, runtime: &tokio::runtime::Runtime) -> u8 {
+    let _guard = runtime.enter();
+    let engine = Engine::new(args.common.paths(), args.demo);
+    let ask = chat::term::Ask {
+        prompt: args.prompt.join(" "),
+        options: chat::Options { chat: args.chat, brain: args.brain, mode: args.bypass.then_some(chat::gate::Mode::Bypass) },
+        list: args.list,
+    };
+    runtime.block_on(chat::term::run(engine, ask))
+}
+
 fn mcp(args: McpArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     if args.print_config {
         print!("{}", mcp::print_config());
         return 0;
+    }
+    if let Some(socket) = &args.chat {
+        let code = match runtime.block_on(chat::bridge::proxy(socket)) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: couldn't reach the chat's Muxin at {}: {e}", socket.display());
+                1
+            }
+        };
+        // Not by returning: the runtime would wait for a read of stdin that can't be cancelled.
+        std::process::exit(code);
     }
     let _guard = runtime.enter();
     // No background loops: tools refresh what they need on demand.

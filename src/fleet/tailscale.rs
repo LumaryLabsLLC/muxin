@@ -90,9 +90,11 @@ impl Peer {
         self.dns_name.split('.').next().filter(|s| !s.is_empty()).unwrap_or(&self.host_name)
     }
 
-    /// Whether you can ssh to it (phones, tablets and Tailscale's own devices: no).
+    /// Whether you can ssh to it (phones, tablets and Tailscale's own devices: no;
+    /// nor a peer without a MagicDNS name, like Funnel's ingress nodes and the
+    /// devices of someone a machine is shared with: there's no name to reach it by).
     pub fn is_computer(&self) -> bool {
-        !self.tailscale_owned && !matches!(self.os.to_ascii_lowercase().as_str(), "ios" | "android" | "tvos")
+        !self.tailscale_owned && !self.dns_name.is_empty() && !matches!(self.os.to_ascii_lowercase().as_str(), "ios" | "android" | "tvos")
     }
 
     /// "direct" (peer-to-peer), "relay" (through a Tailscale relay), or
@@ -340,5 +342,18 @@ mod tests {
         assert_eq!(t.find(&[], &s(&["box-ser.tail0000.ts.net."])).unwrap().host_name, "box-SER");
         assert_eq!(t.find(&[], &s(&["100.99.89.52"])).unwrap().host_name, "nas");
         assert!(t.find(&[], &s(&["192.168.1.9", "elsewhere"])).is_none());
+    }
+    #[test]
+    fn a_peer_without_a_name_is_not_a_machine_to_add() {
+        // What `tailscale status --json` lists once Funnel is on, and for a machine shared with someone else.
+        let t = parse(
+            r#"{ "BackendState": "Running", "Peer": {
+            "nodekey:a": { "HostName": "funnel-ingress-node", "DNSName": "", "OS": "", "Online": true, "Tags": ["tag:ingress"] },
+            "nodekey:b": { "HostName": "device-of-shared-to-user", "DNSName": "", "OS": "", "Online": false },
+            "nodekey:c": { "HostName": "box", "DNSName": "box.tail0000.ts.net.", "OS": "linux", "Online": true } } }"#,
+        )
+        .unwrap();
+        let machines: Vec<&str> = t.peers.iter().filter(|p| p.is_computer()).map(|p| p.short_name()).collect();
+        assert_eq!(machines, ["box"]);
     }
 }

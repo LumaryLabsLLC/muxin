@@ -5,4 +5,5 @@ root = true
 root_unless = 'test -w "$(npm prefix -g)"'
 check = "command -v amp"
 install = "npm install -g @sourcegraph/amp"
-update = "npm install -g @sourcegraph/amp@latest"
+up_to_date = 'npm outdated -g --prefix "$(npm_prefix amp)" @sourcegraph/amp'
+update = 'npm install -g --prefix "$(npm_prefix amp)" @sourcegraph/amp@latest'

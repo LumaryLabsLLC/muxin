@@ -1,8 +1,8 @@
-# Installs one component (recipe::apply), in the user's login shell like its
-# check. Prepended:
+# Installs or updates one component (recipe::apply), in the user's login shell
+# like its check. Prepended:
 #   OR_ID       the component's id, for messages
 #   OR_PRELUDE  what every step can use (prelude.sh)
-#   OR_STEP     its install step, run by sh -e after the prelude, with nothing on stdin
+#   OR_STEP     its install or update step, run by sh -e after the prelude, with nothing on stdin
 #   OR_ROOT     1 when the step needs root here (root = true, on Linux)
 #   OR_UNLESS   its root_unless test: when it exits 0, the step runs as the user
 # Ends with "$OR_MARK:exit=N" on stderr, N being the step's exit status, or 77

@@ -1,4 +1,5 @@
-# What every component step can use (recipe::apply puts it before the step).
+# What every component step and up_to_date test can use (recipe::apply puts
+# it before them).
 #
 # pkg_install <package>...: Homebrew when it's there and this isn't root (it
 # refuses root), else the system's apt, dnf, apk or pacman. When a package
@@ -21,4 +22,16 @@ pkg_install() {
     echo "error: There's no package manager Muxin knows here (apt, dnf, apk, pacman, or Homebrew)." >&2
     return 1
   fi
+}
+
+# npm_prefix <command>: the npm prefix of the copy of <command> on PATH when
+# it's an npm global one (<prefix>/lib/node_modules/...), else npm's own. A
+# new Node.js can move npm's: Ubuntu's npm uses /usr/local, NodeSource's /usr.
+# Updating there updates the copy that runs, not a second one behind it.
+npm_prefix() {
+  npm_found=$(realpath "$(command -v "$1")" 2>/dev/null) || true
+  case "$npm_found" in
+    */lib/node_modules/*) echo "${npm_found%%/lib/node_modules/*}" ;;
+    *) npm prefix -g ;;
+  esac
 }

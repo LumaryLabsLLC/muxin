@@ -3859,6 +3859,9 @@ pub struct RecipeApplyRequest {
     pub machine_id: String,
     /// Component ids to install where they're missing; what they require goes first.
     pub components: Vec<String>,
+    /// Also update what's there and behind (default false).
+    #[serde(default)]
+    pub update: bool,
     /// Wait for it to finish (default true).
     #[serde(default = "yes")]
     pub wait: bool,
@@ -3881,8 +3884,9 @@ pub struct RecipeApplyOut {
 }
 
 /// Installs what's missing of some components on a machine, as an operation:
-/// checks, installs in order, checks each again. Fails when any component
-/// failed or was skipped; `details` then holds every component's result.
+/// checks, installs in order, checks each again; with `update`, updates what's
+/// behind too. Fails when any component failed or was skipped; `details` then
+/// holds every component's result.
 #[cfg(feature = "recipes")]
 pub async fn recipe_apply(engine: &Arc<Engine>, req: RecipeApplyRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<RecipeApplyOut> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
@@ -3897,7 +3901,7 @@ pub async fn recipe_apply(engine: &Arc<Engine>, req: RecipeApplyRequest, surface
         if unknown { err.with_hint(known()) } else { err }
     })?;
     let others = catalog.conflicting(&components).into_iter().cloned().collect();
-    let (op, mut results) = engine.recipe_apply(&m.id, components.into_iter().cloned().collect(), others).map_err(op_error)?;
+    let (op, mut results) = engine.recipe_apply(&m.id, components.into_iter().cloned().collect(), others, req.update).map_err(op_error)?;
     let operation = if req.wait {
         wait_operation(engine, op, Duration::from_secs(req.timeout_secs.unwrap_or(INSTALL_TIMEOUT_SECS).max(1)), on_line).await
     } else {

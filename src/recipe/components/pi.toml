@@ -8,4 +8,5 @@ check = "command -v pi"
 # deprecated in its favour. Pi's README installs it without install scripts;
 # it needs none.
 install = "npm install -g --ignore-scripts @earendil-works/pi-coding-agent"
-update = "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@latest"
+up_to_date = 'npm outdated -g --prefix "$(npm_prefix pi)" @earendil-works/pi-coding-agent'
+update = 'npm install -g --prefix "$(npm_prefix pi)" --ignore-scripts @earendil-works/pi-coding-agent@latest'

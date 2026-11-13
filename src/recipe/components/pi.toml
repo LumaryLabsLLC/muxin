@@ -4,8 +4,8 @@ requires = ["node"]
 root = true
 root_unless = 'test -w "$(npm prefix -g)"'
 check = "command -v pi"
-# @earendil-works is Pi's package now: @mariozechner/pi-coding-agent, which
-# the box image still installs, is deprecated in its favour. Pi's README
-# installs it without install scripts; it needs none.
+# @earendil-works is Pi's package now: @mariozechner/pi-coding-agent is
+# deprecated in its favour. Pi's README installs it without install scripts;
+# it needs none.
 install = "npm install -g --ignore-scripts @earendil-works/pi-coding-agent"
 update = "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@latest"

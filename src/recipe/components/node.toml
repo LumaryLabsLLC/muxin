@@ -1,7 +1,10 @@
 id = "node"
 name = "Node.js"
 root = true
-check = "node --version && command -v npm"
+# 22 or later: Claude Code and Pi need it (Gemini CLI 20). An older Node.js,
+# like the Node.js 18 of Ubuntu 24.04 and Debian 12, counts as missing, so
+# installing brings Node.js 22 instead of agent CLIs that don't start.
+check = 'node -e "process.exit(parseInt(process.versions.node) >= 22 ? 0 : 1)" && command -v npm'
 # Debian and Ubuntu: Node.js 22 from NodeSource, as cloud machines get it.
 # A Mac: Homebrew's. Elsewhere: the system's packages, as VMs get it.
 install = '''

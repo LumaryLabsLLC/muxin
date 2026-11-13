@@ -1,0 +1,19 @@
+id = "go"
+name = "Go"
+os = ["linux"]
+root = true
+check = 'PATH="$PATH:/usr/local/go/bin" go version'
+# The latest release from go.dev into /usr/local/go, and onto every login's
+# PATH. (Cloud machines read the version with jq and the architecture with
+# dpkg; neither is on every machine.)
+install = '''
+v=$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -n 1)
+case $(uname -m) in
+  x86_64) arch=amd64 ;;
+  aarch64 | arm64) arch=arm64 ;;
+  *) echo "error: go.dev has no Linux build for $(uname -m)." >&2; exit 1 ;;
+esac
+rm -rf /usr/local/go
+curl -fsSL "https://go.dev/dl/$v.linux-$arch.tar.gz" | tar -C /usr/local -xz
+echo 'export PATH="$PATH:/usr/local/go/bin"' > /etc/profile.d/go.sh
+'''

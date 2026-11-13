@@ -1,0 +1,8 @@
+id = "gemini"
+name = "Gemini CLI"
+requires = ["node"]
+root = true
+root_unless = 'test -w "$(npm prefix -g)"'
+check = "command -v gemini"
+install = "npm install -g @google/gemini-cli"
+update = "npm install -g @google/gemini-cli@latest"

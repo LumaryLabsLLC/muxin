@@ -1,0 +1,8 @@
+id = "opencode"
+name = "OpenCode"
+requires = ["node"]
+root = true
+root_unless = 'test -w "$(npm prefix -g)"'
+check = "command -v opencode"
+install = "npm install -g opencode-ai"
+update = "npm install -g opencode-ai@latest"

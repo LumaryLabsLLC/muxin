@@ -1,0 +1,8 @@
+id = "codex"
+name = "Codex"
+requires = ["node"]
+root = true
+root_unless = 'test -w "$(npm prefix -g)"'
+check = "command -v codex"
+install = "npm install -g @openai/codex"
+update = "npm install -g @openai/codex@latest"

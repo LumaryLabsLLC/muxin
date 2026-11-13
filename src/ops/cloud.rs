@@ -145,6 +145,9 @@ impl Engine {
         let user = setup::user_name(&std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default());
         let droplet_name = crate::util::slug(&name);
         self.op_log(op, format!("▸ Creating {droplet_name} in {region} ({size}, ${:.3}/h)", size_info.price_hourly));
+        // With recipes, the extras are applied over ssh once its first boot is done (below).
+        #[cfg(feature = "recipes")]
+        let (recipe, extras) = (extras, Vec::<String>::new());
         let created = client.create_droplet(&droplet_name, &region, &size, key.id, &setup::script(&user, &extras)).await?;
         let id = created.id;
 
@@ -180,6 +183,10 @@ impl Engine {
         self.op_log(op, "▸ Setting it up (a few minutes)");
         let spec = self.machine(&machine_id).map(|(s, _)| s).ok_or("The new machine went missing from config.toml.")?;
         self.wait_for_setup(op, &spec, Duration::from_secs(20 * 60)).await?;
+        #[cfg(feature = "recipes")]
+        self.recipe_setup(op, &machine_id, &recipe).await;
+        #[cfg(feature = "recipes")]
+        let extras = recipe;
 
         if setup::resolve(&extras).contains(&"tailscale") {
             self.join_tailnet(op, &spec).await;

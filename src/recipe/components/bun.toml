@@ -1,0 +1,7 @@
+id = "bun"
+name = "Bun"
+# Its installer needs unzip.
+requires = ["unzip"]
+# In ~/.bun/bin, which the installer adds to the shell's rc file.
+check = 'PATH="$PATH:$HOME/.bun/bin" bun --version'
+install = "curl -fsSL https://bun.sh/install | bash"

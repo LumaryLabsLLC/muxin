@@ -7,7 +7,8 @@
 //!
 //! Muxin checks machines with them (every check of a recipe in one script,
 //! `recipe_check`, changing nothing) and applies them (`recipe_apply`, in
-//! apply.rs: installs what's missing). `update` is read and checked, not run.
+//! apply.rs: installs what's missing), also to the cloud machines and VMs it
+//! makes (`recipe_setup`). `update` is read and checked, not run.
 
 mod apply;
 pub use apply::Applied;
@@ -28,12 +29,31 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 /// The systems component steps run on (they're sh), named as the machine check names them.
 const SYSTEMS: &[&str] = &["linux", "darwin"];
 
-/// Muxin's components, in the order they're listed.
+/// Muxin's components, in the order they're listed: git, then what cloud
+/// machines can come with (cloud::setup::EXTRAS), each after what it requires.
 const BUILT_IN: &[(&str, &str)] = &[
     ("git.toml", include_str!("components/git.toml")),
+    ("docker.toml", include_str!("components/docker.toml")),
     ("gh.toml", include_str!("components/gh.toml")),
     ("node.toml", include_str!("components/node.toml")),
+    ("uv.toml", include_str!("components/uv.toml")),
+    ("python.toml", include_str!("components/python.toml")),
+    ("go.toml", include_str!("components/go.toml")),
+    ("rust.toml", include_str!("components/rust.toml")),
+    ("php.toml", include_str!("components/php.toml")),
+    ("ruby.toml", include_str!("components/ruby.toml")),
+    ("java.toml", include_str!("components/java.toml")),
+    ("unzip.toml", include_str!("components/unzip.toml")),
+    ("bun.toml", include_str!("components/bun.toml")),
+    ("deno.toml", include_str!("components/deno.toml")),
+    ("dotnet.toml", include_str!("components/dotnet.toml")),
     ("claude.toml", include_str!("components/claude.toml")),
+    ("codex.toml", include_str!("components/codex.toml")),
+    ("gemini.toml", include_str!("components/gemini.toml")),
+    ("opencode.toml", include_str!("components/opencode.toml")),
+    ("amp.toml", include_str!("components/amp.toml")),
+    ("pi.toml", include_str!("components/pi.toml")),
+    ("tailscale.toml", include_str!("components/tailscale.toml")),
 ];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -329,15 +349,51 @@ mod tests {
         list.iter().map(|c| c.id.clone()).collect()
     }
 
+    /// Muxin's components, in their order.
+    const ALL: [&str; 22] = [
+        "git", "docker", "gh", "node", "uv", "python", "go", "rust", "php", "ruby", "java", "unzip", "bun", "deno", "dotnet", "claude", "codex", "gemini", "opencode", "amp", "pi", "tailscale",
+    ];
+
     #[test]
     fn muxins_components_load() {
         let catalog = catalog().unwrap();
-        assert_eq!(catalog.ids(), ["git", "gh", "node", "claude"]);
+        assert_eq!(catalog.ids(), ALL);
         let claude = catalog.get("claude").unwrap();
         assert_eq!((claude.name.as_str(), claude.requires.as_slice(), claude.root), ("Claude Code", &["node".to_string()][..], true));
         assert!(claude.update.is_some() && catalog.get("git").unwrap().update.is_none());
-        assert!(catalog.components.iter().all(|c| c.os == SYSTEMS), "every one works on Linux and on a Mac");
         assert!(catalog.get("gh").unwrap().install.contains("cli.github.com"), "ported from cloud setup");
+        let linux_only: Vec<&str> = catalog.components.iter().filter(|c| c.os != SYSTEMS).map(|c| c.id.as_str()).collect();
+        assert_eq!(linux_only, ["docker", "python", "go", "php", "ruby", "java", "dotnet", "tailscale"]);
+        assert!(catalog.components.iter().all(|c| c.os == SYSTEMS || c.os == ["linux"]));
+        assert!(catalog.components.iter().all(|c| c.conflicts.is_empty()), "none yet");
+        // Checks are fast and stay on the machine.
+        assert!(catalog.components.iter().all(|c| !c.check.contains("curl") && !c.check.contains("http")));
+    }
+
+    /// The same ids give the same things as a cloud machine's extras and a
+    /// VM's agent CLIs, now in one place.
+    #[test]
+    fn every_extra_is_a_component() {
+        use crate::cloud::setup::{EXTRAS, npm_package};
+        let catalog = catalog().unwrap();
+        for (id, name) in EXTRAS {
+            let c = catalog.get(id).unwrap_or_else(|| panic!("{id} is an extra but no component"));
+            assert_eq!(c.name, *name);
+            if let Some(package) = npm_package(id) {
+                assert_eq!(c.install, format!("npm install -g {package}"), "{id}");
+                assert_eq!(c.update.as_deref(), Some(format!("{}@latest", c.install).as_str()), "{id}");
+                assert_eq!((c.requires.as_slice(), c.root, c.root_unless.as_deref()), (&["node".to_string()][..], true, claude_root_unless()), "{id}");
+            }
+        }
+        // What the extras brought besides themselves.
+        assert_eq!(catalog.get("python").unwrap().requires, ["uv"]);
+        assert_eq!((catalog.get("bun").unwrap().requires.as_slice(), catalog.get("deno").unwrap().requires.as_slice()), (&["unzip".to_string()][..], &["unzip".to_string()][..]));
+        // Pi's package is the one that isn't deprecated.
+        assert!(catalog.get("pi").unwrap().install.ends_with(" @earendil-works/pi-coding-agent"));
+    }
+
+    fn claude_root_unless() -> Option<&'static str> {
+        catalog().unwrap().get("claude").unwrap().root_unless.as_deref()
     }
 
     #[test]
@@ -346,10 +402,11 @@ mod tests {
         let resolve = |list: &[&str]| ids(&catalog.resolve(&list.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap());
         assert_eq!(resolve(&["claude"]), ["node", "claude"]);
         assert_eq!(resolve(&["claude", "git", "node", "claude"]), ["node", "claude", "git"]);
-        assert_eq!(resolve(&[]), ["git", "gh", "node", "claude"]);
+        assert_eq!(resolve(&[]), ALL);
+        assert_eq!(resolve(&["pi", "bun", "python", "deno", "codex"]), ["node", "pi", "unzip", "bun", "uv", "python", "deno", "codex"]);
         let a = load(&[component("a", "requires = [\"c\", \"b\"]"), component("b", "requires = [\"c\"]"), component("c", "")]).unwrap();
         assert_eq!(ids(&a.resolve(&["a".into()]).unwrap()), ["c", "b", "a"]);
-        assert_eq!(catalog.resolve(&["docker".into()]).unwrap_err(), "No component called \"docker\".");
+        assert_eq!(catalog.resolve(&["podman".into()]).unwrap_err(), "No component called \"podman\".");
     }
 
     #[test]
@@ -421,7 +478,7 @@ mod tests {
     #[test]
     fn reads_what_the_checks_print() {
         let catalog = catalog().unwrap();
-        let all = catalog.resolve(&[]).unwrap();
+        let all = catalog.resolve(&["git".into(), "gh".into(), "claude".into()]).unwrap();
         let out = "Last login: today\nos=linux\ncheck.git=present\ncheck.gh=missing\ncheck.node=present\ncheck.claude=unsupported\n";
         let found = read_checks(out, &all).unwrap();
         assert_eq!(found.os, "linux");
@@ -465,7 +522,7 @@ mod tests {
         let session = Session::default();
         let tool = crate::mcp::tools().into_iter().find(|t| t["name"] == "recipe_check").expect("listed");
         assert_eq!(tool["annotations"]["readOnlyHint"], true);
-        assert_eq!(tool["inputSchema"]["properties"]["components"]["items"]["enum"], json!(["git", "gh", "node", "claude"]));
+        assert_eq!(tool["inputSchema"]["properties"]["components"]["items"]["enum"], json!(ALL));
 
         let mac = call_tool(&engine, &session, "recipe_check", json!({"machine_id": "forge", "components": ["claude"]})).await;
         assert_eq!(mac["isError"], false, "{mac}");
@@ -473,10 +530,10 @@ mod tests {
         assert_eq!(mac["structuredContent"]["components"], json!([{"id": "node", "name": "Node.js", "result": "present"}, {"id": "claude", "name": "Claude Code", "result": "present"}]));
         let windows = call_tool(&engine, &session, "recipe_check", json!({"machine_id": "win-test"})).await;
         let results: Vec<&str> = windows["structuredContent"]["components"].as_array().unwrap().iter().map(|c| c["result"].as_str().unwrap()).collect();
-        assert_eq!((windows["structuredContent"]["os"].as_str(), results), (Some("windows"), vec!["unsupported"; 4]));
-        let unknown = call_tool(&engine, &session, "recipe_check", json!({"machine_id": "forge", "components": ["docker"]})).await;
+        assert_eq!((windows["structuredContent"]["os"].as_str(), results), (Some("windows"), vec!["unsupported"; ALL.len()]));
+        let unknown = call_tool(&engine, &session, "recipe_check", json!({"machine_id": "forge", "components": ["podman"]})).await;
         assert_eq!(unknown["structuredContent"]["error"]["code"], "invalid", "{unknown}");
-        assert_eq!(unknown["structuredContent"]["error"]["hint"], "Known components: git, gh, node, claude");
+        assert_eq!(unknown["structuredContent"]["error"]["hint"], format!("Known components: {}", ALL.join(", ")));
         let nowhere = call_tool(&engine, &session, "recipe_check", json!({"machine_id": "nope"})).await;
         assert_eq!(nowhere["structuredContent"]["error"]["code"], "not_found");
     }
@@ -485,11 +542,12 @@ mod tests {
     #[tokio::test]
     async fn the_demo_knows_a_machines_system_before_any_check() {
         let engine = Engine::new(Paths::resolve(Some(std::env::temp_dir().join("muxen-recipe-test-unchecked")), None), true);
-        let all = catalog().unwrap().resolve(&[]).unwrap();
-        let mac = engine.recipe_check("forge", &all).await.unwrap();
-        assert_eq!((mac.os.as_str(), mac.components.iter().all(|c| c.result == "present")), ("darwin", true));
-        let linux = engine.recipe_check("dev-1", &all).await.unwrap();
+        let four = catalog().unwrap().resolve(&["git".into(), "gh".into(), "claude".into(), "docker".into()]).unwrap();
+        let mac = engine.recipe_check("forge", &four).await.unwrap();
+        let results: Vec<&str> = mac.components.iter().map(|c| c.result).collect();
+        assert_eq!((mac.os.as_str(), results), ("darwin", vec!["present", "present", "present", "present", "unsupported"]));
+        let linux = engine.recipe_check("dev-1", &four).await.unwrap();
         let results: Vec<&str> = linux.components.iter().map(|c| c.result).collect();
-        assert_eq!((linux.os.as_str(), results), ("linux", vec!["present", "present", "missing", "missing"]));
+        assert_eq!((linux.os.as_str(), results), ("linux", vec!["present", "present", "missing", "missing", "missing"]));
     }
 }

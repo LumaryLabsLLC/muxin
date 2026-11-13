@@ -1,0 +1,6 @@
+id = "dotnet"
+name = ".NET"
+os = ["linux"]
+root = true
+check = "dotnet --list-sdks | grep -q ."
+install = "pkg_install dotnet-sdk-8.0"

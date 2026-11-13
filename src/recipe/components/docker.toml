@@ -1,0 +1,11 @@
+id = "docker"
+name = "Docker"
+os = ["linux"]
+root = true
+check = "docker --version"
+# Docker's own script, then the user joins the docker group (SUDO_USER is
+# who ran sudo).
+install = '''
+curl -fsSL https://get.docker.com | sh
+[ -z "${SUDO_USER:-}" ] || usermod -aG docker "$SUDO_USER"
+'''

@@ -111,17 +111,20 @@ where
     serve_as(engine, reader, writer, Session::default(), None).await
 }
 
-/// Decides whether a tool call may run, before it does: the chat's gate
-/// (crate::chat::gate), which asks the user about calls that change things.
-/// `Err` is what the model is told instead of the tool's result.
+/// What stands between a client and the tools, for a client Muxin started
+/// itself (the assistant's chat, crate::chat::tools): which tools it's
+/// offered, in place of the whole catalog, and how a call of one runs (after
+/// asking the user, when it changes something).
 #[async_trait::async_trait]
-pub trait Guard: Send + Sync {
-    async fn allow(&self, tool: &str, args: &Value) -> Result<(), String>;
+pub trait Front: Send + Sync {
+    fn tools(&self) -> Vec<Value>;
+    /// Runs a call; the outcome as a tool result (`tool_result`).
+    async fn call(&self, engine: &Arc<Engine>, session: &Session, name: &str, args: Value) -> Value;
 }
 
-/// `serve` for a client Muxin knows (`session`), with every tool call passing
-/// `guard` first when there is one.
-pub async fn serve_as<R, W>(engine: Arc<Engine>, mut reader: R, mut writer: W, session: Session, guard: Option<Arc<dyn Guard>>) -> anyhow::Result<()>
+/// `serve` for a client Muxin knows (`session`), with `front` between it and
+/// the tools when there is one.
+pub async fn serve_as<R, W>(engine: Arc<Engine>, mut reader: R, mut writer: W, session: Session, front: Option<Arc<dyn Front>>) -> anyhow::Result<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -171,10 +174,10 @@ where
         }
         let engine = engine.clone();
         let session = session.clone();
-        let guard = guard.clone();
+        let front = front.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
-            let reply = match handle(&engine, &session, guard.as_deref(), &method, params).await {
+            let reply = match handle(&engine, &session, front.as_deref(), &method, params).await {
                 Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
                 Err((code, message)) => error_response(id, code, &message),
             };
@@ -190,7 +193,7 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-async fn handle(engine: &Arc<Engine>, session: &Session, guard: Option<&dyn Guard>, method: &str, params: Value) -> Result<Value, (i64, String)> {
+async fn handle(engine: &Arc<Engine>, session: &Session, front: Option<&dyn Front>, method: &str, params: Value) -> Result<Value, (i64, String)> {
     match method {
         "initialize" => {
             // A client Muxin started itself keeps the name Muxin gave it.
@@ -208,17 +211,18 @@ async fn handle(engine: &Arc<Engine>, session: &Session, guard: Option<&dyn Guar
             }))
         }
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools() })),
+        "tools/list" => Ok(json!({ "tools": match front {
+            Some(front) => front.tools(),
+            None => tools(),
+        } })),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).ok_or((-32602, "tools/call needs a tool name".to_string()))?;
+            let args = params.get("arguments").cloned().filter(|a| !a.is_null()).unwrap_or_else(|| json!({}));
+            if let Some(front) = front {
+                return Ok(front.call(engine, session, name, args).await);
+            }
             if !tools().iter().any(|t| t["name"] == name) {
                 return Err((-32602, format!("Unknown tool: {name}")));
-            }
-            let args = params.get("arguments").cloned().filter(|a| !a.is_null()).unwrap_or_else(|| json!({}));
-            if let Some(guard) = guard
-                && let Err(why) = guard.allow(name, &args).await
-            {
-                return Ok(tool_result(json!({ "error": { "code": "declined", "message": why } }), None, true));
             }
             Ok(call_tool(engine, session, name, args).await)
         }
@@ -346,7 +350,7 @@ fn session_arg(mut args: Value) -> Value {
 
 /// A tool's result. `structuredContent` has to be an object (Claude's MCP client
 /// refuses anything else): a list goes under "result".
-fn tool_result(value: Value, text: Option<String>, is_error: bool) -> Value {
+pub(crate) fn tool_result(value: Value, text: Option<String>, is_error: bool) -> Value {
     let value = if value.is_object() { value } else { json!({ "result": value }) };
     let text = text.unwrap_or_else(|| serde_json::to_string_pretty(&value).unwrap_or_default());
     json!({

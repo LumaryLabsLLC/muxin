@@ -7,12 +7,13 @@
 //! its MCP server is `muxin mcp --chat <socket>`, which does nothing but pass
 //! bytes between the brain and the socket. So each tool call arrives here,
 //! passes the chat's gate (gate.rs), and runs in this process like any other.
+//! What it's offered is the chat's short list of tools (tools.rs).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::fleet::Engine;
-use crate::mcp::Guard;
+use crate::mcp::Front;
 
 /// A socket path longer than this doesn't fit the system's limit (104 bytes
 /// on macOS, 108 on Linux).
@@ -64,7 +65,7 @@ pub fn close_all() {
 impl Bridge {
     /// Starts listening, under `dir` (Muxin's folder) when the path fits.
     /// Call from inside the runtime.
-    pub fn start(engine: Arc<Engine>, guard: Arc<dyn Guard>, dir: &Path) -> std::io::Result<Bridge> {
+    pub fn start(engine: Arc<Engine>, front: Arc<dyn Front>, dir: &Path) -> std::io::Result<Bridge> {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let name = format!("chat-{}-{}.sock", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
@@ -91,11 +92,11 @@ impl Bridge {
         let task = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else { break };
-                let (engine, guard) = (engine.clone(), guard.clone());
+                let (engine, front) = (engine.clone(), front.clone());
                 tokio::spawn(async move {
                     let (read, write) = stream.into_split();
                     let session = crate::mcp::Session::named("chat");
-                    let _ = crate::mcp::serve_as(engine, tokio::io::BufReader::new(read), write, session, Some(guard)).await;
+                    let _ = crate::mcp::serve_as(engine, tokio::io::BufReader::new(read), write, session, Some(front)).await;
                 });
             }
         });
@@ -133,7 +134,7 @@ pub async fn proxy(socket: &Path) -> std::io::Result<()> {
 // be used on Windows.
 #[cfg(not(unix))]
 impl Bridge {
-    pub fn start(_engine: Arc<Engine>, _guard: Arc<dyn Guard>, _dir: &Path) -> std::io::Result<Bridge> {
+    pub fn start(_engine: Arc<Engine>, _front: Arc<dyn Front>, _dir: &Path) -> std::io::Result<Bridge> {
         Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "The chat can't use Claude Code or Codex on Windows yet."))
     }
 }
@@ -193,7 +194,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let (engine, dir) = demo("gate");
         let (gate, mut events) = Gate::new(Mode::Ask, vec![]);
-        let bridge = Bridge::start(engine, gate.clone(), &dir).unwrap();
+        let bridge = Bridge::start(engine, crate::chat::tools::Short::new(gate.clone()), &dir).unwrap();
         assert_eq!(std::fs::metadata(bridge.path()).unwrap().permissions().mode() & 0o777, 0o600);
         let mut c = Client::connect(bridge.path()).await;
 
@@ -238,7 +239,7 @@ mod tests {
     async fn bypass_asks_nothing() {
         let (engine, dir) = demo("bypass");
         let (gate, mut events) = Gate::new(Mode::Bypass, vec![]);
-        let bridge = Bridge::start(engine, gate, &dir).unwrap();
+        let bridge = Bridge::start(engine, crate::chat::tools::Short::new(gate), &dir).unwrap();
         let mut c = Client::connect(bridge.path()).await;
         c.call(1, "snippet_save", json!({"name": "Uptime", "command": "uptime"})).await;
         assert_eq!(c.recv().await["result"]["isError"], false);
@@ -250,7 +251,7 @@ mod tests {
         let (engine, _) = demo("long");
         let (gate, _events) = Gate::new(Mode::Ask, vec![]);
         let deep = std::env::temp_dir().join("x".repeat(120));
-        let bridge = Bridge::start(engine, gate, &deep).unwrap();
+        let bridge = Bridge::start(engine, crate::chat::tools::Short::new(gate), &deep).unwrap();
         assert!(bridge.path().starts_with("/tmp/"), "{}", bridge.path().display());
         let own = bridge.path().parent().unwrap().to_path_buf();
         Client::connect(bridge.path()).await;

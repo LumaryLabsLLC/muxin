@@ -164,13 +164,6 @@ impl Gate {
     }
 }
 
-#[async_trait::async_trait]
-impl crate::mcp::Guard for Gate {
-    async fn allow(&self, tool: &str, args: &Value) -> Result<(), String> {
-        self.check(tool, args).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

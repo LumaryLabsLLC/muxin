@@ -6,6 +6,8 @@
 //! - `account` and `jwt`: signing in with ChatGPT.
 //! - `bridge`: how such a brain reaches the tools of the Muxin that holds
 //!   the chat, rather than a second Muxin of its own.
+//! - `tools`: which of Muxin's tools the brain is given in full, and how it
+//!   reaches the rest.
 //! - `risk` and `gate`: what a tool call can change, and asking the user
 //!   before it does.
 //! - `store`: chats on disk.
@@ -29,6 +31,7 @@ pub mod store;
 pub mod term;
 #[cfg(test)]
 pub mod testing;
+pub mod tools;
 
 use std::sync::Arc;
 
@@ -139,7 +142,7 @@ impl Chat {
         let (brain, bridge): (Box<dyn brain::Brain>, Option<Bridge>) = match kind.program {
             // Another program: it reaches Muxin's tools through a bridge to this Muxin.
             Some(_) => {
-                let bridge = Bridge::start(engine.clone(), gate.clone(), &engine.paths().dir).map_err(|e| format!("Couldn't open the chat's way to Muxin's tools: {e}"))?;
+                let bridge = Bridge::start(engine.clone(), tools::Short::new(gate.clone()), &engine.paths().dir).map_err(|e| format!("Couldn't open the chat's way to Muxin's tools: {e}"))?;
                 let setup = brain::Setup {
                     exe: std::env::current_exe().map_err(|e| format!("Couldn't find this Muxin's own program: {e}"))?,
                     bridge: bridge.path().to_path_buf(),
@@ -243,6 +246,8 @@ fn brain_event(event: brain::Event, meta: &mut Meta, store: &Store, limit: &mut 
             on(Update::Text(text));
         }
         brain::Event::Tool { id, name, args } => {
+            // Shown and kept as the tool it's really of, not the `use_tool` that carried it.
+            let (name, args) = tools::shown(&name, args);
             let _ = store.append(&meta.id, &Item::Tool { at, id: id.clone(), name: name.clone(), args: args.clone() });
             on(Update::Tool { id, name, args });
         }
@@ -351,7 +356,7 @@ pub(crate) mod tests {
         let store = store(&engine);
         let meta = store.create("claude").unwrap();
         let (gate, gate_events) = Gate::new(Mode::Ask, vec![]);
-        let bridge = Bridge::start(engine.clone(), gate.clone(), &dir).unwrap();
+        let bridge = Bridge::start(engine.clone(), tools::Short::new(gate.clone()), &dir).unwrap();
         let brain = Box::new(Scripted { gate: gate.clone(), turns });
         Chat { meta, store, engine, gate, gate_events, brain, limit: None, _bridge: Some(bridge) }
     }

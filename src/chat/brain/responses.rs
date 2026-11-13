@@ -80,6 +80,8 @@ pub struct ChatGpt {
     at: Endpoints,
     /// Where this chat's conversation is kept, as it's sent.
     kept_at: PathBuf,
+    /// What OpenAI is told this conversation is (see `request`).
+    cache_key: String,
     /// The conversation: what the user said, what the model said and
     /// called, what the tools answered. Sent whole each time.
     said: Vec<Value>,
@@ -96,7 +98,9 @@ impl ChatGpt {
     pub fn new(engine: Arc<Engine>, gate: Arc<Gate>, vault: Vault, at: Endpoints, folder: PathBuf, prompt: String, model: Option<String>) -> ChatGpt {
         let kept_at = folder.join("responses.json");
         let said = std::fs::read_to_string(&kept_at).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-        ChatGpt { engine, gate, vault, at, kept_at, said, prompt, model: model.filter(|m| !m.trim().is_empty()), model_said: false }
+        // The chat's id: nothing about the user, and the same each time.
+        let cache_key = format!("muxin-{}", folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        ChatGpt { engine, gate, vault, at, kept_at, cache_key, said, prompt, model: model.filter(|m| !m.trim().is_empty()), model_said: false }
     }
 
     fn keep(&self) {
@@ -134,7 +138,7 @@ impl ChatGpt {
         loop {
             let token = account::token(&self.vault, &self.at, refused.as_deref()).await?;
             let model = self.model(&token, events).await?;
-            let body = request(&model, &self.prompt, &self.said);
+            let body = request(&model, &self.prompt, &self.said, &self.cache_key);
             let sent = self.http().post(format!("{}/responses", self.at.api)).bearer_auth(&token).json(&body).send().await;
             let resp = match sent {
                 Ok(resp) => resp,
@@ -157,24 +161,23 @@ impl ChatGpt {
         }
     }
 
-    /// Runs a tool the model called, past the gate. What it answered, and
-    /// whether that's a failure.
+    /// Runs a tool the model called, past the gate (see ../tools.rs). What
+    /// it answered, and whether that's a failure.
     async fn run(&self, name: &str, args: Value) -> (String, bool) {
-        if !crate::mcp::tools().iter().any(|t| t["name"] == name) {
-            return (format!("There's no tool named {name}."), true);
-        }
-        if let Err(why) = self.gate.check(name, &args).await {
-            return (json!({ "error": { "code": "declined", "message": why } }).to_string(), true);
-        }
-        let result = crate::mcp::call_tool(&self.engine, &crate::mcp::Session::named("chat"), name, args).await;
+        let result = crate::chat::tools::call(&self.engine, &crate::mcp::Session::named("chat"), &self.gate, name, args).await;
         (super::result_text(&result["content"]), result["isError"] == true)
     }
 }
 
 /// What's sent for one answer.
-fn request(model: &str, prompt: &str, said: &[Value]) -> Value {
+fn request(model: &str, prompt: &str, said: &[Value], cache_key: &str) -> Value {
     json!({
         "model": model,
+        // Every request of a conversation starts the same: the tools, the
+        // instructions, what was said so far. OpenAI keeps the start of a
+        // request ready for a few minutes and charges far less to read it
+        // again; the key sends a conversation's requests to where it's kept.
+        "prompt_cache_key": cache_key,
         // The tools explain themselves to a program's MCP client when it
         // connects; here nothing connects, so what that would have said goes along.
         "instructions": format!("{prompt}\n\n{}", crate::mcp::INSTRUCTIONS),
@@ -188,9 +191,10 @@ fn request(model: &str, prompt: &str, said: &[Value]) -> Value {
     })
 }
 
-/// Muxin's tools as the model is given them: functions, in one namespace.
+/// Muxin's tools as the model is given them (the chat's short list, see
+/// ../tools.rs): functions, in one namespace.
 fn tools() -> Value {
-    let functions: Vec<Value> = crate::mcp::tools().into_iter().map(|t| json!({ "type": "function", "name": t["name"], "description": t["description"], "parameters": t["inputSchema"] })).collect();
+    let functions: Vec<Value> = crate::chat::tools::offered().into_iter().map(|t| json!({ "type": "function", "name": t["name"], "description": t["description"], "parameters": t["inputSchema"] })).collect();
     json!([{
         "type": "namespace",
         "name": NAMESPACE,
@@ -363,20 +367,6 @@ fn mend(said: &mut Vec<Value>) {
     }
 }
 
-/// A call's arguments without the ones the model filled in with nothing.
-/// Some models give every argument a value, and write "" or null for the
-/// ones they don't mean to use; a tool would take that as said (`replacing:
-/// ""` as a snippet named nothing). An argument the tool requires is kept
-/// as it came, for the tool to refuse in its own words.
-fn tidy(name: &str, mut args: Value) -> Value {
-    let tools = crate::mcp::tools();
-    let required: Vec<&str> = tools.iter().find(|t| t["name"] == name).and_then(|t| t["inputSchema"]["required"].as_array()).into_iter().flatten().filter_map(Value::as_str).collect();
-    if let Some(map) = args.as_object_mut() {
-        map.retain(|key, value| required.contains(&key.as_str()) || !(value.is_null() || value.as_str().is_some_and(|s| s.is_empty())));
-    }
-    args
-}
-
 /// A tool's result as the model gets it: all of it, unless it's very long.
 fn for_model(mut text: String) -> String {
     if text.len() > MOST_OUTPUT {
@@ -416,8 +406,6 @@ impl Brain for ChatGpt {
                 let args = call["arguments"].as_str().map(|a| if a.trim().is_empty() { Ok(json!({})) } else { serde_json::from_str::<Value>(a) });
                 let (said, failed) = match args {
                     Some(Ok(args)) => {
-                        // What's shown, asked about and run is the same thing.
-                        let args = tidy(&name, args);
                         let _ = events.send(Event::Tool { id: id.clone(), name: name.clone(), args: args.clone() });
                         self.run(&name, args).await
                     }
@@ -532,7 +520,9 @@ mod tests {
         assert!(first["instructions"].as_str().unwrap().starts_with("You are Muxin's assistant."));
         assert_eq!((first["tools"][0]["type"].as_str(), first["tools"][0]["name"].as_str()), (Some("namespace"), Some("muxin")));
         let functions = first["tools"][0]["tools"].as_array().unwrap();
-        assert_eq!(functions.len(), crate::mcp::tools().len());
+        // The short list: the everyday tools in full, and a way to the rest.
+        assert_eq!(functions.len(), crate::chat::tools::CORE.len() + 2);
+        assert!(functions.iter().any(|f| f["name"] == "use_tool") && !functions.iter().any(|f| f["name"] == "vm_create"));
         assert!(functions.iter().all(|f| f["type"] == "function" && f["parameters"]["type"] == "object" && f["name"].is_string()));
         // None of what that route refuses.
         for field in ["temperature", "top_p", "max_output_tokens", "metadata", "user", "truncation", "previous_response_id", "prompt_cache_retention"] {
@@ -545,6 +535,12 @@ mod tests {
         assert_eq!((input[1]["type"].as_str(), input[1]["call_id"].as_str(), input[1]["namespace"].as_str()), (Some("function_call"), Some("call_1"), Some("muxin")));
         assert_eq!((input[2]["type"].as_str(), input[2]["call_id"].as_str()), (Some("function_call_output"), Some("call_1")));
         assert!(input[2]["output"].as_str().unwrap().contains("\"machines\""));
+        // The result as the model reads it: no indenting to pay for.
+        assert!(!input[2]["output"].as_str().unwrap().contains("\n  "));
+        // Both begin the same way and say they're one conversation, so the second can be read from OpenAI's cache.
+        let key = format!("muxin-{}", rig.folder.file_name().unwrap().to_string_lossy());
+        assert_eq!((first["prompt_cache_key"].as_str(), second["prompt_cache_key"].as_str()), (Some(key.as_str()), Some(key.as_str())));
+        assert_eq!((&first["tools"], &first["instructions"], &first["input"][0]), (&second["tools"], &second["instructions"], &second["input"][0]));
 
         // Kept beside the chat, and gone on with by a brain made later.
         let later = ChatGpt::new(rig.brain.engine.clone(), rig.gate.clone(), rig.brain.vault.clone(), rig.brain.at.clone(), rig.folder.clone(), String::new(), None);
@@ -650,21 +646,6 @@ mod tests {
         // Nothing open: nothing added.
         mend(&mut said);
         assert_eq!(said.len(), 5);
-    }
-
-    #[test]
-    fn arguments_filled_in_with_nothing_are_left_out() {
-        // As GPT sent it: every argument given, the unused ones empty.
-        let sent = json!({"name": "Mem", "command": "free -m", "folder": "", "replacing": "", "note": null});
-        assert_eq!(tidy("snippet_save", sent), json!({"name": "Mem", "command": "free -m"}));
-        // Something the tool requires stays, even empty: the tool says what's wrong with it.
-        assert_eq!(tidy("get_machine", json!({"machine_id": ""})), json!({"machine_id": ""}));
-        assert_eq!(tidy("snippet_save", json!({"name": "", "command": ""})), json!({"command": ""}));
-        // Values that mean something are never touched: false, 0, an empty list.
-        let kept = json!({"machine_id": "forge", "wait": false, "count": 0, "labels": []});
-        assert_eq!(tidy("install_runners", kept.clone()), kept);
-        assert_eq!(tidy("status", json!({})), json!({}));
-        assert_eq!(tidy("not_a_tool", json!({"a": ""})), json!({}));
     }
 
     #[test]

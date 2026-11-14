@@ -62,6 +62,25 @@ pub(crate) fn npm_package(id: &str) -> Option<&'static str> {
     }
 }
 
+/// What `npm install -g` takes to install an agent CLI: its flags, then its
+/// package. Claude Code, OpenCode and Amp fetch their native binary in an
+/// install script (Amp's is its dependency's), and npm runs install scripts
+/// only when told to since npm 12 (`--allow-scripts`; older ones take the
+/// flag and run them anyway). Without it the CLI is there and can't start.
+pub(crate) fn npm_install(id: &str) -> Option<String> {
+    let package = npm_package(id)?;
+    let script = match id {
+        "claude" => Some("@anthropic-ai/claude-code"),
+        "opencode" => Some("opencode-ai"),
+        "amp" => Some("@ampcode/cli"),
+        _ => None,
+    };
+    Some(match script {
+        Some(script) => format!("--allow-scripts={script} {package}"),
+        None => package.to_string(),
+    })
+}
+
 /// The extras as they'll install: known ones only, in catalog order, with
 /// Node.js added when an agent CLI needs it.
 pub fn resolve(picked: &[String]) -> Vec<&'static str> {
@@ -204,7 +223,7 @@ tailscale_() { curl -fsSL https://tailscale.com/install.sh | sh; }
 extra Tailscale tailscale_
 "#
             .to_string(),
-            other => match (npm_package(other), EXTRAS.iter().find(|(i, _)| *i == other)) {
+            other => match (npm_install(other), EXTRAS.iter().find(|(i, _)| *i == other)) {
                 (Some(pkg), Some((_, name))) => format!("\nstep \"Installing {name}\"\nextra \"{name}\" npm install -g {pkg}\n"),
                 _ => String::new(),
             },
@@ -237,6 +256,16 @@ mod tests {
         let all = script("me", &picked);
         assert!(all.contains("@openai/codex") && all.contains("tailscale.com/install.sh") && all.contains("nodesource"));
         assert!(!all.contains("get.docker.com") && !all.contains("claude-code"));
+        // An agent CLI's flags come before its package: the ones whose install script fetches their binary allow it, and Pi's stay off.
+        let installs = |id: &str| npm_install(id).unwrap_or_default();
+        assert_eq!(installs("claude"), "--allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code");
+        assert_eq!(installs("opencode"), "--allow-scripts=opencode-ai opencode-ai");
+        assert_eq!(installs("amp"), "--allow-scripts=@ampcode/cli @sourcegraph/amp");
+        assert_eq!(installs("pi"), "--ignore-scripts @earendil-works/pi-coding-agent");
+        assert_eq!((installs("codex").as_str(), installs("gemini").as_str(), npm_install("docker")), ("@openai/codex", "@google/gemini-cli", None));
+        let agents = script("me", &["claude", "pi"].map(String::from));
+        assert!(agents.contains("npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code\n"));
+        assert!(agents.contains("npm install -g --ignore-scripts @earendil-works/pi-coding-agent\n"));
         let bare = script("me", &[]);
         assert!(bare.contains("install git") || bare.contains("installing git"));
         assert!(!bare.contains("docker") && bare.contains("/var/lib/muxen/ready"));

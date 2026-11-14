@@ -2,7 +2,7 @@ id = "pi"
 name = "Pi"
 requires = ["node"]
 root = true
-root_unless = 'test -w "$(npm prefix -g)"'
+root_unless = 'test -w "$(npm_prefix pi)"'
 check = "command -v pi"
 # @earendil-works is Pi's package now: @mariozechner/pi-coding-agent is
 # deprecated in its favour. Pi's README installs it without install scripts;

@@ -629,12 +629,15 @@ pub struct Settings {
     pub chat: ChatSettings,
 }
 
+/// A list of models longer than this is a long one (see `ChatSettings::offers`).
+pub const MANY_MODELS: usize = 40;
+
 /// The assistant's chat (`[settings.chat]`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ChatSettings {
     /// The chat is on. Off (the default), the app has no Chat page and
-    /// `muxin chat` answers nothing: the user turns it on, in Settings › Chat
+    /// `muxin chat` answers nothing: the user turns it on, in Settings › AI
     /// or with `muxin chat --on`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub enabled: bool,
@@ -650,13 +653,26 @@ pub struct ChatSettings {
     /// name, or `tool:action` for a tool with several (`runner_action:restart`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<String>,
-    /// The model and effort picked last for each brain ("claude", "grok",
-    /// ...), which its next new chat starts with.
+    /// The model, effort and speed picked last for each brain ("claude",
+    /// "grok", ...), which its next new chat starts with.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub picked: std::collections::BTreeMap<String, ChatPick>,
+    /// The providers connected with an API key, by id ("anthropic",
+    /// "openrouter", ...). The key itself isn't here: it's in the Keychain
+    /// (crate::chat::keys).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub providers: std::collections::BTreeMap<String, ChatProvider>,
+    /// Models the pickers leave out, and models of a long list they offer:
+    /// each "<brain>/<model>". A short list is offered whole unless hidden;
+    /// a long one (a gateway's hundreds) only what's shown.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hidden_models: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub shown_models: Vec<String>,
 }
 
-/// A model and how hard it's asked to think; "" for the brain's own choice.
+/// A model, how hard it's asked to think and how fast it's run; "" for the
+/// brain's own choice.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ChatPick {
@@ -664,6 +680,17 @@ pub struct ChatPick {
     pub model: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub effort: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub speed: String,
+}
+
+/// A provider the user connected with an API key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ChatProvider {
+    /// Where it's reached; "" for the provider's own address.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub base: String,
 }
 
 impl ChatSettings {
@@ -673,6 +700,45 @@ impl ChatSettings {
         let some = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
         let picked = self.picked.get(brain);
         (picked.and_then(|p| some(&p.model)), picked.and_then(|p| some(&p.effort)))
+    }
+
+    /// Keeps `model` as what `brain`'s next chats start with (None: the
+    /// brain's own choice), and `brain` as what answers them. An effort the
+    /// model doesn't take (`efforts` are the ones it does) isn't carried over
+    /// to it, nor a speed it doesn't have (`fast`). The effort and speed kept.
+    pub fn start_with(&mut self, brain: &str, model: Option<&str>, efforts: &[String], fast: bool) -> (Option<String>, Option<String>) {
+        self.brain = brain.to_string();
+        let kept = self.picked.entry(brain.to_string()).or_default();
+        kept.model = model.unwrap_or_default().to_string();
+        if model.is_some() && !efforts.contains(&kept.effort) {
+            kept.effort.clear();
+        }
+        if model.is_some() && !fast {
+            kept.speed.clear();
+        }
+        let some = |s: &str| Some(s.to_string()).filter(|s| !s.is_empty());
+        (some(&kept.effort), some(&kept.speed))
+    }
+
+    /// And the speed picked for it last ("fast"), if any.
+    pub fn speed(&self, brain: &str) -> Option<String> {
+        self.picked.get(brain).map(|p| p.speed.trim().to_string()).filter(|s| !s.is_empty())
+    }
+
+    /// Whether the pickers offer `model` of `brain`, whose list has `listed`
+    /// models: a short list whole unless it's hidden, a long one only when shown.
+    pub fn offers(&self, brain: &str, model: &str, listed: usize) -> bool {
+        let name = format!("{brain}/{model}");
+        if listed > MANY_MODELS { self.shown_models.contains(&name) } else { !self.hidden_models.contains(&name) }
+    }
+
+    /// Has the pickers offer `model` of `brain`, or leave it out.
+    pub fn offer(&mut self, brain: &str, model: &str, on: bool) {
+        let name = format!("{brain}/{model}");
+        self.hidden_models.retain(|m| *m != name);
+        self.shown_models.retain(|m| *m != name);
+        // Both are kept: which one counts goes by how long the list is when it's read.
+        if on { self.shown_models.push(name) } else { self.hidden_models.push(name) }
     }
 
     fn is_default(&self) -> bool {
@@ -1136,6 +1202,28 @@ pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_pick_is_what_new_chats_start_with_and_keeps_only_what_the_model_takes() {
+        use super::*;
+        let mut chat = ChatSettings::default();
+        let efforts = |levels: &[&str]| levels.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        assert_eq!(chat.start_with("codex", Some("gpt-a"), &efforts(&["low", "high"]), true), (None, None));
+        chat.picked.get_mut("codex").unwrap().effort = "high".into();
+        chat.picked.get_mut("codex").unwrap().speed = "fast".into();
+        // Another model that takes that effort and runs fast too: both stay.
+        assert_eq!(chat.start_with("codex", Some("gpt-b"), &efforts(&["high", "max"]), true), (Some("high".into()), Some("fast".into())));
+        // One that doesn't: neither is carried over to it.
+        assert_eq!(chat.start_with("codex", Some("gpt-c"), &efforts(&["low"]), false), (None, None));
+        assert_eq!((chat.brain.as_str(), chat.pick("codex")), ("codex", (Some("gpt-c".into()), None)));
+        // The brain's own choice of model keeps what was said about effort.
+        chat.picked.get_mut("codex").unwrap().effort = "low".into();
+        assert_eq!(chat.start_with("codex", None, &[], false), (Some("low".into()), None));
+        assert_eq!(chat.pick("codex"), (None, Some("low".into())));
+        // What answers new chats is the brain picked last.
+        chat.start_with("openrouter", Some("x/a"), &[], false);
+        assert_eq!(chat.brain, "openrouter");
+    }
+
 
     #[test]
     fn agent_choices_are_stamped_sent_and_taken_back() {

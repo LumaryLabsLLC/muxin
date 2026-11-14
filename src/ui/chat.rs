@@ -1,10 +1,12 @@
-//! The assistant's chat: the app's first page. One conversation with a
+//! The assistant's chats: the app's first page. Conversations with a
 //! model that sees and works with everything Muxin does (see crate::chat).
 //! What it says, the tools it calls, and its questions before a call that
 //! changes something, each with its answers as buttons.
 //!
-//! The chat itself runs in a task of its own (chat::live): this page shows
-//! what that reports and sends it what the user types.
+//! A chat runs in a task of its own (chat::live): this page shows what
+//! that reports and sends it what the user types. Several can be at work
+//! at once: the one in front is shown, and the others go on behind it, in
+//! the list beside the conversation, each marked with what it's at.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,6 +26,13 @@ use crate::chat::risk::{self, Risk};
 use crate::chat::store::{Item, Meta};
 use crate::chat::{Options, Update, brain, command, mention, term};
 use crate::fleet::Engine;
+
+/// The list of chats beside the conversation: how wide it is, the page's
+/// width from which there's room for it, and how many chats it shows
+/// before it's asked for all of them.
+const LIST: f32 = 236.;
+const WITH_LIST: f32 = 760.;
+const LISTED: usize = 14;
 
 /// The widest the conversation gets: longer lines are hard to read.
 const MAX_WIDTH: f32 = 760.;
@@ -65,11 +74,64 @@ pub enum ChatEvent {
     Menu { effort: bool, position: Point<Pixels> },
     /// The menu that says whether it asks before a tool changes something.
     ModeMenu { position: Point<Pixels> },
+    /// The menu that says how fast the model is run.
+    SpeedMenu { position: Point<Pixels> },
     /// A chat's own menu (rename it, delete it). `above`: it opens upward.
     ChatMenu { id: String, position: Point<Pixels>, above: bool },
     /// The dialog that names this chat; the one that asks before deleting it.
     Rename(String),
     Delete(String),
+    /// How many chats are at something changed (the sidebar counts them).
+    Marks,
+}
+
+/// A chat that's open but not the one shown. It goes on with what it was
+/// at, and what it says is kept for when it's looked at again.
+struct Behind {
+    live: Live,
+    meta: Meta,
+    rows: Vec<Row>,
+    busy: bool,
+    mode: Mode,
+    model: Option<String>,
+    /// The task that hears it: kept, or it would stop being heard.
+    listening: Option<Task<()>>,
+    /// It finished, or asked something, since it was last looked at.
+    news: bool,
+}
+
+/// What a chat in the list is at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Mark {
+    Working,
+    /// A call of its waits for the user's yes or no.
+    Asks,
+    /// It finished while another chat was in front.
+    News,
+    Quiet,
+}
+
+/// How long ago, in the list's little room: "now", "4m", "2h", "3d".
+fn ago(secs: u64) -> String {
+    match secs {
+        0..60 => "now".into(),
+        60..3600 => format!("{}m", secs / 60),
+        3600..86_400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
+/// What a chat is at, from what's kept of it.
+fn mark_of(rows: &[Row], busy: bool, news: bool) -> Mark {
+    if rows.iter().any(|row| matches!(row, Row::Ask { answer: None, .. })) {
+        Mark::Asks
+    } else if busy {
+        Mark::Working
+    } else if news {
+        Mark::News
+    } else {
+        Mark::Quiet
+    }
 }
 
 /// A row of the list above the box, while a "/" command or an "@" mention
@@ -141,8 +203,15 @@ pub struct ChatView {
     /// closed until they type on.
     list_at: usize,
     list_closed: Option<String>,
-    /// The empty page lists every chat, not only the latest few.
+    /// Every chat is listed, not only the latest few.
     all_chats: bool,
+    /// The chats that are open behind the one shown (see `Behind`).
+    behind: Vec<Behind>,
+    /// The chats there are, newest first, as the list shows them (read when
+    /// something about them changes, not on every draw).
+    chats: Vec<Meta>,
+    /// How many chats were at something when the window was last told.
+    marks: usize,
     /// Each program's models, as that program lists them on this computer
     /// (read when the page opens and when it's shown again, not on every draw).
     catalog: Vec<(&'static str, Vec<Model>)>,
@@ -200,10 +269,14 @@ impl ChatView {
             list_at: 0,
             list_closed: None,
             all_chats: false,
+            behind: Vec::new(),
+            chats: Vec::new(),
+            marks: 0,
             catalog: Vec::new(),
             _subs: subs,
         };
         view.load_models();
+        view.reload_chats();
         // The chat used last opens with the page.
         if let Some(last) = crate::chat::store(&view.engine).list().into_iter().next() {
             view.open(Some(last.id), window, cx);
@@ -216,14 +289,80 @@ impl ChatView {
         self.width = width;
     }
 
+    /// How wide the list of chats is: nothing, on a page too narrow for it.
+    fn list_wide(&self) -> f32 {
+        if self.width >= WITH_LIST { LIST } else { 0. }
+    }
+
+    /// The chats there are, read again. One that's open is listed as the
+    /// page knows it, which can be ahead of what's kept: a chat's first
+    /// message is its title before it's written down.
+    fn reload_chats(&mut self) {
+        let mut chats: Vec<Meta> = crate::chat::store(&self.engine).list().into_iter().filter(|meta| !meta.title.is_empty()).collect();
+        for open in self.meta.iter().filter(|_| self.live.is_some()).chain(self.behind.iter().map(|open| &open.meta)) {
+            if !open.title.is_empty() && !chats.iter().any(|kept| kept.id == open.id) {
+                chats.insert(0, open.clone());
+            }
+        }
+        self.chats = chats;
+    }
+
+    /// The chat in front, by its id.
+    fn front(&self) -> Option<&str> {
+        self.meta.as_ref().filter(|_| self.live.is_some()).map(|meta| meta.id.as_str())
+    }
+
+    /// A call of the chat in front waits for the user.
+    fn waits(&self) -> bool {
+        self.rows.iter().any(|row| matches!(row, Row::Ask { answer: None, .. }))
+    }
+
+    /// What a chat is at: the one in front, or one behind it.
+    fn mark(&self, id: &str) -> Mark {
+        if self.front() == Some(id) {
+            return mark_of(&self.rows, self.busy, false);
+        }
+        self.behind.iter().find(|chat| chat.meta.id == id).map(|chat| mark_of(&chat.rows, chat.busy, chat.news)).unwrap_or(Mark::Quiet)
+    }
+
+    /// How many chats are at something or have something to look at: the
+    /// one in front while it works or asks, and every one behind it.
+    pub(super) fn attention(&self) -> usize {
+        usize::from(self.live.is_some() && (self.busy || self.waits())) + self.behind.len()
+    }
+
+    /// Tells the window when that number changed.
+    fn marks_changed(&mut self, cx: &mut Context<Self>) {
+        let now = self.attention();
+        if now != self.marks {
+            self.marks = now;
+            cx.emit(ChatEvent::Marks);
+        }
+    }
+
     /// Opens a chat from before (`Some(id)`) or a new one. False when it
-    /// couldn't; `trouble` says why.
+    /// couldn't; `trouble` says why. The chat that was in front goes on
+    /// behind when it's at something (see `park`).
     fn open(&mut self, chat: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.close();
+        // The one in front already.
+        if chat.is_some() && chat.as_deref() == self.front() {
+            return true;
+        }
+        self.park();
+        // One that went on behind comes back as it is.
+        if let Some(at) = chat.as_ref().and_then(|id| self.behind.iter().position(|open| open.meta.id == *id)) {
+            let Behind { live, meta, rows, busy, mode, model, listening, .. } = self.behind.remove(at);
+            (self.live, self.meta, self.rows, self.busy, self.mode, self.model, self.listening) = (Some(live), Some(meta), rows, busy, mode, model, listening);
+            self.stick = true;
+            self.marks_changed(cx);
+            cx.notify();
+            return true;
+        }
         // A chat from before goes on with its own brain; a new one takes the one chosen.
         let brain = if chat.is_none() { self.brain_choice.clone() } else { None };
-        match Live::open(&self.engine, Options { chat, brain, mode: Some(self.mode), ..Default::default() }) {
+        let opened = match Live::open(&self.engine, Options { chat, brain, mode: Some(self.mode), ..Default::default() }) {
             Ok((live, meta, thread, mut events)) => {
+                let id = meta.id.clone();
                 self.rows = rows_from(thread);
                 self.meta = Some(meta);
                 self.live = Some(live);
@@ -237,8 +376,9 @@ impl ChatView {
                         }
                         let alive = this.update(cx, |this, cx| {
                             for event in batch {
-                                this.heard(event);
+                                this.heard_from(&id, event);
                             }
+                            this.marks_changed(cx);
                             cx.notify();
                         });
                         if alive.is_err() {
@@ -246,15 +386,16 @@ impl ChatView {
                         }
                     }
                 }));
-                cx.notify();
                 true
             }
             Err(why) => {
                 self.trouble = Some(why);
-                cx.notify();
                 false
             }
-        }
+        };
+        self.marks_changed(cx);
+        cx.notify();
+        opened
     }
 
     /// The open chat's title, once it has one.
@@ -266,16 +407,40 @@ impl ChatView {
     /// renamed or deleted it: its new title, or the page lets go of it (and
     /// what was running in it ends).
     pub(super) fn refresh_open(&mut self, cx: &mut Context<Self>) {
+        let store = crate::chat::store(&self.engine);
         if let Some(open) = &mut self.meta {
-            match crate::chat::store(&self.engine).get(&open.id) {
+            match store.get(&open.id) {
                 Some(kept) => open.title = kept.title,
                 None => self.close(),
             }
         }
+        // The same for the ones behind it: one that was deleted is let go of.
+        self.behind.retain_mut(|open| match store.get(&open.meta.id) {
+            Some(kept) => {
+                open.meta.title = kept.title;
+                true
+            }
+            None => false,
+        });
+        self.reload_chats();
+        self.marks_changed(cx);
         cx.notify();
     }
 
-    /// Closes the chat that's open (it's kept, to go on with later).
+    /// Leaves the chat in front. One that's still at something (working,
+    /// or waiting for an answer) goes on behind, where the list shows it;
+    /// an idle one is let go of, since it's kept on disk to go on with.
+    fn park(&mut self) {
+        let at_something = self.busy || self.waits();
+        if let (Some(live), Some(meta)) = (self.live.take(), self.meta.take())
+            && at_something
+        {
+            self.behind.push(Behind { live, meta, rows: std::mem::take(&mut self.rows), busy: self.busy, mode: self.mode, model: self.model.take(), listening: self.listening.take(), news: false });
+        }
+        self.close();
+    }
+
+    /// Lets go of the chat that's open (it's kept, to go on with later).
     fn close(&mut self) {
         self.live = None;
         self.listening = None;
@@ -286,8 +451,18 @@ impl ChatView {
         self.model = None;
     }
 
-    fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close();
+    /// Brings the chat at that place in the list in front, as a click on it
+    /// does (a hidden `--view` hook).
+    pub(super) fn open_listed(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.chats.get(at).map(|meta| meta.id.clone()) {
+            self.open(Some(id), window, cx);
+        }
+    }
+
+    /// A page for a new chat. The one that was open goes on behind when it's working.
+    pub(super) fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.park();
+        self.marks_changed(cx);
         window.focus(&self.input.focus_handle(cx));
         cx.notify();
     }
@@ -391,6 +566,13 @@ impl ChatView {
                 None => self.under_box = Some("This model doesn't take an effort.".into()),
             },
             ("effort", said, _) => self.effort_said(said, cx),
+            ("speed", said, _) => match (said.trim().to_lowercase().as_str(), self.speed_label().is_some()) {
+                (_, false) => self.under_box = Some("This model runs at one speed.".into()),
+                ("", true) => cx.emit(ChatEvent::SpeedMenu { position: self.picker_anchor(true, window) }),
+                ("fast", true) => self.pick_speed(true, cx),
+                ("standard" | "default" | "normal", true) => self.pick_speed(false, cx),
+                (other, true) => self.under_box = Some(format!("It doesn't take {other}. /speed fast, or /speed standard.")),
+            },
             ("ask", ..) => self.set_bypass(false, cx),
             ("bypass", ..) => self.set_bypass(true, cx),
             ("attach", "", _) => self.pick_files(window, cx),
@@ -412,7 +594,7 @@ impl ChatView {
     /// model by its own: one of the answering program's first, then another's.
     fn model_said(&mut self, said: &str, window: &mut Window, cx: &mut Context<Self>) {
         let wanted = said.trim().to_lowercase();
-        let here = brain::available();
+        let here = brain::available(&self.engine.settings().chat);
         let current = self.brain().map(|kind| kind.id);
         if let Some(kind) = here.iter().find(|kind| kind.id == wanted || kind.name.to_lowercase() == wanted) {
             return self.pick(kind.id, None, window, cx);
@@ -563,8 +745,10 @@ impl ChatView {
     /// hidden `--view` hook that opens one without a click.
     pub(super) fn picker_anchor(&self, effort: bool, window: &Window) -> Point<Pixels> {
         let size = window.viewport_size();
-        let column = (self.width - PADDING * 2.).clamp(280., MAX_WIDTH);
-        let left = f32::from(size.width) - self.width + (self.width - column) / 2.;
+        // The conversation's part of the page: what's right of the list of chats.
+        let room = self.width - self.list_wide();
+        let column = (room - PADDING * 2.).clamp(280., MAX_WIDTH);
+        let left = f32::from(size.width) - room + (room - column) / 2.;
         // After the mode's picker; the effort picker after the model's, whose width goes by its words.
         let mode = if self.mode == Mode::Bypass { 178. } else { 158. };
         let label = match (self.brain(), self.model_label()) {
@@ -594,7 +778,7 @@ impl ChatView {
     /// What answers in the next new chat, by its id, as if picked under the
     /// box (a hidden `--view` hook: demo mode reads no settings).
     pub(super) fn choose_brain(&mut self, id: &str, cx: &mut Context<Self>) {
-        if brain::available().iter().any(|kind| kind.id == id) {
+        if brain::available(&self.engine.settings().chat).iter().any(|kind| kind.id == id) {
             self.brain_choice = Some(id.to_string());
             cx.notify();
         }
@@ -698,7 +882,7 @@ impl ChatView {
             Some(meta) => brain::kind(&meta.brain),
             None => {
                 let set = self.engine.settings().chat.brain;
-                let usable = brain::available();
+                let usable = brain::available(&self.engine.settings().chat);
                 let wanted = self.brain_choice.as_deref().or(Some(set.as_str()).filter(|b| !b.is_empty()));
                 wanted.and_then(|id| usable.iter().find(|k| k.id == id).copied()).or_else(|| usable.into_iter().next())
             }
@@ -709,11 +893,12 @@ impl ChatView {
     /// chats start (Settings), and the models each program lists.
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
         self.load_models();
+        self.reload_chats();
         if self.live.is_none() {
             self.mode = Mode::from_setting(&self.engine.settings().chat.mode);
             // A brain picked here that's gone (its program was removed) is no longer the pick.
             if let Some(pick) = &self.brain_choice
-                && !brain::available().iter().any(|k| k.id == pick)
+                && !brain::available(&self.engine.settings().chat).iter().any(|k| k.id == pick)
             {
                 self.brain_choice = None;
             }
@@ -721,9 +906,10 @@ impl ChatView {
         cx.notify();
     }
 
-    /// Reads each program's list of models.
+    /// Reads each brain's list of models: a program's as it keeps it, a
+    /// provider's as it last answered, less what Settings › AI leaves out.
     fn load_models(&mut self) {
-        self.catalog = brain::KINDS.iter().map(|k| (k.id, catalog::of(k.id))).collect();
+        self.catalog = brain::KINDS.iter().map(|k| (k.id, crate::chat::provider::offered(&self.engine, k.id))).collect();
     }
 
     fn models_of(&self, brain: &str) -> &[Model] {
@@ -764,11 +950,47 @@ impl ChatView {
         Some(self.picked().1.as_deref().and_then(named).or_else(|| model.effort.as_deref().and_then(named)).unwrap_or_else(|| "Effort".into()))
     }
 
+    /// How the model that answers is run: "fast", or None for as usual. The
+    /// open chat's own, else what a new chat with this brain would start with.
+    fn speed(&self) -> Option<String> {
+        match &self.meta {
+            Some(meta) => meta.speed.clone(),
+            None => self.engine.settings().chat.speed(self.brain().map(|k| k.id).unwrap_or_default()),
+        }
+    }
+
+    /// Whether the model that answers is run the faster way.
+    pub(super) fn is_fast(&self) -> bool {
+        self.current_model().is_some_and(|model| model.fast) && self.speed().as_deref() == Some("fast")
+    }
+
+    /// What the speed picker's button says; None when the model runs at one speed.
+    fn speed_label(&self) -> Option<&'static str> {
+        self.current_model().filter(|model| model.fast).map(|_| if self.is_fast() { "Fast" } else { "Standard" })
+    }
+
+    /// Runs the model that answers the faster way, or as usual, from the
+    /// next message on. What this brain's next chats start with, too.
+    pub(super) fn pick_speed(&mut self, fast: bool, cx: &mut Context<Self>) {
+        let Some(brain_id) = self.brain().map(|k| k.id) else { return };
+        let speed = fast.then(|| "fast".to_string());
+        let mut settings = self.engine.settings();
+        settings.chat.picked.entry(brain_id.to_string()).or_default().speed = speed.clone().unwrap_or_default();
+        let _ = self.engine.update_settings(settings);
+        if let Some(live) = &self.live {
+            live.speed(speed.clone());
+            if let Some(meta) = &mut self.meta {
+                meta.speed = speed;
+            }
+        }
+        cx.notify();
+    }
+
     /// The model picker's lines: each brain there is, with its models.
     pub(super) fn model_choices(&self) -> Vec<BrainChoice> {
         let now = self.brain().map(|k| k.id);
         let settings = self.engine.settings().chat;
-        brain::available()
+        brain::available(&self.engine.settings().chat)
             .into_iter()
             .map(|kind| {
                 let current = Some(kind.id) == now;
@@ -796,39 +1018,37 @@ impl ChatView {
     /// Picks what answers: a brain, and one of its models (None: its own
     /// choice). In the open chat when it's the same brain, from its next
     /// message on; another brain answers in a new chat, since it knows
-    /// nothing of this one. The pick is what that brain's next chats start with.
+    /// nothing of this one. The pick is what new chats start with from here
+    /// on (Settings › AI shows the same).
     pub(super) fn pick(&mut self, brain_id: &str, model: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         if brain::kind(brain_id).is_none() {
             return;
         }
-        // An effort the new model doesn't take isn't carried over to it.
-        let efforts: Vec<String> = match &model {
-            Some(id) => catalog::find(self.models_of(brain_id), id).map(|m| m.efforts.iter().map(|e| e.id.clone()).collect()).unwrap_or_default(),
-            None => Vec::new(),
-        };
+        // An effort the new model doesn't take isn't carried over to it, nor a speed it doesn't have.
+        let found = model.as_ref().and_then(|id| catalog::find(self.models_of(brain_id), id));
+        let efforts: Vec<String> = found.map(|m| m.efforts.iter().map(|e| e.id.clone()).collect()).unwrap_or_default();
+        let fast = found.is_some_and(|m| m.fast);
         let mut settings = self.engine.settings();
-        let kept = settings.chat.picked.entry(brain_id.to_string()).or_default();
-        kept.model = model.clone().unwrap_or_default();
-        if model.is_some() && !efforts.contains(&kept.effort) {
-            kept.effort.clear();
-        }
-        let effort = Some(kept.effort.clone()).filter(|e| !e.is_empty());
+        let (effort, speed) = settings.chat.start_with(brain_id, model.as_deref(), &efforts, fast);
         let _ = self.engine.update_settings(settings);
 
         let same = self.meta.as_ref().is_some_and(|meta| meta.brain == brain_id);
         match (&self.live, same) {
             (Some(live), true) => {
                 live.choose(model.clone(), effort.clone());
+                live.speed(speed.clone());
                 if let Some(meta) = &mut self.meta {
                     meta.model = model;
                     meta.effort = effort;
+                    meta.speed = speed;
                 }
                 // The brain says which model answers once it does; until then, the pick is what's shown.
                 self.model = None;
             }
             _ => {
                 if self.live.is_some() {
-                    self.close();
+                    self.park();
+                    self.marks_changed(cx);
                     window.focus(&self.input.focus_handle(cx));
                 }
                 self.brain_choice = Some(brain_id.to_string());
@@ -885,33 +1105,76 @@ impl ChatView {
                 *given = Some(answer.clone());
             }
         }
+        // It no longer waits for the user.
+        self.marks_changed(cx);
         cx.notify();
     }
 
-    fn heard(&mut self, event: Event) {
-        match event {
-            Event::Started(text, files) => {
-                self.rows.push(Row::User(text));
-                if !files.is_empty() {
-                    self.rows.push(Row::Files(files));
-                }
-                self.busy = true;
-                self.stick = true;
+    /// What a chat said: the one in front, or one that's at work behind it.
+    fn heard_from(&mut self, id: &str, event: Event) {
+        // The model that answered, by the name the pickers show it under when it's one of theirs.
+        let event = match event {
+            Event::Update(Update::Usage { input, output, cached, cost, model }) => {
+                let brain = self.meta.iter().chain(self.behind.iter().map(|open| &open.meta)).find(|meta| meta.id == id).map(|meta| meta.brain.clone()).unwrap_or_default();
+                let model = model.map(|model| catalog::find(self.models_of(&brain), &model).map(|m| m.name.clone()).unwrap_or(model));
+                Event::Update(Update::Usage { input, output, cached, cost, model })
             }
-            Event::Update(Update::Model(name)) => self.model = Some(name),
-            Event::Update(update) => apply(&mut self.rows, update),
-            Event::Ended(outcome) => {
-                self.busy = false;
-                settle(&mut self.rows);
-                match outcome {
-                    Ok(()) => {}
-                    Err(why) if why == "Stopped." => self.rows.push(Row::Note("Stopped.".into())),
-                    Err(why) => self.rows.push(Row::Failed(why)),
-                }
+            other => other,
+        };
+        // A chat's first message is its title: at once, for the list.
+        if let Event::Started(text, _) = &event {
+            let named = if self.meta.as_ref().is_some_and(|meta| meta.id == id) { self.meta.as_mut() } else { self.behind.iter_mut().find(|open| open.meta.id == id).map(|open| &mut open.meta) };
+            if let Some(meta) = named.filter(|meta| meta.title.is_empty()) {
+                meta.title = crate::chat::store::title_from(text);
+                meta.updated = crate::chat::store::now();
             }
-            Event::Meta(meta) => self.meta = Some(meta),
+        }
+        // Its title or its place in the list may have changed.
+        let listed = matches!(event, Event::Started(..) | Event::Ended(_) | Event::Meta(_));
+        if self.meta.as_ref().is_some_and(|meta| meta.id == id) {
+            self.stick |= matches!(event, Event::Started(..));
+            if let Some(meta) = hear(event, &mut self.rows, &mut self.busy, &mut self.model) {
+                self.meta = Some(meta);
+            }
+        } else if let Some(open) = self.behind.iter_mut().find(|open| open.meta.id == id) {
+            // Something to look at: it's done, or it asks.
+            open.news |= matches!(event, Event::Ended(_) | Event::Update(Update::Ask(_)));
+            if let Some(meta) = hear(event, &mut open.rows, &mut open.busy, &mut open.model) {
+                open.meta = meta;
+            }
+        }
+        if listed {
+            self.reload_chats();
         }
     }
+}
+
+/// What a chat's event does to what's kept of it: its rows, whether it's
+/// working, and the model that answers. Gives back what the chat is, when
+/// that's what changed (its title, its model).
+fn hear(event: Event, rows: &mut Vec<Row>, busy: &mut bool, model: &mut Option<String>) -> Option<Meta> {
+    match event {
+        Event::Started(text, files) => {
+            rows.push(Row::User(text));
+            if !files.is_empty() {
+                rows.push(Row::Files(files));
+            }
+            *busy = true;
+        }
+        Event::Update(Update::Model(name)) => *model = Some(name),
+        Event::Update(update) => apply(rows, update),
+        Event::Ended(outcome) => {
+            *busy = false;
+            settle(rows);
+            match outcome {
+                Ok(()) => {}
+                Err(why) if why == "Stopped." => rows.push(Row::Note("Stopped.".into())),
+                Err(why) => rows.push(Row::Failed(why)),
+            }
+        }
+        Event::Meta(meta) => return Some(meta),
+    }
+    None
 }
 
 /// Adds what happened in a turn to the rows shown.
@@ -962,9 +1225,11 @@ fn apply(rows: &mut Vec<Row>, update: Update) {
             settle(rows);
             rows.push(Row::Ask { request, answer: None });
         }
-        Update::Usage { input, output, cost, .. } => {
+        Update::Usage { input, output, cost, model, .. } => {
             let cost = cost.map(term::priced).unwrap_or_default();
-            rows.push(Row::Note(format!("{} tokens in, {} out{cost}", term::count(input), term::count(output))));
+            // Which model answered comes first: it's what the turn was, whatever it says of itself.
+            let model = model.map(|name| format!("{name} · ")).unwrap_or_default();
+            rows.push(Row::Note(format!("{model}{} tokens in, {} out{cost}", term::count(input), term::count(output))));
         }
         Update::Limit(text) => rows.push(Row::Note(text)),
         // Shown beside the brain's name, not in the conversation.
@@ -1226,7 +1491,8 @@ impl ChatView {
             starters = starters.child(Button::new(row_id("chat-starter", n), label).on_click(cx.listener(move |this, _, window, cx| this.say(text.to_string(), window, cx))));
         }
         body = body.child(starters);
-        let chats: Vec<Meta> = crate::chat::store(&self.engine).list().into_iter().filter(|m| !m.title.is_empty()).collect();
+        // The earlier chats: here when the page is too narrow for the list beside it.
+        let chats: Vec<Meta> = if self.list_wide() > 0. { Vec::new() } else { self.chats.clone() };
         let more = chats.len().saturating_sub(RECENT);
         let recent: Vec<Meta> = chats.into_iter().take(if self.all_chats { MOST_LISTED } else { RECENT }).collect();
         if !recent.is_empty() {
@@ -1288,6 +1554,125 @@ impl ChatView {
             body = body.child(div().flex().flex_col().gap(px(8.)).child(kit::label(theme, "Go on with")).child(list));
         }
         body.into_any_element()
+    }
+
+    /// The chats, beside the conversation: a new one, then the latest, each
+    /// with what it's at. A click brings one in front; the one that was
+    /// there goes on working behind it.
+    fn chat_list(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let now = crate::chat::store::now();
+        let front = self.front().map(str::to_string);
+        // The latest few, and every one that's open: nothing at work is left out.
+        let open = |id: &str| front.as_deref() == Some(id) || self.behind.iter().any(|chat| chat.meta.id == id);
+        let shown: Vec<&Meta> = self.chats.iter().enumerate().filter(|(n, meta)| self.all_chats || *n < LISTED || open(&meta.id)).map(|(_, meta)| meta).take(MOST_LISTED).collect();
+        let more = self.chats.len().saturating_sub(LISTED);
+        let mut rows = div().id("chat-list-rows").flex_1().min_h(px(0.)).overflow_y_scroll().flex().flex_col().gap(px(1.));
+        for meta in shown {
+            let id = meta.id.clone();
+            let by_right_click = meta.id.clone();
+            let current = front.as_deref() == Some(meta.id.as_str());
+            let mark = self.mark(&meta.id);
+            let sign = match mark {
+                Mark::Working => spinner(gpui::SharedString::from(format!("chat-list-working-{}", meta.id)), 12., theme.text_accent).into_any_element(),
+                Mark::Asks => kit::dot(theme.warning, 7.).into_any_element(),
+                Mark::News => kit::dot(theme.accent, 7.).into_any_element(),
+                Mark::Quiet => icon("message-square", 12., theme.text_placeholder).into_any_element(),
+            };
+            // What it's at, in a word, where the time would be.
+            let (word, lit) = match mark {
+                Mark::Working => ("Working".to_string(), false),
+                Mark::Asks => ("Needs you".to_string(), true),
+                Mark::News => ("Done".to_string(), true),
+                Mark::Quiet => (ago((now - meta.updated).max(0) as u64), false),
+            };
+            let word_wide = word.chars().count() as f32 * 6. + 4.;
+            rows = rows.child(
+                div()
+                    .id(gpui::SharedString::from(format!("chat-list-{}", meta.id)))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(8.))
+                    .h(px(30.))
+                    .px(px(8.))
+                    .rounded(kit::corner(7.))
+                    .cursor_pointer()
+                    .text_size(px(12.5))
+                    .text_color(if current { theme.text } else { theme.text_muted })
+                    .when(current, |d| d.bg(theme.element_selected))
+                    .when(!current, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+                    .child(div().flex_none().w(px(14.)).flex().justify_center().child(sign))
+                    // A width of its own: a title is cut short only in one it knows.
+                    .child(div().w(px(LIST - 16. - 16. - 14. - 16. - word_wide)).truncate().child(meta.title.clone()))
+                    .child(div().flex_1())
+                    .child(div().flex_none().text_size(px(10.5)).text_color(if lit { theme.text_muted } else { theme.text_placeholder }).child(word))
+                    .on_mouse_down(MouseButton::Right, cx.listener(move |_, e: &MouseDownEvent, _, cx| cx.emit(ChatEvent::ChatMenu { id: by_right_click.clone(), position: e.position, above: false })))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open(Some(id.clone()), window, cx);
+                        window.focus(&this.input.focus_handle(cx));
+                    })),
+            );
+        }
+        // The latest few, until asked for the rest.
+        if more > 0 {
+            let all = self.all_chats;
+            rows = rows.child(
+                div()
+                    .id("chat-list-all")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .h(px(28.))
+                    .px(px(8.))
+                    .rounded(kit::corner(7.))
+                    .cursor_pointer()
+                    .text_size(px(11.5))
+                    .text_color(theme.text_placeholder)
+                    .hover(|st| st.bg(theme.ghost_hover).text_color(theme.text_muted))
+                    .child(if all { "Show the latest only".to_string() } else { format!("Show all {}", more + LISTED) })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.all_chats = !this.all_chats;
+                        cx.notify();
+                    })),
+            );
+        }
+        if self.chats.is_empty() {
+            rows = rows.child(div().px(px(8.)).pt(px(6.)).text_size(px(11.5)).text_color(theme.text_placeholder).child("Your chats will be here."));
+        }
+        div()
+            .flex_none()
+            .w(px(LIST))
+            .h_full()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .px(px(8.))
+            .pt(px(14.))
+            .pb(px(10.))
+            .border_r_1()
+            .border_color(theme.border_variant)
+            .child(
+                div()
+                    .id("chat-list-new")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(8.))
+                    .h(px(32.))
+                    .px(px(10.))
+                    .rounded(kit::corner(8.))
+                    .border_1()
+                    .border_color(theme.border_variant)
+                    .cursor_pointer()
+                    .text_size(px(12.5))
+                    .text_color(theme.text)
+                    .hover(|st| st.bg(theme.ghost_hover).border_color(theme.border))
+                    .child(icon("plus", 13., theme.text_muted))
+                    .child("New chat")
+                    .on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx))),
+            )
+            .child(rows)
+            .into_any_element()
     }
 
     /// No brain on this computer: what's needed, and where to get it.
@@ -1420,8 +1805,10 @@ impl ChatView {
                         picker(theme, "chat-model", label, "What answers in this chat: which program, and which of its models.", cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(ChatEvent::Menu { effort: false, position: e.position() })))
                     }))
                     .children(self.effort_label().map(|effort| picker(theme, "chat-effort", effort, "How hard the model is asked to think. More takes longer.", cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(ChatEvent::Menu { effort: true, position: e.position() })))))
+                    // And how fast it's run, for a model that has a faster way.
+                    .children(self.speed_label().map(|speed| picker(theme, "chat-speed", speed.to_string(), "How fast the model is run. Fast costs more.", cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(ChatEvent::SpeedMenu { position: e.position() })))))
                     .child(div().flex_1())
-                    .when(self.live.is_some(), |d| d.child(Button::new("chat-new", "New chat").icon("plus").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx)))))
+                    .when(self.live.is_some() && self.list_wide() == 0., |d| d.child(Button::new("chat-new", "New chat").icon("plus").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx)))))
                     // The open chat's own menu, once there's something in it to name or delete.
                     .when_some(self.meta.as_ref().filter(|_| self.has_chat()).map(|meta| meta.id.clone()), |d, id| {
                         d.child(Button::icon_only("chat-more", "ellipsis").tooltip("Rename or delete this chat").on_click(cx.listener(move |_, e: &ClickEvent, _, cx| cx.emit(ChatEvent::ChatMenu { id: id.clone(), position: e.position(), above: true }))))
@@ -1481,7 +1868,8 @@ fn picker(theme: &Theme, id: &'static str, label: String, tip: &'static str, on_
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let width = (self.width - PADDING * 2.).clamp(280., MAX_WIDTH);
+        let list = self.list_wide();
+        let width = (self.width - list - PADDING * 2.).clamp(280., MAX_WIDTH);
         if self.stick {
             self.scroll.scroll_to_bottom();
         }
@@ -1528,7 +1916,7 @@ impl Render for ChatView {
             thread = thread.child(div().w(px(width)).flex().items_center().gap(px(8.)).text_size(px(12.)).text_color(theme.text_placeholder).child(spinner("chat-working", 12., theme.text_placeholder)).child("Working…"));
         }
 
-        div()
+        let conversation = div()
             .size_full()
             .flex()
             .flex_col()
@@ -1567,7 +1955,9 @@ impl Render for ChatView {
                     .px(px(PADDING))
                     .pb(px(18.))
                     .child(self.composer(&theme, width, window, cx)),
-            )
+            );
+        // The list of chats beside it, on a page wide enough for both.
+        if list > 0. { div().size_full().flex().child(self.chat_list(&theme, cx)).child(div().flex_1().min_w(px(0.)).h_full().child(conversation)).into_any_element() } else { conversation.into_any_element() }
     }
 }
 
@@ -1575,6 +1965,41 @@ impl Render for ChatView {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_chat_is_marked_with_what_its_at() {
+        let restart = json!({"runner_id": "beelink/beelink-01", "action": "restart"});
+        let (mut rows, mut busy, mut model) = (Vec::new(), false, None);
+        assert_eq!(mark_of(&rows, busy, false), Mark::Quiet);
+        // A turn begins: it's working, with what the user said on the page.
+        assert!(hear(Event::Started("restart it".into(), vec!["notes.md".into()]), &mut rows, &mut busy, &mut model).is_none());
+        assert_eq!((rows.clone(), busy), (vec![Row::User("restart it".into()), Row::Files(vec!["notes.md".into()])], true));
+        assert_eq!(mark_of(&rows, busy, false), Mark::Working);
+        hear(Event::Update(Update::Model("gpt-test".into())), &mut rows, &mut busy, &mut model);
+        assert_eq!(model.as_deref(), Some("gpt-test"));
+        // A call waits for a yes: that comes before "working", which it still is.
+        hear(Event::Update(Update::Ask(Request { id: 7, tool: "runner_action".into(), args: restart, risk: Risk::Change, rule: None })), &mut rows, &mut busy, &mut model);
+        assert_eq!(mark_of(&rows, busy, true), Mark::Asks);
+        if let Some(Row::Ask { answer, .. }) = rows.last_mut() {
+            *answer = Some(Answer::Yes);
+        }
+        assert_eq!(mark_of(&rows, busy, false), Mark::Working);
+        // It ends: done, which is news when nobody was looking.
+        hear(Event::Ended(Ok(())), &mut rows, &mut busy, &mut model);
+        assert_eq!((busy, mark_of(&rows, busy, true), mark_of(&rows, busy, false)), (false, Mark::News, Mark::Quiet));
+        // One that failed or was stopped says so on its page.
+        hear(Event::Ended(Err("Stopped.".into())), &mut rows, &mut busy, &mut model);
+        hear(Event::Ended(Err("The provider refused.".into())), &mut rows, &mut busy, &mut model);
+        assert_eq!(rows[rows.len() - 2..], [Row::Note("Stopped.".into()), Row::Failed("The provider refused.".into())]);
+        // What the chat is comes back to whoever keeps it.
+        let meta: Meta = serde_json::from_value(json!({"id": "c-1", "title": "Restart it", "brain": "codex", "created": 1, "updated": 2})).unwrap();
+        assert_eq!(hear(Event::Meta(meta.clone()), &mut rows, &mut busy, &mut model).map(|m| m.title), Some(meta.title));
+    }
+
+    #[test]
+    fn how_long_ago_is_said_in_a_word() {
+        assert_eq!([ago(0), ago(59), ago(60), ago(3599), ago(3600), ago(9000), ago(86_400), ago(700_000)], ["now", "now", "1m", "59m", "1h", "2h", "1d", "8d"]);
+    }
 
     #[test]
     fn a_turn_becomes_rows_as_it_comes() {
@@ -1590,7 +2015,7 @@ mod tests {
             // A brain that sends no pieces: its text arrives whole.
             Update::Text("Done.".into()),
             Update::Text("  ".into()),
-            Update::Usage { input: 12_340, output: 41, cached: 9000, cost: Some(0.05) },
+            Update::Usage { input: 12_340, output: 41, cached: 9000, cost: Some(0.05), model: None },
         ] {
             apply(&mut rows, update);
         }
@@ -1600,6 +2025,9 @@ mod tests {
         assert!(matches!(&rows[3], Row::Ask { request, answer: None } if request.id == 7));
         assert_eq!(rows[4], Row::Said { text: "Done.".into(), writing: false });
         assert_eq!(rows[5], Row::Note("12.3k tokens in, 41 out · $0.05 at API prices".into()));
+        // The model that answered leads the note, when the brain said which.
+        apply(&mut rows, Update::Usage { input: 900, output: 5, cached: 0, cost: None, model: Some("DeepSeek V4.1 Flash".into()) });
+        assert_eq!(rows[6], Row::Note("DeepSeek V4.1 Flash · 900 tokens in, 5 out".into()));
     }
 
     #[test]
@@ -1686,7 +2114,7 @@ mod tests {
             Item::Answer { at: 3, id: 1, answer: "no".into(), note: "mid-job".into() },
             Item::Result { at: 3, id: "t1".into(), text: "declined".into(), is_error: true },
             Item::Text { at: 4, text: "Left it alone.".into() },
-            Item::Usage { at: 4, input: 1, output: 1, cached: 0, cost: None },
+            Item::Usage { at: 4, input: 1, output: 1, cached: 0, cost: None, model: None },
             Item::User { at: 5, text: "ok, do it".into(), files: vec![] },
             // The app quit while these two waited.
             Item::Tool { at: 6, id: "t2".into(), name: "runner_action".into(), args: restart.clone() },

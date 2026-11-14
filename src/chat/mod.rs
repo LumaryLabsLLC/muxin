@@ -23,14 +23,18 @@ pub mod brain;
 pub mod bridge;
 pub mod command;
 pub mod gate;
+pub mod keys;
 // Only the app's page runs a chat this way.
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub mod live;
 pub mod mention;
 pub mod prompt;
+pub mod provider;
 pub mod risk;
 pub mod store;
 pub mod term;
+#[cfg(test)]
+pub mod testing;
 pub mod tools;
 
 use std::sync::Arc;
@@ -48,8 +52,9 @@ use store::{Item, Meta, Store};
 pub struct Options {
     /// A chat's id to go on with, or "last" for the one used last. None: a new chat.
     pub chat: Option<String>,
-    /// "claude", "codex" or "grok". None: the chat's own, else the user's setting,
-    /// else the first one installed.
+    /// A program ("claude", "codex", "grok") or a provider connected with a
+    /// key ("anthropic", "openai", ...). None: the chat's own, else the
+    /// user's setting, else the first there is.
     pub brain: Option<String>,
     /// None: the user's setting (asking, unless they chose otherwise).
     pub mode: Option<Mode>,
@@ -58,6 +63,8 @@ pub struct Options {
     /// picked last for that brain, else the brain's own choice.
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// "fast" to run the model the faster way, where it has one.
+    pub speed: Option<String>,
 }
 
 /// What happens during a turn, for whoever shows the chat. (A call's `id`
@@ -74,7 +81,8 @@ pub enum Update {
     Result { id: String, text: String, is_error: bool },
     /// A call waits for the user: answer with `Chat::gate().answer(id, ..)`.
     Ask(gate::Request),
-    Usage { input: u64, output: u64, cached: u64, cost: Option<f64> },
+    /// What the turn used, and the model that answered it when the brain said.
+    Usage { input: u64, output: u64, cached: u64, cost: Option<f64>, model: Option<String> },
     /// Something about the user's plan and its limits, in words.
     Limit(String),
     /// The model that's answering.
@@ -91,10 +99,12 @@ pub struct Chat {
     brain: Box<dyn brain::Brain>,
     /// The last thing said about the plan's limits, so it's said once.
     limit: Option<String>,
+    /// The model the brain last said is answering.
+    answering: Option<String>,
     /// The files that go with the next message (`attach`).
     staged: Vec<attach::Attached>,
     /// How a brain that's another program reaches Muxin's tools. Muxin's own needs none.
-    _bridge: Bridge,
+    _bridge: Option<Bridge>,
 }
 
 /// The chats kept for `engine`: the user's, or the simulated machines' own.
@@ -144,11 +154,44 @@ impl Chat {
         let wanted = options.brain.clone().or_else(|| existing.as_ref().and_then(|m| known(&m.brain))).or_else(|| known(&settings.brain));
         let brain_id = match wanted {
             Some(id) => id,
-            None => brain::available().first().map(|k| k.id.to_string()).ok_or_else(brain::none_here)?,
+            None => brain::available(&settings).first().map(|k| k.id.to_string()).ok_or_else(brain::none_here)?,
         };
         let kind = brain::kind(&brain_id).ok_or_else(|| format!("\"{brain_id}\" isn't a brain Muxin knows. Use {}.", brain::ids()))?;
-        if brain::find(kind.program).is_none() {
-            return Err(format!("{} isn't on this computer. Get it at {}.", kind.name, kind.get));
+        // A program has to be on this computer; a provider, connected, with its key kept.
+        let dir = engine.paths().dir.clone();
+        let reached = match kind.via {
+            brain::Via::Program(program) => {
+                if brain::find(program).is_none() {
+                    return Err(format!("{} isn't on this computer. Get it at {}.", kind.name, kind.get));
+                }
+                None
+            }
+            brain::Via::Api(api) => {
+                let connected = settings.providers.get(kind.id).ok_or_else(|| format!("{} isn't connected. Connect it with its API key in Settings › AI.", kind.name))?;
+                let base = Some(connected.base.trim()).filter(|b| !b.is_empty()).unwrap_or(api.base).to_string();
+                if base.is_empty() {
+                    return Err(format!("{} has no address to reach it at. Connect it again in Settings › AI.", kind.name));
+                }
+                let key = keys::get(&keys::Place::of(&dir, engine.is_demo()), kind.id).ok_or_else(|| format!("{}'s API key isn't kept on this computer anymore. Connect it again in Settings › AI.", kind.name))?;
+                Some((api.dialect, base, key))
+            }
+        };
+        let some = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let (picked_model, picked_effort) = settings.pick(&brain_id);
+        // The chat's own model, when this brain answered it before.
+        let kept_model = existing.as_ref().filter(|m| m.brain == brain_id).and_then(|m| m.model.clone());
+        let mut model = some(options.model).or(kept_model).or(picked_model);
+        // A provider answers with a model that's named: with none picked yet,
+        // the first of its list that the pickers offer.
+        if model.is_none() && reached.is_some() {
+            let listed = brain::catalog::known(&dir, &brain_id);
+            model = listed.iter().find(|m| settings.offers(&brain_id, &m.id, listed.len())).map(|m| m.id.clone());
+            // A long list offers none until some are checked: answering with
+            // whichever comes first would be a model nobody chose. (Said
+            // before a chat is made for it.)
+            if model.is_none() && !listed.is_empty() {
+                return Err(format!("None of {}'s {} models is picked yet. Check the ones to use in Settings › AI.", kind.name, listed.len()));
+            }
         }
         let mut meta = match existing {
             Some(meta) => meta,
@@ -161,35 +204,51 @@ impl Chat {
             meta.brain = brain_id.clone();
             meta.model = None;
             meta.effort = None;
+            meta.speed = None;
         }
-        let some = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        let (picked_model, picked_effort) = settings.pick(&brain_id);
-        let model = some(options.model).or_else(|| meta.model.clone()).or(picked_model);
         // An effort belongs to a model: one picked for another model isn't carried over.
         let effort = some(options.effort).or_else(|| meta.effort.clone()).or(picked_effort);
-        if other_brain || (&meta.model, &meta.effort) != (&model, &effort) {
+        let speed = some(options.speed).or_else(|| meta.speed.clone()).or_else(|| settings.speed(&brain_id));
+        if other_brain || (&meta.model, &meta.effort, &meta.speed) != (&model, &effort, &speed) {
             meta.model = model.clone();
             meta.effort = effort.clone();
+            meta.speed = speed.clone();
             let _ = store.save(&meta);
         }
         let mode = options.mode.unwrap_or_else(|| Mode::from_setting(&settings.mode));
         let (gate, gate_events) = Gate::new(mode, settings.allow);
         let work = store.work(&meta.id).map_err(|e| format!("Couldn't make the chat's folder: {e}"))?;
-        // It reaches Muxin's tools through a bridge to this Muxin: the short
-        // list, or all of them for a program that finds tools by itself.
-        let front: Arc<dyn crate::mcp::Front> = if kind.finds_tools { tools::Whole::new(gate.clone()) } else { tools::Short::new(gate.clone()) };
-        let bridge = Bridge::start(engine.clone(), front, &engine.paths().dir).map_err(|e| format!("Couldn't open the chat's way to Muxin's tools: {e}"))?;
-        let setup = brain::Setup {
-            exe: std::env::current_exe().map_err(|e| format!("Couldn't find this Muxin's own program: {e}"))?,
-            bridge: bridge.path().to_path_buf(),
-            work,
-            prompt: prompt::system(),
-            resume: meta.sessions.get(&brain_id).cloned(),
-            model,
-            effort,
+        let (brain, bridge): (Box<dyn brain::Brain>, Option<Bridge>) = match reached {
+            // A program reaches Muxin's tools through a bridge to this Muxin:
+            // the short list, or all of them for one that finds tools by itself.
+            None => {
+                let front: Arc<dyn crate::mcp::Front> = if kind.finds_tools { tools::Whole::new(gate.clone()) } else { tools::Short::new(gate.clone()) };
+                let bridge = Bridge::start(engine.clone(), front, &dir).map_err(|e| format!("Couldn't open the chat's way to Muxin's tools: {e}"))?;
+                let setup = brain::Setup {
+                    exe: std::env::current_exe().map_err(|e| format!("Couldn't find this Muxin's own program: {e}"))?,
+                    bridge: bridge.path().to_path_buf(),
+                    work,
+                    prompt: prompt::system(),
+                    resume: meta.sessions.get(&brain_id).cloned(),
+                    model,
+                    effort,
+                    speed,
+                };
+                (brain::start(&brain_id, setup)?, Some(bridge))
+            }
+            // A provider is asked by Muxin itself, which runs the tools right
+            // here and keeps the conversation in the chat's folder.
+            Some((dialect, base, key)) => {
+                let folder = work.parent().unwrap_or(&work).to_path_buf();
+                let setup = brain::api::Setup { engine: engine.clone(), gate: gate.clone(), kind, base, key, folder, prompt: prompt::system(), model, effort, speed };
+                let own: Box<dyn brain::Brain> = match dialect {
+                    brain::Dialect::Anthropic => Box::new(brain::anthropic::Anthropic::new(setup)),
+                    brain::Dialect::OpenAi => Box::new(brain::openai::OpenAi::new(setup)),
+                };
+                (own, None)
+            }
         };
-        let brain = brain::start(&brain_id, setup)?;
-        Ok(Chat { meta, store, engine: engine.clone(), gate, gate_events, brain, limit: None, staged: Vec::new(), _bridge: bridge })
+        Ok(Chat { meta, store, engine: engine.clone(), gate, gate_events, brain, limit: None, answering: None, staged: Vec::new(), _bridge: bridge })
     }
 
     /// Answers with this model, at this effort, from the next turn on (None:
@@ -201,6 +260,15 @@ impl Chat {
         self.meta.effort = effort.clone();
         save(&self.store, &mut self.meta);
         self.brain.choose(model, effort);
+    }
+
+    /// Runs the model the faster way ("fast") from the next turn on, or as
+    /// usual (None).
+    pub fn set_speed(&mut self, speed: Option<String>) {
+        let speed = speed.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        self.meta.speed = speed.clone();
+        save(&self.store, &mut self.meta);
+        self.brain.speed(speed);
     }
 
     /// Attaches files to the next message: each is checked, and copied into
@@ -237,7 +305,7 @@ impl Chat {
     ///
     /// To stop a turn, drop this future and call `stop`.
     pub async fn send(&mut self, text: &str, on: &mut (dyn FnMut(Update) + Send)) -> Result<(), String> {
-        let Chat { meta, store, engine, gate, gate_events, brain, limit, staged, .. } = self;
+        let Chat { meta, store, engine, gate, gate_events, brain, limit, answering, staged, .. } = self;
         // Its record as it is now: the chat may have been renamed since it was
         // opened here, or deleted.
         match store.get(&meta.id) {
@@ -276,7 +344,7 @@ impl Chat {
                 tokio::select! {
                     biased;
                     // What the brain said first: a tool it called is shown before the question about it.
-                    Some(event) = said.recv() => brain_event(event, meta, store, limit, on),
+                    Some(event) = said.recv() => brain_event(event, meta, store, limit, answering, on),
                     Some(event) = gate_events.recv() => gate_event(event, meta, store, engine, on),
                     outcome = &mut turn => break outcome,
                 }
@@ -284,7 +352,7 @@ impl Chat {
         };
         // What was said just before it ended.
         while let Ok(event) = said.try_recv() {
-            brain_event(event, meta, store, limit, on);
+            brain_event(event, meta, store, limit, answering, on);
         }
         while let Ok(event) = gate_events.try_recv() {
             gate_event(event, meta, store, engine, on);
@@ -310,7 +378,7 @@ impl Chat {
     }
 }
 
-fn brain_event(event: brain::Event, meta: &mut Meta, store: &Store, limit: &mut Option<String>, on: &mut (dyn FnMut(Update) + Send)) {
+fn brain_event(event: brain::Event, meta: &mut Meta, store: &Store, limit: &mut Option<String>, answering: &mut Option<String>, on: &mut (dyn FnMut(Update) + Send)) {
     let at = store::now();
     match event {
         brain::Event::Delta(text) => on(Update::Delta(text)),
@@ -331,8 +399,8 @@ fn brain_event(event: brain::Event, meta: &mut Meta, store: &Store, limit: &mut 
             on(Update::Result { id, text, is_error });
         }
         brain::Event::Usage { input, output, cached, cost } => {
-            let _ = store.append(&meta.id, &Item::Usage { at, input, output, cached, cost });
-            on(Update::Usage { input, output, cached, cost });
+            let _ = store.append(&meta.id, &Item::Usage { at, input, output, cached, cost, model: answering.clone() });
+            on(Update::Usage { input, output, cached, cost, model: answering.clone() });
         }
         brain::Event::Limit(text) => {
             if limit.as_deref() != Some(text.as_str()) {
@@ -340,7 +408,10 @@ fn brain_event(event: brain::Event, meta: &mut Meta, store: &Store, limit: &mut 
                 on(Update::Limit(text));
             }
         }
-        brain::Event::Model(name) => on(Update::Model(name)),
+        brain::Event::Model(name) => {
+            *answering = Some(name.clone());
+            on(Update::Model(name));
+        }
         brain::Event::Session(id) => {
             if meta.sessions.get(&meta.brain) != Some(&id) {
                 meta.sessions.insert(meta.brain.clone(), id);
@@ -433,7 +504,7 @@ pub(crate) mod tests {
         let (gate, gate_events) = Gate::new(Mode::Ask, vec![]);
         let bridge = Bridge::start(engine.clone(), tools::Short::new(gate.clone()), &dir).unwrap();
         let brain = Box::new(Scripted { gate: gate.clone(), turns });
-        Chat { meta, store, engine, gate, gate_events, brain, limit: None, staged: Vec::new(), _bridge: bridge }
+        Chat { meta, store, engine, gate, gate_events, brain, limit: None, answering: None, staged: Vec::new(), _bridge: Some(bridge) }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -465,6 +536,25 @@ pub(crate) mod tests {
         assert!(matches!(thread.last(), Some(Item::Usage { cost: Some(_), .. })));
         // It's on disk, for the next time the chat is opened.
         assert_eq!(store(&chat.engine).get(&chat.meta.id).unwrap().sessions["claude"], "thread-1");
+    }
+
+    #[test]
+    fn what_a_turn_used_names_the_model_the_brain_last_said_answers() {
+        let dir = std::env::temp_dir().join(format!("muxin-chat-answering-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::new(&dir);
+        let mut meta = store.create("openrouter").unwrap();
+        let (mut limit, mut answering) = (None, None);
+        let mut seen = Vec::new();
+        let used = || brain::Event::Usage { input: 10, output: 2, cached: 0, cost: None };
+        for event in [used(), brain::Event::Model("x/asked".into()), brain::Event::Model("x/answered-0101".into()), used()] {
+            brain_event(event, &mut meta, &store, &mut limit, &mut answering, &mut |update| seen.push(update));
+        }
+        let models: Vec<Option<String>> = seen.iter().filter_map(|u| if let Update::Usage { model, .. } = u { Some(model.clone()) } else { None }).collect();
+        // Nothing said yet: no model. Then the one said last, which is what the provider called it.
+        assert_eq!(models, [None, Some("x/answered-0101".to_string())]);
+        // Kept with the thread, too.
+        assert!(matches!(store.thread(&meta.id).last(), Some(Item::Usage { model: Some(model), .. }) if model == "x/answered-0101"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -612,7 +702,7 @@ pub(crate) mod tests {
         // A chat ChatGPT answered, from when Muxin could answer on a ChatGPT plan.
         let old = store.create("chatgpt").unwrap();
         let opened = Chat::open(&engine, Options { chat: Some(old.id.clone()), ..Default::default() });
-        match brain::available().first() {
+        match brain::available(&engine.settings().chat).first() {
             Some(first) => {
                 assert_eq!(opened.map(|chat| chat.meta.brain.clone()), Ok(first.id.to_string()));
                 assert_eq!(store.get(&old.id).unwrap().brain, first.id);

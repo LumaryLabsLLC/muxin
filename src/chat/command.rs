@@ -24,6 +24,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "chats", also: &["resume"], takes: "", about: "Go on with an earlier chat", app: true, term: true },
     Command { name: "model", also: &[], takes: "[name]", about: "What answers: the program and its model", app: true, term: true },
     Command { name: "effort", also: &[], takes: "[level]", about: "How hard the model thinks", app: true, term: true },
+    Command { name: "speed", also: &["fast"], takes: "[fast|standard]", about: "Run the model the faster way, where it has one", app: true, term: true },
     Command { name: "ask", also: &[], takes: "", about: "Ask permissions: ask before anything changes", app: true, term: true },
     Command { name: "bypass", also: &[], takes: "", about: "Bypass permissions: run every tool without asking", app: true, term: true },
     Command { name: "attach", also: &[], takes: "[file]", about: "Add a file to your next message", app: true, term: true },
@@ -105,8 +106,8 @@ mod tests {
     fn the_commands_offered_are_the_ones_that_work_there() {
         let names = |so_far: &str, app: bool| matching(so_far, app).into_iter().map(|c| c.name).collect::<Vec<_>>();
         // Nothing typed after the "/": all of them, as listed.
-        assert_eq!(names("", true), ["new", "chats", "model", "effort", "ask", "bypass", "attach", "rename", "delete", "stop"]);
-        assert_eq!(names("", false), ["new", "chats", "model", "effort", "ask", "bypass", "attach", "rename", "help", "quit"]);
+        assert_eq!(names("", true), ["new", "chats", "model", "effort", "speed", "ask", "bypass", "attach", "rename", "delete", "stop"]);
+        assert_eq!(names("", false), ["new", "chats", "model", "effort", "speed", "ask", "bypass", "attach", "rename", "help", "quit"]);
         // What starts with it, then what's about it.
         assert_eq!(names("e", true), ["effort"]);
         assert_eq!(names("by", true), ["bypass"]);

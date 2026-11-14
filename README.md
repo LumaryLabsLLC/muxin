@@ -14,7 +14,7 @@
 
 Point it at the machines you own (a Mac Studio under the desk, a NUC, a Linux box, a few MacBooks, a Windows laptop) and Muxin becomes the hub for all of them:
 
-- **Chat:** ask in plain words ("what needs me?", "restart the runner on the NUC", "start Codex on that issue"). Muxin's assistant works across all your machines with Muxin's own tools, and asks before it changes anything. It answers on a plan you already have: Claude Code, Codex or Grok Build. Off until you turn it on in Settings › Chat.
+- **Chat:** ask in plain words ("what needs me?", "restart the runner on the NUC", "start Codex on that issue"). Muxin's assistant works across all your machines with Muxin's own tools, and asks before it changes anything. It answers on a plan you already have: Claude Code, Codex or Grok Build. Off until you turn it on in Settings › AI.
 - **Agent sessions:** Claude Code, Codex, OpenCode, Gemini CLI, Antigravity, Amp, Pi, Copilot CLI, Cursor Agent, Qwen Code, Droid, Kimi Code or a shell on any machine, in a real terminal, still running after you close the app.
 - **Boxes:** hand a task to an agent that works on it by itself, in a container of its own on one of your machines. A box pauses when it's quiet and picks up where it left off when you ask it more.
 - **Desktops:** see a Linux machine's screen live and use it, beside an agent's terminal or in its own window. While a desktop has the keyboard, the shortcuts your own computer keeps (⌘Tab and Mission Control on a Mac, Alt+Tab and the Windows key elsewhere) go to the machine; Ctrl+Alt (⌃⌥) by themselves gives them back, and the **Keys** menu sends combinations by a click. On a Mac, that needs Muxin allowed under Privacy & Security › Accessibility.
@@ -109,7 +109,7 @@ muxin chat "what needs me?"        # ask the assistant; it asks before it change
 
 ## The app
 
-- **Chat (⌃0):** the first page, once you've turned it on in Settings › Chat. Ask about your machines, or ask for something to be done: the assistant looks, does it with Muxin's own tools, and shows each call it makes (see [Chat](#chat)).
+- **Chat (⌃0):** the first page, once you've turned it on in Settings › AI. Ask about your machines, or ask for something to be done: the assistant looks, does it with Muxin's own tools, and shows each call it makes (see [Chat](#chat)).
 - **Overview:** the day in one line (machines online, agents working, runners busy), a few notices for what needs a look (each with a button that fixes or explains it), a card per machine with what's running on it (its agents, desktop and runners) and live CPU, memory and disk, and every agent session across your machines. The Jobs page shows how busy your runners have been over the last few minutes.
 - **Machines and runners:** install runners on a machine, and start, stop, restart, show logs for or remove each one. A machine that's off or out of reach says so in plain words (offline, Remote Login off, ssh key not accepted, Tailscale off on this Mac, …), with when it was last seen and what to do; Muxin picks it back up by itself when it returns.
 - **Adding machines (⌘N):** suggestions from your `~/.ssh/config`, your Tailscale network, and this network (machines advertising ssh over Bonjour, and Macs that would be addable once Remote Login is on).
@@ -133,17 +133,19 @@ Keyboard: ⌘P goes to any machine, session or desktop by name, and ⇧⌘P (or 
 
 ## Chat
 
-Ask Muxin in plain words, on the app's first page or with `muxin chat`. The chat is off until you turn it on: **Settings › Chat** has the switch, and `muxin chat --on` does the same from a terminal. Until then the app has no Chat page (its shortcut opens that switch) and `muxin chat` says it's off.
+Ask Muxin in plain words, on the app's first page or with `muxin chat`. The chat is off until you turn it on: **Settings › AI** has the switch, and `muxin chat --on` does the same from a terminal. Until then the app has no Chat page (its shortcut opens that switch) and `muxin chat` says it's off.
 
 The assistant is a model with Muxin's tools, the same ones agents get over MCP: it looks at your machines, runners and GitHub, starts and answers agent sessions, hands tasks to boxes, reads logs and files. It has no shell and no files of its own. Long work goes to an agent session or a box, and it tells you which.
 
-- **It asks permission.** Looking runs at once. A call that changes something shows what it would run and waits for your yes. **Yes, and don't ask again** remembers that kind of call (`snippet_save`, `runner_action:restart`); Settings › Chat lists them, each removable. Calls that delete something, stop running work, cost money, or run or type whatever text they're given ask every time.
-- **Or it doesn't.** The mode menu under the box you type in switches that chat from **Ask permissions** to **Bypass permissions**: every tool runs at once, the ones that delete things too. Settings › Chat sets how new chats start.
+- **It asks permission.** Looking runs at once. A call that changes something shows what it would run and waits for your yes. **Yes, and don't ask again** remembers that kind of call (`snippet_save`, `runner_action:restart`); Settings › AI lists them, each removable. Calls that delete something, stop running work, cost money, or run or type whatever text they're given ask every time.
+- **Or it doesn't.** The mode menu under the box you type in switches that chat from **Ask permissions** to **Bypass permissions**: every tool runs at once, the ones that delete things too. Settings › AI sets how new chats start.
 - **What answers** is your choice, on a plan you already have. No API key:
   - **Claude Code**, **Codex** or **Grok Build**, when the program is on this computer and signed in. Muxin runs it without its terminal and with its own tools off, so it's only a model with Muxin's tools. (Codex keeps a shell that can only read. Grok Build needs to be 1.0.13 or later: `grok update`.)
 
-  With none chosen, Muxin takes the first there is: Claude Code, Codex, then Grok Build. A chat keeps what it started with.
-- **Which model, and how hard it thinks.** Two menus under the box you type in. The first lists what can answer here, each with its models; the second, the effort that model takes (Low to Max). A pick holds from the next message, and new chats start with it (`[settings.chat.picked]`). A model of another program starts a new chat. The lists are the programs' own: Codex's and Grok Build's as they keep them on this computer, and Claude Code's short names (Fable, Opus, Sonnet, Haiku).
+  - **A provider you connect with an API key**: Anthropic, OpenAI, xAI, Google, OpenRouter, DeepSeek, or any other that speaks chat completions, at its address. **Settings › AI › Providers** has **Connect**: paste the key, and Muxin asks the provider for its models to prove it. The key is kept in the Keychain (Credential Manager on Windows, elsewhere a file only you can read), never in `config.toml`. These are paid by the token, and Muxin asks the provider itself, with no program in between.
+
+  With none chosen, Muxin takes the first there is: Claude Code, Codex, Grok Build, then the providers you connected. A chat keeps what it started with.
+- **Which model, how hard it thinks, and how fast.** Menus under the box you type in. The first lists what can answer here, each with its models; the second, the effort that model takes (Low to Max); a third, **Speed**, shows for a model that can be run a faster way for more (Codex's models, OpenAI's, Claude Opus 5.5 on an Anthropic key). **Settings › AI › Models** chooses which models the menus offer: a short list is offered whole, and a long one (a gateway's hundreds) only what you check, so a chat there waits until you've checked one. OpenRouter's list is the models that can call tools, each with the effort levels it takes. A pick holds from the next message, and new chats start with it (`[settings.chat]`: `brain`, and `picked`). **Settings › AI › New chats** shows the same and sets it: what answers, its model, effort and speed, and whether it asks first. A model of another program starts a new chat. The lists are the programs' own: Codex's and Grok Build's as they keep them on this computer, and Claude Code's short names (Fable, Opus, Sonnet, Haiku).
 - **Point at things with @.** Type `@` in the box and Muxin lists your machines, agent sessions, boxes, runners, workspaces and repositories, by name as you type. Pick one (Return or Tab) and its id goes into the message (`@forge`, `@forge/claude-3f9a`), so the assistant knows exactly which one you mean and works there. In the terminal, type the id after the `@` yourself.
 - **Commands with /.** A message that starts with `/` and a command's name is done, not said. The box lists them as you type: `/new`, `/chats`, `/model`, `/effort`, `/ask`, `/bypass`, `/attach`, `/rename`, `/delete`, `/stop`. `/model` and `/effort` open their menus, or take a name (`/model opus`, `/effort high`). Anything else that starts with a `/` is a message like any other.
 - **Attach files.** The paperclip, files dropped on the box, or a pasted picture go with your next message, up to 10 of them. The chat keeps its own copy of each.
@@ -153,8 +155,9 @@ The assistant is a model with Muxin's tools, the same ones agents get over MCP: 
 
   A file that what answers can't take isn't sent, and the chat says why.
 - **Every call is shown.** Each tool the assistant calls is a row in the chat, with its arguments and what came back, and a call you refused says so. Under each answer is what it used: tokens in and out, and for some what that would cost at API prices.
-- **Its rules are yours.** What answers, whether it asks, and what runs without asking are in Settings › Chat (`[settings.chat]` in `config.toml`). They aren't among its tools, so it can't change them.
-- **Chats are kept** on this computer, in `chats/` beside `config.toml`. The one used last opens with the page, with its title in the toolbar. **New chat** shows the others under **Go on with**: the latest five, and **Show all** for the rest.
+- **Its rules are yours.** What answers, whether it asks, and what runs without asking are in Settings › AI (`[settings.chat]` in `config.toml`). They aren't among its tools, so it can't change them.
+- **Chats are kept** on this computer, in `chats/` beside `config.toml`. The one used last opens with the page, with its title in the toolbar. They're listed beside the conversation, newest first: a click opens one, and **Show all** lists the rest. (A narrow window has no room for the list: there, **New chat** shows the others under **Go on with**.)
+- **Several at once.** Start a **New chat** or open another while one is working, and it goes on behind: its row in the list turns while it works, and says **Needs you** when a call waits for your yes, or **Done** when it finished while you were elsewhere. Chat in the sidebar counts the chats that are at something.
 - **Rename or delete one** from the **···** beside it, or with a right click. Deleting takes what was said in it and the files attached in it, and can't be undone. Claude Code, Codex and Grok Build keep their own record of a conversation; that stays where they keep it.
 - **Your other setups stay out.** The programs run in the chat's own folder, without the hooks and MCP servers you set up for them. Grok Build is the exception: its own hooks, skills and plugins still load, though only Muxin's tools can run.
 - **Windows:** the chat can't answer there yet. The programs reach Muxin's tools in a way Windows doesn't have.
@@ -167,6 +170,10 @@ muxin chat --chat last "and restart it"      # go on with the last chat (or --ch
 muxin chat --brain codex "is anything offline?"   # what answers: claude, codex or grok
 muxin chat "why is @forge/forge-01 offline?" # point at a machine, session, box, runner or repository by its id
 muxin chat --models                          # the models each can answer with, and their effort levels
+muxin chat --providers                       # what can answer: programs here, and providers connected with a key
+pbpaste | muxin chat --connect anthropic     # connect a provider; its key comes on stdin (--base <url> for another address)
+muxin chat --disconnect anthropic            # forget its key and its list of models
+muxin chat --speed fast "why is the build red?"   # the faster way, where the model has one (it costs more)
 muxin chat --model opus --effort high "why did the deploy fail?"   # a model and an effort, kept by that chat
 muxin chat --attach build.log --attach shot.png "what broke?"      # files with the message (/attach <file> in a conversation)
 muxin chat --bypass "restart forge-03"       # bypass permissions: don't ask before tools that change things

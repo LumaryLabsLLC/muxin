@@ -29,6 +29,12 @@ pub struct Ask {
     pub rename: Option<(String, String)>,
     /// Show the models there are to answer with instead (of `options.brain`, when given).
     pub models: bool,
+    /// Show the providers instead.
+    pub providers: bool,
+    /// Connect a provider instead: which, and where it's reached ("" for its own address). Its key comes on stdin.
+    pub connect: Option<(String, String)>,
+    /// Disconnect a provider instead.
+    pub disconnect: Option<String>,
     /// Files that go with the first message.
     pub attach: Vec<std::path::PathBuf>,
 }
@@ -85,11 +91,29 @@ pub async fn run(engine: Arc<Engine>, ask: Ask) -> u8 {
         return rename(&engine, which, title);
     }
     if ask.models {
-        return models(ask.options.brain.as_deref());
+        return models(&engine, ask.options.brain.as_deref());
+    }
+    if ask.providers {
+        return providers(&engine);
+    }
+    if let Some((provider, base)) = &ask.connect {
+        return connect(&engine, provider, base).await;
+    }
+    if let Some(provider) = &ask.disconnect {
+        return match super::provider::disconnect(&engine, provider) {
+            Ok(()) => {
+                println!("Disconnected {}. Its key and its list of models are forgotten.", brain::kind(provider).map(|k| k.name).unwrap_or(provider));
+                0
+            }
+            Err(why) => {
+                eprintln!("error: {why}");
+                1
+            }
+        };
     }
     // Off until the user turns it on. (Chats from before can still be listed, named and deleted.)
     if !is_on(&engine) {
-        eprintln!("The chat is off. Turn it on in the app (Settings › Chat), or here: muxin chat --on");
+        eprintln!("The chat is off. Turn it on in the app (Settings › AI), or here: muxin chat --on");
         return 1;
     }
     let stop = watch_ctrl_c();
@@ -166,8 +190,9 @@ pub async fn run(engine: Arc<Engine>, ask: Ask) -> u8 {
                 Ok(()) => said(&format!("{named} goes with your next message.")),
                 Err(why) => said(&format!("  ✗ {why}")),
             },
-            ("model", said_model) => said(&model(&mut chat, said_model)),
-            ("effort", said_effort) => said(&effort(&mut chat, said_effort)),
+            ("model", said_model) => said(&model(&engine, &mut chat, said_model)),
+            ("effort", said_effort) => said(&effort(&engine, &mut chat, said_effort)),
+            ("speed", said_speed) => said(&speed(&engine, &mut chat, said_speed)),
             ("rename", "") => said("What should it be called? /rename <title>"),
             ("rename", title) => match super::store(&engine).rename(&chat.meta.id, title) {
                 Ok(meta) => said(&format!("This chat is now: {}", titled(&meta))),
@@ -277,7 +302,7 @@ impl Screen {
                 let answer = ask(&request);
                 gate.answer(request.id, answer);
             }
-            Update::Usage { input, output, cached, cost } => {
+            Update::Usage { input, output, cached, cost, .. } => {
                 self.end_line();
                 let cached = if cached > 0 { format!(" ({} read from cache)", count(cached)) } else { String::new() };
                 let cost = cost.map(priced).unwrap_or_default();
@@ -384,9 +409,8 @@ pub(crate) fn count(n: u64) -> String {
 
 /// `--models`: each brain there is here, and the models it can answer with,
 /// with the efforts each takes (the model's own marked `*`).
-fn models(only: Option<&str>) -> u8 {
-    use brain::catalog;
-    let brains: Vec<&brain::Kind> = brain::available().into_iter().filter(|k| only.is_none_or(|id| id == k.id)).collect();
+fn models(engine: &Engine, only: Option<&str>) -> u8 {
+    let brains: Vec<&brain::Kind> = brain::available(&engine.settings().chat).into_iter().filter(|k| only.is_none_or(|id| id == k.id)).collect();
     if brains.is_empty() {
         eprintln!("error: {}", match only {
             Some(id) if brain::kind(id).is_none() => format!("\"{id}\" isn't a brain Muxin knows. Use {}.", brain::ids()),
@@ -400,8 +424,11 @@ fn models(only: Option<&str>) -> u8 {
             println!();
         }
         println!("{} (--brain {})", kind.name, kind.id);
-        let list = catalog::of(kind.id);
-        if list.is_empty() {
+        // The ones the pickers offer (Settings › AI chooses which, for a provider's).
+        let list = super::provider::offered(engine, kind.id);
+        if list.is_empty() && kind.api().is_some() {
+            println!("  None of its models is in the pickers yet. Settings › AI chooses which, or name one with --model <id>.");
+        } else if list.is_empty() {
             println!("  It doesn't say which models it has. It answers with its own choice.");
         }
         let wide = list.iter().map(|m| m.id.chars().count()).max().unwrap_or(0);
@@ -431,8 +458,8 @@ fn list(engine: &Engine) -> u8 {
 
 /// `/model <said>` in a conversation: the model this chat answers with from
 /// its next message, among the ones its program lists. What to tell the user.
-fn model(chat: &mut Chat, said: &str) -> String {
-    let models = brain::catalog::of(&chat.meta.brain);
+fn model(engine: &Engine, chat: &mut Chat, said: &str) -> String {
+    let models = super::provider::offered(engine, &chat.meta.brain);
     let name = brain::kind(&chat.meta.brain).map(|k| k.name).unwrap_or("It");
     if said.is_empty() {
         let now = chat.meta.model.clone().unwrap_or_else(|| "its own choice".into());
@@ -455,8 +482,8 @@ fn model(chat: &mut Chat, said: &str) -> String {
 }
 
 /// `/effort <said>`: how hard this chat's model thinks from its next message.
-fn effort(chat: &mut Chat, said: &str) -> String {
-    let models = brain::catalog::of(&chat.meta.brain);
+fn effort(engine: &Engine, chat: &mut Chat, said: &str) -> String {
+    let models = super::provider::offered(engine, &chat.meta.brain);
     let model = chat.meta.model.as_deref().and_then(|id| brain::catalog::find(&models, id));
     if said.eq_ignore_ascii_case("default") {
         chat.choose(chat.meta.model.clone(), None);
@@ -487,7 +514,7 @@ pub fn is_on(engine: &Engine) -> bool {
     engine.is_demo() || engine.settings().chat.enabled
 }
 
-/// `--on` and `--off`: the switch in Settings › Chat.
+/// `--on` and `--off`: the switch in Settings › AI.
 fn switch(engine: &Engine, on: bool) -> u8 {
     let mut settings = engine.settings();
     settings.chat.enabled = on;
@@ -500,6 +527,83 @@ fn switch(engine: &Engine, on: bool) -> u8 {
         }
     }
     0
+}
+
+/// `/speed <said>`: whether this chat's model is run the faster way from its
+/// next message. Only where the model has one.
+fn speed(engine: &Engine, chat: &mut Chat, said: &str) -> String {
+    let models = super::provider::offered(engine, &chat.meta.brain);
+    let model = chat.meta.model.as_deref().and_then(|id| brain::catalog::find(&models, id));
+    // With no model picked, whether any of them has one.
+    let has = model.map_or_else(|| models.iter().any(|m| m.fast), |m| m.fast);
+    match said.trim().to_lowercase().as_str() {
+        "" if chat.meta.speed.is_some() => "Speed: fast. /speed standard goes back.".into(),
+        "" if has => "Speed: standard. /speed fast runs it the faster way, which costs more.".into(),
+        "" => "This model runs at one speed.".into(),
+        "fast" if has => {
+            chat.set_speed(Some("fast".into()));
+            "Speed: fast from here. It costs more.".into()
+        }
+        "fast" => "This model runs at one speed.".into(),
+        "standard" | "default" | "normal" => {
+            chat.set_speed(None);
+            "Speed: standard from here.".into()
+        }
+        other => format!("It doesn't take {other}. /speed fast, or /speed standard."),
+    }
+}
+
+/// `--providers`: what can answer here, and what could.
+fn providers(engine: &Engine) -> u8 {
+    let chat = engine.settings().chat;
+    for kind in brain::KINDS.iter() {
+        let how = match kind.via {
+            brain::Via::Program(program) if brain::find(program).is_some() => "program, on this computer".to_string(),
+            brain::Via::Program(_) => format!("program, not on this computer: {}", kind.get),
+            brain::Via::Api(_) => match chat.providers.get(kind.id) {
+                Some(connected) if connected.base.is_empty() => "API key, connected".to_string(),
+                Some(connected) => format!("API key, connected at {}", connected.base),
+                None => "API key, not connected".to_string(),
+            },
+        };
+        println!("{:<11} {:<18} {how}", kind.id, kind.name);
+    }
+    println!("\nConnect one: pbpaste | muxin chat --connect <provider>   (--disconnect <provider> forgets its key)");
+    0
+}
+
+/// `--connect <provider>`: its key comes on stdin, so it stays out of the
+/// shell's history and off the screen.
+async fn connect(engine: &Arc<Engine>, provider: &str, base: &str) -> u8 {
+    // Said before waiting on stdin for a key that couldn't be used.
+    let kind = match super::provider::named(provider) {
+        Ok(kind) => kind,
+        Err(why) => {
+            eprintln!("error: {why}");
+            return 1;
+        }
+    };
+    if std::io::stdin().is_terminal() {
+        let get = if kind.get.is_empty() { String::new() } else { format!(" Get one at {}.", kind.get) };
+        eprintln!("error: {}'s API key comes on stdin, so it stays out of your shell's history: pbpaste | muxin chat --connect {provider}.{get}", kind.name);
+        return 2;
+    }
+    let mut key = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut key);
+    match super::provider::connect(engine, provider, &key, base).await {
+        Ok(models) => {
+            let offered = super::provider::offered(engine, kind.id).len();
+            println!("Connected {}: {} models, {offered} of them in the pickers. Ask with: muxin chat --brain {provider} \"what needs me?\"", kind.name, models.len());
+            if offered == 0 && !models.is_empty() {
+                println!("It lists a lot of models, so none is offered until you choose which: Settings › AI, or --model <id> (muxin chat --models --brain {provider} lists them).");
+            }
+            0
+        }
+        Err(why) => {
+            eprintln!("error: {why}");
+            1
+        }
+    }
 }
 
 /// A chat's title, as a list shows it.
@@ -560,21 +664,22 @@ mod tests {
     async fn a_conversations_model_and_effort_are_set_by_what_theyre_called() {
         // Claude Code answers in the stand-in chat: its models go by short names.
         let mut chat = crate::chat::tests::chat("term-model", vec![]);
-        assert!(model(&mut chat, "").starts_with("Claude Code answers with its own choice. /model <name> picks another: fable, opus, sonnet, haiku, or default."));
-        assert_eq!(model(&mut chat, "Opus"), "Claude Code answers with Opus from here.");
+        let engine = chat.engine.clone();
+        assert!(model(&engine, &mut chat, "").starts_with("Claude Code answers with its own choice. /model <name> picks another: fable, opus, sonnet, haiku, or default."));
+        assert_eq!(model(&engine, &mut chat, "Opus"), "Claude Code answers with Opus from here.");
         assert_eq!(chat.meta.model.as_deref(), Some("opus"));
-        assert_eq!(effort(&mut chat, "extra high"), "Effort: Extra high from here.");
+        assert_eq!(effort(&engine, &mut chat, "extra high"), "Effort: Extra high from here.");
         assert_eq!((chat.meta.model.as_deref(), chat.meta.effort.as_deref()), (Some("opus"), Some("xhigh")));
-        assert!(effort(&mut chat, "").starts_with("Effort: xhigh. /effort <level> sets it: low, medium, high, xhigh, max, or default."));
+        assert!(effort(&engine, &mut chat, "").starts_with("Effort: xhigh. /effort <level> sets it: low, medium, high, xhigh, max, or default."));
         // What it doesn't have is said, and nothing changes.
-        assert_eq!(model(&mut chat, "gpt-9"), "Claude Code has no model called gpt-9. `muxin chat --models` lists them.");
-        assert!(effort(&mut chat, "enormous").starts_with("It doesn't take enormous."));
+        assert_eq!(model(&engine, &mut chat, "gpt-9"), "Claude Code has no model called gpt-9. `muxin chat --models` lists them.");
+        assert!(effort(&engine, &mut chat, "enormous").starts_with("It doesn't take enormous."));
         assert_eq!((chat.meta.model.as_deref(), chat.meta.effort.as_deref()), (Some("opus"), Some("xhigh")));
         // Another model keeps the effort it takes too; "default" gives both back to the program.
-        assert_eq!(model(&mut chat, "son"), "Claude Code answers with Sonnet from here.");
+        assert_eq!(model(&engine, &mut chat, "son"), "Claude Code answers with Sonnet from here.");
         assert_eq!(chat.meta.effort.as_deref(), Some("xhigh"));
-        assert_eq!(effort(&mut chat, "default"), "It thinks as hard as the model would by itself.");
-        assert_eq!(model(&mut chat, "default"), "Claude Code answers with its own choice of model from here.");
+        assert_eq!(effort(&engine, &mut chat, "default"), "It thinks as hard as the model would by itself.");
+        assert_eq!(model(&engine, &mut chat, "default"), "Claude Code answers with its own choice of model from here.");
         assert_eq!((chat.meta.model.clone(), chat.meta.effort.clone()), (None, None));
         // And it's kept with the chat.
         assert_eq!(crate::chat::store(&chat.engine).get(&chat.meta.id).unwrap().model, None);

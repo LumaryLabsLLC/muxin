@@ -51,6 +51,8 @@ pub enum MenuTarget {
     ChatEffort,
     /// Whether the chat asks before a tool changes something.
     ChatMode,
+    /// How fast the chat's model is run.
+    ChatSpeed,
     /// One of the assistant's chats, by id: rename it, delete it. `above`:
     /// from the button under the open chat, so it opens upward.
     Chat { id: String, above: bool },
@@ -75,6 +77,8 @@ enum Action {
     ChatEffort(Option<String>),
     /// The chat asks before a tool changes something, or (true) doesn't.
     ChatMode(bool),
+    /// The chat's model is run as usual, or (true) the faster way.
+    ChatSpeed(bool),
     RenameChat(String),
     DeleteChat(String),
     NewTerminal(String),
@@ -313,7 +317,7 @@ impl Root {
     }
 
     pub(super) fn open_menu(&mut self, target: MenuTarget, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let above = matches!(target, MenuTarget::ChatModel | MenuTarget::ChatEffort | MenuTarget::ChatMode | MenuTarget::Chat { above: true, .. });
+        let above = matches!(target, MenuTarget::ChatModel | MenuTarget::ChatEffort | MenuTarget::ChatMode | MenuTarget::ChatSpeed | MenuTarget::Chat { above: true, .. });
         self.context_menu = Some(ContextMenu { target, position, submenu: None, above });
         cx.notify();
     }
@@ -533,6 +537,15 @@ impl Root {
                     Item::Choice { label: "Bypass permissions".into(), about: "Runs every tool without asking".into(), picked: bypass, action: Action::ChatMode(true) },
                 ]
             }
+            MenuTarget::ChatSpeed => {
+                let Some(chat) = &self.chat else { return Vec::new() };
+                let fast = chat.read(cx).is_fast();
+                vec![
+                    Item::Note("Speed".into()),
+                    Item::Choice { label: "Standard".into(), about: "The model's usual speed and price".into(), picked: !fast, action: Action::ChatSpeed(false) },
+                    Item::Choice { label: "Fast".into(), about: "Answers sooner, and costs more".into(), picked: fast, action: Action::ChatSpeed(true) },
+                ]
+            }
             MenuTarget::Chat { id, .. } => vec![
                 act("Rename…", "pencil", Action::RenameChat(id.clone())),
                 Item::Action { label: "Delete chat…".into(), glyph: Glyph::Icon("trash-2"), action: Action::DeleteChat(id.clone()), danger: true },
@@ -548,7 +561,7 @@ impl Root {
                     // One brain: its models, right away.
                     [only] => models(only),
                     many => {
-                        let mut items: Vec<Item> = many.iter().map(|b| Item::Submenu { label: b.name.to_string(), value: if b.current { Some(b.model.clone().unwrap_or_else(|| "default".into())) } else { None }, glyph: Glyph::Agent(b.id), items: models(b) }).collect();
+                        let mut items: Vec<Item> = many.iter().map(|b| Item::Submenu { label: b.name.to_string(), value: if b.current { Some(b.model.clone().unwrap_or_else(|| "default".into())) } else { None }, glyph: Glyph::Agent(match b.id { "anthropic" => "claude", "openai" => "codex", id => id }), items: models(b) }).collect();
                         // Another brain knows nothing of the chat that's open.
                         if chat.read(cx).has_chat() {
                             items.push(Item::Separator);
@@ -869,6 +882,11 @@ impl Root {
             Action::ChatMode(bypass) => {
                 if let Some(chat) = self.chat.clone() {
                     chat.update(cx, |view, cx| view.set_bypass(bypass, cx));
+                }
+            }
+            Action::ChatSpeed(fast) => {
+                if let Some(chat) = self.chat.clone() {
+                    chat.update(cx, |view, cx| view.pick_speed(fast, cx));
                 }
             }
             Action::RenameChat(id) => self.show_rename(super::dialogs::RenameTarget::Chat(id), window, cx),

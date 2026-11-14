@@ -2,17 +2,25 @@
 //! happens next, piece by piece: text, the tools it calls and what they
 //! answered, what the turn used.
 //!
-//! Each is an agent CLI already on the user's computer, signed in to the
+//! Three are agent CLIs already on the user's computer, signed in to the
 //! user's own plan: Claude Code (claude.rs), Codex (codex.rs) and Grok Build
 //! (grok.rs). Muxin runs them without their terminal, with their own tools
 //! off, and with Muxin's tools reached through the chat's bridge
 //! (../bridge.rs), so every call passes the chat's gate.
+//!
+//! The rest are providers the user connected with an API key (../keys.rs):
+//! Muxin asks their API itself and runs the tools the model calls right
+//! here, each one past the chat's gate first. Anthropic's speaks its own
+//! Messages API (anthropic.rs); the others, chat completions (openai.rs).
 
+pub mod anthropic;
+pub mod api;
 pub mod catalog;
 pub mod claude;
 pub mod codex;
 pub mod grok;
 mod messages;
+pub mod openai;
 
 use std::path::PathBuf;
 
@@ -61,6 +69,8 @@ pub struct Setup {
     pub model: Option<String>,
     /// How hard it should think, as that model names it ("high"). None: the model's own.
     pub effort: Option<String>,
+    /// "fast" for the faster, dearer way to run a model that has one. None: as usual.
+    pub speed: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -76,6 +86,10 @@ pub trait Brain: Send {
     /// the same conversation. None: the brain's own choice.
     fn choose(&mut self, _model: Option<String>, _effort: Option<String>) {}
 
+    /// Runs the model the faster way ("fast") from the next turn on, or as
+    /// usual (None). A brain without such a choice takes no notice.
+    fn speed(&mut self, _speed: Option<String>) {}
+
     /// Takes the pictures and PDFs that go with the next message (text
     /// files are already in its words: ../attach.rs). `Err` says, for the
     /// user, that this brain can't be given one; nothing is taken then.
@@ -87,13 +101,12 @@ pub trait Brain: Send {
     }
 }
 
-/// A brain Muxin can use: its id in settings, its name, its program.
+/// A brain Muxin can use: its id in settings, its name, and how it's reached.
 pub struct Kind {
     pub id: &'static str,
     pub name: &'static str,
-    /// The program it is.
-    pub program: &'static str,
-    /// How to get it, for someone who doesn't have it.
+    pub via: Via,
+    /// Where to get it: the program, or a key for it.
     pub get: &'static str,
     /// It keeps MCP tools out of what it sends the model and looks them up
     /// as it needs them. So it's given every tool in full, to find them by,
@@ -101,24 +114,79 @@ pub struct Kind {
     pub finds_tools: bool,
 }
 
-/// In the order Muxin prefers them when the user hasn't chosen.
-pub const KINDS: [Kind; 3] = [
-    Kind { id: "claude", name: "Claude Code", program: "claude", get: "https://claude.com/claude-code", finds_tools: false },
-    Kind { id: "codex", name: "Codex", program: "codex", get: "https://developers.openai.com/codex/cli", finds_tools: false },
-    Kind { id: "grok", name: "Grok Build", program: "grok", get: "https://docs.x.ai/build/overview", finds_tools: true },
+/// How a brain is reached.
+pub enum Via {
+    /// A program on this computer, signed in to the user's own plan.
+    Program(&'static str),
+    /// A provider's API, with a key the user connected (../keys.rs). Muxin
+    /// asks it itself, and pays by the token.
+    Api(Api),
+}
+
+/// A provider's API: how it's spoken to, and where it is unless the user
+/// said another address when they connected it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Api {
+    pub dialect: Dialect,
+    pub base: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Dialect {
+    /// Anthropic's Messages API (anthropic.rs).
+    Anthropic,
+    /// Chat completions as OpenAI defined them, which most providers speak (openai.rs).
+    OpenAi,
+}
+
+impl Kind {
+    /// The program it is, when it's one.
+    pub fn program(&self) -> Option<&'static str> {
+        match self.via {
+            Via::Program(program) => Some(program),
+            Via::Api(_) => None,
+        }
+    }
+
+    pub fn api(&self) -> Option<Api> {
+        match self.via {
+            Via::Api(api) => Some(api),
+            Via::Program(_) => None,
+        }
+    }
+}
+
+/// The programs first, in the order Muxin prefers them when the user hasn't
+/// chosen; then the providers reached with a key, as a list shows them.
+pub const KINDS: [Kind; 10] = [
+    Kind { id: "claude", name: "Claude Code", via: Via::Program("claude"), get: "https://claude.com/claude-code", finds_tools: false },
+    Kind { id: "codex", name: "Codex", via: Via::Program("codex"), get: "https://developers.openai.com/codex/cli", finds_tools: false },
+    Kind { id: "grok", name: "Grok Build", via: Via::Program("grok"), get: "https://docs.x.ai/build/overview", finds_tools: true },
+    Kind { id: "anthropic", name: "Anthropic", via: Via::Api(Api { dialect: Dialect::Anthropic, base: "https://api.anthropic.com" }), get: "https://platform.claude.com/settings/keys", finds_tools: false },
+    Kind { id: "openai", name: "OpenAI", via: Via::Api(Api { dialect: Dialect::OpenAi, base: "https://api.openai.com/v1" }), get: "https://platform.openai.com/api-keys", finds_tools: false },
+    Kind { id: "xai", name: "xAI", via: Via::Api(Api { dialect: Dialect::OpenAi, base: "https://api.x.ai/v1" }), get: "https://console.x.ai", finds_tools: false },
+    Kind { id: "google", name: "Google", via: Via::Api(Api { dialect: Dialect::OpenAi, base: "https://generativelanguage.googleapis.com/v1beta/openai" }), get: "https://aistudio.google.com/apikey", finds_tools: false },
+    Kind { id: "openrouter", name: "OpenRouter", via: Via::Api(Api { dialect: Dialect::OpenAi, base: "https://openrouter.ai/api/v1" }), get: "https://openrouter.ai/keys", finds_tools: false },
+    Kind { id: "deepseek", name: "DeepSeek", via: Via::Api(Api { dialect: Dialect::OpenAi, base: "https://api.deepseek.com/v1" }), get: "https://platform.deepseek.com/api_keys", finds_tools: false },
+    // Anything else that speaks chat completions, at an address the user gives: a gateway, a model run on this computer.
+    Kind { id: CUSTOM, name: "OpenAI-compatible", via: Via::Api(Api { dialect: Dialect::OpenAi, base: "" }), get: "", finds_tools: false },
 ];
 
-/// The brains' ids, for saying which there are: "claude, codex or grok".
+/// The provider whose address is the user's to give.
+pub const CUSTOM: &str = "custom";
+
+/// The programs' ids, for saying which there are: "claude, codex or grok".
+/// (A provider with a key is named in Settings › AI, once it's connected.)
 pub fn ids() -> String {
-    let ids = KINDS.map(|k| k.id);
+    let ids: Vec<&str> = KINDS.iter().filter(|k| k.program().is_some()).map(|k| k.id).collect();
     format!("{} or {}", ids[..ids.len() - 1].join(", "), ids[ids.len() - 1])
 }
 
 /// What to say when there's nothing to answer with.
 pub fn none_here() -> String {
-    let programs: Vec<String> = KINDS.iter().map(|k| format!("{} ({})", k.name, k.get)).collect();
+    let programs: Vec<String> = KINDS.iter().filter(|k| k.program().is_some()).map(|k| format!("{} ({})", k.name, k.get)).collect();
     let programs = format!("{} or {}", programs[..programs.len() - 1].join(", "), programs[programs.len() - 1]);
-    format!("The chat needs something to answer with: {programs} on this computer, signed in.")
+    format!("The chat needs something to answer with: {programs} on this computer, signed in, or a provider connected with its API key in Settings › AI.")
 }
 
 pub fn kind(id: &str) -> Option<&'static Kind> {
@@ -165,15 +233,24 @@ pub fn path_for_child() -> std::ffi::OsString {
 }
 
 /// The brains there are to use here, in the order Muxin prefers them: the
-/// ones whose program this computer has.
-pub fn available() -> Vec<&'static Kind> {
-    KINDS.iter().filter(|k| find(k.program).is_some()).collect()
+/// programs this computer has, then the providers the user connected.
+pub fn available(chat: &crate::config::ChatSettings) -> Vec<&'static Kind> {
+    KINDS
+        .iter()
+        .filter(|k| match k.via {
+            Via::Program(program) => find(program).is_some(),
+            Via::Api(_) => chat.providers.contains_key(k.id),
+        })
+        .collect()
 }
 
-/// Starts a brain ("claude", "codex", "grok"). Nothing runs until its first turn.
+/// Starts a brain that's a program ("claude", "codex", "grok"). Nothing runs
+/// until its first turn. (One reached with a key is made where the chat is
+/// opened: it calls Muxin's tools itself, so it needs the chat's gate.)
 pub fn start(id: &str, setup: Setup) -> Result<Box<dyn Brain>, String> {
     let kind = kind(id).ok_or_else(|| format!("\"{id}\" isn't a brain Muxin knows. Use {}.", ids()))?;
-    let program = find(kind.program).ok_or_else(|| format!("{} isn't on this computer. Get it at {}.", kind.name, kind.get))?;
+    let program = kind.program().ok_or_else(|| format!("{} isn't a program to start.", kind.name))?;
+    let program = find(program).ok_or_else(|| format!("{} isn't on this computer. Get it at {}.", kind.name, kind.get))?;
     Ok(match kind.id {
         "claude" => Box::new(claude::Claude::new(program, setup)),
         "grok" => Box::new(grok::Grok::new(program, setup)),
@@ -228,11 +305,21 @@ mod tests {
 
     #[test]
     fn every_program_has_a_driver_and_a_place_to_get_it() {
-        for kind in KINDS.iter() {
+        for kind in KINDS.iter().filter(|k| k.id != CUSTOM) {
             assert!(kind.get.starts_with("https://"), "{}", kind.id);
         }
-        // In the order they're chosen when the user hasn't.
-        assert_eq!(KINDS.map(|k| k.id), ["claude", "codex", "grok"]);
+        // The programs come first, in the order they're chosen when the user hasn't; then the providers reached with a key.
+        assert_eq!(KINDS.iter().filter(|k| k.program().is_some()).map(|k| k.id).collect::<Vec<_>>(), ["claude", "codex", "grok"]);
+        assert_eq!(KINDS.iter().position(|k| k.api().is_some()), Some(3));
+        assert_eq!(KINDS.iter().filter(|k| k.api().is_some()).map(|k| k.id).collect::<Vec<_>>(), ["anthropic", "openai", "xai", "google", "openrouter", "deepseek", "custom"]);
+        // Each provider has an address of its own, but the one whose address is the user's to give.
+        assert!(KINDS.iter().filter_map(|k| k.api().map(|api| (k.id, api.base))).all(|(id, base)| (id == CUSTOM) == base.is_empty()));
+        assert_eq!(kind("anthropic").and_then(|k| k.api()).map(|api| api.dialect), Some(Dialect::Anthropic));
+        // Only the programs on this computer answer until a provider is connected.
+        let mut chat = crate::config::ChatSettings::default();
+        assert!(available(&chat).iter().all(|k| k.program().is_some()));
+        chat.providers.insert("openrouter".into(), Default::default());
+        assert_eq!(available(&chat).last().map(|k| k.id), Some("openrouter"));
         assert_eq!(KINDS.iter().filter(|k| k.finds_tools).map(|k| k.id).collect::<Vec<_>>(), ["grok"]);
     }
 

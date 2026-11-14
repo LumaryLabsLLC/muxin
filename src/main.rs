@@ -1657,7 +1657,7 @@ struct ChatArgs {
     #[arg(long, value_name = "ID")]
     chat: Option<String>,
 
-    /// What answers: claude (Claude Code), codex or grok (Grok Build) [default: your setting, else the first there is]
+    /// What answers: claude (Claude Code), codex or grok (Grok Build), or a provider you connected (anthropic, openai, ...) [default: your setting, else the first there is]
     #[arg(long, value_name = "NAME")]
     brain: Option<String>,
 
@@ -1669,9 +1669,29 @@ struct ChatArgs {
     #[arg(long, value_name = "LEVEL")]
     effort: Option<String>,
 
+    /// Run the model the faster way, where it has one (it costs more): fast, or standard
+    #[arg(long, value_name = "SPEED")]
+    speed: Option<String>,
+
     /// List the models there are to answer with, and the efforts each takes (with --brain: that one's)
     #[arg(long)]
     models: bool,
+
+    /// List the providers: the programs on this computer, and the ones connected with an API key
+    #[arg(long)]
+    providers: bool,
+
+    /// Connect a provider with its API key, read from stdin so it stays out of your shell's history: `pbpaste | muxin chat --connect anthropic` (anthropic, openai, xai, google, openrouter, deepseek, custom)
+    #[arg(long, value_name = "PROVIDER")]
+    connect: Option<String>,
+
+    /// With --connect: where the provider is reached, when it isn't at its own address (needed for custom)
+    #[arg(long, value_name = "URL", requires = "connect")]
+    base: Option<String>,
+
+    /// Disconnect a provider: its key and its list of models are forgotten
+    #[arg(long, value_name = "PROVIDER")]
+    disconnect: Option<String>,
 
     /// A file that goes with the message: text, a picture (PNG, JPEG, GIF, WebP) or a PDF (repeat for more)
     #[arg(long, value_name = "FILE")]
@@ -1693,7 +1713,7 @@ struct ChatArgs {
     #[arg(long, value_name = "ID")]
     delete: Option<String>,
 
-    /// Turn the chat on: it's off until you do (the same switch as Settings › Chat in the app)
+    /// Turn the chat on: it's off until you do (the same switch as Settings › AI in the app)
     #[arg(long)]
     on: bool,
 
@@ -3159,7 +3179,10 @@ fn chat(args: ChatArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     let engine = Engine::new(args.common.paths(), args.demo);
     let ask = chat::term::Ask {
         prompt: args.prompt.join(" "),
-        options: chat::Options { chat: args.chat, brain: args.brain, mode: args.bypass.then_some(chat::gate::Mode::Bypass), model: args.model, effort: args.effort },
+        options: chat::Options { chat: args.chat, brain: args.brain, mode: args.bypass.then_some(chat::gate::Mode::Bypass), model: args.model, effort: args.effort, speed: args.speed },
+        providers: args.providers,
+        connect: args.connect.map(|provider| (provider, args.base.unwrap_or_default())),
+        disconnect: args.disconnect,
         list: args.list,
         switch: if args.on { Some(true) } else if args.off { Some(false) } else { None },
         delete: args.delete,

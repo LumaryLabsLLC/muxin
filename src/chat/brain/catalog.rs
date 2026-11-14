@@ -1,18 +1,24 @@
 //! The models a brain can answer with, and how hard each can be asked to
 //! think: what the chat's two pickers offer.
 //!
-//! Nobody is asked over the network for this. Codex and Grok Build each keep
-//! the list their own picker shows in a file beside their settings, kept up
-//! to date by the program itself; that file is read. Claude Code has no such
-//! list: it takes a model by a short name that always means the newest of
-//! its kind, and those names are few.
+//! For the programs, nobody is asked over the network. Codex and Grok Build
+//! each keep the list their own picker shows in a file beside their
+//! settings, kept up to date by the program itself; that file is read.
+//! Claude Code has no such list: it takes a model by a short name that
+//! always means the newest of its kind, and those names are few.
+//!
+//! A provider reached with an API key is asked for its list (anthropic.rs,
+//! openai.rs) when it's connected and when the user asks again, and what it
+//! answered is kept in Muxin's folder (`models/<provider>.json`), so the
+//! pickers don't wait on the network or read the key.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// A model a brain can answer with.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Model {
     /// What the brain is told to use.
     pub id: String,
@@ -21,17 +27,21 @@ pub struct Model {
     /// How hard it can be asked to think, least first. Empty: it has no such choice.
     pub efforts: Vec<Effort>,
     /// The effort it uses when none is chosen.
+    #[serde(default)]
     pub effort: Option<String>,
+    /// It can be run a faster way, for more ("fast").
+    #[serde(default)]
+    pub fast: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Effort {
     pub id: String,
     pub name: String,
 }
 
 impl Effort {
-    fn of(id: &str) -> Effort {
+    pub fn of(id: &str) -> Effort {
         Effort { id: id.to_string(), name: effort_name(id) }
     }
 }
@@ -58,7 +68,7 @@ pub fn effort_name(id: &str) -> String {
 }
 
 /// Least to most, for a list that came in another order.
-fn rank(effort: &str) -> usize {
+pub(super) fn rank(effort: &str) -> usize {
     ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].iter().position(|e| *e == effort).unwrap_or(usize::MAX)
 }
 
@@ -87,7 +97,7 @@ fn claude() -> Vec<Model> {
     let efforts: Vec<Effort> = ["low", "medium", "high", "xhigh", "max"].map(Effort::of).to_vec();
     [("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]
         .into_iter()
-        .map(|(id, name)| Model { id: id.into(), name: name.into(), efforts: efforts.clone(), effort: None })
+        .map(|(id, name)| Model { id: id.into(), name: name.into(), efforts: efforts.clone(), effort: None, fast: false })
         .collect()
 }
 
@@ -106,7 +116,9 @@ fn openai(list: &Value) -> Vec<Model> {
             let id = m["slug"].as_str()?.to_string();
             let mut efforts: Vec<Effort> = m["supported_reasoning_levels"].as_array().into_iter().flatten().filter_map(|l| l["effort"].as_str()).map(Effort::of).collect();
             efforts.sort_by_key(|e| rank(&e.id));
-            Some(Model { name: m["display_name"].as_str().filter(|n| !n.is_empty()).unwrap_or(&id).to_string(), id, efforts, effort: m["default_reasoning_level"].as_str().map(str::to_string) })
+            // A faster tier, where Codex says the model has one.
+            let fast = m["additional_speed_tiers"].as_array().is_some_and(|tiers| tiers.iter().any(|t| t == "fast"));
+            Some(Model { name: m["display_name"].as_str().filter(|n| !n.is_empty()).unwrap_or(&id).to_string(), id, efforts, effort: m["default_reasoning_level"].as_str().map(str::to_string), fast })
         })
         .collect()
 }
@@ -128,9 +140,43 @@ fn grok(list: &Value) -> Vec<Model> {
                 .collect();
             efforts.sort_by_key(|e| rank(&e.id));
             let effort = levels.iter().find(|l| l["default"] == true).and_then(|l| l["value"].as_str()).or(info["reasoning_effort"].as_str()).map(str::to_string);
-            Some(Model { name: info["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(&id).to_string(), id, efforts, effort })
+            // Grok's faster models are models of their own, picked like any other.
+            Some(Model { name: info["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(&id).to_string(), id, efforts, effort, fast: false })
         })
         .collect()
+}
+
+/// Where the list a provider answered with is kept, in Muxin's folder.
+fn kept_at(dir: &Path, provider: &str) -> PathBuf {
+    dir.join("models").join(format!("{provider}.json"))
+}
+
+/// A brain's models: a program's as `of` reads them, a provider's as it
+/// last answered (`keep`). `dir` is Muxin's folder.
+pub fn known(dir: &Path, brain: &str) -> Vec<Model> {
+    match super::kind(brain).and_then(|kind| kind.api()) {
+        Some(_) => read(&kept_at(dir, brain)).and_then(|list| serde_json::from_value(list).ok()).unwrap_or_default(),
+        None => of(brain),
+    }
+}
+
+/// Keeps the list a provider answered with.
+pub fn keep(dir: &Path, provider: &str, models: &[Model]) {
+    let path = kept_at(dir, provider);
+    if let Some(folder) = path.parent() {
+        let _ = std::fs::create_dir_all(folder);
+    }
+    let _ = crate::config::write_atomic(&path, &serde_json::to_vec(models).unwrap_or_default());
+}
+
+/// How long ago a provider's list was kept. None when there isn't one.
+pub fn age(dir: &Path, provider: &str) -> Option<std::time::Duration> {
+    std::fs::metadata(kept_at(dir, provider)).ok()?.modified().ok()?.elapsed().ok()
+}
+
+/// Forgets it, when the provider is disconnected.
+pub fn forget(dir: &Path, provider: &str) {
+    let _ = std::fs::remove_file(kept_at(dir, provider));
 }
 
 /// A model by its id, among `models`.

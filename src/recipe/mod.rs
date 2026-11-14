@@ -265,6 +265,16 @@ pub struct MachineCheck {
     pub components: Vec<ComponentState>,
 }
 
+impl MachineCheck {
+    /// The components found there that have an update step: what the machine
+    /// page's Update asks for.
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub fn updatable(&self) -> Vec<String> {
+        let has_update = |id: &str| catalog().ok().and_then(|c| c.get(id)).is_some_and(|c| c.update.is_some());
+        self.components.iter().filter(|c| c.result == "present" && has_update(&c.id)).map(|c| c.id.clone()).collect()
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ComponentState {
     pub id: String,
@@ -503,6 +513,10 @@ mod tests {
         assert_eq!(results, [("git", "present"), ("gh", "missing"), ("node", "present"), ("claude", "unsupported")]);
         let err = read_checks("os=linux\ncheck.git=present\n", &all).unwrap_err();
         assert_eq!(err, "The check didn't say whether GitHub CLI is there.");
+        // Only what's there and has an update step can be updated.
+        assert!(found.updatable().is_empty(), "git and Node.js have none; Claude Code isn't there");
+        let there = read_checks("os=linux\ncheck.git=present\ncheck.gh=present\ncheck.node=present\ncheck.claude=present\n", &all).unwrap();
+        assert_eq!(there.updatable(), ["claude"]);
     }
 
     /// The script, run here: checks that fail, read stdin, exit or don't parse

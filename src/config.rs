@@ -633,15 +633,15 @@ pub struct Settings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ChatSettings {
-    /// What answers: "claude" (Claude Code), "codex", "grok" (Grok Build), or
-    /// "chatgpt" (Muxin's own, on a ChatGPT plan signed in to); "" for the
-    /// first there is.
+    /// The chat is on. Off (the default), the app has no Chat page and
+    /// `muxin chat` answers nothing: the user turns it on, in Settings › Chat
+    /// or with `muxin chat --on`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub enabled: bool,
+    /// What answers: "claude" (Claude Code), "codex" or "grok" (Grok Build);
+    /// "" for the first there is.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub brain: String,
-    /// The model that answers on a ChatGPT plan, by its id; "" for the first
-    /// one the account lists.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub model: String,
     /// "bypass": new chats start without asking before tools that change
     /// things. Anything else (the default): they ask.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -668,13 +668,11 @@ pub struct ChatPick {
 
 impl ChatSettings {
     /// What a new chat with `brain` starts with: the model and effort picked
-    /// for it last. (The ChatGPT model chosen in Settings, before picks were
-    /// kept, still counts.)
+    /// for it last.
     pub fn pick(&self, brain: &str) -> (Option<String>, Option<String>) {
         let some = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
         let picked = self.picked.get(brain);
-        let model = picked.and_then(|p| some(&p.model)).or_else(|| some(&self.model).filter(|_| brain == "chatgpt"));
-        (model, picked.and_then(|p| some(&p.effort)))
+        (picked.and_then(|p| some(&p.model)), picked.and_then(|p| some(&p.effort)))
     }
 
     fn is_default(&self) -> bool {

@@ -49,6 +49,11 @@ pub enum MenuTarget {
     ChatModel,
     /// How hard the chat's model is asked to think.
     ChatEffort,
+    /// Whether the chat asks before a tool changes something.
+    ChatMode,
+    /// One of the assistant's chats, by id: rename it, delete it. `above`:
+    /// from the button under the open chat, so it opens upward.
+    Chat { id: String, above: bool },
 }
 
 pub struct ContextMenu {
@@ -68,6 +73,10 @@ enum Action {
     ChatPick(String, Option<String>),
     /// The chat's model is asked to think this hard (None: its own choice).
     ChatEffort(Option<String>),
+    /// The chat asks before a tool changes something, or (true) doesn't.
+    ChatMode(bool),
+    RenameChat(String),
+    DeleteChat(String),
     NewTerminal(String),
     ShowDesktop(String),
     /// The machine's own remote desktop (RDP, VNC), in this computer's app for it.
@@ -167,6 +176,9 @@ enum Item {
     Separator,
     /// A row that opens more items beside it, showing the one picked (`value`).
     Submenu { label: String, value: Option<String>, glyph: Glyph, items: Vec<Item> },
+    /// One of a few to choose between, with a line about it under its name
+    /// and a check on the one in use.
+    Choice { label: String, about: String, picked: bool, action: Action },
 }
 
 impl Item {
@@ -177,6 +189,7 @@ impl Item {
             Item::Note(text) => text.chars().count() as f32 * 6.8 + 32.,
             Item::Separator => 0.,
             Item::Submenu { label, value, .. } => (label.chars().count() + value.as_ref().map_or(0, |v| v.chars().count() + 2)) as f32 * 7.4 + 84.,
+            Item::Choice { label, about, .. } => (label.chars().count() as f32 * 7.6).max(about.chars().count() as f32 * 6.6) + 64.,
         }
     }
 }
@@ -300,7 +313,7 @@ impl Root {
     }
 
     pub(super) fn open_menu(&mut self, target: MenuTarget, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let above = matches!(target, MenuTarget::ChatModel | MenuTarget::ChatEffort);
+        let above = matches!(target, MenuTarget::ChatModel | MenuTarget::ChatEffort | MenuTarget::ChatMode | MenuTarget::Chat { above: true, .. });
         self.context_menu = Some(ContextMenu { target, position, submenu: None, above });
         cx.notify();
     }
@@ -511,6 +524,19 @@ impl Root {
                 items
             }
             MenuTarget::Snippets(id) => snippet_items(id, &self.engine.settings().snippets),
+            MenuTarget::ChatMode => {
+                let Some(chat) = &self.chat else { return Vec::new() };
+                let bypass = chat.read(cx).bypasses();
+                vec![
+                    Item::Note("Mode".into()),
+                    Item::Choice { label: "Ask permissions".into(), about: "Asks before anything that changes something".into(), picked: !bypass, action: Action::ChatMode(false) },
+                    Item::Choice { label: "Bypass permissions".into(), about: "Runs every tool without asking".into(), picked: bypass, action: Action::ChatMode(true) },
+                ]
+            }
+            MenuTarget::Chat { id, .. } => vec![
+                act("Rename…", "pencil", Action::RenameChat(id.clone())),
+                Item::Action { label: "Delete chat…".into(), glyph: Glyph::Icon("trash-2"), action: Action::DeleteChat(id.clone()), danger: true },
+            ],
             MenuTarget::ChatModel => {
                 let Some(chat) = &self.chat else { return Vec::new() };
                 let brains = chat.read(cx).model_choices();
@@ -840,6 +866,13 @@ impl Root {
                     chat.update(cx, |view, cx| view.pick_effort(effort, cx));
                 }
             }
+            Action::ChatMode(bypass) => {
+                if let Some(chat) = self.chat.clone() {
+                    chat.update(cx, |view, cx| view.set_bypass(bypass, cx));
+                }
+            }
+            Action::RenameChat(id) => self.show_rename(super::dialogs::RenameTarget::Chat(id), window, cx),
+            Action::DeleteChat(id) => self.confirm_delete_chat(&id, window, cx),
             Action::NewTerminal(machine) => {
                 // A shell in the home folder, right away.
                 let direct = self.snapshot.machines.iter().find(|m| m.id == machine).is_some_and(super::sessions::runs_in_app);
@@ -1083,6 +1116,29 @@ impl Root {
                 .child(div().w(px(18.)).flex().justify_center().child(menu_glyph(theme, glyph)))
                 .child(div().w(px(width - 56.)).truncate().child(label))
                 .into_any_element(),
+            Item::Choice { label, about, picked, action } => div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .mx(px(4.))
+                .px(px(8.))
+                .py(px(6.))
+                .rounded(crate::ui::kit::corner(6.))
+                .cursor_pointer()
+                .hover(|st| st.bg(theme.element_hover))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .w(px(width - 52.))
+                        .child(div().truncate().text_size(px(13.)).text_color(theme.text).child(label))
+                        .child(div().truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(about)),
+                )
+                .child(div().w(px(16.)).flex().justify_center().when(picked, |d| d.child(icon("check", 14., theme.accent))))
+                .on_click(cx.listener(move |this, _, window, cx| this.run_menu_action(action.clone(), window, cx)))
+                .into_any_element(),
             Item::Action { label, glyph, action, danger } => {
                 let color = if danger { theme.error } else { theme.text };
                 let glyph = menu_glyph(theme, glyph);
@@ -1178,7 +1234,7 @@ mod tests {
         items
             .iter()
             .map(|i| match i {
-                Item::Action { label, .. } | Item::Off { label, .. } | Item::Submenu { label, .. } => label.clone(),
+                Item::Action { label, .. } | Item::Off { label, .. } | Item::Submenu { label, .. } | Item::Choice { label, .. } => label.clone(),
                 Item::Note(t) => t.clone(),
                 Item::Separator => "-".into(),
             })

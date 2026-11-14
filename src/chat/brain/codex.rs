@@ -1,4 +1,4 @@
-//! Codex as a chat's brain, on the user's own ChatGPT plan.
+//! Codex as a chat's brain, on the user's own plan.
 //!
 //! Codex has no way to keep one process for a whole conversation without its
 //! terminal, so each turn is a `codex exec --json` that ends with the turn;
@@ -204,7 +204,7 @@ impl Brain for Codex {
 
     fn attach(&mut self, files: Vec<Attached>) -> Result<(), String> {
         if let Some(file) = files.iter().find(|f| !matches!(f.kind, Kind::Image(_))) {
-            return Err(format!("Codex can't be given {} here: it takes pictures and text. Claude Code and your ChatGPT plan read PDFs.", file.name));
+            return Err(format!("Codex can't be given {} here: it takes pictures and text. Claude Code reads PDFs.", file.name));
         }
         self.images = files.into_iter().map(|f| f.path).collect();
         Ok(())

@@ -662,11 +662,13 @@ impl Root {
         }));
         // Recent commands, from before a restart (not in the demo).
         let run_history = if engine.is_demo() { Vec::new() } else { crate::config::read_recent(&engine.paths().recent_commands) };
+        // The chat is the first page once it's turned on; until then, the overview is.
+        let first = if engine.settings().chat.enabled { Route::Chat } else { Route::Overview };
         let mut ws = Root {
             engine,
             snapshot,
             focus: cx.focus_handle(),
-            route: Route::Chat,
+            route: first,
             back: Vec::new(),
             forward: Vec::new(),
             filter,
@@ -862,6 +864,11 @@ impl Root {
             super::theme::remember(cx, |a| a.favorite_machines.retain(|f| ids.contains(f)));
         }
         self.snapshot = snapshot;
+        // The chat was turned off (a change of settings comes with a snapshot):
+        // its page goes, and what was being answered on it stops.
+        if self.chat.is_some() && !self.chat_on() {
+            self.chat = None;
+        }
         cx.notify();
     }
 
@@ -894,8 +901,18 @@ impl Root {
     // Navigation
 
     pub(super) fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+        // The chat is off until it's turned on: asked for (its shortcut, the
+        // palette, the menu), the place to turn it on opens instead.
+        if route == Route::Chat && !self.chat_on() {
+            return self.open_settings_tab(super::settings::SettingsTab::Chat, window, cx);
+        }
         self.show(route, cx);
         self.on_route_changed(window, cx);
+    }
+
+    /// The user turned the chat on (Settings › Chat).
+    pub(super) fn chat_on(&self) -> bool {
+        self.engine.settings().chat.enabled
     }
 
     /// Navigation that doesn't need the window (the settings page is created on first render).
@@ -1003,7 +1020,7 @@ impl Root {
             Route::Chat => {
                 let view = self.chat_view(window, cx);
                 // What Settings changed meanwhile (a sign-in, how new chats start) shows.
-                view.update(cx, |view, cx| view.refresh(window, cx));
+                view.update(cx, |view, cx| view.refresh(cx));
                 window.focus(&view.focus_handle(cx));
             }
             Route::Services(id) => {
@@ -1114,6 +1131,13 @@ impl Root {
     /// Opens a view by name; see `--view` in main.rs.
     pub fn open_view(&mut self, view: &str, window: &mut Window, cx: &mut Context<Self>) {
         let (kind, arg) = view.split_once(':').unwrap_or((view, ""));
+        // A view of the chat on the simulated machines turns the chat on for
+        // that run (nothing is kept there): what these views are for, showing it.
+        if (kind.starts_with("chat") || kind == "script") && self.engine.is_demo() && !self.chat_on() {
+            let mut settings = self.engine.settings();
+            settings.chat.enabled = true;
+            let _ = self.engine.update_settings(settings);
+        }
         match kind {
             "chat" => self.navigate(Route::Chat, window, cx),
             "chat-say" => {
@@ -1160,12 +1184,34 @@ impl Root {
                     cx.notify();
                     return;
                 }
+                // "chat-menu:chat": the menu of the chat used last (rename, delete), where its row's button is.
+                if which == "chat" {
+                    if let Some(meta) = crate::chat::store(&self.engine).list().into_iter().find(|m| !m.title.is_empty()) {
+                        let size = window.viewport_size();
+                        self.open_menu(super::menu::MenuTarget::Chat { id: meta.id, above: false }, gpui::point(size.width - px(190.), size.height * 0.5), cx);
+                    }
+                    return;
+                }
+                // "chat-menu:mode": whether it asks first, under the box at its left.
+                if which == "mode" {
+                    let view = self.chat_view(window, cx);
+                    let at = view.read(cx).picker_anchor(false, window);
+                    let width = if view.read(cx).bypasses() { 178. } else { 158. };
+                    self.open_menu(super::menu::MenuTarget::ChatMode, gpui::point(at.x - px(width), at.y), cx);
+                    return;
+                }
                 let effort = which == "effort";
                 let view = self.chat_view(window, cx);
                 let position = view.read(cx).picker_anchor(effort, window);
                 let target = if effort { super::menu::MenuTarget::ChatEffort } else { super::menu::MenuTarget::ChatModel };
                 self.open_menu(target, position, cx);
                 self.open_submenu_named(brain, cx);
+            }
+            // "chat-rename:<id>" and "chat-delete:<id>" (or "last"): the dialog that names a chat, or asks before deleting it.
+            "chat-rename" | "chat-delete" => {
+                self.navigate(Route::Chat, window, cx);
+                let Ok(meta) = crate::chat::find(&crate::chat::store(&self.engine), arg) else { return };
+                if kind == "chat-rename" { self.show_rename(RenameTarget::Chat(meta.id), window, cx) } else { self.confirm_delete_chat(&meta.id, window, cx) }
             }
             // Typed a letter at a time, then sent: "chat-type:What needs me?",
             // or "chat-type:4000:What needs me?" to start after that many milliseconds.
@@ -1972,11 +2018,56 @@ impl Root {
                     None => return,
                 }
             }
+            RenameTarget::Chat(id) => match crate::chat::store(&self.engine).get(id) {
+                Some(meta) => (meta.title, String::new()),
+                None => return,
+            },
         };
         let engine = self.engine.clone();
         let dialog = cx.new(|cx| RenameDialog::new(engine, target, current, machine, window, cx));
         self.show_modal(Modal::Rename(dialog.clone()), window, cx);
-        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_chat_dialog_event));
+    }
+
+    /// A dialog that may have renamed or deleted a chat closed: the chat
+    /// page shows it as it is now.
+    fn on_chat_dialog_event<D>(&mut self, dialog: &Entity<D>, event: &DialogEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_dialog_event(dialog, event, window, cx);
+        if let Some(chat) = self.chat.clone() {
+            chat.update(cx, |view, cx| view.refresh_open(cx));
+        }
+    }
+
+    /// Asks before a chat is deleted: it can't be brought back.
+    pub(super) fn confirm_delete_chat(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(meta) = crate::chat::store(&self.engine).get(id) else { return };
+        let mut text = if meta.title.is_empty() {
+            "What was said in it and the files attached in it are deleted from this computer.".to_string()
+        } else {
+            format!("“{}”: what was said in it and the files attached in it are deleted from this computer.", meta.title)
+        };
+        // What isn't Muxin's to delete.
+        if let Some(kind) = crate::chat::brain::kind(&meta.brain) {
+            text.push_str(&format!(" {} keeps its own record of the conversation, which stays where it is.", kind.name));
+        }
+        let chat_id = id.to_string();
+        let dialog = cx.new(|cx| {
+            ConfirmDialog::new(
+                "Delete this chat?".to_string(),
+                text,
+                "Delete chat",
+                None,
+                move |_, engine| {
+                    crate::chat::store(engine).delete(&chat_id).map_err(|e| format!("Couldn't delete it: {e}"))?;
+                    Ok(None)
+                },
+                self.engine.clone(),
+                window,
+                cx,
+            )
+        });
+        self.show_modal(Modal::Confirm(dialog.clone()), window, cx);
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_chat_dialog_event));
     }
 
     pub(super) fn show_add_machine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2760,7 +2851,7 @@ impl Root {
                     .gap(px(2.))
                     .px(px(10.))
                     .pt(px(6.))
-                    .child(self.nav_item("nav-chat", "message-square", kit::tiles::CHAT, "Chat", None, Route::Chat, "chat", cx))
+                    .when(self.chat_on(), |d| d.child(self.nav_item("nav-chat", "message-square", kit::tiles::CHAT, "Chat", None, Route::Chat, "chat", cx)))
                     .child(self.nav_item("nav-overview", "gauge", kit::tiles::OVERVIEW, "Overview", None, Route::Overview, "overview", cx))
                     .child(self.nav_item("nav-jobs", "workflow", kit::tiles::JOBS, "Jobs", Some(s.counts.queued + s.counts.running), Route::Jobs, "jobs", cx))
                     .child(self.nav_item("nav-boxes", "box", super::boxes::TILE, "Boxes", Some(s.boxes.iter().filter(|b| b.state != "paused").count()), Route::Boxes, "boxes", cx))
@@ -3560,7 +3651,13 @@ impl Root {
     fn render_toolbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let s = self.snapshot.clone();
-        let (section, mut title) = route_title(&s, &self.route);
+        let (mut section, mut title) = route_title(&s, &self.route);
+        // An open chat goes by its own title.
+        if self.route == Route::Chat
+            && let Some(name) = self.chat.as_ref().and_then(|chat| chat.read(cx).title())
+        {
+            (section, title) = (Some("Chat"), name);
+        }
         // A shared machine goes by its name.
         if let Route::Shared(id) = &self.route
             && let Some(j) = self.joined.iter().find(|j| &j.id == id && j.info.whole_machine)
@@ -3887,12 +3984,19 @@ impl Root {
             let engine = self.engine.clone();
             let view = cx.new(|cx| super::chat::ChatView::new(engine, window, cx));
             // Its pickers are menus of this window's.
-            self._subscriptions.push(cx.subscribe(&view, |this, _, event: &super::chat::ChatEvent, cx| match event {
+            self._subscriptions.push(cx.subscribe_in(&view, window, |this, _, event: &super::chat::ChatEvent, window, cx| match event {
                 super::chat::ChatEvent::Menu { effort, position } => {
                     let target = if *effort { super::menu::MenuTarget::ChatEffort } else { super::menu::MenuTarget::ChatModel };
                     // Just above the button that was clicked.
                     this.open_menu(target, gpui::point(position.x - px(14.), position.y - px(18.)), cx);
                 }
+                super::chat::ChatEvent::ModeMenu { position } => this.open_menu(super::menu::MenuTarget::ChatMode, gpui::point(position.x - px(14.), position.y - px(18.)), cx),
+                super::chat::ChatEvent::ChatMenu { id, position, above } => {
+                    let position = if *above { gpui::point(position.x - px(14.), position.y - px(18.)) } else { *position };
+                    this.open_menu(super::menu::MenuTarget::Chat { id: id.clone(), above: *above }, position, cx);
+                }
+                super::chat::ChatEvent::Rename(id) => this.show_rename(RenameTarget::Chat(id.clone()), window, cx),
+                super::chat::ChatEvent::Delete(id) => this.confirm_delete_chat(id, window, cx),
             }));
             self.chat = Some(view);
         }
@@ -4020,6 +4124,11 @@ impl Root {
 
     fn render_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.route.clone() {
+            // Turned off while its page was showing (or gone back to): the overview shows.
+            Route::Chat if !self.chat_on() => {
+                self.route = Route::Overview;
+                self.render_overview(window, cx).into_any_element()
+            }
             Route::Chat => {
                 let view = self.chat_view(window, cx);
                 // Text only wraps in a width it knows: the page's, less the sidebar.

@@ -1,37 +1,36 @@
 //! The assistant's chat: one conversation with a model that sees and works
 //! with everything Muxin does, through Muxin's own tools (crate::mcp).
 //!
-//! - `brain`: what answers (Claude Code or Codex, on the user's own plan, or
-//!   Muxin's own brain on their ChatGPT plan).
-//! - `account` and `jwt`: signing in with ChatGPT.
-//! - `bridge`: how such a brain reaches the tools of the Muxin that holds
-//!   the chat, rather than a second Muxin of its own.
+//! - `brain`: what answers (Claude Code, Codex or Grok Build, on the user's
+//!   own plan).
+//! - `bridge`: how a brain reaches the tools of the Muxin that holds the
+//!   chat, rather than a second Muxin of its own.
 //! - `tools`: which of Muxin's tools the brain is given in full, and how it
 //!   reaches the rest.
 //! - `risk` and `gate`: what a tool call can change, and asking the user
 //!   before it does.
 //! - `store`: chats on disk.
+//! - `attach` and `mention`: what goes with a message, files and the things it points at.
 //! - `prompt`: what the assistant is told about itself.
+//! - `command`: what a message that starts with "/" does instead of being said.
 //! - `term`: the chat in a terminal (`muxin chat`).
 //! - `live`: a chat running by itself, for the app's page.
 //!
 //! `Chat` puts them together: it holds one conversation and runs its turns.
 
-pub mod account;
 pub mod attach;
 pub mod brain;
 pub mod bridge;
+pub mod command;
 pub mod gate;
-pub mod jwt;
 // Only the app's page runs a chat this way.
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub mod live;
+pub mod mention;
 pub mod prompt;
 pub mod risk;
 pub mod store;
 pub mod term;
-#[cfg(test)]
-pub mod testing;
 pub mod tools;
 
 use std::sync::Arc;
@@ -49,7 +48,7 @@ use store::{Item, Meta, Store};
 pub struct Options {
     /// A chat's id to go on with, or "last" for the one used last. None: a new chat.
     pub chat: Option<String>,
-    /// "claude", "codex", "chatgpt" or "grok". None: the chat's own, else the user's setting,
+    /// "claude", "codex" or "grok". None: the chat's own, else the user's setting,
     /// else the first one installed.
     pub brain: Option<String>,
     /// None: the user's setting (asking, unless they chose otherwise).
@@ -95,7 +94,7 @@ pub struct Chat {
     /// The files that go with the next message (`attach`).
     staged: Vec<attach::Attached>,
     /// How a brain that's another program reaches Muxin's tools. Muxin's own needs none.
-    _bridge: Option<Bridge>,
+    _bridge: Bridge,
 }
 
 /// The chats kept for `engine`: the user's, or the simulated machines' own.
@@ -104,36 +103,52 @@ pub fn store(engine: &Engine) -> Store {
     if engine.is_demo() { Store::new(&dir.join("demo")) } else { Store::new(dir) }
 }
 
+/// A chat from before: by its id, or `last` for the one used last. `Err`
+/// says, for the user, that there's none.
+pub fn find(store: &Store, which: &str) -> Result<Meta, String> {
+    match which {
+        "last" => store.list().into_iter().next().ok_or_else(|| "There's no chat to go on with yet.".to_string()),
+        id => store.get(id).ok_or_else(|| format!("There's no chat {id}. `muxin chat --list` shows them.")),
+    }
+}
+
+/// Said when a chat that's open here was deleted somewhere else.
+const DELETED: &str = "This chat was deleted.";
+
+/// Saves a chat's record, with the title it has on disk now: it may have
+/// been renamed since it was opened here (in the app, from another terminal).
+fn save(store: &Store, meta: &mut Meta) {
+    if let Some(kept) = store.get(&meta.id) {
+        meta.title = kept.title;
+    }
+    let _ = store.save(meta);
+}
+
 impl Chat {
     /// Opens a chat: a new one, or one from before. Nothing runs until the
     /// first `send`. Call from inside the runtime.
     pub fn open(engine: &Arc<Engine>, options: Options) -> Result<Chat, String> {
         let settings = engine.settings().chat;
         let store = store(engine);
-        let existing = match options.chat.as_deref() {
-            None => None,
-            Some("last") => Some(store.list().into_iter().next().ok_or("There's no chat to go on with yet.")?),
-            Some(id) => Some(store.get(id).ok_or_else(|| format!("There's no chat {id}. `muxin chat --list` shows them."))?),
-        };
-        let wanted = options.brain.clone().or_else(|| existing.as_ref().map(|m| m.brain.clone())).or_else(|| Some(settings.brain.clone()).filter(|b| !b.trim().is_empty()));
-        // Before anything is made: a brain that isn't here makes no chat.
-        if let Some(id) = &wanted
+        let existing = options.chat.as_deref().map(|which| find(&store, which)).transpose()?;
+        // Before anything is made: a brain that isn't one makes no chat.
+        if let Some(id) = &options.brain
             && brain::kind(id).is_none()
         {
             return Err(format!("\"{id}\" isn't a brain Muxin knows. Use {}.", brain::ids()));
         }
-        let vault = account::Vault::of(&engine.paths().dir);
-        let signed_in = account::current(&vault);
+        // What was asked for, else the chat's own, else the user's setting. One
+        // of those that Muxin no longer has (a chat ChatGPT answered, a setting
+        // from then) is passed over: the first there is takes it up.
+        let known = |id: &str| Some(id.to_string()).filter(|id| brain::kind(id).is_some());
+        let wanted = options.brain.clone().or_else(|| existing.as_ref().and_then(|m| known(&m.brain))).or_else(|| known(&settings.brain));
         let brain_id = match wanted {
             Some(id) => id,
-            None => brain::available(signed_in.as_ref().is_some_and(|a| a.plan)).first().map(|k| k.id.to_string()).ok_or_else(brain::none_here)?,
+            None => brain::available().first().map(|k| k.id.to_string()).ok_or_else(brain::none_here)?,
         };
         let kind = brain::kind(&brain_id).ok_or_else(|| format!("\"{brain_id}\" isn't a brain Muxin knows. Use {}.", brain::ids()))?;
-        match (kind.program, &signed_in) {
-            (Some(program), _) if brain::find(program).is_none() => return Err(format!("{} isn't on this computer. Get it at {}.", kind.name, kind.get)),
-            (None, None) => return Err("Sign in with ChatGPT first: `muxin chat --sign-in`.".into()),
-            (None, Some(account)) if !account.plan => return Err("You're signed in with ChatGPT, but didn't allow Muxin to use your plan. Sign in again and allow it: `muxin chat --sign-in`.".into()),
-            _ => {}
+        if brain::find(kind.program).is_none() {
+            return Err(format!("{} isn't on this computer. Get it at {}.", kind.name, kind.get));
         }
         let mut meta = match existing {
             Some(meta) => meta,
@@ -160,30 +175,20 @@ impl Chat {
         let mode = options.mode.unwrap_or_else(|| Mode::from_setting(&settings.mode));
         let (gate, gate_events) = Gate::new(mode, settings.allow);
         let work = store.work(&meta.id).map_err(|e| format!("Couldn't make the chat's folder: {e}"))?;
-        let (brain, bridge): (Box<dyn brain::Brain>, Option<Bridge>) = match kind.program {
-            // Another program: it reaches Muxin's tools through a bridge to this Muxin.
-            Some(_) => {
-                // The short list, or all of them for a program that finds tools by itself.
-                let front: Arc<dyn crate::mcp::Front> = if kind.finds_tools { tools::Whole::new(gate.clone()) } else { tools::Short::new(gate.clone()) };
-                let bridge = Bridge::start(engine.clone(), front, &engine.paths().dir).map_err(|e| format!("Couldn't open the chat's way to Muxin's tools: {e}"))?;
-                let setup = brain::Setup {
-                    exe: std::env::current_exe().map_err(|e| format!("Couldn't find this Muxin's own program: {e}"))?,
-                    bridge: bridge.path().to_path_buf(),
-                    work,
-                    prompt: prompt::system(),
-                    resume: meta.sessions.get(&brain_id).cloned(),
-                    model,
-                    effort,
-                };
-                (brain::start(&brain_id, setup)?, Some(bridge))
-            }
-            // Muxin's own: it calls the tools right here, and keeps the conversation in the chat's folder.
-            None => {
-                let folder = work.parent().unwrap_or(&work).to_path_buf();
-                let own = brain::responses::ChatGpt::new(engine.clone(), gate.clone(), vault, account::Endpoints::default(), folder, prompt::system(), model).effort(effort);
-                (Box::new(own), None)
-            }
+        // It reaches Muxin's tools through a bridge to this Muxin: the short
+        // list, or all of them for a program that finds tools by itself.
+        let front: Arc<dyn crate::mcp::Front> = if kind.finds_tools { tools::Whole::new(gate.clone()) } else { tools::Short::new(gate.clone()) };
+        let bridge = Bridge::start(engine.clone(), front, &engine.paths().dir).map_err(|e| format!("Couldn't open the chat's way to Muxin's tools: {e}"))?;
+        let setup = brain::Setup {
+            exe: std::env::current_exe().map_err(|e| format!("Couldn't find this Muxin's own program: {e}"))?,
+            bridge: bridge.path().to_path_buf(),
+            work,
+            prompt: prompt::system(),
+            resume: meta.sessions.get(&brain_id).cloned(),
+            model,
+            effort,
         };
+        let brain = brain::start(&brain_id, setup)?;
         Ok(Chat { meta, store, engine: engine.clone(), gate, gate_events, brain, limit: None, staged: Vec::new(), _bridge: bridge })
     }
 
@@ -194,7 +199,7 @@ impl Chat {
         let (model, effort) = (some(model), some(effort));
         self.meta.model = model.clone();
         self.meta.effort = effort.clone();
-        let _ = self.store.save(&self.meta);
+        save(&self.store, &mut self.meta);
         self.brain.choose(model, effort);
     }
 
@@ -207,6 +212,9 @@ impl Chat {
         }
         if self.staged.len() + paths.len() > attach::MOST_FILES {
             return Err(format!("That's {} files. A message takes {}.", self.staged.len() + paths.len(), attach::MOST_FILES));
+        }
+        if self.store.get(&self.meta.id).is_none() {
+            return Err(DELETED.into());
         }
         let home = self.store.home(&self.meta.id).ok_or("This chat has no folder to keep files in.")?;
         self.staged.extend(attach::take(&home, paths)?);
@@ -230,6 +238,12 @@ impl Chat {
     /// To stop a turn, drop this future and call `stop`.
     pub async fn send(&mut self, text: &str, on: &mut (dyn FnMut(Update) + Send)) -> Result<(), String> {
         let Chat { meta, store, engine, gate, gate_events, brain, limit, staged, .. } = self;
+        // Its record as it is now: the chat may have been renamed since it was
+        // opened here, or deleted.
+        match store.get(&meta.id) {
+            Some(kept) => meta.title = kept.title,
+            None => return Err(DELETED.into()),
+        }
         let files = std::mem::take(staged);
         // A call that came in while no turn was running isn't this turn's to ask about.
         while let Ok(event) = gate_events.try_recv() {
@@ -245,8 +259,10 @@ impl Chat {
         meta.updated = store::now();
         let _ = store.save(meta);
 
-        // Text files go in the message's own words; pictures and PDFs, the brain's own way.
-        let message = attach::with_text(text, &files);
+        // What the message points at (@forge) is said after it, by id. Then
+        // text files, in the message's own words; pictures and PDFs go the brain's own way.
+        let pointed = mention::note(text, &mention::things(&engine.current()));
+        let message = attach::with_text(&format!("{text}{pointed}"), &files);
         if let Err(why) = brain.attach(files.into_iter().filter(|f| f.kind != attach::Kind::Text).collect()) {
             let _ = store.append(&meta.id, &Item::Error { at: store::now(), text: why.clone() });
             return Err(why);
@@ -277,7 +293,8 @@ impl Chat {
             let _ = store.append(&meta.id, &Item::Error { at: store::now(), text: why.clone() });
         }
         meta.updated = store::now();
-        let _ = store.save(meta);
+        // With the title it has now: it can be renamed while a turn runs.
+        save(store, meta);
         outcome
     }
 
@@ -327,7 +344,7 @@ fn brain_event(event: brain::Event, meta: &mut Meta, store: &Store, limit: &mut 
         brain::Event::Session(id) => {
             if meta.sessions.get(&meta.brain) != Some(&id) {
                 meta.sessions.insert(meta.brain.clone(), id);
-                let _ = store.save(meta);
+                save(store, meta);
             }
         }
     }
@@ -416,7 +433,7 @@ pub(crate) mod tests {
         let (gate, gate_events) = Gate::new(Mode::Ask, vec![]);
         let bridge = Bridge::start(engine.clone(), tools::Short::new(gate.clone()), &dir).unwrap();
         let brain = Box::new(Scripted { gate: gate.clone(), turns });
-        Chat { meta, store, engine, gate, gate_events, brain, limit: None, staged: Vec::new(), _bridge: Some(bridge) }
+        Chat { meta, store, engine, gate, gate_events, brain, limit: None, staged: Vec::new(), _bridge: bridge }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -560,6 +577,16 @@ pub(crate) mod tests {
         // They went with that message, not the next one.
         chat.send("And now?", &mut |_| {}).await.unwrap();
         assert_eq!(heard.lock().unwrap()[1], "And now?");
+
+        // What a message points at is said after it, by the id Muxin's tools take, and before a file's text.
+        chat.attach(&[dir.join("build.log")]).unwrap();
+        chat.send("Is @forge free? Not @nobody.", &mut |_| {}).await.unwrap();
+        let said = heard.lock().unwrap().last().cloned().unwrap();
+        assert!(said.starts_with("Is @forge free? Not @nobody.\n\n[From Muxin: what this message points at.\n@forge is the machine \"Forge\" (machine_id \"forge\""), "{said}");
+        assert!(said.ends_with(".]\n\nAttached file: build.log\n```\nerror: nope\n```") && !said.contains("@nobody is"), "{said}");
+        // The chat keeps what the user wrote, as they wrote it.
+        assert!(chat.thread().iter().any(|item| matches!(item, Item::User { text, .. } if text == "Is @forge free? Not @nobody.")));
+        heard.lock().unwrap().pop();
         assert_eq!(given.lock().unwrap().len(), 1);
 
         // One this brain can't take: the message isn't sent, and the chat says why.
@@ -574,6 +601,54 @@ pub(crate) mod tests {
         // A file no brain could read is refused when it's attached.
         assert!(chat.attach(&[dir.join("x.bin")]).unwrap_err().starts_with("x.bin isn't text"));
         assert!(chat.attach(&vec![dir.join("build.log"); 11]).unwrap_err().starts_with("That's 11 files."));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_chat_from_a_brain_muxin_no_longer_has_is_taken_up_by_the_first_there_is() {
+        let dir = std::env::temp_dir().join(format!("muxin-chat-gone-brain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let engine = Engine::new(Paths::resolve(Some(dir), None), true);
+        let store = store(&engine);
+        // A chat ChatGPT answered, from when Muxin could answer on a ChatGPT plan.
+        let old = store.create("chatgpt").unwrap();
+        let opened = Chat::open(&engine, Options { chat: Some(old.id.clone()), ..Default::default() });
+        match brain::available().first() {
+            Some(first) => {
+                assert_eq!(opened.map(|chat| chat.meta.brain.clone()), Ok(first.id.to_string()));
+                assert_eq!(store.get(&old.id).unwrap().brain, first.id);
+            }
+            // Nothing on this computer to answer with: that's what's said.
+            None => assert_eq!(opened.err(), Some(brain::none_here())),
+        }
+        // Asked for by name, it's said not to be one.
+        let asked = Chat::open(&engine, Options { brain: Some("chatgpt".into()), ..Default::default() });
+        assert!(asked.err().is_some_and(|why| why.contains("isn't a brain Muxin knows. Use claude, codex or grok.")));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_chat_renamed_or_deleted_elsewhere_stays_that_way() {
+        let mut chat = chat("elsewhere", vec![vec![Step::Say("One.")], vec![Step::Say("Two.")]]);
+        chat.send("restart the runners", &mut |_| {}).await.unwrap();
+        assert_eq!(chat.meta.title, "restart the runners");
+        let store = store(&chat.engine);
+
+        // Renamed while it's open here (in the app, from another terminal): the next turn keeps the name.
+        store.rename(&chat.meta.id, "Runner restarts").unwrap();
+        chat.send("and again", &mut |_| {}).await.unwrap();
+        assert_eq!((chat.meta.title.as_str(), store.get(&chat.meta.id).unwrap().title.as_str()), ("Runner restarts", "Runner restarts"));
+        // So does picking another model.
+        store.rename(&chat.meta.id, "Restarts").unwrap();
+        chat.choose(Some("opus".into()), None);
+        let kept = store.get(&chat.meta.id).unwrap();
+        assert_eq!((kept.title.as_str(), kept.model.as_deref()), ("Restarts", Some("opus")));
+
+        // Deleted while it's open here: said, and nothing makes it again.
+        store.delete(&chat.meta.id).unwrap();
+        assert_eq!(chat.send("still there?", &mut |_| {}).await.unwrap_err(), "This chat was deleted.");
+        chat.choose(None, None);
+        assert_eq!(chat.attach(&[std::env::temp_dir()]).unwrap_err(), "This chat was deleted.");
+        assert!(store.get(&chat.meta.id).is_none() && store.list().is_empty());
+        assert!(!store.home(&chat.meta.id).unwrap().exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -592,7 +667,7 @@ pub(crate) mod tests {
         let err = |options| Chat::open(&engine, options).err().unwrap();
         assert!(err(Options { chat: Some("last".into()), ..Default::default() }).contains("no chat to go on with"));
         assert!(err(Options { chat: Some("c-nope12".into()), ..Default::default() }).contains("no chat c-nope12"));
-        assert!(err(Options { brain: Some("gpt".into()), ..Default::default() }).contains("claude, codex, chatgpt or grok"));
+        assert!(err(Options { brain: Some("gpt".into()), ..Default::default() }).contains("claude, codex or grok"));
         // Nothing was made along the way.
         assert!(store(&engine).list().is_empty());
     }

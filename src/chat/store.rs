@@ -7,6 +7,11 @@
 //!   the app can show a chat without asking that brain for it.
 //! - `work/`: the folder the brain's CLI runs in. Empty, and its own, so the
 //!   CLI picks up no project's settings, and its usage counts under this chat.
+//! - `files/`: the chat's own copies of what was attached in it.
+//!
+//! Deleting a chat deletes that folder. A program that answered in it
+//! (Claude Code, Codex, Grok Build) has its own record of the conversation,
+//! in its own place; that's not Muxin's to delete.
 //!
 //! No sign-in tokens or keys are kept here. A thread can hold what tools
 //! returned (a log, a file's text), so the folder is the user's alone.
@@ -23,6 +28,8 @@ use super::risk::Risk;
 /// A tool result is kept up to this long (a screenshot's or a long log's
 /// text is cut; the brain got all of it).
 const KEEP_RESULT: usize = 4000;
+/// A title the user gave is kept up to this many characters.
+const MOST_TITLE: usize = 80;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Meta {
@@ -30,7 +37,7 @@ pub struct Meta {
     /// The first thing asked, shortened, until the user names it.
     #[serde(default)]
     pub title: String,
-    /// Which brain answers: "claude", "codex", "chatgpt", "grok".
+    /// Which brain answers: "claude", "codex", "grok".
     pub brain: String,
     pub created: i64,
     pub updated: i64,
@@ -184,9 +191,13 @@ impl Store {
         all
     }
 
+    /// Writes a chat's record. Not for a chat that was deleted since: one
+    /// still open somewhere doesn't make it again.
     pub fn save(&self, meta: &Meta) -> std::io::Result<()> {
         let folder = self.folder(&meta.id).ok_or_else(|| std::io::Error::other("not a chat id"))?;
-        self.make(&folder)?;
+        if !folder.is_dir() {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "the chat was deleted"));
+        }
         let path = folder.join("chat.json");
         let tmp = folder.join(format!("chat.json.{}", std::process::id()));
         std::fs::write(&tmp, serde_json::to_vec_pretty(meta).unwrap_or_default())?;
@@ -221,8 +232,27 @@ impl Store {
         text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
     }
 
-    /// Deletes a chat and its thread.
-    #[allow(dead_code)] // For the app's page.
+    /// Names a chat, and gives back its record. No name (or only spaces):
+    /// back to the first thing asked in it.
+    pub fn rename(&self, id: &str, title: &str) -> std::io::Result<Meta> {
+        let mut meta = self.get(id).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "there's no such chat"))?;
+        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        meta.title = if title.is_empty() {
+            let asked = self.thread(id).into_iter().find_map(|item| match item {
+                Item::User { text, .. } => Some(text),
+                _ => None,
+            });
+            asked.map(|text| title_from(&text)).unwrap_or_default()
+        } else if title.chars().count() > MOST_TITLE {
+            title.chars().take(MOST_TITLE).chain(['…']).collect()
+        } else {
+            title
+        };
+        self.save(&meta)?;
+        Ok(meta)
+    }
+
+    /// Deletes a chat: what was said in it, and the files attached in it.
     pub fn delete(&self, id: &str) -> std::io::Result<()> {
         match self.folder(id) {
             Some(folder) => std::fs::remove_dir_all(folder),
@@ -267,6 +297,34 @@ mod tests {
         }
         s.delete(&b.id).unwrap();
         assert_eq!(s.list().len(), 1);
+        // A chat that's gone isn't made again by something that still had it open.
+        assert_eq!(s.save(&b).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert!(s.get(&b.id).is_none() && !s.root.join(&b.id).exists());
+    }
+
+    #[test]
+    fn a_chat_is_named_and_unnamed_back_to_what_was_first_asked() {
+        let s = store("named");
+        let mut meta = s.create("codex").unwrap();
+        meta.title = "restart beelink-01".into();
+        s.save(&meta).unwrap();
+        s.append(&meta.id, &Item::Text { at: 1, text: "A note before anything was asked.".into() }).unwrap();
+        s.append(&meta.id, &Item::User { at: 2, text: "restart beelink-01\nand say why it stopped".into(), files: vec![] }).unwrap();
+
+        // On one line, and kept on disk. When it was used last doesn't change.
+        let named = s.rename(&meta.id, "  Runner \n restarts ").unwrap();
+        assert_eq!((named.title.as_str(), named.updated), ("Runner restarts", meta.updated));
+        assert_eq!(s.get(&meta.id).unwrap().title, "Runner restarts");
+        // A very long one is cut.
+        let long = s.rename(&meta.id, &"a".repeat(200)).unwrap().title;
+        assert_eq!((long.chars().count(), long.ends_with('…')), (MOST_TITLE + 1, true));
+        // No name: the first thing asked again.
+        assert_eq!(s.rename(&meta.id, "   ").unwrap().title, "restart beelink-01");
+        // A chat nothing was asked in has none.
+        let empty = s.create("codex").unwrap();
+        assert_eq!(s.rename(&empty.id, "").unwrap().title, "");
+        assert_eq!(s.rename("c-gone", "x").unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert!(s.rename("../x", "x").is_err());
     }
 
     #[test]

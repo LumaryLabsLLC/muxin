@@ -677,6 +677,8 @@ pub enum RenameTarget {
     Session(String),
     /// A machine's display: (machine, display id).
     Display(String, String),
+    /// One of the assistant's chats.
+    Chat(String),
 }
 
 pub struct RenameDialog {
@@ -715,7 +717,8 @@ impl RenameDialog {
             return;
         }
         let text = self.name.read(cx).text().trim().to_string();
-        if text.is_empty() {
+        // A chat without a title of its own goes by what was first asked in it.
+        if text.is_empty() && !matches!(self.target, RenameTarget::Chat(_)) {
             self.error = Some("Give it a name.".into());
             cx.notify();
             return;
@@ -725,6 +728,14 @@ impl RenameDialog {
                 Ok(()) => cx.emit(DialogEvent::Dismissed),
                 Err(e) => {
                     self.error = Some(e);
+                    cx.notify();
+                }
+            },
+            // Kept on this computer, beside the chat.
+            RenameTarget::Chat(id) => match crate::chat::store(&self.engine).rename(&id, &text) {
+                Ok(_) => cx.emit(DialogEvent::Dismissed),
+                Err(e) => {
+                    self.error = Some(format!("Couldn't rename it: {e}"));
                     cx.notify();
                 }
             },
@@ -790,6 +801,7 @@ impl Render for RenameDialog {
                 format!("What Muxin calls this monitor on {}. Its windows and settings stay as they are.", self.machine),
                 "Name",
             ),
+            RenameTarget::Chat(_) => ("Rename chat", "The title it's listed under. Left empty, it goes back to the first thing you asked in it.".to_string(), "Title"),
             RenameTarget::Session(_) => (
                 "Rename session",
                 format!("Muxin's agent on {} keeps the title, so it shows wherever you use Muxin. What runs in the session isn't touched.", self.machine),

@@ -26,7 +26,7 @@ actions!(
         Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, Paste, Cut, Copy, Enter, Escape,
         WordLeft, WordRight, SelectWordLeft, SelectWordRight, SelectHome, SelectEnd,
         DeleteWordLeft, DeleteWordRight, DeleteToStart, DeleteToEnd,
-        Newline, Up, Down, SelectUp, SelectDown
+        Newline, Up, Down, SelectUp, SelectDown, Tab
     ]
 );
 
@@ -65,6 +65,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", Down, Some(AREA)),
         KeyBinding::new("shift-up", SelectUp, Some(AREA)),
         KeyBinding::new("shift-down", SelectDown, Some(AREA)),
+        // Takes what a list beside the field offers; otherwise it's not the field's.
+        KeyBinding::new("tab", Tab, Some(AREA)),
     ]);
     // By the word and to either end, the way each system's text fields do it.
     if cfg!(target_os = "macos") {
@@ -147,6 +149,17 @@ pub enum InputEvent {
 /// nothing; whoever holds it may want what's on the clipboard.
 pub struct PastedOther;
 
+/// A key for the list beside the field (see `set_listing`), not for its text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ListKey {
+    Up,
+    Down,
+    /// Enter or Tab: take the row that's picked.
+    Take,
+    /// Escape.
+    Close,
+}
+
 pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
@@ -177,10 +190,14 @@ pub struct TextInput {
     last_rows: Vec<Row>,
     row_height: Pixels,
     scroll_y: Pixels,
+    /// Whoever holds the field shows a list to pick from as the user types:
+    /// Up, Down, Enter, Tab and Escape go to it (as `ListKey`) while it does.
+    listing: bool,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
 impl EventEmitter<PastedOther> for TextInput {}
+impl EventEmitter<ListKey> for TextInput {}
 
 /// A field's lines as drawn, to measure in: how far across its row a place
 /// in the text is, and which place in a row is nearest to a point.
@@ -240,6 +257,7 @@ impl TextInput {
             last_rows: Vec::new(),
             row_height: px(18.),
             scroll_y: px(0.),
+            listing: false,
         }
     }
 
@@ -300,6 +318,29 @@ impl TextInput {
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    /// Where the cursor is in the text, in bytes.
+    pub fn cursor(&self) -> usize {
+        self.cursor_offset()
+    }
+
+    /// A list beside the field is open (or closed): see `ListKey`.
+    pub fn set_listing(&mut self, open: bool) {
+        self.listing = open;
+    }
+
+    /// Puts `text` in place of `range` (bytes), with the cursor after it.
+    pub fn replace(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        if self.content.get(range.clone()).is_none() {
+            return;
+        }
+        let (content, _, selected) = splice(&self.content, range, text, None);
+        self.content = content.into();
+        self.selected_range = selected;
+        self.marked_range = None;
+        cx.emit(InputEvent::Changed);
+        cx.notify();
     }
 
     pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -387,11 +428,21 @@ impl TextInput {
     }
 
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if self.listing {
+            return cx.emit(ListKey::Up);
+        }
         self.move_to(self.row_target(-1), cx);
     }
 
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.listing {
+            return cx.emit(ListKey::Down);
+        }
         self.move_to(self.row_target(1), cx);
+    }
+
+    fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        if self.listing { cx.emit(ListKey::Take) } else { cx.propagate() }
     }
 
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -453,10 +504,16 @@ impl TextInput {
     }
 
     fn enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
+        if self.listing {
+            return cx.emit(ListKey::Take);
+        }
         cx.emit(InputEvent::Submit);
     }
 
     fn escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
+        if self.listing {
+            return cx.emit(ListKey::Close);
+        }
         cx.emit(InputEvent::Cancel);
     }
 
@@ -1195,6 +1252,7 @@ impl Render for TextInput {
                 d.on_action(cx.listener(Self::newline))
                     .on_action(cx.listener(Self::up))
                     .on_action(cx.listener(Self::down))
+                    .on_action(cx.listener(Self::tab))
                     .on_action(cx.listener(Self::select_up))
                     .on_action(cx.listener(Self::select_down))
             })

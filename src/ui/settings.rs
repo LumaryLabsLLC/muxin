@@ -100,7 +100,7 @@ pub struct SettingsPage {
     shortcut_note: Option<String>,
     /// The session action prompt being changed (see prompts.rs).
     prompt_edit: Option<prompts::PromptEdit>,
-    /// The assistant's chat: its ChatGPT account (see assistant.rs).
+    /// The assistant's chat (see assistant.rs).
     assistant: assistant::AssistantState,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -213,9 +213,6 @@ impl SettingsPage {
             }
             if tab == SettingsTab::Ipads {
                 self.load_ipads(cx);
-            }
-            if tab == SettingsTab::Chat {
-                self.load_assistant(cx);
             }
             cx.notify();
         }

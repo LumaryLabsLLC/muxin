@@ -9,10 +9,9 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::account::{self, Endpoints, USAGE_URL, Vault};
 use super::gate::{Answer, Mode, Request};
 use super::risk::{self, Risk};
-use super::{Chat, Options, Update, brain, store};
+use super::{Chat, Options, Update, brain, command, store};
 use crate::fleet::Engine;
 
 /// What `muxin chat` was asked to do.
@@ -22,14 +21,16 @@ pub struct Ask {
     pub options: Options,
     /// Show the chats instead.
     pub list: bool,
+    /// Turn the chat on (or off) instead.
+    pub switch: Option<bool>,
+    /// Delete this chat instead, by its id.
+    pub delete: Option<String>,
+    /// Name a chat instead: which (its id, or `last`), and the title.
+    pub rename: Option<(String, String)>,
     /// Show the models there are to answer with instead (of `options.brain`, when given).
     pub models: bool,
     /// Files that go with the first message.
     pub attach: Vec<std::path::PathBuf>,
-    /// Sign in with ChatGPT instead (or out; `forget`: and forget which account).
-    pub sign_in: bool,
-    pub sign_out: bool,
-    pub forget: bool,
 }
 
 /// What a turn would cost through the API, in words after its token counts.
@@ -71,17 +72,25 @@ fn watch_ctrl_c() -> Arc<tokio::sync::Notify> {
 
 /// Runs `muxin chat`; the exit code.
 pub async fn run(engine: Arc<Engine>, ask: Ask) -> u8 {
+    if let Some(on) = ask.switch {
+        return switch(&engine, on);
+    }
     if ask.list {
         return list(&engine);
     }
+    if let Some(id) = &ask.delete {
+        return delete(&engine, id);
+    }
+    if let Some((which, title)) = &ask.rename {
+        return rename(&engine, which, title);
+    }
     if ask.models {
-        return models(&engine, ask.options.brain.as_deref()).await;
+        return models(ask.options.brain.as_deref());
     }
-    if ask.sign_out {
-        return sign_out(&Vault::of(&engine.paths().dir), ask.forget).await;
-    }
-    if ask.sign_in {
-        return sign_in(&Vault::of(&engine.paths().dir)).await;
+    // Off until the user turns it on. (Chats from before can still be listed, named and deleted.)
+    if !is_on(&engine) {
+        eprintln!("The chat is off. Turn it on in the app (Settings › Chat), or here: muxin chat --on");
+        return 1;
     }
     let stop = watch_ctrl_c();
     let mut chat = match Chat::open(&engine, ask.options) {
@@ -94,12 +103,9 @@ pub async fn run(engine: Arc<Engine>, ask: Ask) -> u8 {
     let name = brain::kind(&chat.meta.brain).map(|k| k.name).unwrap_or("?");
     let mode = match chat.gate().mode() {
         Mode::Ask => "asks before it changes anything",
-        Mode::Bypass => "doesn't ask before it changes things",
+        Mode::Bypass => "bypasses permissions: it doesn't ask before it changes things",
     };
     eprintln!("{}", dim(&format!("Chat {} · {name} · {mode}", chat.meta.id)));
-    if chat.meta.brain == brain::CHATGPT {
-        eprintln!("{}", dim(&format!("Using ChatGPT plan. Manage usage: {USAGE_URL}")));
-    }
 
     // What's attached goes with the first message said.
     if let Err(why) = chat.attach(&ask.attach) {
@@ -125,89 +131,64 @@ pub async fn run(engine: Arc<Engine>, ask: Ask) -> u8 {
             Err(_) => 1,
         };
     }
-    eprintln!("{}", dim("Type a message. /attach <file> adds a file to the next one; /bypass and /ask change whether it asks first; /quit ends."));
+    eprintln!("{}", dim("Type a message. @forge points at a machine, a session or a box by its id. /help lists the commands."));
     loop {
         eprint!("{} ", bold("›"));
         let _ = std::io::stderr().flush();
         let Some(line) = read_line() else { break };
-        match line.trim() {
-            "" => continue,
-            "/quit" | "/exit" | "/q" => break,
-            "/bypass" => {
-                chat.gate().set_mode(Mode::Bypass);
-                eprintln!("{}", dim("It won't ask before it changes things, in this chat."));
-            }
-            "/ask" => {
-                chat.gate().set_mode(Mode::Ask);
-                eprintln!("{}", dim("It asks before it changes anything."));
-            }
-            attach if attach.starts_with("/attach") => {
-                // A path as a shell would give it: quoted, or with "~" for the home folder.
-                let named = attach["/attach".len()..].trim().trim_matches(|c| c == '"' || c == '\'');
-                let path = match named.strip_prefix("~/") {
-                    Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
-                    None => named.into(),
-                };
-                match if named.is_empty() { Err("Which file? /attach <file>".to_string()) } else { chat.attach(&[path]) } {
-                    Ok(()) => eprintln!("{}", dim(&format!("{named} goes with your next message."))),
-                    Err(why) => eprintln!("{}", dim(&format!("  ✗ {why}"))),
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // A command is done, not said.
+        let Some((command, rest)) = command::parse(line).filter(|(command, _)| command.term) else {
+            let _ = turn(&mut chat, line, &stop).await;
+            continue;
+        };
+        let said = |text: &str| eprintln!("{}", dim(text));
+        match (command.name, rest) {
+            ("quit", _) => break,
+            ("help", _) => {
+                for command in command::COMMANDS.iter().filter(|c| c.term) {
+                    said(&format!("  {:<18} {}", format!("/{} {}", command.name, command.takes), command.about));
                 }
             }
-            text => {
-                let _ = turn(&mut chat, text, &stop).await;
+            ("bypass", _) => {
+                chat.gate().set_mode(Mode::Bypass);
+                said("Bypass permissions: it won't ask before it changes things, in this chat.");
             }
+            ("ask", _) => {
+                chat.gate().set_mode(Mode::Ask);
+                said("Ask permissions: it asks before it changes anything.");
+            }
+            ("attach", "") => said("Which file? /attach <file>"),
+            ("attach", named) => match chat.attach(&[command::path(named)]) {
+                Ok(()) => said(&format!("{named} goes with your next message.")),
+                Err(why) => said(&format!("  ✗ {why}")),
+            },
+            ("model", said_model) => said(&model(&mut chat, said_model)),
+            ("effort", said_effort) => said(&effort(&mut chat, said_effort)),
+            ("rename", "") => said("What should it be called? /rename <title>"),
+            ("rename", title) => match super::store(&engine).rename(&chat.meta.id, title) {
+                Ok(meta) => said(&format!("This chat is now: {}", titled(&meta))),
+                Err(why) => said(&format!("  ✗ Couldn't rename it: {why}")),
+            },
+            ("chats", _) => {
+                list(&engine);
+                said("Go on with one: muxin chat --chat <id>");
+            }
+            // Another chat, answered by the same program in the same mode.
+            ("new", _) => match Chat::open(&engine, Options { brain: Some(chat.meta.brain.clone()), mode: Some(chat.gate().mode()), ..Default::default() }) {
+                Ok(fresh) => {
+                    said(&format!("A new chat: {}. The one before is {}.", fresh.meta.id, chat.meta.id));
+                    chat = fresh;
+                }
+                Err(why) => said(&format!("  ✗ {why}")),
+            },
+            _ => {}
         }
     }
     eprintln!("{}", dim(&format!("Go on with it later: muxin chat --chat {}", chat.meta.id)));
-    0
-}
-
-/// `muxin chat --sign-in`: signs in with ChatGPT, in the browser.
-async fn sign_in(vault: &Vault) -> u8 {
-    eprintln!("Opening ChatGPT's sign-in in your browser…");
-    let outcome = account::sign_in(vault, &Endpoints::default(), |address| {
-        crate::util::open_url(address);
-        // Not when it says which account it's for: that part isn't for a screen or a log.
-        if !address.contains("id_token_hint=") {
-            eprintln!("{}\n{address}", dim("If it didn't open, go to:"));
-        }
-    })
-    .await;
-    match outcome {
-        Ok(account) if account.plan => {
-            let who = if account.email.is_empty() { String::new() } else { format!(" as {}", account.email) };
-            println!("Signed in{who}.");
-            if !account.welcomed {
-                // Said once, the first time.
-                println!("You're using your ChatGPT plan: eligible requests in Muxin's chat use it. Manage usage: {USAGE_URL}");
-                account::welcomed(vault);
-            }
-            println!("Ask with it: muxin chat --brain chatgpt \"what needs me?\"");
-            0
-        }
-        Ok(_) => {
-            eprintln!("You signed in, but didn't allow Muxin to use your ChatGPT plan, so the chat can't answer with it. Sign in again and allow it.");
-            1
-        }
-        Err(why) => {
-            eprintln!("error: {why}");
-            1
-        }
-    }
-}
-
-/// `muxin chat --sign-out`.
-async fn sign_out(vault: &Vault, forget: bool) -> u8 {
-    let was = account::current(vault).is_some();
-    match account::sign_out(vault, &Endpoints::default(), forget).await {
-        Ok(_) if !was => println!("{}", if forget { "You weren't signed in. Muxin has forgotten the account it was registered for." } else { "You weren't signed in with ChatGPT." }),
-        Ok(true) => println!("Signed out of ChatGPT."),
-        Ok(false) => println!("Signed out here. ChatGPT couldn't be told, so Muxin may still be listed there: you can disconnect it in ChatGPT's settings."),
-        Err(why) => {
-            eprintln!("error: {why}");
-            return 1;
-        }
-    }
     0
 }
 
@@ -403,11 +384,9 @@ pub(crate) fn count(n: u64) -> String {
 
 /// `--models`: each brain there is here, and the models it can answer with,
 /// with the efforts each takes (the model's own marked `*`).
-async fn models(engine: &Engine, only: Option<&str>) -> u8 {
+fn models(only: Option<&str>) -> u8 {
     use brain::catalog;
-    let vault = Vault::of(&engine.paths().dir);
-    let plan = account::current(&vault).is_some_and(|a| a.plan);
-    let brains: Vec<&brain::Kind> = brain::available(plan).into_iter().filter(|k| only.is_none_or(|id| id == k.id)).collect();
+    let brains: Vec<&brain::Kind> = brain::available().into_iter().filter(|k| only.is_none_or(|id| id == k.id)).collect();
     if brains.is_empty() {
         eprintln!("error: {}", match only {
             Some(id) if brain::kind(id).is_none() => format!("\"{id}\" isn't a brain Muxin knows. Use {}.", brain::ids()),
@@ -421,16 +400,7 @@ async fn models(engine: &Engine, only: Option<&str>) -> u8 {
             println!();
         }
         println!("{} (--brain {})", kind.name, kind.id);
-        let list = match kind.program {
-            Some(_) => catalog::of(kind.id),
-            None => match brain::responses::models(&vault, &Endpoints::default()).await {
-                Ok(list) => list,
-                Err(why) => {
-                    println!("  {why}");
-                    continue;
-                }
-            },
-        };
+        let list = catalog::of(kind.id);
         if list.is_empty() {
             println!("  It doesn't say which models it has. It answers with its own choice.");
         }
@@ -454,16 +424,206 @@ fn list(engine: &Engine) -> u8 {
     let now = store::now();
     for chat in chats {
         let brain = brain::kind(&chat.brain).map(|k| k.name).unwrap_or(&chat.brain);
-        let title = if chat.title.is_empty() { "(nothing asked yet)" } else { &chat.title };
-        println!("{}  {:<11}  {:>8} ago  {title}", chat.id, brain, crate::util::short_duration((now - chat.updated).max(0) as u64));
+        println!("{}  {:<11}  {:>8} ago  {}", chat.id, brain, crate::util::short_duration((now - chat.updated).max(0) as u64), titled(&chat));
     }
     0
+}
+
+/// `/model <said>` in a conversation: the model this chat answers with from
+/// its next message, among the ones its program lists. What to tell the user.
+fn model(chat: &mut Chat, said: &str) -> String {
+    let models = brain::catalog::of(&chat.meta.brain);
+    let name = brain::kind(&chat.meta.brain).map(|k| k.name).unwrap_or("It");
+    if said.is_empty() {
+        let now = chat.meta.model.clone().unwrap_or_else(|| "its own choice".into());
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        return format!("{name} answers with {now}. /model <name> picks another: {}, or default.", ids.join(", "));
+    }
+    if said.eq_ignore_ascii_case("default") {
+        chat.choose(None, None);
+        return format!("{name} answers with its own choice of model from here.");
+    }
+    match brain::catalog::named(&models, said) {
+        Some(model) => {
+            // An effort the new model doesn't take isn't carried over to it.
+            let effort = chat.meta.effort.clone().filter(|e| model.efforts.iter().any(|known| known.id == *e));
+            chat.choose(Some(model.id.clone()), effort);
+            format!("{name} answers with {} from here.", model.name)
+        }
+        None => format!("{name} has no model called {said}. `muxin chat --models` lists them."),
+    }
+}
+
+/// `/effort <said>`: how hard this chat's model thinks from its next message.
+fn effort(chat: &mut Chat, said: &str) -> String {
+    let models = brain::catalog::of(&chat.meta.brain);
+    let model = chat.meta.model.as_deref().and_then(|id| brain::catalog::find(&models, id));
+    if said.eq_ignore_ascii_case("default") {
+        chat.choose(chat.meta.model.clone(), None);
+        return "It thinks as hard as the model would by itself.".into();
+    }
+    // With no model picked, the levels any of them take.
+    let level = match model {
+        Some(model) => model.effort_named(said).cloned(),
+        None => models.iter().find_map(|m| m.effort_named(said).cloned()),
+    };
+    match level {
+        Some(level) => {
+            chat.choose(chat.meta.model.clone(), Some(level.id.clone()));
+            format!("Effort: {} from here.", level.name)
+        }
+        None if said.is_empty() => {
+            let now = chat.meta.effort.clone().unwrap_or_else(|| "the model's own".into());
+            let takes: Vec<&str> = model.or(models.first()).map(|m| m.efforts.iter().map(|e| e.id.as_str()).collect()).unwrap_or_default();
+            format!("Effort: {now}. /effort <level> sets it: {}, or default.", takes.join(", "))
+        }
+        None => format!("It doesn't take {said}. `muxin chat --models` lists what each model takes."),
+    }
+}
+
+/// Whether the chat answers here: the user turned it on. The simulated
+/// machines keep no settings to turn it on in, so there it does.
+pub fn is_on(engine: &Engine) -> bool {
+    engine.is_demo() || engine.settings().chat.enabled
+}
+
+/// `--on` and `--off`: the switch in Settings › Chat.
+fn switch(engine: &Engine, on: bool) -> u8 {
+    let mut settings = engine.settings();
+    settings.chat.enabled = on;
+    match engine.update_settings(settings) {
+        Ok(_) if on => println!("The chat is on. Ask with: muxin chat \"what needs me?\""),
+        Ok(_) => println!("The chat is off."),
+        Err(why) => {
+            eprintln!("error: {why}");
+            return 1;
+        }
+    }
+    0
+}
+
+/// A chat's title, as a list shows it.
+fn titled(meta: &store::Meta) -> &str {
+    if meta.title.is_empty() { "(nothing asked yet)" } else { &meta.title }
+}
+
+/// `--delete <id>`: a chat, with what was said in it and the files attached
+/// in it. By its id only: `last` is too easy to get wrong for something
+/// that can't be undone.
+fn delete(engine: &Engine, id: &str) -> u8 {
+    let store = super::store(engine);
+    let Some(meta) = store.get(id) else {
+        eprintln!("error: There's no chat {id}. `muxin chat --list` shows them.");
+        return 1;
+    };
+    if let Err(e) = store.delete(id) {
+        eprintln!("error: Couldn't delete {id}: {e}");
+        return 1;
+    }
+    println!("Deleted {id}  {}", titled(&meta));
+    // What isn't Muxin's to delete.
+    if let Some(kind) = brain::kind(&meta.brain) {
+        eprintln!("{}", dim(&format!("{} keeps its own record of the conversation. That stays where it is.", kind.name)));
+    }
+    0
+}
+
+/// `--rename <id> <title>`: a chat's title. An empty one goes back to the
+/// first thing asked in it.
+fn rename(engine: &Engine, which: &str, title: &str) -> u8 {
+    let store = super::store(engine);
+    let meta = match super::find(&store, which) {
+        Ok(meta) => meta,
+        Err(why) => {
+            eprintln!("error: {why}");
+            return 1;
+        }
+    };
+    match store.rename(&meta.id, title) {
+        Ok(meta) => {
+            println!("{}  {}", meta.id, titled(&meta));
+            0
+        }
+        Err(e) => {
+            eprintln!("error: Couldn't rename {}: {e}", meta.id);
+            1
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_conversations_model_and_effort_are_set_by_what_theyre_called() {
+        // Claude Code answers in the stand-in chat: its models go by short names.
+        let mut chat = crate::chat::tests::chat("term-model", vec![]);
+        assert!(model(&mut chat, "").starts_with("Claude Code answers with its own choice. /model <name> picks another: fable, opus, sonnet, haiku, or default."));
+        assert_eq!(model(&mut chat, "Opus"), "Claude Code answers with Opus from here.");
+        assert_eq!(chat.meta.model.as_deref(), Some("opus"));
+        assert_eq!(effort(&mut chat, "extra high"), "Effort: Extra high from here.");
+        assert_eq!((chat.meta.model.as_deref(), chat.meta.effort.as_deref()), (Some("opus"), Some("xhigh")));
+        assert!(effort(&mut chat, "").starts_with("Effort: xhigh. /effort <level> sets it: low, medium, high, xhigh, max, or default."));
+        // What it doesn't have is said, and nothing changes.
+        assert_eq!(model(&mut chat, "gpt-9"), "Claude Code has no model called gpt-9. `muxin chat --models` lists them.");
+        assert!(effort(&mut chat, "enormous").starts_with("It doesn't take enormous."));
+        assert_eq!((chat.meta.model.as_deref(), chat.meta.effort.as_deref()), (Some("opus"), Some("xhigh")));
+        // Another model keeps the effort it takes too; "default" gives both back to the program.
+        assert_eq!(model(&mut chat, "son"), "Claude Code answers with Sonnet from here.");
+        assert_eq!(chat.meta.effort.as_deref(), Some("xhigh"));
+        assert_eq!(effort(&mut chat, "default"), "It thinks as hard as the model would by itself.");
+        assert_eq!(model(&mut chat, "default"), "Claude Code answers with its own choice of model from here.");
+        assert_eq!((chat.meta.model.clone(), chat.meta.effort.clone()), (None, None));
+        // And it's kept with the chat.
+        assert_eq!(crate::chat::store(&chat.engine).get(&chat.meta.id).unwrap().model, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_chat_is_off_until_its_turned_on() {
+        let dir = std::env::temp_dir().join(format!("muxin-chat-switch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // The user's own machines (none here): off to begin with, and nothing in the settings file says otherwise.
+        let engine = Engine::new(crate::config::Paths::resolve(Some(dir.clone()), None), false);
+        assert!(!is_on(&engine) && !engine.settings().chat.enabled);
+        assert_eq!(switch(&engine, true), 0);
+        assert!(is_on(&engine));
+        let kept = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(kept.contains("[settings.chat]") && kept.contains("enabled = true"), "{kept}");
+        // And off again leaves no trace of it there.
+        assert_eq!(switch(&engine, false), 0);
+        assert!(!is_on(&engine));
+        assert!(!std::fs::read_to_string(dir.join("config.toml")).unwrap().contains("enabled"));
+        // The simulated machines have no settings to turn it on in: there it answers.
+        let demo = Engine::new(crate::config::Paths::resolve(Some(dir.join("demo-home")), None), true);
+        assert!(is_on(&demo) && !demo.settings().chat.enabled);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chats_are_renamed_and_deleted_by_id() {
+        let dir = std::env::temp_dir().join(format!("muxin-chat-term-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let engine = Engine::new(crate::config::Paths::resolve(Some(dir), None), true);
+        let store = crate::chat::store(&engine);
+        let (old, new) = (store.create("codex").unwrap(), store.create("grok").unwrap());
+        let mut newer = new.clone();
+        newer.updated += 10;
+        store.save(&newer).unwrap();
+
+        // By id, or `last` for the one used last.
+        assert_eq!(rename(&engine, &old.id, "Runner restarts"), 0);
+        assert_eq!(rename(&engine, "last", "The newest"), 0);
+        assert_eq!((store.get(&old.id).unwrap().title.as_str(), store.get(&new.id).unwrap().title.as_str()), ("Runner restarts", "The newest"));
+        assert_eq!(rename(&engine, "c-gone", "x"), 1);
+
+        // Deleting takes an id: there's no `last` for it.
+        assert_eq!(delete(&engine, "last"), 1);
+        assert_eq!(delete(&engine, "c-gone"), 1);
+        assert_eq!(delete(&engine, &old.id), 0);
+        assert_eq!(store.list().into_iter().map(|m| m.id).collect::<Vec<_>>(), [new.id.clone()]);
+        assert_eq!(delete(&engine, &old.id), 1);
+    }
 
     #[test]
     fn typed_answers() {

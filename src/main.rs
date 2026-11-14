@@ -1654,7 +1654,7 @@ struct ChatArgs {
     #[arg(long, value_name = "ID")]
     chat: Option<String>,
 
-    /// What answers: claude (Claude Code), codex, grok (Grok Build), or chatgpt (your ChatGPT plan, after --sign-in) [default: your setting, else the first there is]
+    /// What answers: claude (Claude Code), codex or grok (Grok Build) [default: your setting, else the first there is]
     #[arg(long, value_name = "NAME")]
     brain: Option<String>,
 
@@ -1674,25 +1674,29 @@ struct ChatArgs {
     #[arg(long, value_name = "FILE")]
     attach: Vec<std::path::PathBuf>,
 
-    /// Sign in with ChatGPT, so chats can answer on your ChatGPT plan (opens your browser)
-    #[arg(long)]
-    sign_in: bool,
-
-    /// Sign out of ChatGPT
-    #[arg(long, conflicts_with = "sign_in")]
-    sign_out: bool,
-
-    /// With --sign-out: also forget which account Muxin was registered for, to sign in with another
-    #[arg(long, requires = "sign_out")]
-    forget: bool,
-
-    /// Don't ask before tools that change things
+    /// Bypass permissions: don't ask before tools that change things
     #[arg(long)]
     bypass: bool,
 
     /// List the chats
     #[arg(long)]
     list: bool,
+
+    /// Name a chat: its id (or `last`), then the title. An empty title ("") goes back to the first thing asked in it
+    #[arg(long, num_args = 2, value_names = ["ID", "TITLE"])]
+    rename: Option<Vec<String>>,
+
+    /// Delete a chat, by its id: what was said in it and the files attached in it
+    #[arg(long, value_name = "ID")]
+    delete: Option<String>,
+
+    /// Turn the chat on: it's off until you do (the same switch as Settings › Chat in the app)
+    #[arg(long)]
+    on: bool,
+
+    /// Turn the chat off again
+    #[arg(long, conflicts_with = "on")]
+    off: bool,
 }
 
 #[derive(Subcommand)]
@@ -3154,11 +3158,14 @@ fn chat(args: ChatArgs, runtime: &tokio::runtime::Runtime) -> u8 {
         prompt: args.prompt.join(" "),
         options: chat::Options { chat: args.chat, brain: args.brain, mode: args.bypass.then_some(chat::gate::Mode::Bypass), model: args.model, effort: args.effort },
         list: args.list,
+        switch: if args.on { Some(true) } else if args.off { Some(false) } else { None },
+        delete: args.delete,
+        rename: args.rename.and_then(|said| {
+            let mut said = said.into_iter();
+            Some((said.next()?, said.next()?))
+        }),
         models: args.models,
         attach: args.attach,
-        sign_in: args.sign_in,
-        sign_out: args.sign_out,
-        forget: args.forget,
     };
     runtime.block_on(chat::term::run(engine, ask))
 }

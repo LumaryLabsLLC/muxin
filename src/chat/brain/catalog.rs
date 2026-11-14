@@ -5,9 +5,7 @@
 //! the list their own picker shows in a file beside their settings, kept up
 //! to date by the program itself; that file is read. Claude Code has no such
 //! list: it takes a model by a short name that always means the newest of
-//! its kind, and those names are few. Muxin's own brain asks the user's
-//! ChatGPT account (responses.rs), which answers in the shape Codex's file
-//! has, read by the same code.
+//! its kind, and those names are few.
 
 use std::path::Path;
 
@@ -64,8 +62,8 @@ fn rank(effort: &str) -> usize {
     ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].iter().position(|e| *e == effort).unwrap_or(usize::MAX)
 }
 
-/// The models of a brain that is a program, as this computer knows them.
-/// Empty for one whose list isn't on disk (Muxin's own asks the account).
+/// A brain's models, as this computer knows them. Empty when its program
+/// hasn't written its list yet.
 pub fn of(brain: &str) -> Vec<Model> {
     let home = dirs::home_dir().unwrap_or_default();
     match brain {
@@ -93,12 +91,12 @@ fn claude() -> Vec<Model> {
         .collect()
 }
 
-/// The list as OpenAI gives it, to Codex (its `models_cache.json`) and to an
-/// account asked directly (`GET /v1/models`): `{"models": [{slug,
+/// The list as OpenAI gives it to Codex (its `models_cache.json`):
+/// `{"models": [{slug,
 /// display_name, visibility, default_reasoning_level,
 /// supported_reasoning_levels: [{effort}]}]}`. The ones meant to be shown,
 /// in the order given.
-pub fn openai(list: &Value) -> Vec<Model> {
+fn openai(list: &Value) -> Vec<Model> {
     list["models"]
         .as_array()
         .into_iter()
@@ -138,6 +136,33 @@ fn grok(list: &Value) -> Vec<Model> {
 /// A model by its id, among `models`.
 pub fn find<'a>(models: &'a [Model], id: &str) -> Option<&'a Model> {
     models.iter().find(|m| m.id == id)
+}
+
+/// The one of `all` the user means by `said`: its id or its name, whatever
+/// the letters' case, or the only one that starts with it.
+fn meant<'a, T>(all: &'a [T], said: &str, id: impl Fn(&T) -> &str, name: impl Fn(&T) -> &str) -> Option<&'a T> {
+    let said = said.trim().to_lowercase();
+    if said.is_empty() {
+        return None;
+    }
+    let exact = all.iter().find(|x| id(x).to_lowercase() == said || name(x).to_lowercase() == said);
+    exact.or_else(|| {
+        let mut starts = all.iter().filter(|x| id(x).to_lowercase().starts_with(&said) || name(x).to_lowercase().starts_with(&said));
+        let first = starts.next()?;
+        starts.next().is_none().then_some(first)
+    })
+}
+
+/// The model the user means by `said` ("opus", "GPT-6.1-Sol", "grok-4.7").
+pub fn named<'a>(models: &'a [Model], said: &str) -> Option<&'a Model> {
+    meant(models, said, |m| &m.id, |m| &m.name)
+}
+
+impl Model {
+    /// The effort the user means by `said` ("high", "Extra high", "x").
+    pub fn effort_named(&self, said: &str) -> Option<&Effort> {
+        meant(&self.efforts, said, |e| &e.id, |e| &e.name)
+    }
 }
 
 #[cfg(test)]
@@ -185,7 +210,16 @@ mod tests {
         assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["fable", "opus", "sonnet", "haiku"]);
         assert_eq!(models[1].efforts.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["low", "medium", "high", "xhigh", "max"]);
         assert_eq!(find(&models, "sonnet").map(|m| m.name.as_str()), Some("Sonnet"));
-        assert!(of("chatgpt").is_empty() && of("nothing").is_empty());
+        // As the user would say it: by id or name, or the only one that starts that way.
+        assert_eq!(named(&models, " OPUS ").map(|m| m.id.as_str()), Some("opus"));
+        assert_eq!(named(&models, "son").map(|m| m.id.as_str()), Some("sonnet"));
+        assert!(named(&models, "gpt").is_none() && named(&models, "").is_none());
+        let opus = &models[1];
+        assert_eq!(opus.effort_named("Extra high").map(|e| e.id.as_str()), Some("xhigh"));
+        assert_eq!(opus.effort_named("x").map(|e| e.id.as_str()), Some("xhigh"));
+        // "m" could be medium or max: neither.
+        assert!(opus.effort_named("m").is_none());
+        assert!(of("nothing").is_empty());
         assert_eq!((effort_name("minimal"), effort_name("deep"), effort_name("")), ("Minimal".to_string(), "Deep".to_string(), String::new()));
     }
 }

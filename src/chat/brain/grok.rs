@@ -362,11 +362,11 @@ impl Brain for Grok {
 
     fn attach(&mut self, files: Vec<Attached>) -> Result<(), String> {
         if let Some(file) = files.iter().find(|f| !matches!(f.kind, Kind::Image(_))) {
-            return Err(format!("Grok Build can't be given {} here: it takes pictures and text. Claude Code and your ChatGPT plan read PDFs.", file.name));
+            return Err(format!("Grok Build can't be given {} here: it takes pictures and text. Claude Code reads PDFs.", file.name));
         }
         let size: u64 = files.iter().filter_map(|f| std::fs::metadata(&f.path).ok()).map(|m| m.len()).sum();
         if size > MOST_PICTURES {
-            return Err(format!("Grok Build takes pictures up to {} KB together here, and these are {} KB. Attach a smaller one, or ask Claude Code, Codex or your ChatGPT plan.", MOST_PICTURES / 1024, size.div_ceil(1024)));
+            return Err(format!("Grok Build takes pictures up to {} KB together here, and these are {} KB. Attach a smaller one, or ask Claude Code or Codex.", MOST_PICTURES / 1024, size.div_ceil(1024)));
         }
         self.attached = files;
         Ok(())

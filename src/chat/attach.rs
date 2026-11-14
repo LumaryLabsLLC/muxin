@@ -6,8 +6,8 @@
 //! - Text (code, logs, notes) is put in the message itself, under its name.
 //!   Every brain reads that.
 //! - A picture or a PDF goes to the brain the way that brain takes one, as
-//!   each driver knows how (a content block, a flag, a data URL). A brain
-//!   that can't take one says so, and the message isn't sent.
+//!   each driver knows how (a content block, a flag). A brain that can't
+//!   take one says so, and the message isn't sent.
 
 use std::path::{Path, PathBuf};
 
@@ -44,15 +44,6 @@ impl Attached {
         Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
     }
 
-    /// The file as a `data:` URL, as OpenAI takes a picture or a PDF.
-    pub fn data_url(&self) -> Result<String, String> {
-        let media = match &self.kind {
-            Kind::Image(media) => media,
-            Kind::Pdf => "application/pdf",
-            Kind::Text => "text/plain",
-        };
-        Ok(format!("data:{media};base64,{}", self.base64()?))
-    }
 }
 
 fn megabytes(bytes: u64) -> String {
@@ -189,8 +180,8 @@ mod tests {
         let message = with_text("Why does this fail?", &files);
         assert_eq!(message, "Why does this fail?\n\nAttached file: build.log\n````\nerror: nope\n```\nstill the log\n````");
         assert_eq!(with_text("hi", &[]), "hi");
-        // As a data URL, for the brains that take one.
+        // As base64, for the brains that take one that way.
         std::fs::write(d.join("shot.png"), [1u8, 2, 3]).unwrap();
-        assert_eq!(files[1].data_url().unwrap(), "data:image/png;base64,AQID");
+        assert_eq!(files[1].base64().unwrap(), "AQID");
     }
 }

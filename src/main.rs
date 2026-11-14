@@ -139,7 +139,7 @@ enum Command {
     /// Snippets: commands you saved to run with one click, in folders
     #[command(alias = "snippets", subcommand)]
     Snippet(SnippetCommand),
-    /// Wake a machine that's asleep or off (Wake on LAN)
+    /// Wake a machine: one that's asleep through its agent, one that's off with Wake on LAN
     Wake(MachineArgs),
     /// Power a machine on or off, or restart it. Ordinary machines can shut down and restart, not turn on (see wake)
     Power(PowerArgs),
@@ -1895,7 +1895,7 @@ fn main() -> ExitCode {
         }
         Some(Command::Wake(a)) => {
             let req = api::WakeRequest { machine_id: a.machine_id };
-            run(&runtime, &a.agent, async move |e| api::wake_machine(&e, req).await, |v| format!("Sent the wake signal from {}. Muxin checks it again in 20 and 40 seconds.\n", v["sent_from"].as_str().unwrap_or("here")))
+            run(&runtime, &a.agent, async move |e| api::wake_machine(&e, req).await, |v| format!("{}\n", v["message"].as_str().unwrap_or("Sent the wake signal.")))
         }
         Some(Command::Edit(a)) => {
             let (machine, path) = a.target.split_once(':').map(|(m, p)| (m.to_string(), p.to_string())).unwrap_or((a.target.clone(), "~".into()));

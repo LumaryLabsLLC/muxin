@@ -132,13 +132,16 @@ pub fn build(input: &Inputs) -> Snapshot {
             _ if spec.disconnected => "disconnected",
             None => "unchecked",
             Some(p) if p.ok => "online",
+            Some(p) if p.asleep => "asleep",
             Some(_) => "offline",
         };
         let device = input.tailnet.get(&spec.id);
         let powered_off = spec.cloud.is_some() && input.droplets.get(&spec.id).is_some_and(|s| s == "off");
         let parent = parents.get(&spec.id).cloned();
         let unreachable = probe.filter(|p| !p.ok && spec.is_connected()).map(|p| {
-            if powered_off {
+            if p.asleep {
+                asleep_reason(spec, p, input.settings.check_interval_minutes > 0)
+            } else if powered_off {
                 powered_off_reason(spec, p)
             } else if let Some(u) = installing_reason(spec, p, input.now) {
                 u
@@ -559,6 +562,28 @@ fn parent_reason(spec: &MachineSpec, p: &ProbeResult, parent: &ParentMachine, in
     })
 }
 
+/// A machine that's asleep: nothing's wrong, and Muxin lets it sleep (a
+/// packet would wake it). It's back when its agent says it woke; one that
+/// can't say so (reached over ssh, or with an older agent) is found awake
+/// by a check.
+fn asleep_reason(spec: &MachineSpec, p: &ProbeResult, checking: bool) -> Unreachable {
+    let back = if p.wake_notice.is_some() {
+        "Muxin lets it sleep, and reconnects when it wakes."
+    } else if checking {
+        "Muxin lets it sleep, and looks again at each check."
+    } else {
+        "Muxin lets it sleep. Check it when it's awake."
+    };
+    Unreachable {
+        kind: "asleep".into(),
+        title: format!("{} is asleep", spec.name),
+        detail: if p.lid_closed { format!("Its lid is closed. {back}") } else { back.to_string() },
+        hint: None,
+        last_seen_at: p.last_seen_at,
+        error: p.error.clone().unwrap_or_default(),
+    }
+}
+
 /// A cloud machine the user (or the provider) powered off: nothing's wrong.
 fn powered_off_reason(spec: &MachineSpec, p: &ProbeResult) -> Unreachable {
     Unreachable {
@@ -835,8 +860,8 @@ fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Opt
     if !p.ok {
         if let Some(u) = unreachable {
             let level = match u.kind.as_str() {
-                // Off on purpose: worth knowing, nothing to fix.
-                "powered-off" => "info",
+                // Off on purpose, or asleep: worth knowing, nothing to fix.
+                "powered-off" | "asleep" => "info",
                 k if comes_back_by_itself(k) => "warning",
                 _ => "error",
             };
@@ -1506,6 +1531,53 @@ mod tests {
         let state = |name: &str| snap.runners.iter().find(|r| r.name == name).map(|r| (r.state.clone(), r.source.clone())).unwrap();
         assert_eq!(state("s-01"), ("offline".into(), "probe".into()));
         assert_eq!(state("s-02"), ("working".into(), "github".into()));
+    }
+
+    /// Asleep is a status of its own: nothing to fix, nothing in the
+    /// attention list, and words that say how it comes back.
+    #[test]
+    fn a_machine_that_sleeps_is_asleep_not_offline() {
+        let inv = inventory("[[machine]]\nname = \"Book\"\nhost = \"book\"\nrunners = [\"b-01\"]\n");
+        let seen = Utc::now() - chrono::Duration::minutes(5);
+        let asleep = |notice: Option<&str>, lid_closed: bool| {
+            let mut probes = HashMap::new();
+            probes.insert(
+                "book".to_string(),
+                ProbeResult {
+                    ok: false,
+                    error: Some(crate::probe::ASLEEP.into()),
+                    asleep: true,
+                    wake_notice: notice.map(str::to_string),
+                    lid_closed,
+                    os: Some("darwin".into()),
+                    arch: Some("arm64".into()),
+                    last_seen_at: Some(seen),
+                    ..Default::default()
+                },
+            );
+            probes
+        };
+        let snap = run(&inv, &Settings::default(), &asleep(Some("192.168.1.20:53312"), true), None);
+        let m = &snap.machines[0];
+        assert_eq!(m.status, "asleep");
+        assert!(m.is_down() && m.is_asleep() && !m.is_disconnected());
+        assert_eq!(m.platform, "darwin-arm64", "keeps the OS the last check found");
+        let u = m.unreachable.as_ref().unwrap();
+        assert_eq!((u.kind.as_str(), u.title.as_str(), u.hint.as_deref()), ("asleep", "Book is asleep", None));
+        assert_eq!(u.detail, "Its lid is closed. Muxin lets it sleep, and reconnects when it wakes.");
+        assert_eq!(u.last_seen_at, Some(seen));
+        assert_eq!((m.diagnostics[0].code.as_str(), m.diagnostics[0].level.as_str()), ("unreachable", "info"));
+        assert!(snap.attention.iter().all(|a| a.id != "unreachable" && a.id != "runners-down"), "{:?}", snap.attention);
+        // Nobody is told when it wakes (reached over ssh, an older agent): a check finds it.
+        let snap = run(&inv, &Settings::default(), &asleep(None, false), None);
+        assert_eq!(snap.machines[0].unreachable.as_ref().unwrap().detail, "Muxin lets it sleep, and looks again at each check.");
+        let no_checks = Settings { check_interval_minutes: 0, ..Settings::default() };
+        let snap = run(&inv, &no_checks, &asleep(None, false), None);
+        assert_eq!(snap.machines[0].unreachable.as_ref().unwrap().detail, "Muxin lets it sleep. Check it when it's awake.");
+        // Disconnected on purpose says that, asleep or not.
+        let inv = inventory("[[machine]]\nname = \"Book\"\nhost = \"book\"\ndisconnected = true\n");
+        let snap = run(&inv, &Settings::default(), &asleep(None, false), None);
+        assert_eq!((snap.machines[0].status.as_str(), snap.machines[0].unreachable.is_none()), ("disconnected", true));
     }
 
     #[test]

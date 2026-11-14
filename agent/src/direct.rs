@@ -8,20 +8,28 @@
 //! (systemd on Linux, launchd on macOS) so it survives reboots. Other apps
 //! (an iPad, paired from a Mac) are added with `{"op": "trust"}` once it runs.
 //!
+//! When the machine sleeps, the apps let go of it (sleep.rs), so nothing they
+//! send wakes it. One that asked (a link's ping names a port of its own:
+//! `"wake_notice": 53312`) is told when it has fully woken: this side
+//! connects to that port at the address the app connected from, with the
+//! same pinned certificates the other way round (`WAKE_ALPN`). The
+//! connection is the whole message; the app then links again.
+//!
 //! Files, in ~/.muxen/direct: `cert.der` and `key.der` (this machine's
-//! identity), `trusted` (one app fingerprint per line), `port`.
+//! identity), `trusted` (one app fingerprint per line), `port`, and while
+//! it's asleep `sleepers` (the apps to tell when it wakes).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::{Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
-use rustls::client::danger::HandshakeSignatureValid;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use serde_json::{Value, json};
@@ -30,6 +38,8 @@ use crate::home_dir;
 
 pub const DEFAULT_PORT: u16 = 47821;
 const ALPN: &[u8] = b"muxen/1";
+/// A wake notice: a connection from this machine to an app (see the top).
+const WAKE_ALPN: &[u8] = b"muxen-wake/1";
 const SERVICE: &str = "muxen-agent";
 const LAUNCHD_LABEL: &str = "com.lumarylabs.muxen-agent";
 
@@ -120,6 +130,8 @@ pub fn listen() -> i32 {
     crate::gui::serve();
     // Alerts for the iPads that asked for them.
     crate::push::start();
+    // When this machine sleeps and wakes, for the apps linked to it.
+    crate::sleep::start();
     let runtime = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
         Ok(r) => r,
         Err(e) => {
@@ -164,6 +176,20 @@ async fn accept_loop() -> Result<(), String> {
     let endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), Some(config), socket, Arc::new(quinn::TokioRuntime))
         .map_err(|e| format!("can't listen on UDP port {}: {e}", addr.port()))?;
     eprintln!("muxen-agent {} listening on UDP {}", crate::VERSION, addr.port());
+    // Asleep, the apps that asked are remembered; awake again, they're told.
+    let (waking, runtime) = (endpoint.clone(), tokio::runtime::Handle::current());
+    let _listening = crate::sleep::listen(move |change| match change {
+        crate::sleep::Change::Sleep => remember_sleepers(),
+        crate::sleep::Change::Awake => {
+            runtime.spawn(tell_sleepers(waking.clone()));
+        }
+    });
+    listening().store(true, std::sync::atomic::Ordering::SeqCst);
+    // Some may be left from before this started (the machine restarted
+    // while they thought it asleep).
+    if !crate::sleep::asleep() {
+        tokio::spawn(tell_sleepers(endpoint.clone()));
+    }
     // Stopped (an update, a restart): tell connected apps right away, so they
     // reconnect instead of waiting for silence.
     let closing = endpoint.clone();
@@ -206,9 +232,13 @@ async fn accept_loop() -> Result<(), String> {
                 });
             }
             // Each bidirectional stream is one link, which knows which app it serves.
+            let peer = crate::link::Peer { app, addr: Some(canonical(conn.remote_address())) };
             while let Ok((send, recv)) = conn.accept_bi().await {
-                tokio::spawn(bridge(send, recv, app.clone()));
+                tokio::spawn(bridge(send, recv, peer.clone()));
             }
+            // The app went away: nothing to tell it when this machine sleeps
+            // (one that left because it sleeps is kept in `sleepers`).
+            forget_notice(&peer);
         });
     }
     Ok(())
@@ -229,12 +259,12 @@ fn udp_socket(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
     Ok(s.into())
 }
 
-async fn bridge(mut send: quinn::SendStream, mut recv: quinn::RecvStream, app: Option<String>) {
+async fn bridge(mut send: quinn::SendStream, mut recv: quinn::RecvStream, peer: crate::link::Peer) {
     let Ok((ours, theirs)) = stream_pair() else { return };
     let Ok(theirs_out) = theirs.try_clone() else { return };
     let priority: crate::link::Priority = Default::default();
     let asked = priority.clone();
-    std::thread::spawn(move || crate::link::serve_for(Box::new(theirs), Box::new(theirs_out), app, Some(asked)));
+    std::thread::spawn(move || crate::link::serve_for(Box::new(theirs), Box::new(theirs_out), peer, Some(asked)));
     let _ = ours.set_nonblocking(true);
     #[cfg(unix)]
     let Ok(ours) = tokio::net::UnixStream::from_std(ours) else { return };
@@ -276,6 +306,183 @@ async fn bridge(mut send: quinn::SendStream, mut recv: quinn::RecvStream, app: O
         r
     };
     let _ = tokio::join!(up, down);
+}
+
+/// An app's address as it's written and compared: IPv4 as IPv4 (the
+/// listener's socket sees it mapped into IPv6).
+fn canonical(addr: SocketAddr) -> SocketAddr {
+    SocketAddr::new(addr.ip().to_canonical(), addr.port())
+}
+
+/// Whether this process is `listen` (only it can tell an app later).
+fn listening() -> &'static std::sync::atomic::AtomicBool {
+    static LISTENING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    &LISTENING
+}
+
+/// The apps connected now that asked to hear when this machine wakes, by
+/// their certificate's fingerprint and where they connected from: where
+/// each one's notice goes (that address, at the port the app named).
+fn notices() -> &'static Mutex<HashMap<(String, SocketAddr), SocketAddr>> {
+    static NOTICES: OnceLock<Mutex<HashMap<(String, SocketAddr), SocketAddr>>> = OnceLock::new();
+    NOTICES.get_or_init(Default::default)
+}
+
+fn key(peer: &crate::link::Peer) -> Option<(String, SocketAddr)> {
+    Some((peer.app.clone()?, peer.addr?))
+}
+
+/// An app asks to be told when this machine wakes, on `port` (its ping said
+/// `"wake_notice": <port>`). The address the notice will go to, or None when
+/// it can't be sent: over ssh, or to an app this machine doesn't know.
+pub fn wants_notice(peer: &crate::link::Peer, port: u16) -> Option<SocketAddr> {
+    let key = key(peer).filter(|_| port != 0 && listening().load(std::sync::atomic::Ordering::SeqCst))?;
+    let to = SocketAddr::new(key.1.ip(), port);
+    notices().lock().unwrap().insert(key.clone(), to);
+    let sleeper = (key.0, to);
+    if crate::sleep::asleep() {
+        // It reached this machine in its sleep: told when it wakes, too.
+        let mut all = sleepers();
+        if all.insert(sleeper) {
+            write_sleepers(&all);
+        }
+    } else {
+        // Back by itself: nothing left to tell it.
+        forget_sleeper(&sleeper);
+    }
+    Some(to)
+}
+
+/// Where this app's wake notice goes, when it asked for one.
+pub fn notice_for(peer: &crate::link::Peer) -> Option<SocketAddr> {
+    notices().lock().unwrap().get(&key(peer)?).copied()
+}
+
+fn forget_notice(peer: &crate::link::Peer) {
+    if let Some(key) = key(peer) {
+        notices().lock().unwrap().remove(&key);
+    }
+}
+
+fn sleepers_file() -> PathBuf {
+    dir().join("sleepers")
+}
+
+/// The apps to tell when this machine wakes: "<fingerprint> <address>" a line.
+fn sleepers() -> HashSet<(String, SocketAddr)> {
+    parse_sleepers(&std::fs::read_to_string(sleepers_file()).unwrap_or_default())
+}
+
+fn parse_sleepers(text: &str) -> HashSet<(String, SocketAddr)> {
+    text.lines().filter_map(|l| l.trim().split_once(' ')).filter(|(app, _)| app.len() == 64).filter_map(|(app, addr)| Some((app.to_string(), addr.trim().parse().ok()?))).collect()
+}
+
+fn write_sleepers(all: &HashSet<(String, SocketAddr)>) {
+    if all.is_empty() {
+        let _ = std::fs::remove_file(sleepers_file());
+        return;
+    }
+    let mut lines: Vec<String> = all.iter().map(|(app, addr)| format!("{app} {addr}\n")).collect();
+    lines.sort();
+    let _ = write_private(&sleepers_file(), lines.concat().as_bytes());
+}
+
+fn forget_sleeper(key: &(String, SocketAddr)) {
+    let mut all = sleepers();
+    if all.remove(key) {
+        write_sleepers(&all);
+    }
+}
+
+/// The machine is about to sleep: the apps linked now that asked are the
+/// ones to tell when it wakes (they let go of it in a moment).
+fn remember_sleepers() {
+    let mut all = sleepers();
+    all.extend(notices().lock().unwrap().iter().map(|((app, _), to)| (app.clone(), *to)));
+    write_sleepers(&all);
+}
+
+/// The machine has fully woken: tells each app that's waiting to hear.
+async fn tell_sleepers(endpoint: quinn::Endpoint) {
+    let known = trusted();
+    let telling: Vec<_> = sleepers().into_iter().map(|key| tokio::spawn(tell(endpoint.clone(), key, known.clone()))).collect();
+    for t in telling {
+        let _ = t.await;
+    }
+}
+
+/// One app's wake notice. The network takes a moment to come back after a
+/// wake, so it's tried a few times; an app that's gone (quit, or elsewhere
+/// now) never answers, and looks for itself when it's back.
+async fn tell(endpoint: quinn::Endpoint, key: (String, SocketAddr), known: HashSet<String>) {
+    if known.contains(&key.0) {
+        for wait in [0, 1, 2, 4, 8, 15, 30, 60] {
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            // Asleep again: it's told at the next wake.
+            if crate::sleep::asleep() {
+                return;
+            }
+            // It linked again by itself.
+            if !sleepers().contains(&key) {
+                return;
+            }
+            let Ok(config) = notice_config(&key.0) else { break };
+            let Ok(connecting) = endpoint.connect_with(config, key.1, "muxen-app") else { continue };
+            if let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_secs(3), connecting).await {
+                conn.close(0u32.into(), b"awake");
+                let _ = tokio::time::timeout(Duration::from_millis(500), conn.closed()).await;
+                break;
+            }
+        }
+    }
+    forget_sleeper(&key);
+}
+
+/// Accepts only the app the notice is for.
+#[derive(Debug)]
+struct PinnedApp {
+    fingerprint: String,
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl ServerCertVerifier for PinnedApp {
+    fn verify_server_cert(&self, cert: &CertificateDer<'_>, _: &[CertificateDer<'_>], _: &ServerName<'_>, _: &[u8], _: UnixTime) -> Result<ServerCertVerified, rustls::Error> {
+        if fingerprint(cert.as_ref()) == self.fingerprint {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General("that isn't the app this notice is for".into()))
+        }
+    }
+
+    fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
+/// How this machine connects to an app for a wake notice: as itself, to
+/// that app only.
+fn notice_config(app: &str) -> Result<quinn::ClientConfig, String> {
+    let (cert, key) = identity()?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = PinnedApp { fingerprint: app.to_string(), algorithms: provider.signature_verification_algorithms };
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| e.to_string())?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_client_auth_cert(vec![cert], key)
+        .map_err(|e| e.to_string())?;
+    tls.alpn_protocols = vec![WAKE_ALPN.to_vec()];
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|e| e.to_string())?;
+    Ok(quinn::ClientConfig::new(Arc::new(crypto)))
 }
 
 /// Two connected streams: one for the QUIC side, one for the link.
@@ -772,6 +979,18 @@ mod tests {
         let (lan, tailnet) = addresses();
         println!("lan {lan:?} tailnet {tailnet:?}");
         assert!(lan.iter().all(|a| !tailnet.contains(a)));
+    }
+
+    #[test]
+    fn reads_the_apps_to_tell() {
+        let (app, other) = ("a".repeat(64), "b".repeat(64));
+        let text = format!("{app} 192.168.1.20:53312\n{other} [fd7a:115c:a1e0::1]:40000\nnot a line\n{app} nowhere\n");
+        let all = parse_sleepers(&text);
+        assert_eq!(all.len(), 2);
+        assert!(all.contains(&(app, "192.168.1.20:53312".parse().unwrap())));
+        assert!(all.contains(&(other, "[fd7a:115c:a1e0::1]:40000".parse().unwrap())));
+        // An app that connected over IPv4 is written, and told, at that address.
+        assert_eq!(canonical("[::ffff:192.168.1.20]:53312".parse().unwrap()).to_string(), "192.168.1.20:53312");
     }
 
     #[test]

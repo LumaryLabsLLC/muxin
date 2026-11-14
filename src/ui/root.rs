@@ -1565,10 +1565,10 @@ impl Root {
     }
 
     /// Powers a cloud machine on or off.
-    /// Sends a machine the Wake on LAN signal (from here and its network's machines).
+    /// Wakes a machine: one that's asleep through its agent, else with the
+    /// Wake on LAN signal (from here and its network's machines).
     pub(super) fn wake_machine(&mut self, machine_id: &str, cx: &mut Context<Self>) {
         let (engine, id) = (self.engine.clone(), machine_id.to_string());
-        let name = self.snapshot.machines.iter().find(|m| m.id == machine_id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone());
         let job = engine.runtime().spawn({
             let engine = engine.clone();
             async move { engine.wake(&id).await }
@@ -1576,7 +1576,7 @@ impl Root {
         let task = cx.spawn(async move |this, cx| {
             let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update(cx, |this, cx| match result {
-                Ok(from) => this.notify_user(format!("Woke {name} from {from}. Muxin looks again in a moment."), false, cx),
+                Ok(woke) => this.notify_user(woke.message, false, cx),
                 Err(e) => this.notify_user(e, true, cx),
             });
         });
@@ -3264,15 +3264,20 @@ impl Root {
         } else {
             let total = s.machines.iter().filter(|m| !m.host.is_empty()).count();
             let offline = s.machines.iter().filter(|m| m.status == "offline").count();
-            // Off or asleep, versus on but needing something (a key, Remote Login, ...).
+            // Asleep: nothing's wrong, and it's not online either.
+            let asleep = s.machines.iter().filter(|m| m.is_asleep()).count();
+            // Off, versus on but needing something (a key, Remote Login, ...).
             let off = s.machines.iter().filter(|m| format::is_just_offline(m)).count();
             let stuck = offline - off;
-            let title = match (total, offline) {
+            let title = match (total, offline + asleep) {
                 (0, _) => "No machines yet".to_string(),
                 (1, 0) => "Your machine is online".to_string(),
                 (n, 0) => format!("All {n} machines online"),
                 (n, _) => {
-                    let mut parts = vec![format!("{} online", n - offline)];
+                    let mut parts = vec![format!("{} online", n.saturating_sub(offline + asleep))];
+                    if asleep > 0 {
+                        parts.push(format!("{asleep} asleep"));
+                    }
                     if off > 0 {
                         parts.push(format!("{off} offline"));
                     }

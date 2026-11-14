@@ -207,6 +207,9 @@ async fn handle(engine: &Arc<Engine>, session: &Session, method: &str, params: V
 /// results with `isError: true`, not protocol errors, so the model sees them.
 pub async fn call_tool(engine: &Arc<Engine>, session: &Session, name: &str, args: Value) -> Value {
     let args = session_arg(args);
+    // What the app found since the last call: a machine that woke, say (this
+    // server runs no checks of its own, and leaves one that's asleep alone).
+    engine.refresh_from_disk();
     // A screenshot comes back as an image the model can look at.
     if name == "desktop_screenshot" {
         let machine = args["machine_id"].as_str().unwrap_or("").to_string();
@@ -484,7 +487,7 @@ pub fn tools() -> Vec<Value> {
     let tools = vec![
         json!({
             "name": "status",
-            "description": "Overview of all the user's machines: counts of working/idle/offline runners, queued jobs, GitHub connection, every machine with CPU/memory/disk/uptime and a runner summary, and an `attention` list of problems (unreachable machines, stopped runners, jobs no runner can take, low disk). Call this first. Uses the last machine check unless refresh=true, which re-checks every machine over ssh first.",
+            "description": "Overview of all the user's machines: counts of working/idle/offline runners, queued jobs, GitHub connection, every machine with CPU/memory/disk/uptime and a runner summary, and an `attention` list of problems (unreachable machines, stopped runners, jobs no runner can take, low disk). Call this first. Uses the last machine check unless refresh=true, which re-checks every machine over ssh first. A machine whose status is \"asleep\" is left alone (a check would wake it): it shows as online again when it wakes.",
             "inputSchema": schema(json!({
                 "refresh": { "type": "boolean", "description": "Re-check all machines over ssh and sync GitHub before answering. Slower; default false." }
             }), &[]),
@@ -513,7 +516,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "check_machines",
-            "description": "Run the read-only machine check now (over ssh, or locally for host \"local\"): CPU, memory, disk, uptime, installed runners and whether they're running. One machine or all. Changes nothing on the machines.",
+            "description": "Run the read-only machine check now (over ssh, or locally for host \"local\"): CPU, memory, disk, uptime, installed runners and whether they're running. One machine or all. Changes nothing on the machines. A check of all leaves a machine that's asleep alone when the app is told of its waking; naming it checks it, which wakes it for a moment (it stays \"asleep\" unless it's really awake).",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": "Only this machine; omit for all." } }), &[]),
             "annotations": annotations("Check machines", true, false, true, true),
         }),
@@ -1311,7 +1314,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "wake_machine",
-            "description": "Wake a machine that's asleep or shut down (Wake on LAN), when its network card is known (Muxin learns it while the machine is on) and it's set up to wake that way. The signal goes from this computer and from online machines on the same network. Muxin checks it again after 20 and 40 seconds.",
+            "description": "Wake a machine. One whose status is \"asleep\" (a Mac that sleeps and wakes for the network) is woken for real by its agent, as a key press there would: `awake` says whether it is now; a laptop with its lid closed can't stay awake, and `message` says so. Otherwise Wake on LAN, for a machine that's asleep or shut down, when its network card is known (Muxin learns it while the machine is on) and it's set up to wake that way: the signal goes from this computer and from online machines on the same network (`sent_from`), and Muxin checks it again after 20 and 40 seconds. It wakes the user's machine: only when asked.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
             "annotations": annotations("Wake a machine", false, false, true, true),
         }),

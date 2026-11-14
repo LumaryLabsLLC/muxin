@@ -21,6 +21,15 @@
 //! "priority", "priority": n}` puts this side of a stream in line: higher
 //! goes first (the app uses 2 for the terminal it's typing into, 1 for the
 //! machine's link, 0 for the rest).
+//!
+//! A link also says when the machine sleeps and wakes (sleep.rs): its hello
+//! and its pings' replies have `"sleeps": true` where the agent can tell,
+//! and `"asleep": true` while the machine is asleep (a dark wake included);
+//! `{"event": "sleep"}` comes before it sleeps and `{"event": "awake"}` once
+//! it has fully woken. An app whose ping names a port of its own
+//! (`"wake_notice": 53312`) over a direct link is told there when the
+//! machine wakes, with no link left (direct.rs); the reply's `wake_notice`
+//! is the address that goes to, and the `sleep` event says it again.
 
 use std::collections::HashMap;
 use std::io::{self, BufWriter, Read, Write};
@@ -204,21 +213,53 @@ pub fn run() -> i32 {
 
 /// Serves one link until the other side hangs up.
 pub fn serve(input: Box<dyn Read + Send>, output: Box<dyn Write + Send>) -> i32 {
-    serve_for(input, output, None, None)
+    serve_for(input, output, Peer::default(), None)
 }
 
 /// Where a direct link's stream goes in line (see `priority` above).
 pub type Priority = Arc<std::sync::atomic::AtomicI32>;
 
-/// The same, for the paired app with this certificate fingerprint (a direct
-/// link; over ssh there's no telling which app it is), on a stream whose
-/// priority the app may set.
-pub fn serve_for(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>, app: Option<String>, priority: Option<Priority>) -> i32 {
+/// The paired app a direct link serves (over ssh there's no telling which
+/// app it is): its certificate fingerprint, and where it connected from.
+#[derive(Clone, Debug, Default)]
+pub struct Peer {
+    pub app: Option<String>,
+    pub addr: Option<std::net::SocketAddr>,
+}
+
+/// The same, for a paired app (a direct link), on a stream whose priority
+/// the app may set.
+pub fn serve_for(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>, peer: Peer, priority: Option<Priority>) -> i32 {
     let out: Out = Arc::new(Mutex::new(BufWriter::new(output)));
     let attached: Attached = Arc::new(Mutex::new(HashMap::new()));
-    if send_json(&out, &json!({ "event": "hello", "version": crate::VERSION, "now": now() })).is_err() {
+    crate::sleep::start();
+    let mut hello = json!({ "event": "hello", "version": crate::VERSION, "now": now() });
+    crate::sleep::describe(&mut hello);
+    if send_json(&out, &hello).is_err() {
         return 1;
     }
+    // Before the machine sleeps, and once it has fully woken, the app hears.
+    let _listening = {
+        let (out, peer) = (out.clone(), peer.clone());
+        crate::sleep::listen(move |change| {
+            let event = match change {
+                crate::sleep::Change::Sleep => {
+                    let mut e = json!({ "event": "sleep" });
+                    if crate::sleep::lid_closed() {
+                        e["lid_closed"] = json!(true);
+                    }
+                    if let Some(to) = crate::direct::notice_for(&peer) {
+                        e["wake_notice"] = json!(to.to_string());
+                    }
+                    e
+                }
+                crate::sleep::Change::Awake => json!({ "event": "awake" }),
+            };
+            if send_json(&out, &event).is_ok() && change == crate::sleep::Change::Sleep {
+                crate::sleep::told_an_app();
+            }
+        })
+    };
     loop {
         let (channel, kind, mut payload) = match read_frame(&mut input) {
             Ok(f) => f,
@@ -242,11 +283,11 @@ pub fn serve_for(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>,
                 let _ = send_json(&out, &reply);
                 continue;
             }
-            let (out, attached, app) = (out.clone(), attached.clone(), app.clone());
+            let (out, attached, peer) = (out.clone(), attached.clone(), peer.clone());
             // Requests run side by side; a slow one doesn't hold up the rest.
             thread::spawn(move || {
                 let id = req["id"].clone();
-                let mut reply = handle(&req, &out, &attached, app.as_deref());
+                let mut reply = handle(&req, &out, &attached, &peer);
                 reply["id"] = id;
                 let _ = send_json(&out, &reply);
             });
@@ -289,7 +330,7 @@ pub fn serve_for(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>,
     0
 }
 
-fn handle(req: &Value, out: &Out, attached: &Attached, app: Option<&str>) -> Value {
+fn handle(req: &Value, out: &Out, attached: &Attached, peer: &Peer) -> Value {
     match req["op"].as_str().unwrap_or("") {
         "sh" => run_script(req),
         "attach" => attach(req, out, attached),
@@ -304,12 +345,22 @@ fn handle(req: &Value, out: &Out, attached: &Attached, app: Option<&str>) -> Val
             thread::spawn(move || watch(out));
             json!({ "ok": true })
         }
-        "ping" => json!({ "ok": true, "version": crate::VERSION, "now": now() }),
+        "ping" => {
+            let mut reply = json!({ "ok": true, "version": crate::VERSION, "now": now() });
+            crate::sleep::describe(&mut reply);
+            // An app that wants to hear when this machine wakes, on that port.
+            if let Some(port) = req["wake_notice"].as_u64().and_then(|p| u16::try_from(p).ok())
+                && let Some(to) = crate::direct::wants_notice(peer, port)
+            {
+                reply["wake_notice"] = json!(to.to_string());
+            }
+            reply
+        }
         "addresses" => json!({ "ok": true, "addresses": crate::direct::lan_addresses(), "tailnet": crate::direct::tailnet_addresses(), "port": crate::direct::port() }),
         "pair" => crate::direct::pair(req),
         "trust" => crate::direct::trust(req),
         "unpair" => crate::direct::unpair(req),
-        "push" => crate::push::op(req, app),
+        "push" => crate::push::op(req, peer.app.as_deref()),
         // Everything `muxen-agent ctl` does.
         _ => client::handle(req),
     }
@@ -747,6 +798,7 @@ mod tests {
     #[test]
     fn answers_requests_and_runs_scripts() {
         use std::os::unix::net::UnixStream;
+        let _turn = crate::sleep::test_lock();
         let (mut app, agent) = UnixStream::pair().unwrap();
         let agent_out = agent.try_clone().unwrap();
         let server = thread::spawn(move || serve(Box::new(agent), Box::new(agent_out)));
@@ -775,6 +827,7 @@ mod tests {
     fn a_direct_stream_takes_a_priority() {
         use std::os::unix::net::UnixStream;
         use std::sync::atomic::Ordering;
+        let _turn = crate::sleep::test_lock();
         let next = |app: &mut UnixStream| {
             let (channel, kind, payload) = read_frame(app).unwrap();
             assert_eq!((channel, kind), (CONTROL, JSON));
@@ -785,7 +838,7 @@ mod tests {
             let agent_out = agent.try_clone().unwrap();
             let priority: Priority = Default::default();
             let given = direct.then(|| priority.clone());
-            let server = thread::spawn(move || serve_for(Box::new(agent), Box::new(agent_out), None, given));
+            let server = thread::spawn(move || serve_for(Box::new(agent), Box::new(agent_out), Peer::default(), given));
             assert_eq!(next(&mut app)["event"], "hello");
             // An app that never asks.
             app.write_all(&frame(CONTROL, JSON, br#"{"id":1,"op":"ping"}"#)).unwrap();
@@ -800,5 +853,57 @@ mod tests {
             drop(app);
             assert_eq!(server.join().unwrap(), 0);
         }
+    }
+
+    /// A link says when the machine is about to sleep and when it has woken.
+    /// While it sleeps, pings say so, and so does the hello of a link made
+    /// then (an app's packet woke the machine for a moment). An app before
+    /// all this hears two events it doesn't know, and is served as ever.
+    #[cfg(unix)]
+    #[test]
+    fn says_when_the_machine_sleeps_and_wakes() {
+        use crate::sleep::{Change, test_change};
+        use std::os::unix::net::UnixStream;
+        let _turn = crate::sleep::test_lock();
+        let next = |app: &mut UnixStream| {
+            let (channel, kind, payload) = read_frame(app).unwrap();
+            assert_eq!((channel, kind), (CONTROL, JSON));
+            serde_json::from_slice::<Value>(&payload).unwrap()
+        };
+        let link = || {
+            let (app, agent) = UnixStream::pair().unwrap();
+            let agent_out = agent.try_clone().unwrap();
+            (app, thread::spawn(move || serve(Box::new(agent), Box::new(agent_out))))
+        };
+        let (mut app, server) = link();
+        let hello = next(&mut app);
+        assert_eq!((hello["event"].as_str(), hello["sleeps"].as_bool(), hello.get("asleep")), (Some("hello"), Some(true), None));
+        // Asking for a wake notice over ssh: there's nowhere to send one.
+        app.write_all(&frame(CONTROL, JSON, br#"{"id":1,"op":"ping","wake_notice":53312}"#)).unwrap();
+        let pong = next(&mut app);
+        assert_eq!((pong["id"].as_u64(), pong["ok"].as_bool(), pong.get("asleep"), pong.get("wake_notice")), (Some(1), Some(true), None, None));
+
+        // Said before the machine may sleep: it's on the wire when this returns.
+        test_change(Change::Sleep);
+        let event = next(&mut app);
+        assert_eq!((event["event"].as_str(), event.get("wake_notice")), (Some("sleep"), None));
+        app.write_all(&frame(CONTROL, JSON, br#"{"id":2,"op":"ping"}"#)).unwrap();
+        let pong = next(&mut app);
+        assert_eq!((pong["id"].as_u64(), pong["asleep"].as_bool()), (Some(2), Some(true)));
+        // A link made while it sleeps.
+        let (mut late, late_server) = link();
+        let hello = next(&mut late);
+        assert_eq!((hello["event"].as_str(), hello["asleep"].as_bool()), (Some("hello"), Some(true)));
+        // It still answers: an app from before this goes on as it did.
+        late.write_all(&frame(CONTROL, JSON, br#"{"id":1,"op":"sh","login":false,"script":"echo up"}"#)).unwrap();
+        assert_eq!(next(&mut late)["stdout"], "up\n");
+
+        test_change(Change::Awake);
+        assert_eq!(next(&mut app)["event"], "awake");
+        assert_eq!(next(&mut late)["event"], "awake");
+        app.write_all(&frame(CONTROL, JSON, br#"{"id":3,"op":"ping"}"#)).unwrap();
+        assert_eq!(next(&mut app).get("asleep"), None);
+        drop((app, late));
+        assert_eq!((server.join().unwrap(), late_server.join().unwrap()), (0, 0));
     }
 }

@@ -190,8 +190,10 @@ pub struct Machine {
     pub platform: String,
     /// "runner" when it hosts runners, otherwise "other".
     pub kind: String,
-    /// "online" | "offline" | "unchecked" | "manual" | "disconnected" (on
-    /// purpose: Muxin leaves it alone until it's connected again)
+    /// "online" | "offline" | "asleep" (its agent said it sleeps: Muxin
+    /// leaves it alone until it wakes) | "unchecked" | "manual" |
+    /// "disconnected" (on purpose: Muxin leaves it alone until it's
+    /// connected again)
     pub status: String,
     pub checking: bool,
     pub notes: Option<String>,
@@ -213,7 +215,7 @@ pub struct Machine {
     /// "none" (not set up there) or what went wrong (see fleet::sessions).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_hooks: Option<serde_json::Value>,
-    /// Why it can't be reached, when `status` is "offline".
+    /// Why it can't be reached, when `status` is "offline" or "asleep".
     pub unreachable: Option<Unreachable>,
     /// It on the user's tailnet, as Tailscale last saw it.
     pub tailnet: Option<TailnetDevice>,
@@ -274,9 +276,14 @@ impl Machine {
         !self.local && !(self.parent.as_ref().is_some_and(|p| p.inside()) && self.direct_address.is_none())
     }
 
-    /// Muxin can't use it now: it's offline, or disconnected on purpose.
+    /// Muxin can't use it now: it's offline, asleep, or disconnected on purpose.
     pub fn is_down(&self) -> bool {
-        matches!(self.status.as_str(), "offline" | "disconnected")
+        matches!(self.status.as_str(), "offline" | "asleep" | "disconnected")
+    }
+
+    /// Asleep: Muxin leaves it alone until it wakes (or is woken).
+    pub fn is_asleep(&self) -> bool {
+        self.status == "asleep"
     }
 
     pub fn is_disconnected(&self) -> bool {
@@ -400,7 +407,9 @@ pub struct Probe {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Unreachable {
-    /// "offline" (no answer: shut down, asleep, off the network) | "refused" |
+    /// "offline" (no answer: shut down, off the network, or asleep without
+    /// saying so) | "asleep" (its agent said it sleeps: nothing to fix, and
+    /// Muxin doesn't wake it by looking) | "refused" |
     /// "auth" | "key-locked" (the machine has the key, and it has a passphrase
     /// no agent here unlocks) | "unknown-host" | "host-key" | "tailscale-off" (this computer's
     /// Tailscale is off or signed out, and the machine is on the tailnet) |

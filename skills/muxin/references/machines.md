@@ -18,9 +18,10 @@ These only edit Muxin's `config.toml` (`remove-machine` also unpairs a machine p
 
 ## When a machine can't be reached
 
-`muxin machine beelink --json`: when `status` is `offline`, `unreachable` has a `kind`, a `title` and `detail`, often a `hint`, and `last_seen_at`. The kinds:
+`muxin machine beelink --json`: when `status` is `offline` or `asleep`, `unreachable` has a `kind`, a `title` and `detail`, often a `hint`, and `last_seen_at`. The kinds:
 
-- `offline`: it didn't answer (shut down, asleep, off the network). Nothing to fix from here; tell the user when it was last seen. `muxin wake beelink` sends Wake on LAN, when Muxin has seen its network card and the machine is set up to wake that way.
+- `asleep` (`status` is `asleep` too): a Mac's agent said it was going to sleep, and Muxin leaves it alone (a packet would wake it): anything that would reach it fails with "<name> is asleep. Wake it first." Nothing to fix; its sessions go on when it wakes, and it's `online` again by itself. Don't check it by name or wake it to find out. `muxin wake beelink` wakes it for real, only when the user asks; a laptop with its lid closed can't stay awake, and the answer says so.
+- `offline`: it didn't answer (shut down, off the network, or asleep without having said so). Nothing to fix from here; tell the user when it was last seen. `muxin wake beelink` sends Wake on LAN, when Muxin has seen its network card and the machine is set up to wake that way.
 - `refused`, `auth`, `key-locked`, `unknown-host`, `host-key`: an ssh problem. Pass the `hint` on. `key-locked` means the machine already has the user's key, but it has a passphrase and no ssh agent Muxin can reach holds it: copying the key again won't help.
 - `tailscale-off`: Tailscale is off or signed out on this computer. Tell the user to turn it on; Muxin never changes Tailscale's settings.
 - `host-down`: the machine it runs on (or is reached through) is off. `stopped`: its container there isn't running. `powered-off`: a cloud machine that's off. `installing`: a VM Muxin just made.

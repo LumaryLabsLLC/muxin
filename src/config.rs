@@ -419,13 +419,13 @@ impl MachineSpec {
         self.is_checkable() && !self.disconnected
     }
 
-    /// Err for a machine disconnected on purpose: what the user sees instead
-    /// of Muxin reaching it.
+    /// Err for a machine disconnected on purpose, or asleep: what the user
+    /// sees instead of Muxin reaching it (which would wake one that sleeps).
     pub fn refuse_if_disconnected(&self) -> Result<(), String> {
         if self.disconnected {
             return Err(format!("{} is disconnected. Connect to it first.", self.name));
         }
-        Ok(())
+        crate::fleet::asleep::refuse(self)
     }
 }
 

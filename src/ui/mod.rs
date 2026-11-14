@@ -39,6 +39,8 @@ mod text_rows;
 mod theme;
 mod tray;
 mod run;
+#[cfg(feature = "recipes")]
+mod recipes;
 mod schedule_dialog;
 mod schedules;
 mod snippets;

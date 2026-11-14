@@ -273,6 +273,7 @@ The MCP server has these tools:
 | `wake_machine` | Wakes a machine that's asleep or off (Wake on LAN). |
 | `machine_power` | Powers a machine on or off, or restarts it: a cloud machine, a VM in a Docker container on another of your machines, or any other machine through its own system (off and restart) |
 | `vm_options`, `vm_create`, `vm_destroy` | VMs on your machines: Windows (Docker with KVM) or Linux containers, added to your machines. |
+| `recipe_check`, `recipe_apply` | Which of Muxin's components a machine has (git, Docker, Node.js, languages, agent CLIs); install the missing ones, and update the agent CLIs. See [Recipes](#recipes). |
 | `schedule_list`, `schedule_save`, `schedule_delete`, `schedule_run`, `schedule_log` | Commands and agent sessions that run on a machine at set times, run there by its own scheduler. |
 | `agent_usage` | What Claude Code and Codex used over the last N days: tokens, requests and cost at API prices, by model and machine. |
 | `install_runners` | Downloads, registers and starts runners on a machine. |
@@ -357,6 +358,8 @@ muxin kill beelink 4242 [--force]         # stop a process (--force: SIGKILL)
 muxin wake beelink                        # Wake on LAN
 muxin power win11 off                     # shut a machine down (or restart it); a VM or cloud machine also turns on
 muxin vm create win-test --system windows-11 --on beelink   # a VM on one of your machines
+muxin recipe check beelink [claude]       # which of Muxin's components it has (git, docker, node, claude, ...)
+muxin recipe apply beelink gh claude [--update]   # install the missing ones (--update: and update the agent CLIs)
 muxin schedule add beelink --name Tests --every day --at 09:00 --command "make test"
 muxin usage [--days 30] [beelink]             # what the agents used, and the cost at API prices
 muxin edit beelink:~/code/api [--editor zed] [--print]   # open a folder there in your editor
@@ -695,6 +698,32 @@ muxin power win-test off
 muxin vm destroy win-test
 ```
 
+## Recipes
+
+Which tools does a machine have, and can Muxin put the missing ones there? A **component** is one thing a machine can have: git, Docker, Node.js, a language, an agent CLI. Each one has a check that says whether it's there, an install step, sometimes an update step, the components it requires, the systems it works on, and whether its steps need root. A **recipe** is the components you name, by id. Muxin has 22 built in:
+
+- **Tools:** `git`, `docker`, `gh` (the GitHub CLI), `unzip`, `tailscale`.
+- **Languages:** `node`, `python` (it brings `uv`), `go`, `rust`, `php`, `ruby`, `java`, `bun`, `deno`, `dotnet`.
+- **Agent CLIs:** `claude`, `codex`, `gemini`, `opencode`, `amp`, `pi`.
+
+Recipes aren't in released builds yet. Until the `recipes` cargo feature is on by default, build Muxin with it: `cargo build --release --features recipes` (`cargo run --features recipes -- recipe check forge --demo` tries it on the simulated machines).
+
+- **Check** runs every check in one read-only script, in your login shell, so tools from Homebrew, mise, nvm or `~/.local/bin` count. Each component comes back `present`, `missing`, or `unsupported` (it has no steps for that system). Name no component and you get all of them; what a component requires is checked too. Node.js counts from version 22, which the agent CLIs need: an older one is `missing`.
+- **Apply** installs what's missing, as an operation: one per machine at a time, its log printed as it goes, and the command waits until it's done. It checks first, installs in order (each requirement before what needs it, otherwise the order you gave, so Node.js goes before Claude Code), and checks each one again. Each component comes back `already`, `installed`, `failed`, `skipped` (not tried, with why and often a hint) or `unsupported`. An install that finishes while its check still fails is `failed`. Nothing is removed or rolled back, so a second run changes nothing. The command fails when anything failed or was skipped.
+- **Update** (`--update`) also updates what's there and has a newer version out, and only that. The six agent CLIs have an update step; they ask npm. Each comes back `updated`, or `current` when there's nothing newer. Everything else that's there stays `already`.
+- **Root.** Steps never call sudo themselves. On Linux, a component that needs root runs through `sudo -n`. When sudo asks for a password it's `skipped` with nothing of it run, and so is whatever requires it; the hint says what to do. The agent CLIs install as you when npm's global folder is yours (a Node.js from mise, nvm or Homebrew), and as root when it's the system's (`root_unless` in their files). On a Mac every step runs as you, and packages come from Homebrew.
+- **Systems.** Steps are `sh`, for Linux and macOS. On Linux they're tested on the systems Muxin's VMs come in: Ubuntu, Debian, Fedora, Alpine and Arch, each with its own package names. Deno and Amp have no build for Alpine, and fail there saying so. Docker, Python, Go, PHP, Ruby, Java, .NET and Tailscale have Linux steps only. A Windows machine answers `unsupported` for everything, and nothing runs there.
+- **New cloud machines and Linux VMs** get what you picked for them the same way: once the machine answers ssh, Muxin applies those components inside the operation that makes it. One that doesn't install is a warning in that log, with the command that tries again, and the machine is still ready.
+
+```sh
+muxin recipe check beelink                         # all 22: present, missing or unsupported
+muxin recipe check beelink claude                  # Node.js, then Claude Code
+muxin recipe apply beelink gh claude               # install what's missing, requirements first
+muxin recipe apply beelink claude codex --update   # and update the agent CLIs that are behind
+```
+
+Your AI agents have the same through MCP: `recipe_check` and `recipe_apply`. The components are the TOML files in [`src/recipe/components`](src/recipe/components), built into the binary.
+
 ## Schedules
 
 A schedule runs a command, or starts an agent session, on one of your machines at set times: every few minutes, every hour, every day, weekdays, or some days of the week, in that machine's own time. It's kept on the machine and run by its own scheduler (cron, launchd or Task Scheduler), so it runs even when Muxin isn't open. The **Schedules** page lists them with their last run, runs one now, pauses one, and shows each run's output. An agent schedule ("every morning, go through new issues") starts a session you find under the machine, waiting for you.
@@ -747,6 +776,7 @@ Source layout:
 - `src/share`: sharing sessions by link (the host's gateway, joining, WebRTC); `share-server/`: the server that introduces the two sides and serves the browser's join page.
 - `src/fleet`: the engine and snapshot model; `link.rs` and `direct.rs` (connections), `tailscale.rs` and `engine/roaming.rs` (moving between networks), `files.rs`, `clipboard.rs`, `discover.rs` (machines on this network).
 - `src/probe`: machine checks.
+- `src/recipe`: [recipes](#recipes). The components (`components/*.toml`), checking a machine for them (`mod.rs`) and applying them (`apply.rs`, with the scripts every step runs through in `scripts/`).
 - `src/github`: the GitHub API client.
 - `src/ops`: installs and runner control.
 - `src/fleet/workspaces/`: agent workspaces (host and Docker).

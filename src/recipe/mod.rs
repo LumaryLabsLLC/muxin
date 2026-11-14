@@ -11,7 +11,7 @@
 //! also to the cloud machines and VMs it makes (`recipe_setup`).
 
 mod apply;
-pub use apply::Applied;
+pub use apply::{Applied, longest};
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -388,14 +388,22 @@ mod tests {
             let c = catalog.get(id).unwrap_or_else(|| panic!("{id} is an extra but no component"));
             assert_eq!(c.name, *name);
             if let Some(package) = npm_package(id) {
-                assert_eq!(c.install, format!("npm install -g {package}"), "{id}");
+                // The step ends with what cloud machines run (Amp first says so where it can't start).
+                let installs = c.install.trim().lines().last().unwrap();
+                assert!(installs.starts_with("npm install -g ") && installs.ends_with(&format!(" {package}")), "{id}: {installs}");
                 // Updating looks at the copy on PATH, the command being the id.
                 let at = format!("--prefix \"$(npm_prefix {id})\"");
-                assert_eq!(c.update.as_deref(), Some(format!("npm install -g {at} {package}@latest").as_str()), "{id}");
+                let updates = c.update.as_deref().unwrap();
+                assert!(updates.starts_with("npm install -g ") && updates.contains(&format!(" {at} ")) && updates.ends_with(&format!(" {package}@latest")), "{id}: {updates}");
                 let name = package.rsplit(' ').next().unwrap();
                 assert_eq!(c.up_to_date.as_deref(), Some(format!("npm outdated -g {at} {name}").as_str()), "{id}");
                 assert_eq!((c.requires.as_slice(), c.root, c.root_unless.as_deref()), (&["node".to_string()][..], true, claude_root_unless()), "{id}");
             }
+        }
+        // npm 12 runs install scripts only when told to: the CLIs whose script fetches their binary say so, installing and updating.
+        for (id, package) in [("claude", "@anthropic-ai/claude-code"), ("opencode", "opencode-ai"), ("amp", "@ampcode/cli")] {
+            let (c, flag) = (catalog.get(id).unwrap(), format!(" --allow-scripts={package} "));
+            assert!(c.install.contains(&flag) && c.update.as_deref().unwrap().contains(&flag), "{id}");
         }
         // What the extras brought besides themselves.
         assert_eq!(catalog.get("python").unwrap().requires, ["uv"]);

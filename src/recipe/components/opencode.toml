@@ -4,6 +4,7 @@ requires = ["node"]
 root = true
 root_unless = 'test -w "$(npm prefix -g)"'
 check = "command -v opencode"
-install = "npm install -g opencode-ai"
+# Its install script has to run (see claude.toml).
+install = "npm install -g --allow-scripts=opencode-ai opencode-ai"
 up_to_date = 'npm outdated -g --prefix "$(npm_prefix opencode)" opencode-ai'
-update = 'npm install -g --prefix "$(npm_prefix opencode)" opencode-ai@latest'
+update = 'npm install -g --allow-scripts=opencode-ai --prefix "$(npm_prefix opencode)" opencode-ai@latest'

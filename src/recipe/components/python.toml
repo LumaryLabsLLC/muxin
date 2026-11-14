@@ -6,4 +6,13 @@ requires = ["uv"]
 os = ["linux"]
 root = true
 check = "python3 -m pip --version"
-install = "pkg_install python3 python3-pip python3-venv python3-dev"
+# pip, venv and the headers are packages of their own on Debian and Ubuntu;
+# elsewhere venv comes with Python, and the others are named differently.
+install = '''
+case "$(pkg_manager)" in
+  dnf) pkg_install python3 python3-pip python3-devel ;;
+  apk) pkg_install python3 py3-pip python3-dev ;;
+  pacman) pkg_install python python-pip ;;
+  *) pkg_install python3 python3-pip python3-venv python3-dev ;;
+esac
+'''

@@ -3,4 +3,11 @@ name = "Ruby"
 os = ["linux"]
 root = true
 check = "ruby --version"
-install = "pkg_install ruby-full"
+# With its headers, to build gems (ruby-full on Debian, Ubuntu and Alpine).
+install = '''
+case "$(pkg_manager)" in
+  dnf) pkg_install ruby ruby-devel ;;
+  pacman) pkg_install ruby ;;
+  *) pkg_install ruby-full ;;
+esac
+'''

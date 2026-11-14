@@ -3,4 +3,20 @@ name = ".NET"
 os = ["linux"]
 root = true
 check = "dotnet --list-sdks | grep -q ."
-install = "pkg_install dotnet-sdk-8.0"
+# .NET 8 where the system still packages it, as cloud machines get it, else
+# .NET 10 (Ubuntu 26.04, Fedora); Arch has one package, the current SDK.
+# Debian packages none: there, from Microsoft's own apt repository.
+install = '''
+case "$(pkg_manager)" in
+  pacman) pkg_install dotnet-sdk ;;
+  *)
+    if [ "$(. /etc/os-release 2>/dev/null; echo "$ID")" = debian ]; then
+      curl -fsSL "https://packages.microsoft.com/config/debian/$(. /etc/os-release; echo "$VERSION_ID")/packages-microsoft-prod.deb" -o /tmp/packages-microsoft-prod.deb
+      dpkg -i /tmp/packages-microsoft-prod.deb
+      rm -f /tmp/packages-microsoft-prod.deb
+      apt-get -o DPkg::Lock::Timeout=600 update -y
+    fi
+    pkg_install dotnet-sdk-8.0 || { echo "No .NET 8 package here: trying .NET 10."; pkg_install dotnet-sdk-10.0; }
+    ;;
+esac
+'''

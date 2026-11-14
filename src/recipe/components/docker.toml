@@ -3,9 +3,14 @@ name = "Docker"
 os = ["linux"]
 root = true
 check = "docker --version"
-# Docker's own script, then the user joins the docker group (SUDO_USER is
-# who ran sudo).
+# Docker's own script, which also starts it; on Alpine and Arch, which the
+# script doesn't know, their own packages (starting it there is left to you).
+# Then the user joins the docker group (SUDO_USER is who ran sudo).
 install = '''
-curl -fsSL https://get.docker.com | sh
-[ -z "${SUDO_USER:-}" ] || usermod -aG docker "$SUDO_USER"
+case "$(pkg_manager)" in
+  apk) pkg_install docker docker-cli-compose ;;
+  pacman) pkg_install docker docker-compose ;;
+  *) curl -fsSL https://get.docker.com | sh ;;
+esac
+[ -z "${SUDO_USER:-}" ] || usermod -aG docker "$SUDO_USER" || addgroup "$SUDO_USER" docker
 '''

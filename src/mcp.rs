@@ -1420,10 +1420,11 @@ pub fn tools() -> Vec<Value> {
         "annotations": annotations("Check components", true, false, true, true),
     }), json!({
         "name": "recipe_apply",
-        "description": "Install what's missing of Muxin's components (git, the GitHub CLI, Node.js, Claude Code) on a machine, as an operation: checks first, installs only what's missing in order (requirements first) in the user's login shell, checks each again, and says per component already, installed, failed, skipped (not tried; error says why, often with a hint) or unsupported. Never removes, updates or rolls back anything, so a second run changes nothing. On Linux, steps that need root run through `sudo -n` and are skipped when sudo asks for a password. Changes the real machine: confirm with the user first unless they asked for exactly that.",
+        "description": "Install what's missing of Muxin's components (git, the GitHub CLI, Node.js, Claude Code) on a machine, as an operation: checks first, installs only what's missing in order (requirements first) in the user's login shell, checks each again, and says per component already, installed, failed, skipped (not tried; error says why, often with a hint) or unsupported. With update, what's there and has a newer version out (the agent CLIs ask npm) is updated too, and only that: current or updated. Never removes or rolls back anything, so a second run changes nothing. On Linux, steps that need root run through `sudo -n` and are skipped when sudo asks for a password. Changes the real machine: confirm with the user first unless they asked for exactly that.",
         "inputSchema": schema(json!({
             "machine_id": { "type": "string", "description": MACHINE_ID },
             "components": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": crate::recipe::catalog().map(|c| c.ids()).unwrap_or_default() }, "description": "Component ids to install where missing; what they require goes first." },
+            "update": { "type": "boolean", "description": "Also update the ones there that have a newer version out. Default false." },
             "wait": { "type": "boolean", "description": "Wait for it to finish. Default true." },
             "timeout_secs": { "type": "integer", "minimum": 1, "description": "How long to wait. Default 900." }
         }), &["machine_id", "components"]),

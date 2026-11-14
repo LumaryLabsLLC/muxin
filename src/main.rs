@@ -1079,7 +1079,7 @@ struct GitSetupArgs {
 enum RecipeCommand {
     /// Run the components' checks on a machine (changes nothing): present, missing or unsupported
     Check(RecipeCheckArgs),
-    /// Install the components a machine is missing, requirements first (removes and updates nothing)
+    /// Install the components a machine is missing, requirements first (removes nothing; --update also updates what's behind)
     Apply(RecipeApplyArgs),
 }
 
@@ -1104,6 +1104,9 @@ struct RecipeApplyArgs {
     /// Component ids (what they require is installed first)
     #[arg(required = true)]
     components: Vec<String>,
+    /// Also update the ones there that have a newer version out (those with an update step: the agent CLIs)
+    #[arg(long)]
+    update: bool,
     /// Return right away with the operation id
     #[arg(long)]
     no_wait: bool,
@@ -1932,7 +1935,7 @@ fn main() -> ExitCode {
         }
         #[cfg(feature = "recipes")]
         Some(Command::Recipe(RecipeCommand::Apply(a))) => {
-            let req = api::RecipeApplyRequest { machine_id: a.machine, components: a.components, wait: !a.no_wait, timeout_secs: None };
+            let req = api::RecipeApplyRequest { machine_id: a.machine, components: a.components, update: a.update, wait: !a.no_wait, timeout_secs: None };
             run(&runtime, &a.agent, async move |e| api::recipe_apply(&e, req, api::Surface::Cli, stream_line).await, cli::recipe_apply)
         }
         Some(Command::Desktop(cmd)) => desktop(cmd, &runtime),

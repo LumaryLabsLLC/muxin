@@ -5,4 +5,5 @@ root = true
 root_unless = 'test -w "$(npm prefix -g)"'
 check = "command -v opencode"
 install = "npm install -g opencode-ai"
-update = "npm install -g opencode-ai@latest"
+up_to_date = 'npm outdated -g --prefix "$(npm_prefix opencode)" opencode-ai'
+update = 'npm install -g --prefix "$(npm_prefix opencode)" opencode-ai@latest'

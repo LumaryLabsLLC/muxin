@@ -5,4 +5,5 @@ root = true
 root_unless = 'test -w "$(npm prefix -g)"'
 check = "command -v gemini"
 install = "npm install -g @google/gemini-cli"
-update = "npm install -g @google/gemini-cli@latest"
+up_to_date = 'npm outdated -g --prefix "$(npm_prefix gemini)" @google/gemini-cli'
+update = 'npm install -g --prefix "$(npm_prefix gemini)" @google/gemini-cli@latest'

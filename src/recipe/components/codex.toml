@@ -5,4 +5,5 @@ root = true
 root_unless = 'test -w "$(npm prefix -g)"'
 check = "command -v codex"
 install = "npm install -g @openai/codex"
-update = "npm install -g @openai/codex@latest"
+up_to_date = 'npm outdated -g --prefix "$(npm_prefix codex)" @openai/codex'
+update = 'npm install -g --prefix "$(npm_prefix codex)" @openai/codex@latest'

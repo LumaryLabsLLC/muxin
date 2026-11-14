@@ -1,8 +1,10 @@
 //! Applying a recipe to a machine: check, install in order only what's
-//! missing, check each again. It's an operation like installing runners, one
-//! per machine at a time. Steps run in the user's login shell, as the checks
-//! do and as `run_command` runs commands, so they find the same tools (a Mac's
-//! Homebrew, a user's mise or nvm). Nothing is removed, updated or rolled back.
+//! missing, check each again. Asked to update too, it also runs the update
+//! step of what's there and behind (its up_to_date test fails), and tests it
+//! again. It's an operation like installing runners, one per machine at a
+//! time. Steps run in the user's login shell, as the checks do and as
+//! `run_command` runs commands, so they find the same tools (a Mac's
+//! Homebrew, a user's mise or nvm). Nothing is removed or rolled back.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,14 +16,17 @@ use super::{Component, MachineCheck};
 use crate::config::MachineSpec;
 use crate::demo::World;
 use crate::fleet::Engine;
+use crate::fleet::sessions::agent;
 use crate::fleet::workspaces::transport::{self, Limits};
-use crate::ops::remote::{Param, with_params};
+use crate::ops::remote::{Param, sh_quote, with_params};
 use crate::probe::{self, ProbeResult, Shell};
 
 const APPLY_SH: &str = include_str!("scripts/apply.sh");
 const PRELUDE_SH: &str = include_str!("scripts/prelude.sh");
 /// How long one component's install may take.
 const STEP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// How long the up_to_date tests of a recipe may take together (they may ask the network).
+const UP_TO_DATE_TIMEOUT: Duration = Duration::from_secs(120);
 /// apply.sh's exit status when a step needs root and sudo wants a password: nothing ran.
 const NEEDS_ROOT: i32 = 77;
 /// What a Linux machine in the demo has to begin with, like Muxin's VMs. A Mac there has everything.
@@ -32,7 +37,8 @@ const DEMO_LINUX: &[&str] = &["git", "gh"];
 pub struct Applied {
     pub id: String,
     pub name: String,
-    /// "already" | "installed" | "failed" | "skipped" (not tried; `error` says why) | "unsupported" (no steps for this system)
+    /// "already" | "installed" | "failed" | "skipped" (not tried; `error` says why) | "unsupported" (no steps for this system),
+    /// and when updating: "current" (there, and its up_to_date test passes) | "updated"
     pub result: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -46,7 +52,7 @@ impl Applied {
     }
 
     fn there(&self) -> bool {
-        matches!(self.result, "already" | "installed")
+        matches!(self.result, "already" | "installed" | "current" | "updated")
     }
 
     /// Its line in the operation's log.
@@ -54,6 +60,8 @@ impl Applied {
         match self.result {
             "already" => format!("✓ {} was already there", self.name),
             "installed" => format!("✓ {} is installed", self.name),
+            "current" => format!("✓ {} is up to date", self.name),
+            "updated" => format!("✓ {} is updated", self.name),
             "unsupported" => format!("! {} has no steps for this system", self.name),
             other => format!("! {} {other}: {}", self.name, self.error.as_deref().unwrap_or_default()),
         }
@@ -124,20 +132,51 @@ impl Target {
         }
     }
 
-    async fn install(&self, engine: &Arc<Engine>, op: u64, spec: &MachineSpec, c: &Component, os: &str) -> Outcome {
+    /// Runs `step`, `c`'s install or update.
+    async fn run(&self, engine: &Arc<Engine>, op: u64, spec: &MachineSpec, c: &Component, step: &str, os: &str) -> Outcome {
         match self {
-            Target::Machine => install(engine, op, spec, c, os).await,
-            Target::Demo(w) => demo_install(w, engine, op, spec, c, os).await,
+            Target::Machine => run_step(engine, op, spec, c, step, os).await,
+            Target::Demo(w) => demo_run(w, engine, op, spec, c, os).await,
+        }
+    }
+
+    /// The ids of `components` (there, each with an up_to_date test) that are behind.
+    async fn behind(&self, spec: &MachineSpec, components: &[&Component]) -> Result<Vec<String>, String> {
+        match self {
+            Target::Machine => read_up_to_date(&agent::run_sh(spec, &up_to_date_script(components), UP_TO_DATE_TIMEOUT).await?, components),
+            Target::Demo(w) => Ok(components.iter().filter(|c| !demo_current(w, &spec.id, c)).map(|c| c.id.clone()).collect()),
         }
     }
 }
 
-/// Runs apply.sh for `c` on the machine, its output streaming into the operation's log.
-async fn install(engine: &Arc<Engine>, op: u64, spec: &MachineSpec, c: &Component, os: &str) -> Outcome {
+/// One script for the up_to_date tests of `components`, each in a shell of its
+/// own as checks run, after the prelude as steps run: prints
+/// `up_to_date.<id>=yes|no`. One without a test is never behind.
+fn up_to_date_script(components: &[&Component]) -> String {
+    let test = |c: &&Component| Some(format!("if sh -c {} </dev/null >/dev/null 2>&1; then echo up_to_date.{id}=yes; else echo up_to_date.{id}=no; fi\n", sh_quote(&format!("{PRELUDE_SH}\n{}", c.up_to_date.as_ref()?)), id = c.id));
+    components.iter().filter_map(test).collect()
+}
+
+/// The ids the tests found behind.
+fn read_up_to_date(out: &str, components: &[&Component]) -> Result<Vec<String>, String> {
+    let mut behind = Vec::new();
+    for c in components.iter().filter(|c| c.up_to_date.is_some()) {
+        let key = format!("up_to_date.{}=", c.id);
+        match out.lines().find_map(|l| l.trim().strip_prefix(&key)) {
+            Some("yes") => {}
+            Some("no") => behind.push(c.id.clone()),
+            _ => return Err(format!("The test didn't say whether {} is up to date.", c.name)),
+        }
+    }
+    Ok(behind)
+}
+
+/// Runs apply.sh with `step` on the machine, its output streaming into the operation's log.
+async fn run_step(engine: &Arc<Engine>, op: u64, spec: &MachineSpec, c: &Component, step: &str, os: &str) -> Outcome {
     let params = [
         ("OR_ID", Param::Str(&c.id)),
         ("OR_PRELUDE", Param::Str(PRELUDE_SH)),
-        ("OR_STEP", Param::Str(&c.install)),
+        ("OR_STEP", Param::Str(step)),
         ("OR_ROOT", Param::Bool(root_here(c, os))),
         ("OR_UNLESS", Param::Str(c.root_unless.as_deref().unwrap_or_default())),
     ];
@@ -157,9 +196,10 @@ async fn install(engine: &Arc<Engine>, op: u64, spec: &MachineSpec, c: &Componen
     }
 }
 
-/// The demo's install: made-up output, and it's there afterwards. The demo's
-/// Node.js is the system's, so root_unless never lets a step off root there.
-async fn demo_install(w: &World, engine: &Arc<Engine>, op: u64, spec: &MachineSpec, c: &Component, os: &str) -> Outcome {
+/// The demo's install or update: made-up output, and it's there and up to date
+/// afterwards. The demo's Node.js is the system's, so root_unless never lets a
+/// step off root there.
+async fn demo_run(w: &World, engine: &Arc<Engine>, op: u64, spec: &MachineSpec, c: &Component, os: &str) -> Outcome {
     pause(300).await;
     if root_here(c, os) {
         if w.probe(spec).await.sudo.as_deref() == Some("password") {
@@ -186,16 +226,47 @@ pub(super) fn demo_state(world: &World, machine_id: &str, os: &str, c: &Componen
     if !c.os.iter().any(|o| o == os) {
         return "unsupported";
     }
-    let applied = || world.recipes.lock().unwrap().contains(&(machine_id.to_string(), c.id.clone()));
-    if os == "darwin" || DEMO_LINUX.contains(&c.id.as_str()) || applied() { "present" } else { "missing" }
+    if os == "darwin" || DEMO_LINUX.contains(&c.id.as_str()) || demo_current(world, machine_id, c) { "present" } else { "missing" }
+}
+
+/// What the demo applied is up to date; what a machine had to begin with isn't.
+fn demo_current(world: &World, machine_id: &str, c: &Component) -> bool {
+    world.recipes.lock().unwrap().contains(&(machine_id.to_string(), c.id.clone()))
 }
 
 fn step(engine: &Arc<Engine>, op: u64, text: impl std::fmt::Display) {
     engine.op_log(op, format!("▸ {text}"));
 }
 
+/// What became of `c` once its install step ran, or its update step (`updating`
+/// on `target`: then its up_to_date test runs again too).
+async fn after(engine: &Arc<Engine>, spec: &MachineSpec, c: &Component, outcome: Outcome, updating: Option<&Target>) -> Applied {
+    let (verb, done) = if updating.is_some() { ("update", "updated") } else { ("install", "installed") };
+    match outcome {
+        Outcome::NeedsRoot => {
+            let (error, hint) = root_refusal(c, &spec.name);
+            Applied::new(c, "skipped", Some(error), hint)
+        }
+        Outcome::Failed(e) => Applied::new(c, "failed", Some(e), None),
+        Outcome::Done => match engine.recipe_check(&spec.id, &[c]).await {
+            Ok(again) if again.components.iter().all(|s| s.result == "present") => match updating {
+                None => Applied::new(c, done, None, None),
+                Some(target) => match target.behind(spec, &[c]).await {
+                    Ok(behind) if behind.is_empty() => Applied::new(c, done, None, None),
+                    Ok(_) => Applied::new(c, "failed", Some("Its update step finished, but its up_to_date test still fails.".into()), c.up_to_date.as_ref().map(|t| format!("Its up_to_date test is: {}", t.trim()))),
+                    Err(e) => Applied::new(c, "failed", Some(format!("Its update step finished, but testing it again didn't work: {e}")), None),
+                },
+            },
+            Ok(_) => Applied::new(c, "failed", Some(format!("Its {verb} step finished, but its check still fails.")), Some(format!("Its check is: {}", c.check.trim()))),
+            Err(e) => Applied::new(c, "failed", Some(format!("Its {verb} step finished, but checking it again didn't work: {e}")), None),
+        },
+    }
+}
+
 /// Checks, then installs each missing component in order and checks it again.
-async fn apply(engine: &Arc<Engine>, op: u64, spec: &MachineSpec, probe: Option<ProbeResult>, components: &[Component], others: &[Component], target: &Target) -> Result<Vec<Applied>, String> {
+/// With `update`, what's there and behind is updated and tested again too.
+#[allow(clippy::too_many_arguments)]
+async fn apply(engine: &Arc<Engine>, op: u64, spec: &MachineSpec, probe: Option<ProbeResult>, components: &[Component], others: &[Component], update: bool, target: &Target) -> Result<Vec<Applied>, String> {
     step(engine, op, format!("Checking what {} has", spec.name));
     if let Target::Demo(w) = target {
         w.reachable(&spec.id, spec.host.trim())?;
@@ -203,30 +274,36 @@ async fn apply(engine: &Arc<Engine>, op: u64, spec: &MachineSpec, probe: Option<
     let everything: Vec<&Component> = components.iter().chain(others).collect();
     let found = engine.recipe_check(&spec.id, &everything).await?;
     let state = |id: &str| found.components.iter().find(|s| s.id == id).map_or("missing", |s| s.result);
-    let root_wanted = components.iter().any(|c| root_here(c, &found.os) && state(&c.id) == "missing");
+    let updatable: Vec<&Component> = components.iter().filter(|c| update && c.up_to_date.is_some() && state(&c.id) == "present").collect();
+    let behind = if updatable.is_empty() {
+        Vec::new()
+    } else {
+        step(engine, op, "Looking for updates");
+        target.behind(spec, &updatable).await?
+    };
+    let root_wanted = components.iter().any(|c| root_here(c, &found.os) && (state(&c.id) == "missing" || behind.contains(&c.id)));
     let sudo = if root_wanted { target.sudo(spec, probe).await } else { None };
 
     let mut done: Vec<Applied> = Vec::new();
     for c in components {
         let a = match state(&c.id) {
+            "present" if behind.contains(&c.id) =>match refusal(c, &spec.name, &found, &[], &done, sudo.as_deref()) {
+                Some((error, hint)) => Applied::new(c, "skipped", Some(error), hint),
+                None => {
+                    step(engine, op, format!("Updating {}", c.name));
+                    let outcome = target.run(engine, op, spec, c, c.update.as_deref().unwrap_or_default(), &found.os).await;
+                    after(engine, spec, c, outcome, Some(target)).await
+                }
+            },
+            "present" if updatable.iter().any(|u| u.id == c.id) => Applied::new(c, "current", None, None),
             "present" => Applied::new(c, "already", None, None),
             "unsupported" => Applied::new(c, "unsupported", None, None),
             _ => match refusal(c, &spec.name, &found, others, &done, sudo.as_deref()) {
                 Some((error, hint)) => Applied::new(c, "skipped", Some(error), hint),
                 None => {
                     step(engine, op, format!("Installing {}", c.name));
-                    match target.install(engine, op, spec, c, &found.os).await {
-                        Outcome::NeedsRoot => {
-                            let (error, hint) = root_refusal(c, &spec.name);
-                            Applied::new(c, "skipped", Some(error), hint)
-                        }
-                        Outcome::Failed(e) => Applied::new(c, "failed", Some(e), None),
-                        Outcome::Done => match engine.recipe_check(&spec.id, &[c]).await {
-                            Ok(again) if again.components.iter().all(|s| s.result == "present") => Applied::new(c, "installed", None, None),
-                            Ok(_) => Applied::new(c, "failed", Some("Its install step finished, but its check still fails.".into()), Some(format!("Its check is: {}", c.check.trim()))),
-                            Err(e) => Applied::new(c, "failed", Some(format!("Its install step finished, but checking it again didn't work: {e}")), None),
-                        },
-                    }
+                    let outcome = target.run(engine, op, spec, c, &c.install, &found.os).await;
+                    after(engine, spec, c, outcome, None).await
                 }
             },
         };
@@ -240,9 +317,10 @@ impl Engine {
     /// Starts applying `components` (from `Catalog::resolve`, in that order)
     /// to a machine. `others` are the components they can't go with
     /// (`Catalog::conflicting`): finding one on the machine skips what it
-    /// conflicts with. Returns the operation id, and each component's result
-    /// once it's done (the operation fails when any is failed or skipped).
-    pub fn recipe_apply(self: &Arc<Self>, machine_id: &str, components: Vec<Component>, others: Vec<Component>) -> Result<(u64, oneshot::Receiver<Vec<Applied>>), String> {
+    /// conflicts with. With `update`, what's there and behind is updated too.
+    /// Returns the operation id, and each component's result once it's done
+    /// (the operation fails when any is failed or skipped).
+    pub fn recipe_apply(self: &Arc<Self>, machine_id: &str, components: Vec<Component>, others: Vec<Component>, update: bool) -> Result<(u64, oneshot::Receiver<Vec<Applied>>), String> {
         let (spec, probe) = self.machine(machine_id).ok_or("That machine isn't in config.toml anymore.")?;
         if !spec.is_checkable() {
             return Err(format!("{} has no host in config.toml, so Muxin can't reach it.", spec.name));
@@ -251,15 +329,17 @@ impl Engine {
             return Err(format!("Another operation is already changing {}. Wait for it to finish.", spec.name));
         }
         let ids: Vec<&str> = components.iter().map(|c| c.id.as_str()).collect();
-        let op = self.begin_op("recipe", format!("Apply {} to {}", ids.join(", "), spec.name), Some(spec.id.clone()), None);
+        let title = if update { format!("Apply and update {} on {}", ids.join(", "), spec.name) } else { format!("Apply {} to {}", ids.join(", "), spec.name) };
+        let op = self.begin_op("recipe", title, Some(spec.id.clone()), None);
         let target = Target::of(self);
         let (tx, rx) = oneshot::channel();
         let me = self.clone();
         self.runtime().spawn(async move {
-            let result = apply(&me, op, &spec, probe, &components, &others, &target).await.and_then(|done| {
+            let result = apply(&me, op, &spec, probe, &components, &others, update, &target).await.and_then(|done| {
                 let missed: Vec<String> = done.iter().filter(|a| matches!(a.result, "failed" | "skipped")).map(|a| a.name.clone()).collect();
                 let _ = tx.send(done);
-                if missed.is_empty() { Ok(()) } else { Err(format!("{} didn't install.", missed.join(", "))) }
+                let verb = if update { "install or update" } else { "install" };
+                if missed.is_empty() { Ok(()) } else { Err(format!("{} didn't {verb}.", missed.join(", "))) }
             });
             if let Err(e) = &result {
                 me.op_log(op, format!("error: {e}"));
@@ -283,7 +363,7 @@ impl Engine {
             let others: Vec<Component> = catalog.conflicting(&components).into_iter().cloned().collect();
             let components: Vec<Component> = components.into_iter().cloned().collect();
             let (spec, probe) = self.machine(machine_id).ok_or("The new machine went missing from config.toml.")?;
-            apply(self, op, &spec, probe, &components, &others, &Target::of(self)).await
+            apply(self, op, &spec, probe, &components, &others, false, &Target::of(self)).await
         }
         .await;
         match done {
@@ -465,6 +545,86 @@ mod tests {
         let busy = apply_tool(&engine, json!({"machine_id": "pebble", "components": ["gh"]})).await;
         assert_eq!(busy["structuredContent"]["error"]["code"], "busy", "{busy}");
         assert!(catalog().unwrap().get("claude").unwrap().root_unless.is_some());
+    }
+
+    /// The up_to_date tests' script, run here: each answers for itself, and one
+    /// without a test is never behind.
+    #[cfg(unix)]
+    #[test]
+    fn one_script_runs_every_up_to_date_test() {
+        use std::io::Write;
+        let tested = |id: &str, test: &str| component(id, &format!("update = \"true\"\nup_to_date = \"{test}\""));
+        let list = [tested("new", "true"), tested("old", "exit 1"), tested("eats-stdin", "cat; true"), tested("broken", "if then fi ("), tested("prelude", "command -v npm_prefix"), component("no-test", "")];
+        let all: Vec<&Component> = list.iter().collect();
+        let mut sh = std::process::Command::new("/bin/sh").arg("-s").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        sh.stdin.take().unwrap().write_all(up_to_date_script(&all).as_bytes()).unwrap();
+        let out = sh.wait_with_output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(read_up_to_date(&String::from_utf8_lossy(&out.stdout), &all).unwrap(), ["old", "broken"]);
+        assert_eq!(read_up_to_date("up_to_date.new=yes\n", &all[..2]).unwrap_err(), "The test didn't say whether OLD is up to date.");
+    }
+
+    /// The prelude's npm_prefix, run here with a stand-in npm: the prefix of an
+    /// npm copy found on PATH (where a new Node.js's npm wouldn't look), else npm's own.
+    #[cfg(unix)]
+    #[test]
+    fn npm_prefix_finds_the_copy_that_runs() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = std::env::temp_dir().join(format!("muxen-recipe-npm-prefix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (old, own) = (dir.join("old"), dir.join("own"));
+        let package = old.join("lib/node_modules/@x/tool/bin");
+        for d in [&package, &old.join("bin"), &own] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let executable = |p: std::path::PathBuf, text: &str| {
+            std::fs::write(&p, format!("#!/bin/sh\n{text}\n")).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        executable(package.join("tool.js"), "true");
+        symlink("../lib/node_modules/@x/tool/bin/tool.js", old.join("bin/tool")).unwrap();
+        executable(own.join("npm"), "[ \"$*\" = \"prefix -g\" ] && echo /npm-own");
+        executable(own.join("plain"), "true");
+        let path = format!("{}:{}:/usr/bin:/bin", old.join("bin").display(), own.display());
+        let script = format!("{PRELUDE_SH}\nnpm_prefix tool; npm_prefix plain; npm_prefix missing");
+        let out = std::process::Command::new("/bin/sh").args(["-ec", &script]).env("PATH", path).output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let old = std::fs::canonicalize(&old).unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{}\n/npm-own\n/npm-own\n", old.display()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// In the demo, what a machine had to begin with is behind, and what was applied is up to date.
+    #[tokio::test]
+    async fn recipe_apply_updates_only_whats_behind_in_the_demo() {
+        let engine = Engine::new(Paths::resolve(Some(std::env::temp_dir().join("muxen-recipe-update-test")), None), true);
+        engine.run_check(None).await;
+        let tool = crate::mcp::tools().into_iter().find(|t| t["name"] == "recipe_apply").expect("listed");
+        assert_eq!(tool["inputSchema"]["properties"]["update"]["type"], "boolean");
+        let log = |v: &Value| v["operation"]["log_tail"].as_array().unwrap().iter().map(|l| l.as_str().unwrap().to_string()).collect::<Vec<_>>();
+
+        // A Mac in the demo has every component: those with an update step are updated, the rest left alone.
+        let first = apply_tool(&engine, json!({"machine_id": "forge", "components": ["git", "claude", "codex"], "update": true})).await;
+        assert_eq!(first["isError"], false, "{first}");
+        let out = &first["structuredContent"];
+        assert_eq!(results(out), pairs(&[("git", "already"), ("node", "already"), ("claude", "updated"), ("codex", "updated")]));
+        assert_eq!(out["operation"]["title"], "Apply and update git, node, claude, codex on Forge");
+        let lines = log(out);
+        assert!(lines.contains(&"▸ Looking for updates".into()) && lines.contains(&"▸ Updating Codex".into()) && lines.contains(&"✓ Claude Code is updated".into()), "{lines:?}");
+        // A second run changes nothing; without update, nothing is even asked.
+        let again = apply_tool(&engine, json!({"machine_id": "forge", "components": ["claude", "codex"], "update": true})).await;
+        assert_eq!(results(&again["structuredContent"]), pairs(&[("node", "already"), ("claude", "current"), ("codex", "current")]));
+        assert!(!log(&again["structuredContent"]).iter().any(|l| l.starts_with("▸ Updating")), "{again}");
+        assert!(log(&again["structuredContent"]).contains(&"✓ Claude Code is up to date".into()));
+        let plain = apply_tool(&engine, json!({"machine_id": "forge", "components": ["pi"]})).await;
+        assert_eq!(results(&plain["structuredContent"]), pairs(&[("node", "already"), ("pi", "already")]));
+        assert!(!log(&plain["structuredContent"]).contains(&"▸ Looking for updates".into()));
+
+        // What's missing is installed, not updated, and then it's up to date.
+        let linux = apply_tool(&engine, json!({"machine_id": "dev-1", "components": ["claude"], "update": true})).await;
+        assert_eq!(results(&linux["structuredContent"]), pairs(&[("node", "installed"), ("claude", "installed")]));
+        let linux = apply_tool(&engine, json!({"machine_id": "dev-1", "components": ["claude"], "update": true})).await;
+        assert_eq!(results(&linux["structuredContent"]), pairs(&[("node", "already"), ("claude", "current")]));
     }
 
     /// The log of the operation `op`.

@@ -51,6 +51,9 @@ pub struct Meta {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// "fast" when it's run the faster way. None: as usual.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<String>,
 }
 
 /// One line of a thread.
@@ -97,6 +100,9 @@ pub enum Item {
         cached: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost: Option<f64>,
+        /// The model that answered, as the brain called it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// A turn that failed, in words.
     Error { at: i64, text: String },
@@ -170,7 +176,7 @@ impl Store {
                 continue;
             }
             self.make(&folder)?;
-            let meta = Meta { id, title: String::new(), brain: brain.to_string(), created: now, updated: now, sessions: BTreeMap::new(), model: None, effort: None };
+            let meta = Meta { id, title: String::new(), brain: brain.to_string(), created: now, updated: now, sessions: BTreeMap::new(), model: None, effort: None, speed: None };
             self.save(&meta)?;
             return Ok(meta);
         }
@@ -338,7 +344,7 @@ mod tests {
             Item::Answer { at: 3, id: 1, answer: "yes".into(), note: String::new() },
             Item::Result { at: 4, id: "t1".into(), text: "restarted".into(), is_error: false },
             Item::Text { at: 5, text: "Done: beelink-01 is back and idle.".into() },
-            Item::Usage { at: 5, input: 1200, output: 40, cached: 1000, cost: Some(0.01) },
+            Item::Usage { at: 5, input: 1200, output: 40, cached: 1000, cost: Some(0.01), model: Some("gpt-test".into()) },
         ];
         for item in &items {
             s.append(&id, item).unwrap();

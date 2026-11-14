@@ -70,6 +70,11 @@ impl Codex {
         if let Some(effort) = &self.setup.effort {
             args.extend(["-c".to_string(), format!("model_reasoning_effort={}", json!(effort))]);
         }
+        // The faster tier, as Codex's own settings name it. Unsaid, the usual one
+        // (the user's own Codex settings aren't read here).
+        if self.setup.speed.as_deref() == Some("fast") {
+            args.extend(["-c".to_string(), "service_tier=\"priority\"".to_string()]);
+        }
         args.extend(set("command", json!(self.setup.exe.to_string_lossy())));
         args.extend(set("args", json!(["mcp", "--chat", self.setup.bridge.to_string_lossy()])));
         args.extend(set("default_tools_approval_mode", json!("approve")));
@@ -197,6 +202,11 @@ impl Brain for Codex {
     }
 
     // Each turn is its own process, started with what's chosen now.
+    // Each turn is a new process: the next one is started with it.
+    fn speed(&mut self, speed: Option<String>) {
+        self.setup.speed = speed;
+    }
+
     fn choose(&mut self, model: Option<String>, effort: Option<String>) {
         self.setup.model = model;
         self.setup.effort = effort;
@@ -242,6 +252,12 @@ mod tests {
         let args = codex.args();
         assert_eq!(args.iter().position(|a| a == "-m").map(|i| args[i + 1].as_str()), Some("gpt-6.1-sol"));
         assert!(args.contains(&r#"model_reasoning_effort="high""#.to_string()), "{args:?}");
+        // And the faster tier, once it's asked for.
+        assert!(!args.iter().any(|a| a.starts_with("service_tier")));
+        codex.speed(Some("fast".into()));
+        assert!(codex.args().contains(&r#"service_tier="priority""#.to_string()));
+        codex.speed(None);
+        assert!(!codex.args().iter().any(|a| a.starts_with("service_tier")));
     }
 
 

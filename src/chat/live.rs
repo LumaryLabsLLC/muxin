@@ -22,6 +22,8 @@ enum Command {
     Send(String, Vec<std::path::PathBuf>),
     /// Answer with this model, at this effort, from the next turn on.
     Choose(Option<String>, Option<String>),
+    /// "fast", or None for as usual.
+    Speed(Option<String>),
     Stop,
 }
 
@@ -85,6 +87,11 @@ impl Live {
         let _ = self.commands.send(Command::Choose(model, effort));
     }
 
+    /// Runs the model the faster way ("fast") from the next turn on, or as usual (None).
+    pub fn speed(&self, speed: Option<String>) {
+        let _ = self.commands.send(Command::Speed(speed));
+    }
+
     /// Stops the turn that's running, and drops what was waiting behind it.
     pub fn stop(&self) {
         let _ = self.commands.send(Command::Stop);
@@ -110,6 +117,11 @@ async fn run(mut chat: Chat, mut inbox: mpsc::UnboundedReceiver<Command>, events
             Command::Send(text, files) => (text, files),
             Command::Choose(model, effort) => {
                 chat.choose(model, effort);
+                let _ = events.send(Event::Meta(chat.meta.clone()));
+                continue;
+            }
+            Command::Speed(speed) => {
+                chat.set_speed(speed);
                 let _ = events.send(Event::Meta(chat.meta.clone()));
                 continue;
             }

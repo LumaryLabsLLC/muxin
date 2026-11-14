@@ -48,7 +48,7 @@ impl SettingsTab {
             SettingsTab::Cloud => "Cloud",
             // Muxin for iPhone and Muxin for iPad: "iPhone & iPad" doesn't fit the row.
             SettingsTab::Ipads => "Mobile",
-            SettingsTab::Chat => "Chat",
+            SettingsTab::Chat => "AI",
             SettingsTab::Prompts => "Prompts",
             SettingsTab::Keyboard => "Keyboard",
         }
@@ -161,6 +161,8 @@ impl SettingsPage {
 
         let (cloud_state, cloud_subs) = cloud::CloudState::new(window, cx);
         subs.extend(cloud_subs);
+        let (assistant_state, assistant_subs) = assistant::AssistantState::new(window, cx);
+        subs.extend(assistant_subs);
         let mut page = SettingsPage {
             engine,
             snapshot,
@@ -184,7 +186,7 @@ impl SettingsPage {
             catch_keys: None,
             shortcut_note: None,
             prompt_edit: None,
-            assistant: assistant::AssistantState::default(),
+            assistant: assistant_state,
             _tasks: vec![updates],
             _subscriptions: subs,
         };
@@ -213,6 +215,9 @@ impl SettingsPage {
             }
             if tab == SettingsTab::Ipads {
                 self.load_ipads(cx);
+            }
+            if tab == SettingsTab::Chat {
+                self.refresh_old_lists(cx);
             }
             cx.notify();
         }

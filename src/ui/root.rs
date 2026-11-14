@@ -910,7 +910,7 @@ impl Root {
         self.on_route_changed(window, cx);
     }
 
-    /// The user turned the chat on (Settings › Chat).
+    /// The user turned the chat on (Settings › AI).
     pub(super) fn chat_on(&self) -> bool {
         self.engine.settings().chat.enabled
     }
@@ -1133,7 +1133,7 @@ impl Root {
         let (kind, arg) = view.split_once(':').unwrap_or((view, ""));
         // A view of the chat on the simulated machines turns the chat on for
         // that run (nothing is kept there): what these views are for, showing it.
-        if (kind.starts_with("chat") || kind == "script") && self.engine.is_demo() && !self.chat_on() {
+        if (kind.starts_with("chat") || kind.starts_with("ai-") || kind == "script" || (kind == "settings" && arg == "ai")) && self.engine.is_demo() && !self.chat_on() {
             let mut settings = self.engine.settings();
             settings.chat.enabled = true;
             let _ = self.engine.update_settings(settings);
@@ -1144,6 +1144,18 @@ impl Root {
                 self.navigate(Route::Chat, window, cx);
                 let view = self.chat_view(window, cx);
                 view.update(cx, |view, cx| view.say(arg.to_string(), window, cx));
+            }
+            // "chat-open:2": the chat at that place in the list (from 0) comes in front.
+            "chat-open" => {
+                self.navigate(Route::Chat, window, cx);
+                let view = self.chat_view(window, cx);
+                view.update(cx, |view, cx| view.open_listed(arg.parse().unwrap_or(0), window, cx));
+            }
+            // "chat-new": a page for a new chat; the one open goes on behind it when it's working.
+            "chat-new" => {
+                self.navigate(Route::Chat, window, cx);
+                let view = self.chat_view(window, cx);
+                view.update(cx, |view, cx| view.new_chat(window, cx));
             }
             // A script of steps, one after another, " | " between them, to
             // film the app or check it without a click:
@@ -1159,8 +1171,14 @@ impl Root {
             // "chat-pick:codex/gpt-6.1-sol/high": the brain, and its model and
             // effort when given ("codex//high": its own model), as the pickers set them.
             "chat-pick" => {
-                let mut parts = arg.splitn(3, '/');
-                let (brain, model, effort) = (parts.next().unwrap_or_default().to_string(), parts.next().filter(|m| !m.is_empty()).map(str::to_string), parts.next().filter(|e| !e.is_empty()).map(str::to_string));
+                let (brain, rest) = arg.split_once('/').unwrap_or((arg, ""));
+                // A gateway's model has a slash of its own ("maker/model"): the
+                // effort is what follows the last one, when that's a level.
+                let (model, effort) = match rest.rsplit_once('/') {
+                    Some((model, effort)) if effort.is_empty() || ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].contains(&effort) => (model, effort),
+                    _ => (rest, ""),
+                };
+                let (brain, model, effort) = (brain.to_string(), Some(model.to_string()).filter(|m| !m.is_empty()), Some(effort.to_string()).filter(|e| !e.is_empty()));
                 let view = self.chat_view(window, cx);
                 view.update(cx, |view, cx| {
                     view.pick(&brain, model, window, cx);
@@ -1192,6 +1210,13 @@ impl Root {
                     }
                     return;
                 }
+                // "chat-menu:speed": how fast the model is run, after the effort's picker.
+                if which == "speed" {
+                    let view = self.chat_view(window, cx);
+                    let at = view.read(cx).picker_anchor(true, window);
+                    self.open_menu(super::menu::MenuTarget::ChatSpeed, gpui::point(at.x + px(84.), at.y), cx);
+                    return;
+                }
                 // "chat-menu:mode": whether it asks first, under the box at its left.
                 if which == "mode" {
                     let view = self.chat_view(window, cx);
@@ -1206,6 +1231,46 @@ impl Root {
                 let target = if effort { super::menu::MenuTarget::ChatEffort } else { super::menu::MenuTarget::ChatModel };
                 self.open_menu(target, position, cx);
                 self.open_submenu_named(brain, cx);
+            }
+            // Settings › AI with a provider's key form open ("ai-connect:openai"),
+            // or a brain's models listed ("ai-models:codex").
+            "ai-connect" | "ai-models" => {
+                self.open_settings_tab(super::settings::SettingsTab::Chat, window, cx);
+                if let Some(settings) = &self.settings {
+                    let (connecting, listing) = if kind == "ai-connect" { (Some(arg), None) } else { (None, Some(arg)) };
+                    settings.update(cx, |settings, cx| settings.show_ai(connecting, listing, cx));
+                }
+            }
+            // "ai-offer:openrouter/x/model": that model is one the pickers offer, on
+            // the simulated machines only. "ai-scroll:420": Settings › AI, that far down.
+            "ai-offer" if self.engine.is_demo() => {
+                if let Some((provider, model)) = arg.split_once('/') {
+                    let mut settings = self.engine.settings();
+                    settings.chat.offer(provider, model, true);
+                    let _ = self.engine.update_settings(settings);
+                }
+            }
+            "ai-scroll" => {
+                let down: f32 = arg.parse().unwrap_or(0.);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_millis(400)).await;
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(p) = &this.settings {
+                            p.read(cx).scroll.set_offset(gpui::point(px(0.), px(-down)));
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            // "ai-provider:openrouter": that provider counts as connected, on the
+            // simulated machines only (its models are whatever `models/<id>.json` there lists).
+            "ai-provider" if self.engine.is_demo() => {
+                if let Some(provider) = crate::chat::brain::kind(arg).filter(|k| k.api().is_some()) {
+                    let mut settings = self.engine.settings();
+                    settings.chat.providers.insert(provider.id.to_string(), Default::default());
+                    let _ = self.engine.update_settings(settings);
+                }
             }
             // "chat-rename:<id>" and "chat-delete:<id>" (or "last"): the dialog that names a chat, or asks before deleting it.
             "chat-rename" | "chat-delete" => {
@@ -1354,7 +1419,7 @@ impl Root {
                     "terminal" => SettingsTab::Terminal,
                     "github" => SettingsTab::GitHub,
                     "cloud" => SettingsTab::Cloud,
-                    "chat" | "assistant" => SettingsTab::Chat,
+                    "ai" | "chat" | "assistant" => SettingsTab::Chat,
                     "prompts" => SettingsTab::Prompts,
                     "keyboard" => SettingsTab::Keyboard,
                     _ => SettingsTab::General,
@@ -2851,7 +2916,7 @@ impl Root {
                     .gap(px(2.))
                     .px(px(10.))
                     .pt(px(6.))
-                    .when(self.chat_on(), |d| d.child(self.nav_item("nav-chat", "message-square", kit::tiles::CHAT, "Chat", None, Route::Chat, "chat", cx)))
+                    .when(self.chat_on(), |d| d.child(self.nav_item("nav-chat", "message-square", kit::tiles::CHAT, "Chat", self.chat.as_ref().map(|chat| chat.read(cx).attention()), Route::Chat, "chat", cx)))
                     .child(self.nav_item("nav-overview", "gauge", kit::tiles::OVERVIEW, "Overview", None, Route::Overview, "overview", cx))
                     .child(self.nav_item("nav-jobs", "workflow", kit::tiles::JOBS, "Jobs", Some(s.counts.queued + s.counts.running), Route::Jobs, "jobs", cx))
                     .child(self.nav_item("nav-boxes", "box", super::boxes::TILE, "Boxes", Some(s.boxes.iter().filter(|b| b.state != "paused").count()), Route::Boxes, "boxes", cx))
@@ -3991,12 +4056,15 @@ impl Root {
                     this.open_menu(target, gpui::point(position.x - px(14.), position.y - px(18.)), cx);
                 }
                 super::chat::ChatEvent::ModeMenu { position } => this.open_menu(super::menu::MenuTarget::ChatMode, gpui::point(position.x - px(14.), position.y - px(18.)), cx),
+                super::chat::ChatEvent::SpeedMenu { position } => this.open_menu(super::menu::MenuTarget::ChatSpeed, gpui::point(position.x - px(14.), position.y - px(18.)), cx),
                 super::chat::ChatEvent::ChatMenu { id, position, above } => {
                     let position = if *above { gpui::point(position.x - px(14.), position.y - px(18.)) } else { *position };
                     this.open_menu(super::menu::MenuTarget::Chat { id: id.clone(), above: *above }, position, cx);
                 }
                 super::chat::ChatEvent::Rename(id) => this.show_rename(RenameTarget::Chat(id.clone()), window, cx),
                 super::chat::ChatEvent::Delete(id) => this.confirm_delete_chat(id, window, cx),
+                // The sidebar counts the chats that are at something.
+                super::chat::ChatEvent::Marks => cx.notify(),
             }));
             self.chat = Some(view);
         }

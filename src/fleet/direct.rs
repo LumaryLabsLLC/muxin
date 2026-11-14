@@ -52,7 +52,27 @@ static DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Where Muxin keeps its files (set once, at startup).
 pub fn init(config_dir: PathBuf) {
+    #[cfg(test)]
+    let config_dir = test_dir(config_dir);
     let _ = DIR.set(config_dir);
+}
+
+/// A test run is one process, so the first test to get here would choose the
+/// folder for all of them: often one that stays from run to run (with the
+/// host keys the ssh tests' servers left in its known_hosts, on ports this
+/// run's servers get again), or one its own test deletes while others still
+/// use it. A run gets a new folder of its own instead, whichever was asked for.
+#[cfg(test)]
+fn test_dir(_asked: PathBuf) -> PathBuf {
+    static MADE: OnceLock<PathBuf> = OnceLock::new();
+    MADE.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("muxin-test-app-{}", std::process::id()));
+        // One an earlier run left, when its process had this id.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    })
+    .clone()
 }
 
 /// Muxin's config folder, once set (where this app's keys are kept).

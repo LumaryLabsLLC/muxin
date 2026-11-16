@@ -487,7 +487,7 @@ pub fn tools() -> Vec<Value> {
     let tools = vec![
         json!({
             "name": "status",
-            "description": "Overview of all the user's machines: counts of working/idle/offline runners, queued jobs, GitHub connection, every machine with CPU/memory/disk/uptime and a runner summary, and an `attention` list of problems (unreachable machines, stopped runners, jobs no runner can take, low disk). Call this first. Uses the last machine check unless refresh=true, which re-checks every machine over ssh first. A machine whose status is \"asleep\" is left alone (a check would wake it): it shows as online again when it wakes.",
+            "description": "Overview of all the user's machines: counts of working/idle/offline runners, queued jobs, GitHub connection, every machine with CPU/memory/disk/uptime and a runner summary, and an `attention` list of problems (unreachable machines, stopped runners, jobs no runner can take, low disk). Call this first. Uses the last machine check unless refresh=true, which re-checks every machine over ssh first. A machine whose status is \"asleep\" is left alone (a check would wake it). The Muxin app finds it awake at its next scheduled check, or at once when its agent tells the app; with only this server running nothing looks, so call check_machines with its id when the user wants to know.",
             "inputSchema": schema(json!({
                 "refresh": { "type": "boolean", "description": "Re-check all machines over ssh and sync GitHub before answering. Slower; default false." }
             }), &[]),

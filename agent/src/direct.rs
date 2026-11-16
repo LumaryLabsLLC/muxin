@@ -488,13 +488,15 @@ async fn tell_sleepers(endpoint: quinn::Endpoint) {
 }
 
 /// One app's wake notice. The network takes a moment to come back after a
-/// wake, so it's tried a few times; an app that's gone (quit, or elsewhere
-/// now) never answers, and looks for itself when it's back.
+/// wake, so it's tried a few times quickly; then once a minute for as long
+/// as the machine stays awake, a day at most: one that woke somewhere else
+/// for a while still says so when it's back where the app is. An app
+/// that's gone for good never answers, and looks for itself when it's back.
 async fn tell(endpoint: quinn::Endpoint, key: (String, SocketAddr), known: HashSet<String>) {
     if known.contains(&key.0) {
-        let mut why = String::from("it was never tried");
+        let quickly = [0, 1, 2, 4, 8, 15, 30, 60];
         let mut told = false;
-        for wait in [0, 1, 2, 4, 8, 15, 30, 60] {
+        for (n, wait) in quickly.into_iter().chain(std::iter::repeat_n(60, 24 * 60)).enumerate() {
             tokio::time::sleep(Duration::from_secs(wait)).await;
             // Asleep again: it's told at the next wake.
             if crate::sleep::asleep() {
@@ -509,15 +511,14 @@ async fn tell(endpoint: quinn::Endpoint, key: (String, SocketAddr), known: HashS
                     told = true;
                     break;
                 }
-                Err(e) => why = e,
+                // In `listen`'s log, beside the sleep and the wake: once,
+                // when the quick tries are through.
+                Err(why) if n + 1 == quickly.len() => eprintln!("{} muxen-agent: couldn't tell the app at {} it woke yet: {why}", crate::now(), key.1),
+                Err(_) => {}
             }
         }
-        // In `listen`'s log, beside the sleep and the wake: an app that
-        // wasn't told finds the machine awake only when it next looks.
-        let now = crate::now();
-        match told {
-            true => eprintln!("{now} muxen-agent: told the app at {} it woke", key.1),
-            false => eprintln!("{now} muxen-agent: couldn't tell the app at {} it woke: {why}", key.1),
+        if told {
+            eprintln!("{} muxen-agent: told the app at {} it woke", crate::now(), key.1);
         }
     }
     forget_sleeper(&key);

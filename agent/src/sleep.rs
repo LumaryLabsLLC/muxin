@@ -171,6 +171,15 @@ pub fn describe(message: &mut Value) {
     }
 }
 
+/// Marks an answer given while the machine is asleep. Every answer on a link
+/// has it then, so an app that missed the word that it was going to sleep
+/// (or never got it) learns from whatever it asks next.
+pub fn mark(reply: &mut Value) {
+    if supported() && reply.is_object() && asleep() {
+        reply["asleep"] = json!(true);
+    }
+}
+
 /// A laptop with its lid closed: it can't stay awake without a display.
 pub fn lid_closed() -> bool {
     #[cfg(target_os = "macos")]

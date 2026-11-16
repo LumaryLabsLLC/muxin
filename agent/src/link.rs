@@ -24,7 +24,8 @@
 //!
 //! A link also says when the machine sleeps and wakes (sleep.rs): its hello
 //! and its pings' replies have `"sleeps": true` where the agent can tell,
-//! and `"asleep": true` while the machine is asleep (a dark wake included);
+//! and `"asleep": true` while the machine is asleep (a dark wake included;
+//! every other answer has `"asleep": true` then, too);
 //! `{"event": "sleep"}` comes before it sleeps and `{"event": "awake"}` once
 //! it has fully woken. An app whose ping names a port of its own
 //! (`"wake_notice": 53312`) over a direct link is told there when the
@@ -296,6 +297,7 @@ pub fn serve_for(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>,
                 let id = req["id"].clone();
                 let mut reply = handle(&req, &out, &attached, &peer);
                 reply["id"] = id;
+                crate::sleep::mark(&mut reply);
                 let _ = send_json(&out, &reply);
             });
             continue;
@@ -904,9 +906,11 @@ mod tests {
         let (mut late, late_server) = link();
         let hello = next(&mut late);
         assert_eq!((hello["event"].as_str(), hello["asleep"].as_bool()), (Some("hello"), Some(true)));
-        // It still answers: an app from before this goes on as it did.
+        // It still answers: an app from before this goes on as it did. And
+        // every answer says it's asleep, for an app that missed the word.
         late.write_all(&frame(CONTROL, JSON, br#"{"id":1,"op":"sh","login":false,"script":"echo up"}"#)).unwrap();
-        assert_eq!(next(&mut late)["stdout"], "up\n");
+        let ran = next(&mut late);
+        assert_eq!((ran["stdout"].as_str(), ran["asleep"].as_bool()), (Some("up\n"), Some(true)));
 
         test_change(Change::Awake);
         assert_eq!(next(&mut app)["event"], "awake");

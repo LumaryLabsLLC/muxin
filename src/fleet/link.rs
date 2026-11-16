@@ -91,6 +91,9 @@ pub struct Link {
     rt: tokio::runtime::Handle,
     /// A stream of its own for one terminal (`lane`), not the machine's link.
     lane: AtomicBool,
+    /// An answer of its agent's said the machine is asleep (said on to
+    /// whoever follows the link, once).
+    said_asleep: AtomicBool,
 }
 
 enum Holder {
@@ -679,6 +682,39 @@ mod tests {
         assert!(awake(&here, link).await.is_some());
     }
 
+    /// The word that a machine is going to sleep can fail to arrive. Every
+    /// answer its agent gives in its sleep says so, and whoever follows the
+    /// link then hears it as the word itself, once. When the agent's own
+    /// word does come, that's the one heard (it says where its wake notice
+    /// goes).
+    #[tokio::test]
+    async fn an_answer_that_says_asleep_is_the_word_that_it_sleeps() {
+        let frame = |payload: &str| {
+            let mut f = CONTROL.to_be_bytes().to_vec();
+            f.push(JSON);
+            f.extend((payload.len() as u32).to_be_bytes());
+            f.extend(payload.as_bytes());
+            f
+        };
+        let (link, mut agent) = piped("link-asleep-answer", r#"{"event":"hello","version":"0.7.0","now":1,"sleeps":true}"#).await;
+        let mut events = link.subscribe();
+        // Two answers in its sleep, and no word from the agent before them.
+        agent.write_all(&frame(r#"{"id":41,"ok":true,"asleep":true}"#)).await.unwrap();
+        agent.write_all(&frame(r#"{"id":42,"ok":true,"asleep":true,"lid_closed":true}"#)).await.unwrap();
+        let heard = tokio::time::timeout(Duration::from_secs(3), events.recv()).await.expect("said on").unwrap();
+        assert_eq!((heard["event"].as_str(), heard["wake_notice"].as_str()), (Some("sleep"), None));
+        assert!(tokio::time::timeout(Duration::from_millis(900), events.recv()).await.is_err(), "once");
+
+        // The agent's own word, right behind an answer: only that is heard.
+        let (link, mut agent) = piped("link-asleep-word", r#"{"event":"hello","version":"0.7.0","now":1,"sleeps":true}"#).await;
+        let mut events = link.subscribe();
+        agent.write_all(&frame(r#"{"id":7,"ok":true,"asleep":true}"#)).await.unwrap();
+        agent.write_all(&frame(r#"{"event":"sleep","wake_notice":"192.168.1.20:53312"}"#)).await.unwrap();
+        let heard = tokio::time::timeout(Duration::from_secs(3), events.recv()).await.expect("the word").unwrap();
+        assert_eq!(heard["wake_notice"], "192.168.1.20:53312");
+        assert!(tokio::time::timeout(Duration::from_millis(900), events.recv()).await.is_err(), "and nothing made up after it");
+    }
+
     /// Nothing reaches for a machine that's asleep: no link is made, and no
     /// try at one is counted as a failure to wait out.
     #[tokio::test]
@@ -736,6 +772,7 @@ impl Link {
             priority: Arc::new(AtomicI32::new(BACKGROUND)),
             rt,
             lane: AtomicBool::new(false),
+            said_asleep: AtomicBool::new(false),
         });
         (link, out_rx)
     }
@@ -792,6 +829,21 @@ impl Link {
                 if channel == CONTROL {
                     let Ok(msg) = serde_json::from_slice::<Value>(&payload) else { continue };
                     if let Some(id) = msg["id"].as_u64() {
+                        // Asleep, says an answer: the word that it was going
+                        // to sleep didn't get here (or this link was made in
+                        // its sleep). Whoever follows the link hears it now,
+                        // unless the agent's own word comes in a moment (it
+                        // says more: where its wake notice goes).
+                        if msg["asleep"].as_bool() == Some(true) && !link.said_asleep.load(Ordering::Relaxed) {
+                            let (weak, said) = (weak.clone(), json!({ "event": "sleep", "lid_closed": msg["lid_closed"], "wake_notice": msg["wake_notice"], "wake_notice_error": msg["wake_notice_error"] }));
+                            link.rt.spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                                let Some(link) = weak.upgrade() else { return };
+                                if !link.said_asleep.swap(true, Ordering::Relaxed) {
+                                    let _ = link.events.send(said);
+                                }
+                            });
+                        }
                         if let Some(tx) = link.pending.lock().unwrap().remove(&id) {
                             let _ = tx.send(msg);
                         }
@@ -801,6 +853,11 @@ impl Link {
                             let _ = tx.send(msg);
                         }
                     } else {
+                        if msg["event"] == "sleep" {
+                            link.said_asleep.store(true, Ordering::Relaxed);
+                        } else if msg["event"] == "awake" {
+                            link.said_asleep.store(false, Ordering::Relaxed);
+                        }
                         let _ = link.events.send(msg);
                     }
                 } else if kind == CLOSE {

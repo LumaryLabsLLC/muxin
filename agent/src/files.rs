@@ -297,56 +297,89 @@ pub fn kill(pid: u32) {
     crate::sys::kill_one(pid, true);
 }
 
+/// Where a tar stream's entries end and its end marker (two empty blocks)
+/// begins, for a stream whose last file ends in a byte that isn't zero:
+/// everything past that byte's block is tar's own.
+#[cfg(test)]
+pub(crate) fn entries_end(stream: &[u8]) -> usize {
+    (stream.iter().rposition(|&b| b != 0).expect("a tar stream with entries") + 1).div_ceil(512) * 512
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
+
+    /// How long tar may take on a busy machine before a test gives up.
+    const PATIENCE: Duration = Duration::from_secs(60);
+
+    /// A send that keeps what's sent, for the test to read in order.
+    fn kept() -> (Send, mpsc::Receiver<(u8, Vec<u8>)>) {
+        let (tx, rx) = mpsc::channel();
+        let send: Send = Arc::new(move |_, kind, payload| {
+            let _ = tx.send((kind, payload.to_vec()));
+            Ok(())
+        });
+        (send, rx)
+    }
 
     #[test]
     fn packs_and_unpacks_through_channels() {
         let base = std::env::temp_dir().join(format!("muxen-files-{}", std::process::id()));
+        // A run that failed leaves its folder, and process ids come round again.
+        let _ = std::fs::remove_dir_all(&base);
         let (src, dst) = (base.join("src"), base.join("dst"));
         std::fs::create_dir_all(src.join("folder/inner")).unwrap();
         std::fs::write(src.join("folder/inner/a.txt"), b"hello").unwrap();
         std::fs::write(src.join("-dash.bin"), vec![7u8; 300_000]).unwrap();
 
-        // What pack sends lands in unpack, the way the app relays it.
-        let frames: Arc<Mutex<Vec<(u8, Vec<u8>)>>> = Arc::default();
-        let sink = frames.clone();
-        let send: Send = Arc::new(move |_, kind, payload| {
-            sink.lock().unwrap().push((kind, payload.to_vec()));
-            Ok(())
-        });
+        // What pack sends, taken the way the app takes it.
+        let (send, packed) = kept();
         let req = json!({ "channel": 5, "dir": src.display().to_string(), "names": ["folder", "-dash.bin"] });
         let (reply, credit) = pack(&req, send).unwrap();
         assert_eq!(reply["files"], 2);
         assert_eq!(reply["size"], 300_005);
-        let acks: Send = Arc::new(|_, _, _| Ok(()));
-        let (_, mut into) = unpack(&json!({ "channel": 6, "dir": dst.display().to_string() }), acks).unwrap();
-        let started = Instant::now();
-        loop {
-            let batch: Vec<(u8, Vec<u8>)> = std::mem::take(&mut *frames.lock().unwrap());
-            let mut ended = None;
-            for (kind, payload) in batch {
-                match kind {
-                    crate::proto::DATA => {
-                        into.write(&payload).unwrap();
-                        credit.ack(payload.len() as u64);
-                    }
-                    END => ended = Some(serde_json::from_slice::<Value>(&payload).unwrap()),
-                    _ => {}
+        let mut stream = Vec::new();
+        let result = loop {
+            match packed.recv_timeout(PATIENCE).expect("pack sends its stream, then its result") {
+                (crate::proto::DATA, data) => {
+                    credit.ack(data.len() as u64);
+                    stream.extend(data);
                 }
+                (END, result) => break serde_json::from_slice::<Value>(&result).unwrap(),
+                _ => {}
             }
-            if let Some(result) = ended {
-                assert_eq!(result["ok"], true, "{result}");
-                break;
-            }
-            assert!(started.elapsed() < Duration::from_secs(10));
-            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(result["ok"], true, "{result}");
+
+        // It lands in unpack the way the app relays it: the entries, then the
+        // end of the archive, two empty blocks of the app's own (see
+        // src/fleet/tar_filter.rs). The zeros tar fills its last record with
+        // after its own end stay behind: macOS's tar leaves once it has the
+        // end of the archive, without reading on, and a write to it after
+        // that fails (see link.rs's
+        // `zeros_after_the_end_of_an_archive_dont_fail_a_copy`).
+        let entries = &stream[..entries_end(&stream)];
+        let end = [0u8; 1024];
+        let (send, unpacked) = kept();
+        let (_, mut into) = unpack(&json!({ "channel": 6, "dir": dst.display().to_string() }), send).unwrap();
+        for part in entries.chunks(CHUNK).chain([&end[..]]) {
+            into.write(part).unwrap();
         }
         into.end();
-        thread::sleep(Duration::from_millis(300));
+        // Every byte is acknowledged; tar's result follows once the files are written.
+        let mut acked = 0;
+        let result = loop {
+            match unpacked.recv_timeout(PATIENCE).expect("unpack acknowledges what it takes, then sends its result") {
+                (ACK, n) => acked += u64::from_be_bytes(n[..8].try_into().unwrap()),
+                (END, result) => break serde_json::from_slice::<Value>(&result).unwrap(),
+                _ => {}
+            }
+        };
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(acked, (entries.len() + end.len()) as u64);
         assert_eq!(std::fs::read(dst.join("folder/inner/a.txt")).unwrap(), b"hello");
-        assert_eq!(std::fs::metadata(dst.join("-dash.bin")).unwrap().len(), 300_000);
+        assert!(std::fs::read(dst.join("-dash.bin")).unwrap() == vec![7u8; 300_000], "-dash.bin arrives whole");
         let listed = list(&json!({ "path": dst.display().to_string() }));
         assert_eq!(listed["entries"][0]["name"], "folder", "folders first");
         let _ = std::fs::remove_dir_all(&base);

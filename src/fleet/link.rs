@@ -394,8 +394,8 @@ fn notice_port(link: &Link) -> Option<u16> {
     super::direct::notice_port()
 }
 
-/// A link to the machine whether or not it's asleep, for waking it: not
-/// kept, and the caller hangs up.
+/// A link to the machine whether or not it's asleep, for waking it, or for
+/// a last word to one that's leaving Muxin: not kept, and the caller hangs up.
 pub async fn reach(spec: &MachineSpec) -> Result<Arc<Link>, String> {
     spec.refuse_if_disconnected()?;
     let gate = gate(&spec.id);
@@ -471,6 +471,13 @@ fn local_agent() -> PathBuf {
 
 /// Directly when the machine is paired and reachable, else over ssh.
 async fn connect(spec: &MachineSpec) -> Result<Arc<Link>, String> {
+    // In a test, the pretend agent that waits for this (`piped_asleep`).
+    #[cfg(test)]
+    {
+        if let Some(link) = waiting().lock().unwrap().remove(&spec.id) {
+            return Ok(link);
+        }
+    }
     if let Some(paired) = super::direct::paired(&spec.id).filter(|_| !spec.is_local()) {
         match connect_direct(spec, &paired).await {
             Ok(link) => return Ok(link),
@@ -596,6 +603,33 @@ pub fn network_of(ip: std::net::IpAddr) -> &'static str {
 /// dropped and nothing holds it any more.
 #[cfg(test)]
 pub(crate) async fn piped(spec: &MachineSpec) -> (Arc<Link>, mpsc::UnboundedReceiver<Value>) {
+    let (link, requests) = pretend(spec, false).await;
+    slots().lock().unwrap().insert(spec.id.clone(), Slot::Up(link.clone()));
+    (link, requests)
+}
+
+/// For tests: a machine that's asleep, so it has no link. The next
+/// connection made to it (`reach`, `get`) is one to a pretend agent that
+/// was woken by it for a moment, and says so; nothing is dialed. The
+/// receiver is `piped`'s.
+#[cfg(test)]
+pub(crate) async fn piped_asleep(spec: &MachineSpec) -> mpsc::UnboundedReceiver<Value> {
+    let (link, requests) = pretend(spec, true).await;
+    waiting().lock().unwrap().insert(spec.id.clone(), link);
+    requests
+}
+
+/// Pretend agents waiting to be connected to, by machine.
+#[cfg(test)]
+fn waiting() -> &'static Mutex<HashMap<String, Arc<Link>>> {
+    static WAITING: OnceLock<Mutex<HashMap<String, Arc<Link>>>> = OnceLock::new();
+    WAITING.get_or_init(Default::default)
+}
+
+/// The pretend agent and a link to it. `asleep`: its machine sleeps, as its
+/// hello and every answer say.
+#[cfg(test)]
+async fn pretend(spec: &MachineSpec, asleep: bool) -> (Arc<Link>, mpsc::UnboundedReceiver<Value>) {
     // One pipe each way: letting go of the app's end is what the agent sees.
     let (to_agent, mut agent_in) = tokio::io::duplex(1 << 16);
     let (mut agent_out, from_agent) = tokio::io::duplex(1 << 16);
@@ -608,7 +642,8 @@ pub(crate) async fn piped(spec: &MachineSpec) -> (Arc<Link>, mpsc::UnboundedRece
     };
     let (seen, requests) = mpsc::unbounded_channel();
     tokio::spawn(async move {
-        if agent_out.write_all(&frame(br#"{"event":"hello","version":"0.13.0"}"#)).await.is_err() {
+        let hello: &[u8] = if asleep { br#"{"event":"hello","version":"0.13.0","sleeps":true,"asleep":true}"# } else { br#"{"event":"hello","version":"0.13.0"}"# };
+        if agent_out.write_all(&frame(hello)).await.is_err() {
             return;
         }
         loop {
@@ -621,7 +656,11 @@ pub(crate) async fn piped(spec: &MachineSpec) -> (Arc<Link>, mpsc::UnboundedRece
                 break;
             }
             let Some(request) = serde_json::from_slice::<Value>(&payload).ok().filter(|_| head[..4] == CONTROL.to_be_bytes() && head[4] == JSON) else { continue };
-            let reply = serde_json::to_vec(&json!({ "id": request["id"], "ok": true })).unwrap_or_default();
+            let mut reply = json!({ "id": request["id"], "ok": true });
+            if asleep {
+                reply["asleep"] = json!(true);
+            }
+            let reply = serde_json::to_vec(&reply).unwrap_or_default();
             let _ = seen.send(request);
             if agent_out.write_all(&frame(&reply)).await.is_err() {
                 break;
@@ -629,7 +668,6 @@ pub(crate) async fn piped(spec: &MachineSpec) -> (Arc<Link>, mpsc::UnboundedRece
         }
     });
     let link = start(spec, Box::pin(from_agent), Writer::Pipe(Box::pin(to_agent)), Holder::Lane, "ssh").await.expect("a piped link");
-    slots().lock().unwrap().insert(spec.id.clone(), Slot::Up(link.clone()));
     (link, requests)
 }
 

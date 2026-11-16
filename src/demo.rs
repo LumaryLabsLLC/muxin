@@ -175,6 +175,9 @@ pub struct World {
     /// Components installed in the demo, as (machine id, component id) (see recipe::apply).
     #[cfg(feature = "recipes")]
     pub(crate) recipes: Mutex<std::collections::HashSet<(String, String)>>,
+    /// Recipes saved in the demo's window, kept in memory (see recipe::saved).
+    #[cfg(feature = "recipes")]
+    pub(crate) saved_recipes: Mutex<Vec<crate::recipe::saved::SavedRecipe>>,
 }
 
 /// Machines added in the demo get these specs.
@@ -261,6 +264,8 @@ impl World {
             workspace_files: Mutex::new(std::collections::HashMap::new()),
             #[cfg(feature = "recipes")]
             recipes: Mutex::new(std::collections::HashSet::new()),
+            #[cfg(feature = "recipes")]
+            saved_recipes: Mutex::new(Vec::new()),
         }
     }
 

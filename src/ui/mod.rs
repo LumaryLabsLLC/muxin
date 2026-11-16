@@ -20,6 +20,8 @@ mod logs;
 mod menu;
 mod notify;
 mod move_dialog;
+#[cfg(target_os = "macos")]
+mod mouse_hook;
 mod overview;
 mod palette;
 mod panes;
@@ -36,6 +38,10 @@ mod terminal;
 mod theme;
 mod tray;
 mod run;
+#[cfg(feature = "recipes")]
+mod recipes;
+#[cfg(feature = "recipes")]
+mod saved_recipes;
 mod schedule_dialog;
 mod schedules;
 mod snippets;

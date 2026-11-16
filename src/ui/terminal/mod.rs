@@ -267,6 +267,16 @@ fn new_term(cols: usize, rows: usize) -> (Arc<FairMutex<Term<Listener>>>, Listen
     (Arc::new(FairMutex::new(term)), listener, rx)
 }
 
+/// Ends a synchronized update (`ESC[?2026h`) the program left open, once its
+/// time is up, as terminals do, or at once when the program is gone (`ended`).
+/// Until then the parser holds back all it prints, up to 2 MiB. (A local PTY's
+/// event loop does this itself; output from a session over the link doesn't.)
+fn end_sync(parser: &mut Processor, term: &mut Term<Listener>, ended: bool) {
+    if parser.sync_timeout().sync_timeout().is_some_and(|at| ended || at <= Instant::now()) {
+        parser.stop_sync(term);
+    }
+}
+
 impl TerminalView {
     /// Runs `program` in a new PTY.
     pub fn spawn(program: String, args: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Result<Self, String> {
@@ -299,7 +309,25 @@ impl TerminalView {
             let mut parser: Processor = Processor::new();
             // The end of the last output, for a query split across two pieces.
             let mut tail: Vec<u8> = Vec::new();
-            while let Some(first) = output.next().await {
+            loop {
+                // While an update is held open, wait for more output only until its time is up.
+                let next = match parser.sync_timeout().sync_timeout() {
+                    Some(at) => {
+                        let timer = Box::pin(cx.background_executor().timer(at.saturating_duration_since(Instant::now())));
+                        match futures::future::select(output.next(), timer).await {
+                            futures::future::Either::Left((next, _)) => next,
+                            futures::future::Either::Right(_) => {
+                                end_sync(&mut parser, &mut term.lock(), false);
+                                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                                    return;
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    None => output.next().await,
+                };
+                let Some(first) = next else { break };
                 // Take everything queued, then draw once.
                 let mut batch = vec![first];
                 while let Ok(more) = output.try_recv() {
@@ -317,9 +345,13 @@ impl TerminalView {
                                 bytes += b.len() as u64;
                                 asked_version |= asks_version(&tail, &b);
                                 tail = b[b.len().saturating_sub(4)..].to_vec();
+                                end_sync(&mut parser, &mut t, false);
                                 parser.advance(&mut *t, &b)
                             }
-                            RemoteOutput::Ended(code) => ended = Some(code),
+                            RemoteOutput::Ended(code) => {
+                                end_sync(&mut parser, &mut t, true);
+                                ended = Some(code)
+                            }
                             RemoteOutput::Resize(cols, rows) => {
                                 let dims = TermDims { cols: (cols as usize).clamp(2, 1000), rows: (rows as usize).clamp(1, 500) };
                                 t.resize(dims);
@@ -350,6 +382,7 @@ impl TerminalView {
                     return;
                 }
             }
+            end_sync(&mut parser, &mut term.lock(), true);
             let _ = this.update(cx, |this, cx| this.finish(None, cx));
         });
         view._tasks.push(feed);
@@ -811,4 +844,34 @@ impl Render for TerminalView {
 fn asks_version(tail: &[u8], bytes: &[u8]) -> bool {
     let seen: Vec<u8> = tail.iter().chain(bytes.iter().take(5)).copied().collect();
     [&b"\x1b[>q"[..], &b"\x1b[>0q"[..]].iter().any(|q| bytes.windows(q.len()).any(|w| w == *q) || seen.windows(q.len()).any(|w| w == *q))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shown(term: &Term<Listener>) -> String {
+        let grid = term.grid();
+        (0..grid.screen_lines()).map(|l| (0..grid.columns()).map(|c| grid[Line(l as i32)][Column(c)].c).collect::<String>()).collect()
+    }
+
+    /// A session's program starts a synchronized update (`ESC[?2026h`) and
+    /// never ends it: what it printed shows once the update's time is up, and
+    /// at once when the program is gone, not before.
+    #[test]
+    fn an_update_the_program_never_ends_still_shows() {
+        let (term, _listener, _rx) = new_term(40, 5);
+        let mut t = term.lock();
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut *t, b"\x1b[?2026hhola");
+        end_sync(&mut parser, &mut t, false);
+        assert!(!shown(&t).contains("hola"), "shown before its time");
+        std::thread::sleep(Duration::from_millis(200));
+        end_sync(&mut parser, &mut t, false);
+        assert!(shown(&t).contains("hola"), "held back: {:?}", shown(&t));
+
+        parser.advance(&mut *t, b"\x1b[?2026hadios");
+        end_sync(&mut parser, &mut t, true);
+        assert!(shown(&t).contains("adios"), "held back after it ended: {:?}", shown(&t));
+    }
 }

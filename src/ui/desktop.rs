@@ -992,19 +992,22 @@ impl DesktopView {
 
     /// The mouse position in frame pixels, when it's over the frame.
     fn at(&self, p: Point<Pixels>) -> Option<(f64, f64)> {
-        let r = self.shown.get()?;
-        let (x, y) = (f32::from(p.x - r.origin.x), f32::from(p.y - r.origin.y));
-        let (w, h) = (f32::from(r.size.width), f32::from(r.size.height));
-        if x < 0. || y < 0. || x >= w || y >= h || w <= 0. || h <= 0. {
-            return None;
-        }
-        Some(((x / w * self.size.0 as f32) as f64, (y / h * self.size.1 as f32) as f64))
+        frame_point(self.shown.get()?, self.size, p, false)
     }
 
     fn send(&self, event: Value) {
         if let Some(r) = self.remote.as_ref().filter(|_| self.can_control) {
             r.input(event);
         }
+    }
+
+    /// Lets go of a mouse button there, at the place on the picture nearest
+    /// the mouse. A Mac and Linux move the pointer to where a release says:
+    /// let go off the picture, a drag ends at the edge it left by, not in the
+    /// screen's corner.
+    fn button_up(&self, b: u64, position: Point<Pixels>) {
+        let (x, y) = self.shown.get().and_then(|shown| frame_point(shown, self.size, position, true)).unwrap_or((0., 0.));
+        self.send(json!({ "t": "button", "b": b, "down": false, "x": x, "y": y }));
     }
 
     fn mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -1041,20 +1044,39 @@ impl DesktopView {
             self.alt_needed();
             let keys = self.mods.needed();
             self.send_keys(keys);
-            self.buttons.press(button);
+            // A button still down there, its release never heard: let go first.
+            for held in self.buttons.press(button) {
+                self.button_up(held, position);
+            }
             button.1
         } else {
             self.buttons.release(button)
         };
-        if let Some((x, y)) = self.at(position) {
-            self.send(json!({ "t": "button", "b": b, "down": down, "x": x, "y": y }));
-        } else if !down {
-            // Let go outside the frame: still release it there.
-            self.send(json!({ "t": "button", "b": b, "down": false, "x": 0, "y": 0 }));
+        if !down {
+            // Let go outside the frame too: still released there.
+            self.button_up(b, position);
+        } else if let Some((x, y)) = self.at(position) {
+            self.send(json!({ "t": "button", "b": b, "down": true, "x": x, "y": y }));
         }
     }
 
-    fn scroll(&mut self, e: &ScrollWheelEvent, _: &mut Window, _: &mut Context<Self>) {
+    /// A mouse button let go where the view isn't under the mouse: over the
+    /// toolbar, another pane, off the window (easily, at the end of a drag).
+    /// GPUI only calls `on_mouse_up` over the view, so the machine never heard
+    /// of it and kept the button held. Out there the view hears every release
+    /// in its window: only one whose press was the view's is passed on.
+    fn mouse_up_out(&mut self, button: MouseButton, position: Point<Pixels>) {
+        let Some(button) = desktop_keys::button_there(button, native_left()) else { return };
+        if button.0 == 1 {
+            // A press that dragged this window ends here too.
+            self.moving = false;
+        }
+        if let Some(b) = self.buttons.release_pressed(button) {
+            self.button_up(b, position);
+        }
+    }
+
+    fn scroll(&mut self, e: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some((x, y)) = self.at(e.position) else { return };
         let lines = match e.delta {
             ScrollDelta::Lines(l) => l.y,
@@ -1064,6 +1086,14 @@ impl DesktopView {
         let notches = self.scroll_rest.trunc();
         if notches != 0. {
             self.scroll_rest -= notches;
+            // What's held now, as a click does: with a ⌃ still held there (let
+            // go where the view didn't hear of it) the wheel zooms instead.
+            // Only while the view has the keyboard: the wheel doesn't take it
+            // as a click does, and without it a key pressed there for this
+            // would never be heard let go.
+            if window.is_window_active() && self.focus.is_focused(window) {
+                self.click_modifiers(e.modifiers, cx);
+            }
             self.alt_needed();
             let keys = self.mods.needed();
             self.send_keys(keys);
@@ -1072,10 +1102,10 @@ impl DesktopView {
         }
     }
 
-    /// The modifiers held with a click, when they aren't what the machine was
-    /// told (the view didn't hear them change: macOS kept the event, or it went
-    /// elsewhere). As `on_modifiers_changed` does, but Option let go isn't Alt
-    /// tapped there (that opens a Windows app's menu).
+    /// The modifiers held with a click or a turn of the wheel, when they aren't
+    /// what the machine was told (the view didn't hear them change: macOS kept
+    /// the event, or it went elsewhere). As `on_modifiers_changed` does, but
+    /// Option let go isn't Alt tapped there (that opens a Windows app's menu).
     fn click_modifiers(&mut self, mut m: Modifiers, cx: &App) {
         // The Windows key, when the keyboard hook took it (GPUI never hears of it).
         m.platform |= self.hook_super;
@@ -1773,6 +1803,10 @@ impl Render for DesktopView {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.modifiers, e.position, false, w, cx)))
             .on_mouse_up(MouseButton::Right, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.modifiers, e.position, false, w, cx)))
             .on_mouse_up(MouseButton::Middle, cx.listener(|this, e: &MouseUpEvent, w, cx| this.mouse_button(e.button, e.modifiers, e.position, false, w, cx)))
+            // Let go anywhere else, which `on_mouse_up` doesn't hear of.
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, _, _| this.mouse_up_out(e.button, e.position)))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(|this, e: &MouseUpEvent, _, _| this.mouse_up_out(e.button, e.position)))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(|this, e: &MouseUpEvent, _, _| this.mouse_up_out(e.button, e.position)))
             .on_scroll_wheel(cx.listener(Self::scroll))
             .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, window, cx| {
                 if e.modifiers.shift != this.mods.held().shift {
@@ -1853,6 +1887,25 @@ fn modifiers_for_key(stroke: &gpui::Keystroke, shift_told: bool) -> Modifiers {
 fn may_wait_for_next_key(stroke: &gpui::Keystroke) -> bool {
     let m = &stroke.modifiers;
     !m.control && !m.platform && !m.alt && !m.function && matches!(stroke.key.as_str(), "`" | "´" | "^" | "¨" | "~")
+}
+
+/// Where a point of the window is in a frame of `size` pixels drawn at `shown`.
+/// Off the picture that's nowhere, or with `nearest` the place on it nearest
+/// the point.
+fn frame_point(shown: Bounds<Pixels>, size: (u32, u32), p: Point<Pixels>, nearest: bool) -> Option<(f64, f64)> {
+    let (mut x, mut y) = (f32::from(p.x - shown.origin.x), f32::from(p.y - shown.origin.y));
+    let (w, h) = (f32::from(shown.size.width), f32::from(shown.size.height));
+    if w <= 0. || h <= 0. {
+        return None;
+    }
+    if x < 0. || y < 0. || x >= w || y >= h {
+        if !nearest {
+            return None;
+        }
+        // Just inside the far edges, which are off the picture themselves.
+        (x, y) = (x.clamp(0., (w - 1.).max(0.)), y.clamp(0., (h - 1.).max(0.)));
+    }
+    Some(((x / w * size.0 as f32) as f64, (y / h * size.1 as f32) as f64))
 }
 
 /// Whether the mouse event being handled is the left button's, as the Mac's own
@@ -2449,6 +2502,27 @@ mod tests {
         assert_eq!(option, OptionKey::Up);
         assert_eq!(option.pressed(true, true), &[] as &[bool]);
         assert_eq!(option.pressed(false, true), &[true, false]);
+    }
+
+    #[test]
+    fn a_button_let_go_off_the_picture_is_let_go_at_its_nearest_edge() {
+        // A 1024×512 frame drawn at half its size, 100 in and 50 down.
+        let shown = Bounds { origin: gpui::point(px(100.), px(50.)), size: gpui::size(px(512.), px(256.)) };
+        let at = |x: f32, y: f32, nearest: bool| frame_point(shown, (1024, 512), gpui::point(px(x), px(y)), nearest);
+        // On the picture, the same place either way.
+        assert_eq!(at(356., 178., false), Some((512., 256.)));
+        assert_eq!(at(356., 178., true), Some((512., 256.)));
+        // Off it, a move or a press is nowhere on the machine.
+        assert_eq!(at(356., 10., false), None);
+        assert_eq!(at(612., 178., false), None);
+        // A release is at the edge the mouse left by (the toolbar above,
+        // another pane to the right, off the window), not in the corner.
+        assert_eq!(at(356., 10., true), Some((512., 0.)));
+        assert_eq!(at(2000., 178., true), Some((1022., 256.)));
+        assert_eq!(at(-30., 5000., true), Some((0., 510.)));
+        // Nothing drawn yet.
+        let nothing = Bounds { origin: gpui::point(px(0.), px(0.)), size: gpui::size(px(0.), px(0.)) };
+        assert_eq!(frame_point(nothing, (0, 0), gpui::point(px(5.), px(5.)), true), None);
     }
 
     #[test]

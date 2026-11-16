@@ -377,6 +377,8 @@ pub enum Modal {
     Share(Entity<super::share::ShareDialog>),
     Join(Entity<super::share::JoinDialog>),
     Snippet(Entity<super::snippets::SnippetDialog>),
+    #[cfg(feature = "recipes")]
+    Recipe(Entity<super::saved_recipes::RecipeDialog>),
 }
 
 pub struct Notice {
@@ -482,6 +484,9 @@ pub struct Root {
     /// How git is set up on each machine (the machine page's Git card), and fixes in flight.
     pub(super) machine_git: std::collections::HashMap<String, super::github::Load<crate::api::GitSetupOut>>,
     pub(super) git_fixing: std::collections::HashSet<String>,
+    /// The machine page's Components card (recipes.rs).
+    #[cfg(feature = "recipes")]
+    pub(super) recipes: super::recipes::Recipes,
     /// How each machine is reached (the machine page's Connection card), and changes in flight.
     pub(super) machine_conn: std::collections::HashMap<String, super::github::Load<crate::fleet::connection::Connection>>,
     pub(super) conn_changing: std::collections::HashSet<String>,
@@ -705,6 +710,8 @@ impl Root {
             split_resizing: false,
             machine_git: Default::default(),
             git_fixing: Default::default(),
+            #[cfg(feature = "recipes")]
+            recipes: Default::default(),
             machine_conn: Default::default(),
             conn_changing: Default::default(),
             machine_ports: Default::default(),
@@ -1255,6 +1262,20 @@ impl Root {
             }
             // The Share dialog for a session.
             "share" => self.show_share(arg, window, cx),
+            // "mouse:18000:down:left:700:480": a mouse event for this window, that
+            // many milliseconds from now (ui/mouse_hook.rs). For checking what the
+            // desktop view sends a machine without a hand on the mouse:
+            // scripts/check-desktop-buttons.sh.
+            #[cfg(target_os = "macos")]
+            "mouse" => match super::mouse_hook::Step::parse(arg) {
+                Some(step) => cx
+                    .spawn(async move |_, cx| {
+                        cx.background_executor().timer(step.after).await;
+                        step.post();
+                    })
+                    .detach(),
+                None => tracing::warn!("mouse: {arg:?} isn't <ms>:<down|up|move|drag>:<left|ctrl>:<x>:<y>"),
+            },
             // "desktop:<machine>", or "desktop:<machine>@<display>" for one of its displays.
             "desktop" => match arg.split_once('@') {
                 Some((machine, display)) => self.show_display(machine.into(), Some(display.into()), window, cx),
@@ -2091,6 +2112,8 @@ impl Root {
             Modal::Share(d) => d.read(cx).first_focus(cx),
             Modal::Join(d) => d.read(cx).first_focus(cx),
             Modal::Snippet(d) => d.read(cx).first_focus(cx),
+            #[cfg(feature = "recipes")]
+            Modal::Recipe(d) => d.read(cx).first_focus(cx),
             Modal::Licenses(d) => d.focus_handle(cx),
         };
         window.focus(&focus);
@@ -3940,6 +3963,8 @@ impl Render for Root {
             Modal::Move(d) => d.clone().into_any_element(),
             Modal::Rename(d) => d.clone().into_any_element(),
             Modal::Snippet(d) => d.clone().into_any_element(),
+            #[cfg(feature = "recipes")]
+            Modal::Recipe(d) => d.clone().into_any_element(),
             Modal::AddDisplay(d) => d.clone().into_any_element(),
             Modal::MonitorPassword(d) => d.clone().into_any_element(),
             Modal::Power(d) => d.clone().into_any_element(),

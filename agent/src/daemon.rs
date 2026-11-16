@@ -186,6 +186,26 @@ impl Inner {
     fn broadcast(&mut self, kind: u8, payload: &[u8]) {
         self.clients.retain_mut(|c| proto::write_frame(&mut c.stream, kind, payload).is_ok());
     }
+
+    /// Notes when the screen's text changed (`screen::signature`).
+    fn note_screen(&mut self) {
+        let sig = crate::screen::signature(&self.term);
+        if sig != self.screen_sig {
+            self.screen_sig = sig;
+            self.last_output = now();
+            self.unsaved = true;
+        }
+    }
+
+    /// Ends a synchronized update (`ESC[?2026h`) the program left open, once
+    /// its time is up, as terminals do, or at once when the program is gone
+    /// (`ended`). Until then the parser holds back all it prints, up to 2 MiB.
+    fn end_sync(&mut self, ended: bool) {
+        if self.parser.sync_timeout().sync_timeout().is_some_and(|at| ended || at <= Instant::now()) {
+            self.parser.stop_sync(&mut self.term);
+            self.note_screen();
+        }
+    }
 }
 
 struct State {
@@ -533,13 +553,9 @@ fn pump(state: &State, s: &Session, mut reader: Box<dyn Read + Send>, generation
         }
         let i = &mut *guard;
         let bells = i.listener.bells.load(Ordering::Relaxed);
+        i.end_sync(false);
         i.parser.advance(&mut i.term, bytes);
-        let sig = crate::screen::signature(&i.term);
-        if sig != i.screen_sig {
-            i.screen_sig = sig;
-            i.last_output = now();
-            i.unsaved = true;
-        }
+        i.note_screen();
         // Attached terminals answer queries themselves; without one that
         // can (watchers' answers are ignored), answer here so programs
         // waiting on a reply don't hang.
@@ -578,6 +594,7 @@ fn pump(state: &State, s: &Session, mut reader: Box<dyn Read + Send>, generation
     if i.generation != generation {
         return;
     }
+    i.end_sync(true);
     i.exit = Some(code);
     i.exited_at = now();
     i.meta_unsaved = true;
@@ -701,6 +718,7 @@ fn restart(state: &Arc<State>, req: &Value) -> Result<Value, String> {
         i.generation += 1;
         kill(&mut i);
         // A clean screen for the new run, here and in attached terminals.
+        i.parser = Processor::new();
         let mut parser = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
         parser.advance(&mut i.term, b"\x1bc");
         i.broadcast(proto::DATA, b"\x1bc");
@@ -800,6 +818,7 @@ fn save(state: &State, now: i64) {
             if i.exit.is_some() && now - i.exited_at < GRACE {
                 continue;
             }
+            i.end_sync(false);
             let meta = std::mem::take(&mut i.meta_unsaved).then(|| meta_json(s, &i));
             let screen = (i.unsaved && now - i.screen_saved >= SCREEN_EVERY).then(|| {
                 i.unsaved = false;
@@ -930,7 +949,8 @@ fn read(state: &State, req: &Value) -> Result<Value, String> {
     let name = str_of(req, "name");
     let s = state.find(name).ok_or_else(|| format!("no session called {name}"))?;
     let lines = req["lines"].as_u64().unwrap_or(200) as usize;
-    let i = s.inner.lock().unwrap();
+    let mut i = s.inner.lock().unwrap();
+    i.end_sync(false);
     Ok(json!({ "text": screen::text(&i.term, lines) }))
 }
 
@@ -961,6 +981,7 @@ fn attach(state: &State, mut stream: Stream, req: &Value) {
         if sizes && proto::write_frame(&mut stream, proto::SIZE, &i.size_frame()).is_err() {
             return;
         }
+        i.end_sync(false);
         let redraw = screen::redraw(&i.term);
         if proto::write_frame(&mut stream, proto::DATA, &redraw).is_err() {
             return;
@@ -1124,6 +1145,34 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
         }
         false
+    }
+
+    /// A program that starts a synchronized update (`ESC[?2026h`) and never
+    /// ends it, because it hangs or dies mid-frame: what it printed shows
+    /// once the update's time is up, as in a terminal, and at once when it exits.
+    #[cfg(unix)]
+    #[test]
+    fn an_update_the_program_never_ends_still_shows() {
+        let state = test_state();
+        let cwd = std::env::temp_dir().display().to_string();
+        start(&state, &json!({ "name": "sync-hangs", "cwd": cwd, "run": "printf '\\033[?1049h\\033[?2026hhola'; exec sleep 30" })).unwrap();
+        start(&state, &json!({ "name": "sync-dies", "cwd": cwd, "run": "printf '\\033[?2026hadios'; exit 3" })).unwrap();
+        let text = |name: &str| read(&state, &json!({ "name": name, "lines": 50 })).unwrap()["text"].as_str().unwrap_or_default().to_string();
+        let started = Instant::now();
+        while !text("sync-hangs").contains("hola") {
+            assert!(started.elapsed() < Duration::from_secs(10), "held back: {:?}", text("sync-hangs"));
+            thread::sleep(Duration::from_millis(50));
+        }
+        let dies = state.find("sync-dies").unwrap();
+        while dies.inner.lock().unwrap().exit.is_none() {
+            assert!(started.elapsed() < Duration::from_secs(10), "it didn't exit");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let screen = screen::text(&dies.inner.lock().unwrap().term, 50);
+        let (said, note) = (screen.find("adios"), screen.find("[exited with code 3]"));
+        assert!(said.is_some() && said < note, "{screen:?}");
+        let _ = stop(&state, &json!({ "name": "sync-hangs" }));
+        let _ = stop(&state, &json!({ "name": "sync-dies" }));
     }
 
     /// The session server dies (its programs with it), leaving what it saved.

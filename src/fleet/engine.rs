@@ -230,7 +230,7 @@ impl Engine {
         {
             let mut st = engine.state.lock().unwrap();
             if engine.demo.is_none() {
-                engine.reload_inventory(&mut st, true);
+                engine.reload_inventory(&mut st, true, None);
                 let known: HashSet<&String> = st.inventory.machines.iter().map(|m| &m.id).collect();
                 let stale: Vec<String> = st.probes.keys().filter(|id| !known.contains(id)).cloned().collect();
                 for id in stale {
@@ -378,14 +378,16 @@ impl Engine {
 
     /// Picks up what other Muxin processes wrote to the shared config
     /// directory: config.toml edits (machines and settings), and newer machine
-    /// checks in state.json. Cheap when nothing changed (three `stat` calls).
+    /// checks in state.json. A machine one of them disconnected or removed
+    /// loses its link here (`reload_inventory`). Cheap when nothing changed
+    /// (three `stat` calls).
     pub fn refresh_from_disk(&self) {
         if self.demo.is_some() {
             return;
         }
         let settings_changed = {
             let mut st = self.state.lock().unwrap();
-            let inventory_changed = self.reload_inventory(&mut st, false);
+            let inventory_changed = self.reload_inventory(&mut st, false, None);
             let settings_changed = self.reload_settings(&mut st);
             let state_changed = self.merge_disk_state(&mut st);
             let workspaces_changed = self.reload_workspaces(&mut st);
@@ -422,7 +424,6 @@ impl Engine {
         Some((spec, st.probes.get(id).cloned()))
     }
 
-    /// Re-reads config.toml right away (after Muxin edited it) and publishes.
     /// Publishes the snapshot again (when something outside the state changed, like idle times).
     #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     pub(crate) fn republish(&self) {
@@ -430,7 +431,15 @@ impl Engine {
         self.publish(&mut st);
     }
 
+    /// Re-reads config.toml right away (after Muxin edited it) and publishes.
     pub(crate) fn reload_inventory_now(&self) {
+        self.reload_inventory_keeping(None);
+    }
+
+    /// The same, after this process took `keep` out of config.toml while its
+    /// agent is still to be told (`unpair_removed`): that machine's link
+    /// stays up for it, and is the caller's to drop.
+    pub(crate) fn reload_inventory_keeping(&self, keep: Option<&str>) {
         let mut st = self.state.lock().unwrap();
         match &self.demo {
             Some(w) => {
@@ -438,7 +447,7 @@ impl Engine {
                 st.inventory_info.loaded_at = Some(Utc::now());
             }
             None => {
-                self.reload_inventory(&mut st, true);
+                self.reload_inventory(&mut st, true, keep);
             }
         }
         let known: HashSet<String> = st.inventory.machines.iter().map(|m| m.id.clone()).collect();
@@ -1059,7 +1068,7 @@ impl Engine {
                 return;
             }
             if self.demo.is_none() {
-                self.reload_inventory(&mut st, false);
+                self.reload_inventory(&mut st, false, None);
             }
             let (in_flight, specs): (Vec<MachineSpec>, Vec<MachineSpec>) = st
                 .inventory
@@ -1231,7 +1240,14 @@ impl Engine {
 
     /// Re-reads config.toml when it changed (or `force`). Returns true if the inventory changed.
     /// On a parse error the last good inventory stays in place and the error is shown.
-    fn reload_inventory(&self, st: &mut State, force: bool) -> bool {
+    ///
+    /// A machine that was within reach and no longer is (disconnected, or
+    /// removed) loses its link in this process, whoever changed the file:
+    /// this process, another one (the CLI, an agent's MCP server) or an
+    /// editor. What rides on the link ends with it: terminals, the shared
+    /// clipboard, and the keep-alives that would go on waking a sleeping Mac.
+    /// Not `keep`'s: the caller still has a word for that machine's agent.
+    fn reload_inventory(&self, st: &mut State, force: bool, keep: Option<&str>) -> bool {
         let path = &self.paths.inventory;
         let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         if !force && mtime == st.inventory_mtime {
@@ -1244,7 +1260,19 @@ impl Engine {
                 st.inventory_info.error = None;
                 st.inventory_info.warnings = inv.warnings.clone();
                 st.inventory_info.loaded_at = Some(Utc::now());
+                let left: Vec<String> = st
+                    .inventory
+                    .machines
+                    .iter()
+                    .filter(|was| was.is_connected() && keep != Some(was.id.as_str()))
+                    .filter(|was| !inv.machines.iter().any(|m| m.id == was.id && m.is_connected()))
+                    .map(|was| was.id.clone())
+                    .collect();
+                // The new inventory first, so nothing connects again in between.
                 st.inventory = inv;
+                for id in left {
+                    super::link::reset(&id);
+                }
                 true
             }
             Err(e) => {
@@ -1412,6 +1440,76 @@ mod tests {
         window.refresh_from_disk();
         assert_eq!(window.current().machines[0].status, "online", "an older check must not win");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One Muxin process disconnects a machine, or removes one, while another
+    /// has a link to it: the other's link closes when it reads config.toml
+    /// again, and what rode on it ends (the shared clipboard).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_machine_disconnected_or_removed_elsewhere_loses_its_link_here() {
+        use super::super::{clipboard, link};
+        let dir = std::env::temp_dir().join(format!("muxen-xlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let machine = |name: &str| format!("[[machine]]\nname = \"Xlink {name}\"\nhost = \"xlink-{}.invalid\"\n\n", name.to_lowercase());
+        let text = format!("[settings]\nshare_clipboard = true\n\n{}{}{}{}", machine("Mac"), machine("Box"), machine("Nas"), machine("Stay"));
+        std::fs::write(dir.join("config.toml"), text).unwrap();
+        let paths = Paths::resolve(Some(dir.clone()), None);
+        let window = Engine::new(paths.clone(), false);
+        let cli = Engine::new(paths.clone(), false);
+        let spec = |id: &str| window.machine(id).map(|(spec, _)| spec);
+        // A change to config.toml shows in its modification time.
+        let later = || tokio::time::sleep(Duration::from_millis(20));
+
+        // Closed here, and let go of by everything: the agent's end closes too.
+        async fn gone(id: &str, l: Arc<link::Link>, mut agent: tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>) {
+            assert!(link::current(id).is_none() && !l.alive() && l.retired(), "{id} kept its link");
+            drop(l);
+            let closed = async { while agent.recv().await.is_some() {} };
+            tokio::time::timeout(Duration::from_secs(10), closed).await.unwrap_or_else(|_| panic!("something still holds the link to {id}"));
+        }
+
+        // A machine nobody touches keeps its link through all of it.
+        let (stay, _stay_agent) = link::piped(&spec("xlink-stay").unwrap()).await;
+
+        // The CLI disconnects the Mac. (A process has one table of links, and
+        // the two engines here share it: the window's link is put up after
+        // the CLI's own reset, while the window still has the Mac as connected.)
+        later().await;
+        cli.set_connected("xlink-mac", false).unwrap();
+        let mac = spec("xlink-mac").unwrap();
+        assert!(mac.is_connected(), "the window hasn't read config.toml yet");
+        let (l, agent) = link::piped(&mac).await;
+        tokio::spawn(window.clone().follow_link(l.clone()));
+        for _ in 0..500 {
+            if clipboard::sharing("xlink-mac") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(clipboard::sharing("xlink-mac"));
+        window.refresh_from_disk();
+        assert_eq!(window.current().machines.iter().find(|m| m.id == "xlink-mac").unwrap().status, "disconnected");
+        gone("xlink-mac", l, agent).await;
+        assert!(!clipboard::sharing("xlink-mac"));
+
+        // The CLI removes the box.
+        later().await;
+        cli.remove_machine("xlink-box").unwrap();
+        let (l, agent) = link::piped(&spec("xlink-box").unwrap()).await;
+        window.refresh_from_disk();
+        assert!(spec("xlink-box").is_none());
+        gone("xlink-box", l, agent).await;
+
+        // One removed here goes with its link too (it isn't paired: its
+        // agent has nothing to be told).
+        let (l, agent) = link::piped(&spec("xlink-nas").unwrap()).await;
+        window.remove_machine("xlink-nas").unwrap();
+        gone("xlink-nas", l, agent).await;
+
+        assert!(stay.alive() && link::current("xlink-stay").is_some_and(|l| Arc::ptr_eq(&l, &stay)));
+        link::reset("xlink-stay");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

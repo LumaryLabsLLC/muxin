@@ -508,6 +508,49 @@ pub fn network_of(ip: std::net::IpAddr) -> &'static str {
     }
 }
 
+/// For tests: a link over pipes to a pretend agent that says yes to every
+/// request, kept as the machine's link. The receiver gets each request the
+/// agent reads, and ends once the app's end of the pipe closes: the link was
+/// dropped and nothing holds it any more.
+#[cfg(test)]
+pub(crate) async fn piped(spec: &MachineSpec) -> (Arc<Link>, mpsc::UnboundedReceiver<Value>) {
+    // One pipe each way: letting go of the app's end is what the agent sees.
+    let (to_agent, mut agent_in) = tokio::io::duplex(1 << 16);
+    let (mut agent_out, from_agent) = tokio::io::duplex(1 << 16);
+    let frame = |payload: &[u8]| {
+        let mut f = CONTROL.to_be_bytes().to_vec();
+        f.push(JSON);
+        f.extend((payload.len() as u32).to_be_bytes());
+        f.extend(payload);
+        f
+    };
+    let (seen, requests) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        if agent_out.write_all(&frame(br#"{"event":"hello","version":"0.13.0"}"#)).await.is_err() {
+            return;
+        }
+        loop {
+            let mut head = [0u8; 9];
+            if agent_in.read_exact(&mut head).await.is_err() {
+                break;
+            }
+            let mut payload = vec![0u8; u32::from_be_bytes([head[5], head[6], head[7], head[8]]) as usize];
+            if agent_in.read_exact(&mut payload).await.is_err() {
+                break;
+            }
+            let Some(request) = serde_json::from_slice::<Value>(&payload).ok().filter(|_| head[..4] == CONTROL.to_be_bytes() && head[4] == JSON) else { continue };
+            let reply = serde_json::to_vec(&json!({ "id": request["id"], "ok": true })).unwrap_or_default();
+            let _ = seen.send(request);
+            if agent_out.write_all(&frame(&reply)).await.is_err() {
+                break;
+            }
+        }
+    });
+    let link = start(spec, Box::pin(from_agent), Writer::Pipe(Box::pin(to_agent)), Holder::Lane, "ssh").await.expect("a piped link");
+    slots().lock().unwrap().insert(spec.id.clone(), Slot::Up(link.clone()));
+    (link, requests)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

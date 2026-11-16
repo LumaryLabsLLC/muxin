@@ -819,6 +819,75 @@ mod tests {
         assert_eq!(server.join().unwrap(), 0);
     }
 
+    /// An app before 0.5.7 passed on everything the other machine's tar
+    /// wrote: after the end of the archive, the zeros tar fills its last
+    /// record with. A tar that leaves at the end of the archive without
+    /// reading on (macOS's) is gone when they come, and the write to it
+    /// fails. The files are all there by then, and that's what the app hears.
+    #[cfg(unix)]
+    #[test]
+    fn zeros_after_the_end_of_an_archive_dont_fail_a_copy() {
+        let _turn = crate::sleep::test_lock();
+        let base = std::env::temp_dir().join(format!("muxen-link-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (src, dst) = (base.join("src"), base.join("dst"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("data.bin"), vec![7u8; 300_000]).unwrap();
+        let tar = Command::new("tar").env("COPYFILE_DISABLE", "1").arg("-C").arg(&src).args(["-cf", "-", "./data.bin"]).output().unwrap();
+        assert!(tar.status.success());
+        // The archive to its end (two empty blocks), and the zeros that fill
+        // its last record of 10240 bytes (BusyBox's tar leaves them out).
+        let end = crate::files::entries_end(&tar.stdout) + 1024;
+        let (archive, zeros) = (&tar.stdout[..end], vec![0u8; 10240 - end % 10240]);
+
+        // Two pipes, as over ssh: each end has one owner, and closing the
+        // app's ends the link.
+        let (agent_in, mut app) = io::pipe().unwrap();
+        let (mut from_agent, agent_out) = io::pipe().unwrap();
+        let server = thread::spawn(move || serve(Box::new(agent_in), Box::new(agent_out)));
+        // What the agent sends, as it comes.
+        let (tx, frames) = mpsc::channel();
+        thread::spawn(move || {
+            while let Ok(f) = read_frame(&mut from_agent) {
+                if tx.send(f).is_err() {
+                    break;
+                }
+            }
+        });
+        let patience = Duration::from_secs(60);
+        let json_of = |f: (u32, u8, Vec<u8>)| serde_json::from_slice::<Value>(&f.2).unwrap();
+        assert_eq!(json_of(frames.recv_timeout(patience).unwrap())["event"], "hello");
+        let req = json!({ "id": 1, "op": "unpack", "channel": 7, "dir": dst.display().to_string() });
+        app.write_all(&frame(CONTROL, JSON, req.to_string().as_bytes())).unwrap();
+        let reply = json_of(frames.recv_timeout(patience).unwrap());
+        assert_eq!(reply["ok"], true, "{reply}");
+
+        // All of the archive is taken.
+        app.write_all(&frame(7, proto::DATA, archive)).unwrap();
+        let (channel, kind, taken) = frames.recv_timeout(patience).unwrap();
+        assert_eq!((channel, kind, taken), (7, crate::files::ACK, (end as u64).to_be_bytes().to_vec()));
+        // macOS's tar has left by now, and its result comes unasked. GNU tar
+        // waits for the rest of its record and BusyBox's for the end of its
+        // input: they take the zeros.
+        let mut result = match frames.recv_timeout(Duration::from_secs(1)) {
+            Ok((7, crate::files::END, result)) => Some(result),
+            _ => None,
+        };
+        app.write_all(&frame(7, proto::DATA, &zeros)).unwrap();
+        app.write_all(&frame(7, crate::files::END, &[])).unwrap();
+        while result.is_none() {
+            if let (7, crate::files::END, r) = frames.recv_timeout(patience).expect("the copy's result") {
+                result = Some(r);
+            }
+        }
+        let result = serde_json::from_slice::<Value>(&result.unwrap()).unwrap();
+        assert_eq!(result["ok"], true, "{result}");
+        assert!(std::fs::read(dst.join("data.bin")).unwrap() == vec![7u8; 300_000], "data.bin arrives whole");
+        drop(app);
+        assert_eq!(server.join().unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// A direct link's stream takes the priority the app asks for; one that
     /// never asks (an app before 0.14) is served as before, and over ssh
     /// (no stream of its own) the app is told there's none.

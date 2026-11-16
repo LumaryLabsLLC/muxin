@@ -90,7 +90,12 @@ impl Root {
         // While it's open, only working shows (it's in front of you).
         let shown = if selected && mark != Mark::Working { Mark::Idle } else { mark };
         let state = if down {
-            if machine.is_some_and(|m| m.is_disconnected()) { "disconnected" } else { "offline" }.to_string()
+            match machine {
+                Some(m) if m.is_disconnected() => "disconnected",
+                Some(m) if m.is_asleep() => "asleep",
+                _ => "offline",
+            }
+            .to_string()
         } else if exited && shown == Mark::Idle {
             match x.exit_code {
                 Some(c) if c != 0 => format!("exited ({c})"),

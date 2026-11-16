@@ -20,6 +20,13 @@ darwin)
   kv os_version "macOS $(sw_vers -productVersion 2>/dev/null)"
   # A battery means a laptop.
   if pmset -g batt 2>/dev/null | grep -q InternalBattery; then kv form_factor laptop; else kv form_factor desktop; fi
+  # Awake without its graphics: a dark wake (something woke it for a moment,
+  # this check maybe). It's asleep.
+  caps=$(pmset -g systemstate 2>/dev/null | sed -n 's/^Current System Capabilities are: *//p')
+  case "$caps" in
+  *Graphics*) ;;
+  *CPU*) kv asleep 1 ;;
+  esac
   kv cores "$(sysctl -n hw.ncpu 2>/dev/null)"
   kv load "$(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}')"
   boot=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p')

@@ -419,13 +419,13 @@ impl MachineSpec {
         self.is_checkable() && !self.disconnected
     }
 
-    /// Err for a machine disconnected on purpose: what the user sees instead
-    /// of Muxin reaching it.
+    /// Err for a machine disconnected on purpose, or asleep: what the user
+    /// sees instead of Muxin reaching it (which would wake one that sleeps).
     pub fn refuse_if_disconnected(&self) -> Result<(), String> {
         if self.disconnected {
             return Err(format!("{} is disconnected. Connect to it first.", self.name));
         }
-        Ok(())
+        crate::fleet::asleep::refuse(self)
     }
 }
 
@@ -607,6 +607,14 @@ pub struct Settings {
     /// on ssh until the user connects one directly. Machines added before
     /// are asked about once (see fleet::build).
     pub connect_directly: bool,
+    /// A Mac that sleeps is left alone, so nothing Muxin sends wakes it. With
+    /// this on, its agent tells this app when it wakes (it connects to the
+    /// app: see fleet::direct), and Muxin never looks at it meanwhile. macOS
+    /// asks on each Mac to allow Muxin Agent on the local network for that,
+    /// and again after every update of the agent there, so it's off until
+    /// the user turns it on: Muxin then looks at a sleeping Mac at each
+    /// check, which wakes it for a moment.
+    pub wake_notices: bool,
     /// The editor machines' folders open in: "zed", "cursor", "vscode", or "" for the first one installed.
     pub editor: String,
     /// Cloud machines: how Muxin signs in, what new ones come with, what happens when they sit idle.
@@ -825,6 +833,7 @@ impl Default for Settings {
             desktop_shortcuts: true,
             check_updates: true,
             connect_directly: true,
+            wake_notices: false,
             editor: String::new(),
             cloud: CloudSettings::default(),
             prompts: Default::default(),
@@ -1230,6 +1239,8 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(&path, "[settings]\ncheck_interval_minutes = 5\n").unwrap();
         assert!(Settings::load(&path).connect_directly);
+        // Off unless asked for: macOS asks about it on every Mac.
+        assert!(!Settings::load(&path).wake_notices);
         std::fs::write(&path, "[settings]\nconnect_directly = false\n").unwrap();
         assert!(!Settings::load(&path).connect_directly);
         let _ = std::fs::remove_dir_all(&dir);

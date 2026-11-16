@@ -291,7 +291,11 @@ impl World {
                 checked_at: Utc::now(),
                 duration_ms: 8000,
                 ok: false,
-                error: Some(format!("ssh: connect to host {} port 22: Operation timed out", spec.host)),
+                // A laptop with its lid closed: asleep, as its agent said.
+                error: Some(crate::probe::ASLEEP.into()),
+                asleep: true,
+                wake_notice: Some("192.168.1.20:53312".into()),
+                lid_closed: true,
                 os: Some(hw.os.into()),
                 arch: Some(hw.arch.into()),
                 os_version: Some(hw.os_version.into()),
@@ -403,6 +407,10 @@ impl World {
             kvm: hw.id == "beacon",
             refused_user: None,
             locked_key: None,
+            asleep: false,
+            wake_notice: None,
+            lid_closed: false,
+            wake_notice_failed: false,
         }
     }
 

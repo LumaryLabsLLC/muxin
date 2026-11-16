@@ -372,7 +372,9 @@ impl Engine {
             return Err("An operation is still running on this machine. Wait for it to finish.".into());
         }
         let paired = crate::fleet::direct::paired(&spec.id).is_some();
-        self.forget_machine(machine_id)?;
+        // Paired: its link stays until its agent has been told, over it
+        // (`unpair_removed` drops it then). Otherwise it goes with the machine.
+        self.forget(machine_id, paired)?;
         if paired {
             self.unpair_removed(spec);
         }
@@ -434,14 +436,20 @@ impl Engine {
     }
 
     /// Drops a machine from config.toml, for an operation that is itself
-    /// what's changing it (destroying a cloud machine).
+    /// what's changing it (destroying a cloud machine). Its link goes with it.
     pub(crate) fn forget_machine(self: &Arc<Self>, machine_id: &str) -> Result<(), String> {
+        self.forget(machine_id, false)
+    }
+
+    /// Takes a machine out of config.toml. With `keep_link` its link stays
+    /// up, for the caller to drop.
+    fn forget(self: &Arc<Self>, machine_id: &str, keep_link: bool) -> Result<(), String> {
         let edit = |text: &str| inventory_edit::remove_machine(text, machine_id);
         match self.demo_world() {
             Some(w) => w.edit_inventory(edit)?,
             None => inventory_edit::edit_file(self.inventory_path(), edit)?,
         }
-        self.reload_inventory_now();
+        self.reload_inventory_keeping(keep_link.then_some(machine_id));
         // Its pairing goes too, so a machine added later under its name starts unpaired.
         if self.demo_world().is_none() && crate::fleet::direct::paired(machine_id).is_some() {
             let _ = crate::fleet::direct::save(machine_id, None);

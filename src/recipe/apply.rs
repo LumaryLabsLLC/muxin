@@ -30,13 +30,6 @@ const UP_TO_DATE_TIMEOUT: Duration = Duration::from_secs(120);
 /// apply.sh's exit status when a step needs root and sudo wants a password: nothing ran.
 const NEEDS_ROOT: i32 = 77;
 
-/// The longest applying this many components can take: the checks and tests
-/// at the start, then each one's step, its check and its test again. The CLI
-/// waits this long, since the operation runs in its own process and ends with it.
-pub fn longest(components: usize) -> Duration {
-    let start = super::CHECK_TIMEOUT + UP_TO_DATE_TIMEOUT + Duration::from_secs(60);
-    start + (STEP_TIMEOUT + super::CHECK_TIMEOUT + UP_TO_DATE_TIMEOUT) * components as u32
-}
 /// What a Linux machine in the demo has to begin with, like Muxin's VMs. A Mac there has everything.
 const DEMO_LINUX: &[&str] = &["git", "gh"];
 

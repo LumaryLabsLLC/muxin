@@ -49,6 +49,7 @@ mod saved;
 mod schedules;
 mod screen;
 mod settings;
+mod sleep;
 mod states;
 mod sys;
 #[cfg_attr(not(windows), allow(dead_code))]

@@ -994,15 +994,19 @@ impl Root {
                             .p(px(20.))
                             .max_w(px(420.))
                             .bg(theme.elevated)
-                            .child(kit::color_tile(if format::is_just_offline(&m) { "power" } else { "unplug" }, 36.))
+                            .child(kit::color_tile(if m.is_asleep() { "moon" } else if format::is_just_offline(&m) { "power" } else { "unplug" }, 36.))
                             .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(title))
                             .child(div().text_size(px(12.5)).text_color(theme.text_muted).text_center().child(if disconnected {
                                 "This session keeps running there. Connect to see it again."
+                            } else if m.is_asleep() {
+                                "This session is still there. It goes on when the machine wakes."
                             } else {
                                 "Shut down: this session ended. Asleep: it's still there."
                             }))
                             .child(if disconnected {
                                 Button::new("session-connect", "Connect").icon("plug").on_click(cx.listener(move |this, _, _, cx| this.set_machine_connected(&mid, true, cx)))
+                            } else if m.is_asleep() && self.engine.can_wake(&m.id) {
+                                Button::new("session-wake", "Wake").icon("power").on_click(cx.listener(move |this, _, _, cx| this.wake_machine(&mid, cx)))
                             } else {
                                 Button::new("session-offline-check", "Try again")
                                     .icon("refresh-cw")
@@ -1259,6 +1263,7 @@ impl Root {
         let content = if all.is_empty() {
             let text = match runs_in_app(m) {
                 _ if m.is_disconnected() => format!("Connect to {} to start Claude Code, Codex or a shell there.", m.name),
+                _ if m.is_asleep() => format!("{} is asleep. Wake it to start Claude Code, Codex or a shell there.", m.name),
                 _ if m.is_down() => format!("Start Claude Code, Codex or a shell here once {} is back.", m.name),
                 true => format!("Run Claude Code, Codex or a shell here. {} so sessions run while Muxin is open.", m.sessions_error.clone().unwrap_or_default().trim_end_matches('.')),
                 false => "Run Claude Code, Codex, OpenCode or a shell here. Sessions keep working on the machine after you close Muxin.".to_string(),
@@ -1349,7 +1354,11 @@ impl Root {
         let state = if x.status == "exited" {
             div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!("Exited{}", x.exit_code.map(|c| format!(" ({c})")).unwrap_or_default())).into_any_element()
         } else if offline {
-            div().text_size(px(12.)).text_color(theme.text_placeholder).child(if self.snapshot.machines.iter().any(|m| m.id == x.machine_id && m.is_disconnected()) { "Disconnected" } else { "Machine offline" }).into_any_element()
+            div().text_size(px(12.)).text_color(theme.text_placeholder).child(match self.snapshot.machines.iter().find(|m| m.id == x.machine_id) {
+                Some(m) if m.is_disconnected() => "Disconnected",
+                Some(m) if m.is_asleep() => "Machine asleep",
+                _ => "Machine offline",
+            }).into_any_element()
         } else {
             state_label(theme, format!("ms-spin-{}", x.id), x.mark())
         };

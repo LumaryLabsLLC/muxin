@@ -235,6 +235,8 @@ pub fn icon_colors(name: &str) -> Option<(u32, u32)> {
         "plus" => (0xb69cff, 0x7a4ce8),
         "trash-2" | "circle-x" | "square" => (0xff8080, 0xdc3b33),
         "power" | "unplug" => (0xff8fb1, 0xd63c6e),
+        // Asleep.
+        "moon" => (0xa9acff, 0x5a5ed8),
         "external-link" | "info" | "inbox" | "message-square" | "arrow-up" | "arrow-down" | "cloud" => (0x6cb6ff, 0x2f6fe4),
         "git-branch" | "git-merge" | "git-pull-request" | "git-pull-request-draft" | "workflow" | "list" | "scroll-text" => {
             (0xffa95c, 0xea6a2a)

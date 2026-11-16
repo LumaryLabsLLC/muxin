@@ -1262,6 +1262,20 @@ impl Root {
             }
             // The Share dialog for a session.
             "share" => self.show_share(arg, window, cx),
+            // "mouse:18000:down:left:700:480": a mouse event for this window, that
+            // many milliseconds from now (ui/mouse_hook.rs). For checking what the
+            // desktop view sends a machine without a hand on the mouse:
+            // scripts/check-desktop-buttons.sh.
+            #[cfg(target_os = "macos")]
+            "mouse" => match super::mouse_hook::Step::parse(arg) {
+                Some(step) => cx
+                    .spawn(async move |_, cx| {
+                        cx.background_executor().timer(step.after).await;
+                        step.post();
+                    })
+                    .detach(),
+                None => tracing::warn!("mouse: {arg:?} isn't <ms>:<down|up|move|drag>:<left|ctrl>:<x>:<y>"),
+            },
             // "desktop:<machine>", or "desktop:<machine>@<display>" for one of its displays.
             "desktop" => match arg.split_once('@') {
                 Some((machine, display)) => self.show_display(machine.into(), Some(display.into()), window, cx),

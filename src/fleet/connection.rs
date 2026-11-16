@@ -56,7 +56,9 @@ impl Engine {
             Some(w) => w.edit_inventory(edit)?,
             None => crate::ops::inventory_edit::edit_file(self.inventory_path(), edit)?,
         }
-        // The new setting first, so nothing connects again in between.
+        // The new setting first, so nothing connects again in between. Reading
+        // it closes the link too, as it does in every other Muxin process
+        // that has one to the machine (`reload_inventory`).
         self.reload_inventory_now();
         if connected {
             self.trigger_check(Some(spec.id.clone()));
@@ -95,6 +97,11 @@ impl Engine {
             out.tailnet = m.tailnet.clone();
         }
         out.tailscale = self.current().tailscale.clone();
+        // Asleep: no connection is kept, or made to see how it would go.
+        if super::asleep::is(&spec.id) {
+            out.note = Some(format!("{} is asleep, so Muxin isn't connected to it.", spec.name));
+            return Ok(out);
+        }
         if let Some(l) = link::get(&spec).await {
             let started = Instant::now();
             if l.request(json!({ "op": "ping" }), Duration::from_secs(10)).await.is_ok() {
@@ -299,8 +306,10 @@ impl Engine {
     /// A machine that was paired left Muxin: its agent forgets this app too
     /// (only this one). In the background and best-effort: a machine that
     /// can't be reached is removed all the same. `unpaired` waits for it.
+    /// The machine's link, kept up for this (`remove_machine`), goes after.
     pub(crate) fn unpair_removed(self: &Arc<Self>, spec: MachineSpec) {
         if spec.is_local() || self.demo_world().is_some() {
+            link::reset(&spec.id);
             return;
         }
         let id = spec.id.clone();
@@ -345,19 +354,39 @@ mod tests {
     use super::*;
     use crate::config::Paths;
 
+    /// A paired machine that's removed is unpaired here, reached or not. The
+    /// second machine has a link: its agent is told over that one, which
+    /// taking it out of config.toml leaves up until then and closes after.
+    /// (Both in one test: tests share one direct.json, and two saving a
+    /// pairing at the same moment would lose one.)
     #[tokio::test(flavor = "multi_thread")]
     async fn a_removed_machine_leaves_no_pairing_behind() {
         let tmp = std::env::temp_dir().join(format!("muxin-unpair-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         // Disconnected, so nothing reaches out to it.
-        std::fs::write(tmp.join("config.toml"), "[[machine]]\nname = \"Paired\"\nhost = \"paired.invalid\"\ndisconnected = true\n").unwrap();
+        let text = "[[machine]]\nname = \"Paired\"\nhost = \"paired.invalid\"\ndisconnected = true\n\n[[machine]]\nname = \"Told\"\nhost = \"told.invalid\"\n";
+        std::fs::write(tmp.join("config.toml"), text).unwrap();
         let engine = Engine::new(Paths::resolve(Some(tmp.clone()), None), false);
-        let pairing = direct::Paired { fingerprint: "f".repeat(64), host: "paired.invalid".into(), port: 47821, lan: Vec::new(), tailnet: Vec::new() };
-        direct::save("paired", Some(pairing)).unwrap();
+        let pairing = |host: &str| direct::Paired { fingerprint: "f".repeat(64), host: host.into(), port: 47821, lan: Vec::new(), tailnet: Vec::new() };
+        direct::save("paired", Some(pairing("paired.invalid"))).unwrap();
         engine.remove_machine("paired").unwrap();
         engine.unpaired("paired").await;
         assert!(engine.machine("paired").is_none() && direct::paired("paired").is_none());
+
+        direct::save("told", Some(pairing("told.invalid"))).unwrap();
+        let (l, mut agent) = link::piped(&engine.machine("told").unwrap().0).await;
+        engine.remove_machine("told").unwrap();
+        engine.unpaired("told").await;
+        assert!(engine.machine("told").is_none() && direct::paired("told").is_none());
+        assert!(link::current("told").is_none() && !l.alive());
+        drop(l);
+        // What the agent got before its end of the link closed.
+        let mut asked = Vec::new();
+        while let Some(request) = tokio::time::timeout(Duration::from_secs(10), agent.recv()).await.expect("something still holds the link") {
+            asked.push(request["op"].as_str().unwrap_or_default().to_string());
+        }
+        assert_eq!(asked, ["unpair"]);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

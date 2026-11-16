@@ -312,7 +312,7 @@ impl Root {
                 let mut new = Vec::new();
                 if !m.host.is_empty() {
                     // Asleep: wake it first.
-                    if m.status == "offline" && super::format::is_just_offline(m) && self.engine.can_wake(&m.id) {
+                    if (m.is_asleep() || super::format::is_just_offline(m)) && self.engine.can_wake(&m.id) {
                         items.push(act("Wake", "power", Action::Wake(id.clone())));
                         items.push(Item::Separator);
                     }

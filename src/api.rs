@@ -27,6 +27,9 @@ const LOGS_TAIL: usize = 200;
 const INSTALL_TIMEOUT_SECS: u64 = 900;
 const ACTION_TIMEOUT_SECS: u64 = 180;
 const CHECK_WAIT: Duration = Duration::from_secs(60);
+/// What a CLI result says of an operation it didn't wait for (no command asks
+/// for that): it ended with the command's process.
+const NOT_WAITED: &str = "This command didn't wait, and its own process does the work: what was left didn't run.";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -45,7 +48,14 @@ pub struct ApiError {
 
 impl ApiError {
     fn new(code: &'static str, message: impl Into<String>) -> ApiError {
-        ApiError { code, message: message.into(), hint: None, details: None }
+        let message = message.into();
+        // A machine that's asleep is out of reach whatever was asked of it,
+        // and Muxin doesn't wake it by itself.
+        if message.ends_with(crate::fleet::asleep::WAKE_FIRST) {
+            let hint = "wake_machine (`muxin wake <machine>`) wakes it. It's asleep on purpose: wake it only when the user asked.";
+            return ApiError { code: "unreachable", message, hint: Some(hint.into()), details: None };
+        }
+        ApiError { code, message, hint: None, details: None }
     }
 
     pub fn not_found(message: impl Into<String>) -> ApiError {
@@ -424,8 +434,11 @@ pub struct MachineSummary {
     pub id: String,
     pub name: String,
     pub host: String,
-    /// "online" | "offline" (unreachable) | "unchecked" | "manual" (no host: also a cloud machine
-    /// that was created and hasn't started, with `cloud.power` "starting") | "disconnected" (on purpose: connect_machine)
+    /// "online" | "offline" (unreachable) | "asleep" (its agent said it
+    /// sleeps: Muxin leaves it alone until it wakes; wake_machine wakes it) |
+    /// "unchecked" | "manual" (no host: also a cloud machine that was created
+    /// and hasn't started, with `cloud.power` "starting") | "disconnected"
+    /// (on purpose: connect_machine)
     pub status: String,
     pub checking: bool,
     /// e.g. "darwin-arm64", "linux-x64", "windows-x64"
@@ -453,7 +466,8 @@ pub struct MachineSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Why it can't be reached, in plain words: `kind` is "offline" (shut
-    /// down, asleep, off the network: nothing to fix), "refused", "auth",
+    /// down, off the network, or asleep without saying so: nothing to fix),
+    /// "asleep" (its agent said it sleeps: nothing to fix), "refused", "auth",
     /// "key-locked", "unknown-host", "host-key" or "error"; `hint` is a command to try.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unreachable: Option<crate::fleet::model::Unreachable>,
@@ -933,12 +947,38 @@ async fn wait_checked(engine: &Arc<Engine>, machine_id: &str, timeout: Duration)
     .await;
 }
 
+/// How long a call waits for the operation it started. An MCP server goes on
+/// running after a call returns, so its waits end (`default_secs` unless the
+/// caller said) and the caller polls get_operation. The CLI's own process
+/// runs the operation, and what's left when it stops waiting never runs: it
+/// waits until the operation ends, unless it was told how long (`--timeout`).
+fn wait_limit(surface: Surface, asked: Option<u64>, default_secs: u64) -> Option<Duration> {
+    match (asked, surface) {
+        (Some(secs), _) => Some(Duration::from_secs(secs.max(1))),
+        (None, Surface::Mcp) => Some(Duration::from_secs(default_secs.max(1))),
+        (None, Surface::Cli) => None,
+    }
+}
+
+/// The CLI stopped waiting (its `--timeout` passed) while its operation was
+/// still running. The operation ends with the command's process, so this is a
+/// failure and not "still running in the background". `details`: the response.
+fn cut_off(operation: &Operation, limit: Option<Duration>, details: Option<serde_json::Value>) -> ApiError {
+    let after = limit.map(|l| format!(" after {} s", l.as_secs())).unwrap_or_default();
+    ApiError {
+        code: "operation_failed",
+        message: format!("Stopped waiting{after}: \"{}\" wasn't finished, and what was left didn't run.", operation.title),
+        hint: Some("This command's own process does the work, so it ends when the command does. Run it again with a longer --timeout, or with none: it then waits until it's done.".into()),
+        details,
+    }
+}
+
 /// Waits for an operation to leave "running", calling `on_line` for every new log line.
-/// Returns the operation as it is when it finishes or the timeout passes, or None if it's unknown.
-pub async fn wait_operation(engine: &Arc<Engine>, id: u64, timeout: Duration, mut on_line: impl FnMut(&str)) -> Option<Operation> {
+/// Returns the operation as it is when it finishes or `limit` passes (None: however long it takes), or None if it's unknown.
+pub async fn wait_operation(engine: &Arc<Engine>, id: u64, limit: Option<Duration>, mut on_line: impl FnMut(&str)) -> Option<Operation> {
     let mut rx = engine.subscribe();
     let mut printed = 0;
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = limit.map(|l| tokio::time::Instant::now() + l);
     loop {
         let op = rx.borrow_and_update().operations.iter().find(|o| o.id == id).cloned()?;
         for line in op.log.iter().skip(printed) {
@@ -948,9 +988,12 @@ pub async fn wait_operation(engine: &Arc<Engine>, id: u64, timeout: Duration, mu
         if op.status != "running" {
             return Some(op);
         }
-        match tokio::time::timeout_at(deadline, rx.changed()).await {
-            Ok(Ok(())) => continue,
-            _ => return Some(op),
+        let changed = match deadline {
+            Some(at) => matches!(tokio::time::timeout_at(at, rx.changed()).await, Ok(Ok(()))),
+            None => rx.changed().await.is_ok(),
+        };
+        if !changed {
+            return Some(op);
         }
     }
 }
@@ -1385,7 +1428,7 @@ pub async fn install_runners(engine: &Arc<Engine>, req: InstallRunnersRequest, s
             mode,
         })
         .map_err(op_error)?;
-    finish_action(engine, op, req.wait, req.timeout_secs.unwrap_or(INSTALL_TIMEOUT_SECS), DEFAULT_TAIL, Some(machine_id), names, surface, on_line).await
+    finish_action(engine, op, req.wait, req.timeout_secs, INSTALL_TIMEOUT_SECS, DEFAULT_TAIL, Some(machine_id), names, surface, on_line).await
 }
 
 pub async fn runner_action(engine: &Arc<Engine>, req: RunnerActionRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<ActionResponse> {
@@ -1411,8 +1454,7 @@ pub async fn runner_action(engine: &Arc<Engine>, req: RunnerActionRequest, surfa
     };
     let op = engine.runner_action(&runner.id, action).map_err(op_error)?;
     let tail = if req.action == ActionName::Logs { LOGS_TAIL } else { DEFAULT_TAIL };
-    let timeout = req.timeout_secs.unwrap_or(ACTION_TIMEOUT_SECS);
-    finish_action(engine, op, req.wait, timeout, tail, runner.machine_id.clone(), vec![runner.name.clone()], surface, on_line).await
+    finish_action(engine, op, req.wait, req.timeout_secs, ACTION_TIMEOUT_SECS, tail, runner.machine_id.clone(), vec![runner.name.clone()], surface, on_line).await
 }
 
 /// The DigitalOcean account, regions, sizes and defaults for a new cloud machine.
@@ -1456,7 +1498,7 @@ pub async fn cloud_create(engine: &Arc<Engine>, req: CloudCreateRequest, surface
         install: req.install,
     };
     let op = engine.cloud_create(machine).map_err(op_error)?;
-    finish_action(engine, op, req.wait, req.timeout_secs.unwrap_or(1800), DEFAULT_TAIL, None, Vec::new(), surface, on_line).await
+    finish_action(engine, op, req.wait, req.timeout_secs, 1800, DEFAULT_TAIL, None, Vec::new(), surface, on_line).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -1475,7 +1517,7 @@ pub async fn cloud_destroy(engine: &Arc<Engine>, req: CloudMachineRequest, surfa
     let s = freshen(engine).await;
     let m = find_machine(&s, &req.machine_id)?.clone();
     let op = engine.cloud_destroy(&m.id).map_err(op_error)?;
-    finish_action(engine, op, req.wait, 300, DEFAULT_TAIL, Some(m.id), Vec::new(), surface, on_line).await
+    finish_action(engine, op, req.wait, None, 300, DEFAULT_TAIL, Some(m.id), Vec::new(), surface, on_line).await
 }
 
 /// Powers a cloud machine on or off (it's still billed while off).
@@ -1488,7 +1530,7 @@ pub async fn cloud_power(engine: &Arc<Engine>, req: CloudMachineRequest, surface
         _ => return Err(ApiError::invalid("power must be \"on\" or \"off\".")),
     };
     let op = engine.cloud_power(&m.id, on).map_err(op_error)?;
-    finish_action(engine, op, req.wait, 300, DEFAULT_TAIL, Some(m.id), Vec::new(), surface, on_line).await
+    finish_action(engine, op, req.wait, None, 300, DEFAULT_TAIL, Some(m.id), Vec::new(), surface, on_line).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -1604,7 +1646,7 @@ pub async fn vm_create(engine: &Arc<Engine>, req: VmCreateRequest, surface: Surf
     let id = crate::util::slug(req.name.trim());
     let create = crate::ops::vm::VmCreate { name: req.name, system: req.system, host: req.host, cpus: req.cpus, memory_gb: req.memory_gb, disk_gb: req.disk_gb, install: req.install };
     let op = engine.vm_create(create).map_err(op_error)?;
-    finish_action(engine, op, req.wait, req.timeout_secs.unwrap_or(600), DEFAULT_TAIL, Some(id), Vec::new(), surface, on_line).await
+    finish_action(engine, op, req.wait, req.timeout_secs, 600, DEFAULT_TAIL, Some(id), Vec::new(), surface, on_line).await
 }
 
 /// Destroys a VM Muxin made: its container and disk, and the machine in Muxin.
@@ -1612,7 +1654,7 @@ pub async fn vm_destroy(engine: &Arc<Engine>, req: CloudMachineRequest, surface:
     let s = freshen(engine).await;
     let m = find_machine(&s, &req.machine_id)?.clone();
     let op = engine.vm_destroy(&m.id).map_err(op_error)?;
-    finish_action(engine, op, req.wait, 300, DEFAULT_TAIL, None, Vec::new(), surface, on_line).await
+    finish_action(engine, op, req.wait, None, 300, DEFAULT_TAIL, None, Vec::new(), surface, on_line).await
 }
 
 /// Powers a machine on, off or restarts it. A cloud machine goes through its
@@ -1636,14 +1678,14 @@ pub async fn machine_power(engine: &Arc<Engine>, req: CloudMachineRequest, surfa
             crate::fleet::desktop::AddDisplayError::Failed(why) => op_error(why),
         })?,
     };
-    finish_action(engine, op, req.wait, 480, DEFAULT_TAIL, Some(m.id), Vec::new(), surface, on_line).await
+    finish_action(engine, op, req.wait, None, 480, DEFAULT_TAIL, Some(m.id), Vec::new(), surface, on_line).await
 }
 
 /// Cancels the workflow run a queued or running job belongs to.
 pub async fn cancel_run(engine: &Arc<Engine>, req: CancelRunRequest, surface: Surface, on_line: impl FnMut(&str)) -> ApiResult<ActionResponse> {
     freshen(engine).await;
     let op = engine.cancel_run(req.job_id).map_err(op_error)?;
-    finish_action(engine, op, req.wait, req.timeout_secs.unwrap_or(60), DEFAULT_TAIL, None, Vec::new(), surface, on_line).await
+    finish_action(engine, op, req.wait, req.timeout_secs, 60, DEFAULT_TAIL, None, Vec::new(), surface, on_line).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1651,15 +1693,17 @@ async fn finish_action(
     engine: &Arc<Engine>,
     op: u64,
     wait: bool,
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
+    default_secs: u64,
     tail: usize,
     machine_id: Option<String>,
     runner_names: Vec<String>,
     surface: Surface,
     on_line: impl FnMut(&str),
 ) -> ApiResult<ActionResponse> {
+    let limit = wait_limit(surface, timeout_secs, default_secs);
     let operation = if wait {
-        wait_operation(engine, op, Duration::from_secs(timeout_secs.max(1)), on_line).await
+        wait_operation(engine, op, limit, on_line).await
     } else {
         engine.current().operations.iter().find(|o| o.id == op).cloned()
     }
@@ -1672,14 +1716,12 @@ async fn finish_action(
         finished,
         machine: machine_id.as_ref().and_then(|id| s.machines.iter().find(|m| &m.id == id)).map(machine_summary),
         runners: s.runners.iter().filter(|r| names.contains(&r.name.to_ascii_lowercase())).map(|r| runner_out(&s, r)).collect(),
-        next: (!finished).then(|| {
-            surface.say(
-                format!("Still running. Poll get_operation(operation_id={op}) until status isn't \"running\"."),
-                "Still running in the background; this command stopped waiting. Check the result with `muxin status`.",
-            )
-        }),
+        next: (!finished).then(|| surface.say(format!("Still running. Poll get_operation(operation_id={op}) until status isn't \"running\"."), NOT_WAITED)),
         operation: operation_out(&operation, tail),
     };
+    if wait && !finished && surface == Surface::Cli {
+        return Err(cut_off(&operation, limit, serde_json::to_value(ActionResponse { next: None, ..response }).ok()));
+    }
 
     if operation.status == "failed" {
         let message = operation.error.clone().unwrap_or_else(|| "The operation failed.".into());
@@ -2465,6 +2507,17 @@ mod tests {
         Engine::new(Paths::resolve(Some(std::env::temp_dir().join("muxen-api-test")), None), true)
     }
 
+    /// Whatever was asked of a machine that's asleep, the answer says it's
+    /// out of reach and how to wake it.
+    #[test]
+    fn a_machine_asleep_is_unreachable_with_a_way_to_wake_it() {
+        for err in [ApiError::operation_failed("Book is asleep. Wake it first."), ApiError::invalid("Book is asleep. Wake it first."), ws_error("Book is asleep. Wake it first.".into(), Surface::Mcp)] {
+            assert_eq!(err.code, "unreachable");
+            assert!(err.hint.as_deref().unwrap().contains("wake_machine"), "{err:?}");
+        }
+        assert_eq!(ApiError::invalid("Book is disconnected. Connect to it first.").code, "invalid");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn status_reads_the_demo_machines() {
         let engine = demo();
@@ -2472,10 +2525,11 @@ mod tests {
         assert_eq!(s.counts.machines, 9);
         assert!(s.demo && s.github.live);
         assert!(s.summary.contains("9 machines"), "{}", s.summary);
+        // A laptop with its lid closed: asleep, which is nothing to fix.
         let harbor = s.machines.iter().find(|m| m.id == "harbor").unwrap();
-        assert_eq!(harbor.status, "offline");
-        assert!(harbor.error.is_some());
-        assert!(s.attention.iter().any(|a| a.machine_id.as_deref() == Some("harbor")));
+        assert_eq!(harbor.status, "asleep");
+        assert_eq!(harbor.unreachable.as_ref().map(|u| (u.kind.as_str(), u.title.as_str())), Some(("asleep", "Harbor is asleep")));
+        assert!(!s.attention.iter().any(|a| a.machine_id.as_deref() == Some("harbor")));
 
         let err = machine(&engine, MachineRequest { machine_id: "nope".into() }).await.unwrap_err();
         assert_eq!(err.code, "not_found");
@@ -2529,7 +2583,7 @@ mod tests {
         assert_eq!(stopped.runners[0].state, "offline");
         let started = runner_action(&engine, act(ActionName::Start, false), Surface::Mcp, |_| {}).await.unwrap();
         assert!(!started.finished && started.next.is_some());
-        let op = wait_operation(&engine, started.operation.id, Duration::from_secs(30), |_| {}).await.unwrap();
+        let op = wait_operation(&engine, started.operation.id, Some(Duration::from_secs(30)), |_| {}).await.unwrap();
         assert_eq!(op.status, "succeeded");
         assert_eq!(operation(&engine, OperationRequest { operation_id: op.id, tail: Some(1) }).unwrap().log_tail.len(), 1);
 
@@ -2562,6 +2616,45 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, "operation_failed");
         assert!(err.hint.is_some() && err.details.is_some());
+    }
+
+    #[test]
+    fn the_cli_waits_until_the_work_ends() {
+        // An MCP server goes on running after a call, so its waits end and the caller polls.
+        assert_eq!(wait_limit(Surface::Mcp, None, 900), Some(Duration::from_secs(900)));
+        assert_eq!(wait_limit(Surface::Mcp, Some(30), 900), Some(Duration::from_secs(30)));
+        // The CLI's own process runs the operation: no limit unless it was given one.
+        assert_eq!(wait_limit(Surface::Cli, None, 900), None);
+        assert_eq!(wait_limit(Surface::Cli, Some(30), 900), Some(Duration::from_secs(30)));
+        assert_eq!(wait_limit(Surface::Cli, Some(0), 900), Some(Duration::from_secs(1)));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cli_wait_that_runs_out_is_a_failure_not_still_running() {
+        // The demo's restart takes a little over a second.
+        let restart = |timeout_secs| RunnerActionRequest { runner_id: "forge/forge-03".into(), action: ActionName::Restart, delete_files: false, wait: true, timeout_secs };
+
+        // With no limit, the CLI waits for all of it.
+        let engine = demo();
+        let done = runner_action(&engine, restart(None), Surface::Cli, |_| {}).await.unwrap();
+        assert!(done.finished && done.operation.status == "succeeded" && done.next.is_none(), "{:?}", done.operation);
+
+        // Given one that's too short, it says what's true: the work ends with the command.
+        let engine = demo();
+        let err = runner_action(&engine, restart(Some(1)), Surface::Cli, |_| {}).await.unwrap_err();
+        assert_eq!((err.code, err.exit_code()), ("operation_failed", 1));
+        assert!(err.message.starts_with("Stopped waiting after 1 s") && err.message.contains("what was left didn't run"), "{}", err.message);
+        assert!(!err.message.contains("background") && err.hint.is_some_and(|h| h.contains("--timeout")));
+        let details = err.details.unwrap();
+        assert_eq!((details["finished"].as_bool(), details["operation"]["status"].as_str()), (Some(false), Some("running")));
+        assert!(details.get("next").is_none(), "{details}");
+
+        // An MCP server's operation does go on: the same wait there ends with where to look.
+        let engine = demo();
+        let going = runner_action(&engine, restart(Some(1)), Surface::Mcp, |_| {}).await.unwrap();
+        assert!(!going.finished && going.next.as_deref().is_some_and(|n| n.contains("get_operation")), "{:?}", going.next);
+        let op = wait_operation(&engine, going.operation.id, Some(Duration::from_secs(30)), |_| {}).await.unwrap();
+        assert_eq!(op.status, "succeeded");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3341,7 +3434,7 @@ pub async fn box_create(engine: &Arc<Engine>, req: BoxCreateRequest, surface: Su
         idle_minutes: req.idle_minutes,
     };
     let (op, id) = engine.box_create(create).map_err(box_error)?;
-    let done = finish_action(engine, op, req.wait, req.timeout_secs.unwrap_or(900), DEFAULT_TAIL, None, Vec::new(), surface, on_line).await?;
+    let done = finish_action(engine, op, req.wait, req.timeout_secs, 900, DEFAULT_TAIL, None, Vec::new(), surface, on_line).await?;
     let next = done.next.or_else(|| {
         done.finished.then(|| {
             surface.say(
@@ -3905,15 +3998,10 @@ pub async fn recipe_apply(engine: &Arc<Engine>, req: RecipeApplyRequest, surface
         if unknown { err.with_hint(known()) } else { err }
     })?;
     let others = catalog.conflicting(&components).into_iter().cloned().collect();
-    // The CLI's own process runs the operation, so it waits for all of it: what's
-    // left when it stops waiting never runs. An MCP server goes on running.
-    let limit = req.timeout_secs.unwrap_or(match surface {
-        Surface::Cli => crate::recipe::longest(components.len()).as_secs(),
-        Surface::Mcp => INSTALL_TIMEOUT_SECS,
-    });
+    let limit = wait_limit(surface, req.timeout_secs, INSTALL_TIMEOUT_SECS);
     let (op, mut results) = engine.recipe_apply(&m.id, components.into_iter().cloned().collect(), others, req.update).map_err(op_error)?;
     let operation = if req.wait {
-        wait_operation(engine, op, Duration::from_secs(limit.max(1)), on_line).await
+        wait_operation(engine, op, limit, on_line).await
     } else {
         engine.current().operations.iter().find(|o| o.id == op).cloned()
     }
@@ -3927,10 +4015,13 @@ pub async fn recipe_apply(engine: &Arc<Engine>, req: RecipeApplyRequest, surface
         next: (!finished).then(|| {
             surface.say(
                 format!("Still running. Poll get_operation(operation_id={op}) until status isn't \"running\"; its log ends with a line per component."),
-                format!("This command stopped waiting, and what was left didn't run. See what's there with `muxin recipe check {}`, then apply again.", m.id),
+                format!("{NOT_WAITED} See what's there with `muxin recipe check {}`, then apply again.", m.id),
             )
         }),
     };
+    if req.wait && !finished && surface == Surface::Cli {
+        return Err(cut_off(&operation, limit, serde_json::to_value(RecipeApplyOut { next: None, ..out }).ok()));
+    }
     if operation.status == "failed" {
         let message = operation.error.clone().unwrap_or_else(|| "The operation failed.".into());
         let hint = out.components.iter().find_map(|c| c.hint.clone()).or_else(|| failure_hint(&message));
@@ -4220,7 +4311,7 @@ pub struct DockerRunRequest {
 
 /// An operation's result: waited for (up to 30 minutes) unless `wait` is off.
 async fn operation_result(engine: &Arc<Engine>, op: u64, wait: bool) -> ApiResult<OperationOut> {
-    let done = if wait { wait_operation(engine, op, Duration::from_secs(30 * 60), |_| {}).await } else { None };
+    let done = if wait { wait_operation(engine, op, Some(Duration::from_secs(30 * 60)), |_| {}).await } else { None };
     let o = done.or_else(|| engine.current().operations.iter().find(|o| o.id == op).cloned()).ok_or_else(|| ApiError::new("internal", "The operation went missing."))?;
     Ok(operation_out(&o, DEFAULT_TAIL))
 }
@@ -4494,7 +4585,7 @@ pub async fn run_on_machines(engine: &Arc<Engine>, req: RunRequest) -> ApiResult
     for (machine_id, op) in started {
         match op {
             Ok(op) => {
-                let o = if wait { wait_operation(engine, op, timeout + Duration::from_secs(30), |_| {}).await } else { None };
+                let o = if wait { wait_operation(engine, op, Some(timeout + Duration::from_secs(30)), |_| {}).await } else { None };
                 let o = o.or_else(|| engine.current().operations.iter().find(|o| o.id == op).cloned()).ok_or_else(|| ApiError::new("internal", "The operation went missing."))?;
                 let exit_code = match (o.status.as_str(), o.error.as_deref()) {
                     ("succeeded", _) => Some(0),
@@ -4592,11 +4683,17 @@ pub struct WakeRequest {
     pub machine_id: String,
 }
 
-/// Wakes a machine that's asleep or off (Wake on LAN).
+/// Wakes a machine that's asleep (its agent wakes it for real when it
+/// answers) or off (Wake on LAN).
 pub async fn wake_machine(engine: &Arc<Engine>, req: WakeRequest) -> ApiResult<serde_json::Value> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
-    let from = engine.wake(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))?;
-    Ok(serde_json::json!({ "machine_id": m.id, "sent_from": from, "next": "Muxin checks it again in 20 and 40 seconds; call get_machine then." }))
+    let woke = engine.wake(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    let next = match (woke.awake, &woke.sent_from) {
+        (true, _) => "It's awake: use it.",
+        (false, Some(_)) => "Muxin checks it again in 20 and 40 seconds; call get_machine then.",
+        (false, None) => "It's still asleep. Someone has to wake it at the machine (open its lid).",
+    };
+    Ok(serde_json::json!({ "machine_id": m.id, "awake": woke.awake, "sent_from": woke.sent_from, "message": woke.message, "next": next }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -4759,11 +4856,11 @@ pub async fn copy_files(engine: &Arc<Engine>, req: CopyFilesRequest, surface: Su
         let copy = crate::fleet::files::CopyRequest { from: from.clone(), dir, names, to: to.clone(), to_dir: req.to_dir.clone() };
         ids.push(engine.copy_files(copy).map_err(ApiError::invalid)?);
     }
-    let timeout = Duration::from_secs(req.timeout_secs.unwrap_or(3600).max(1));
+    let limit = wait_limit(surface, req.timeout_secs, 3600);
     let mut operations = Vec::new();
     for id in &ids {
         let op = if req.wait {
-            wait_operation(engine, *id, timeout, &mut on_line).await
+            wait_operation(engine, *id, limit, &mut on_line).await
         } else {
             engine.current().operations.iter().find(|o| o.id == *id).cloned()
         }
@@ -4777,7 +4874,7 @@ pub async fn copy_files(engine: &Arc<Engine>, req: CopyFilesRequest, surface: Su
         next: (!finished).then(|| {
             surface.say(
                 "Still copying. Poll get_operation with each operation id until status isn't \"running\"; cancel_operation stops one.".to_string(),
-                "Still copying in the background; this command stopped waiting.",
+                NOT_WAITED,
             )
         }),
     };
@@ -4788,6 +4885,9 @@ pub async fn copy_files(engine: &Arc<Engine>, req: CopyFilesRequest, surface: Su
             hint: None,
             details: serde_json::to_value(&response).ok(),
         });
+    }
+    if req.wait && surface == Surface::Cli && let Some(unfinished) = operations.iter().find(|o| o.status == "running") {
+        return Err(cut_off(unfinished, limit, serde_json::to_value(CopyFilesResponse { next: None, operations: response.operations, finished }).ok()));
     }
     Ok(response)
 }

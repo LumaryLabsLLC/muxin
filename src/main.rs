@@ -139,7 +139,7 @@ enum Command {
     /// Snippets: commands you saved to run with one click, in folders
     #[command(alias = "snippets", subcommand)]
     Snippet(SnippetCommand),
-    /// Wake a machine that's asleep or off (Wake on LAN)
+    /// Wake a machine: one that's asleep through its agent, one that's off with Wake on LAN
     Wake(MachineArgs),
     /// Power a machine on or off, or restart it. Ordinary machines can shut down and restart, not turn on (see wake)
     Power(PowerArgs),
@@ -381,13 +381,9 @@ struct InstallArgs {
     #[arg(long, conflicts_with = "mode")]
     no_service: bool,
 
-    /// Return right away with the operation id
-    #[arg(long)]
-    no_wait: bool,
-
-    /// Seconds to wait
-    #[arg(long, default_value_t = 900)]
-    timeout: u64,
+    /// Give up after this many seconds, leaving the work unfinished [default: wait until it's done]
+    #[arg(long, value_name = "SECONDS")]
+    timeout: Option<u64>,
 }
 
 #[derive(Args)]
@@ -397,10 +393,6 @@ struct CancelRunArgs {
 
     /// The job's id (from `muxin jobs --json`)
     job_id: u64,
-
-    /// Return right away with the operation id
-    #[arg(long)]
-    no_wait: bool,
 }
 
 #[derive(Args)]
@@ -419,13 +411,9 @@ struct RunnerArgs {
     #[arg(long)]
     delete_files: bool,
 
-    /// Return right away with the operation id
-    #[arg(long)]
-    no_wait: bool,
-
-    /// Seconds to wait
-    #[arg(long, default_value_t = 180)]
-    timeout: u64,
+    /// Give up after this many seconds, leaving the work unfinished [default: wait until it's done]
+    #[arg(long, value_name = "SECONDS")]
+    timeout: Option<u64>,
 }
 
 #[derive(Args)]
@@ -611,9 +599,6 @@ struct VmCreateArgs {
     #[arg(long)]
     #[cfg_attr(feature = "recipes", arg(help = "What to install on a Linux VM, comma-separated: agent CLIs (claude, codex, gemini, opencode, amp, pi) or any other component (see `muxin recipe check`)"))]
     install: Option<String>,
-    /// Return right away with the operation id
-    #[arg(long)]
-    no_wait: bool,
 }
 
 #[derive(Subcommand)]
@@ -682,9 +667,6 @@ struct CloudCreateArgs {
     #[arg(long)]
     #[cfg_attr(feature = "recipes", arg(help = "What it comes with, comma-separated: docker, gh, node, python, go, rust, php, ruby, java, bun, deno, dotnet, claude, codex, gemini, opencode, amp, pi, tailscale, or any other component (see `muxin recipe check`) (\"\" for nothing; default: Settings)"))]
     install: Option<String>,
-    /// Return right away with the operation id
-    #[arg(long)]
-    no_wait: bool,
 }
 
 #[derive(Args)]
@@ -1022,9 +1004,6 @@ struct CpArgs {
     /// then the folder to copy them into (made if missing; same names are replaced)
     #[arg(required = true, num_args = 2..)]
     paths: Vec<String>,
-    /// Start the copy and return without waiting for it
-    #[arg(long)]
-    no_wait: bool,
 }
 
 #[derive(Args)]
@@ -1250,9 +1229,6 @@ struct BoxNewArgs {
     /// Memory limit in GB
     #[arg(long, value_name = "GB")]
     memory: Option<u32>,
-    /// Don't wait for it to start
-    #[arg(long)]
-    no_wait: bool,
 }
 
 #[derive(Args)]
@@ -1783,8 +1759,8 @@ fn main() -> ExitCode {
                 mode: Some(if a.no_service { "background".into() } else { a.mode }),
                 image: a.image,
                 docker_socket: a.docker_socket,
-                wait: !a.no_wait,
-                timeout_secs: Some(a.timeout),
+                wait: true,
+                timeout_secs: a.timeout,
             };
             run(&runtime, &a.agent, async move |e| api::install_runners(&e, req, api::Surface::Cli, stream_line).await, cli::action)
         }
@@ -1797,13 +1773,13 @@ fn main() -> ExitCode {
                 runner_id: a.runner_id,
                 action,
                 delete_files: a.delete_files,
-                wait: !a.no_wait,
-                timeout_secs: Some(a.timeout),
+                wait: true,
+                timeout_secs: a.timeout,
             };
             run(&runtime, &a.agent, async move |e| api::runner_action(&e, req, api::Surface::Cli, stream_line).await, cli::action)
         }
         Some(Command::CancelRun(a)) => {
-            let req = api::CancelRunRequest { job_id: a.job_id, wait: !a.no_wait, timeout_secs: None };
+            let req = api::CancelRunRequest { job_id: a.job_id, wait: true, timeout_secs: None };
             run(&runtime, &a.agent, async move |e| api::cancel_run(&e, req, api::Surface::Cli, stream_line).await, cli::action)
         }
         Some(Command::Watch(a)) => {
@@ -1898,7 +1874,7 @@ fn main() -> ExitCode {
         }
         Some(Command::Wake(a)) => {
             let req = api::WakeRequest { machine_id: a.machine_id };
-            run(&runtime, &a.agent, async move |e| api::wake_machine(&e, req).await, |v| format!("Sent the wake signal from {}. Muxin checks it again in 20 and 40 seconds.\n", v["sent_from"].as_str().unwrap_or("here")))
+            run(&runtime, &a.agent, async move |e| api::wake_machine(&e, req).await, |v| format!("{}\n", v["message"].as_str().unwrap_or("Sent the wake signal.")))
         }
         Some(Command::Edit(a)) => {
             let (machine, path) = a.target.split_once(':').map(|(m, p)| (m.to_string(), p.to_string())).unwrap_or((a.target.clone(), "~".into()));
@@ -1978,7 +1954,7 @@ fn main() -> ExitCode {
             VmCommand::Options(a) => run(&runtime, &a, async move |e| Ok::<_, api::ApiError>(api::vm_options(&e).await), cli::vm_options),
             VmCommand::Create(a) => {
                 let install = a.install.map(|l| l.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
-                let req = api::VmCreateRequest { name: a.name, system: a.system, host: a.on, cpus: a.cpus, memory_gb: a.memory, disk_gb: a.disk, install, wait: !a.no_wait, timeout_secs: Some(100 * 60) };
+                let req = api::VmCreateRequest { name: a.name, system: a.system, host: a.on, cpus: a.cpus, memory_gb: a.memory, disk_gb: a.disk, install, wait: true, timeout_secs: None };
                 run(&runtime, &a.agent, async move |e| api::vm_create(&e, req, api::Surface::Cli, stream_line).await, cli::action)
             }
             VmCommand::Destroy(a) => {
@@ -2218,7 +2194,7 @@ fn cp(a: CpArgs, runtime: &tokio::runtime::Runtime) -> u8 {
             }
         }
     }
-    let req = api::CopyFilesRequest { from: from.unwrap_or_default(), paths, to, to_dir, wait: !a.no_wait, timeout_secs: None };
+    let req = api::CopyFilesRequest { from: from.unwrap_or_default(), paths, to, to_dir, wait: true, timeout_secs: None };
     let json = a.agent.json;
     run(runtime, &a.agent, async move |e| api::copy_files(&e, req, api::Surface::Cli, |line| if !json { eprintln!("{line}") }).await, cli::copied)
 }
@@ -2253,7 +2229,9 @@ fn report_error(args: &AgentArgs, e: &ApiError) -> u8 {
     e.exit_code()
 }
 
-/// Operation output streams to stderr while a command waits.
+/// Operation output streams to stderr while a command waits. Every command
+/// that starts an operation waits for it to end: this process is what runs
+/// it, so nothing would go on once it exits (which is why none has `--no-wait`).
 fn stream_line(line: &str) {
     eprintln!("  {line}");
 }
@@ -2650,7 +2628,7 @@ fn cloud(cmd: CloudCommand, runtime: &tokio::runtime::Runtime) -> u8 {
                 region: a.region,
                 size: a.size,
                 install: a.install.map(|list| list.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()),
-                wait: !a.no_wait,
+                wait: true,
                 timeout_secs: None,
             };
             run(runtime, &a.agent, async move |e| api::cloud_create(&e, req, api::Surface::Cli, stream_line).await, cli::action)
@@ -3005,8 +2983,8 @@ fn boxes(cmd: BoxCommand, runtime: &tokio::runtime::Runtime) -> u8 {
                 cpus: a.cpus,
                 memory_gb: a.memory,
                 idle_minutes: a.idle,
-                wait: !a.no_wait,
-                timeout_secs: Some(60 * 60),
+                wait: true,
+                timeout_secs: None,
             };
             run(runtime, &a.agent, async move |e| api::box_create(&e, req, api::Surface::Cli, stream_line).await, cli::box_created)
         }
@@ -3200,6 +3178,56 @@ mod tests {
         let Some(Command::Machines(a)) = cli.command else { panic!("not machines") };
         assert_eq!(a.common.paths().dir, dir);
         assert_eq!(crash::current_log(), Some(dir.join("crash.log")));
+    }
+
+    /// A command's own process runs the operation it starts, so nothing goes
+    /// on once it exits: no command offers to return before the work is done.
+    #[test]
+    fn no_command_has_no_wait() {
+        fn walk(cmd: &clap::Command, path: &str, found: &mut Vec<String>) {
+            if cmd.get_arguments().any(|a| a.get_long() == Some("no-wait")) {
+                found.push(path.to_string());
+            }
+            for sub in cmd.get_subcommands() {
+                walk(sub, &format!("{path} {}", sub.get_name()), found);
+            }
+        }
+        let mut found = Vec::new();
+        walk(&Cli::command(), "muxin", &mut found);
+        assert!(found.is_empty(), "--no-wait is back on: {found:?}");
+
+        // The ones that had it say so, rather than starting work that ends with them.
+        let had_it: [&[&str]; 8] = [
+            &["install", "forge"],
+            &["runner", "restart", "forge/forge-03"],
+            &["cancel-run", "42"],
+            &["vm", "create", "win-test", "--system", "windows-11"],
+            &["cloud", "create", "builder"],
+            &["cp", "forge:~/a", "orbit:~/b"],
+            &["box", "new", "acme/api", "Fix the login redirect"],
+            &["recipe", "apply", "forge", "git"],
+        ];
+        for words in had_it {
+            let args = || ["muxin"].into_iter().chain(words.iter().copied());
+            if let Err(e) = Cli::try_parse_from(args()) {
+                // `recipe` is a feature; the rest are always there.
+                assert!(words[0] == "recipe" && !cfg!(feature = "recipes"), "{words:?} doesn't parse:\n{e}");
+                continue;
+            }
+            let err = Cli::try_parse_from(args().chain(["--no-wait"])).err().unwrap_or_else(|| panic!("{words:?} took --no-wait"));
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{words:?}");
+        }
+
+        // They wait until it's done unless told how long.
+        let timeout = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Some(Command::Install(a)) => a.timeout,
+            Some(Command::Runner(a)) => a.timeout,
+            _ => panic!("not install or runner"),
+        };
+        assert_eq!(timeout(&["muxin", "install", "forge"]), None);
+        assert_eq!(timeout(&["muxin", "install", "forge", "--timeout", "600"]), Some(600));
+        assert_eq!(timeout(&["muxin", "runner", "update", "forge/forge-03"]), None);
+        assert_eq!(timeout(&["muxin", "runner", "update", "forge/forge-03", "--timeout", "90"]), Some(90));
     }
 
     #[test]

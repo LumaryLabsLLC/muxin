@@ -83,6 +83,7 @@ fn status_line(snapshot: &Snapshot) -> String {
         0 => "No machines connected".to_string(),
         _ if online == 0 && machines.iter().any(|m| m.status == "unchecked") => "Checking machines…".to_string(),
         1 if online == 1 => "1 machine online".to_string(),
+        1 if machines[0].is_asleep() => "1 machine asleep".to_string(),
         1 => "1 machine offline".to_string(),
         n if online == n => format!("{n} machines online"),
         _ if online == 0 => "No machines online".to_string(),
@@ -1076,6 +1077,8 @@ mod tests {
         assert_eq!(status(vec![], vec![]), "No machines yet");
         assert_eq!(status(vec![machine("a", "online", true, None)], vec![]), "1 machine online");
         assert_eq!(status(vec![machine("a", "offline", false, None)], vec![]), "1 machine offline");
+        assert_eq!(status(vec![machine("a", "asleep", false, None)], vec![]), "1 machine asleep");
+        assert_eq!(status(vec![machine("a", "online", false, None), machine("b", "asleep", false, None)], vec![]), "1 of 2 machines online");
         let three = || vec![machine("a", "online", false, None), machine("b", "online", false, None), machine("c", "online", false, None)];
         assert_eq!(
             status(three(), vec![session("w1", "working", None), session("w2", "working", None), session("n", "needs_you", None), session("d", "done", Some("waiting"))]),

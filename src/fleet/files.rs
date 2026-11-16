@@ -78,6 +78,7 @@ impl Engine {
         if self.demo_world().is_some() {
             return Ok(demo_listing(&spec, path));
         }
+        spec.refuse_if_disconnected()?;
         let l = self.files_link(&spec).await.ok_or_else(|| format!("Browsing {} needs Muxin's agent there.", spec.name))?;
         let r = l.request(json!({ "op": "files", "path": if path.trim().is_empty() { "~" } else { path } }), Duration::from_secs(20)).await?;
         if r["ok"].as_bool() != Some(true) {
@@ -136,6 +137,9 @@ impl Engine {
     /// `no_git`: leave out every .git (a workspace pull).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_copy(self: &Arc<Self>, id: u64, from: &MachineSpec, dir: &str, names: &[String], to: &MachineSpec, to_dir: &str, cancel: &AtomicBool, no_git: bool) -> Result<u64, String> {
+        // Disconnected or asleep: said so, not reached by plain ssh instead.
+        from.refuse_if_disconnected()?;
+        to.refuse_if_disconnected()?;
         let src_place = format!("{}:{}", from.id, dir);
         let dst_place = format!("{}:{}", to.id, to_dir);
         self.op_log(id, format!("{} → {}", names.iter().map(|n| format!("{src_place}/{n}")).collect::<Vec<_>>().join(", "), dst_place));

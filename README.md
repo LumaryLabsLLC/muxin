@@ -109,7 +109,7 @@ muxin status
 ## The app
 
 - **Overview:** the day in one line (machines online, agents working, runners busy), a few notices for what needs a look (each with a button that fixes or explains it), a card per machine with what's running on it (its agents, desktop and runners) and live CPU, memory and disk, and every agent session across your machines. The Jobs page shows how busy your runners have been over the last few minutes.
-- **Machines and runners:** install runners on a machine, and start, stop, restart, show logs for or remove each one. A machine that's off or out of reach says so in plain words (offline, Remote Login off, ssh key not accepted, Tailscale off on this Mac, …), with when it was last seen and what to do; Muxin picks it back up by itself when it returns.
+- **Machines and runners:** install runners on a machine, and start, stop, restart, show logs for or remove each one. A machine that's off or out of reach says so in plain words (offline, Remote Login off, ssh key not accepted, Tailscale off on this Mac, …), with when it was last seen and what to do; Muxin picks it back up by itself when it returns. A Mac that goes to sleep shows as **Asleep**, and Muxin lets it sleep (see [Connections and desktops](#connections-and-desktops)).
 - **Adding machines (⌘N):** suggestions from your `~/.ssh/config`, your Tailscale network, and this network (machines advertising ssh over Bonjour, and Macs that would be addable once Remote Login is on). Once you've saved a recipe, the dialog can apply one as soon as the new machine answers.
 - **Components:** a machine's page says which tools it has (git, Docker, Node.js and other languages, the agent CLIs), installs the ones you pick, and updates the agent CLIs. What you pick can be saved as a recipe for the next machine (see [Recipes](#recipes)).
 - **Agent sessions (⌘T):** a real terminal on any machine running Claude Code, Codex, OpenCode, Gemini CLI, Antigravity, Amp, Pi, Copilot CLI, Cursor Agent, Qwen Code, Droid, Kimi Code or a shell. Sessions are listed under their machine in the sidebar (a spinner while the agent works, an amber dot when it needs you, a dot in the accent color when it's done), with its open desktop and one line for its runners, and keep running when you quit the app. A long list shows the first five (and any that need you) with the rest behind **more**, a folded machine still shows what's on screen from it, and right-click › **Hide** takes a session out of the lists until it needs you. Terminal font size, line height and a blinking cursor are in Settings.
@@ -117,7 +117,7 @@ muxin status
 - **Run (⌃6):** one command on several machines at once (`df -h /`, `brew upgrade`, `git -C ~/code/api pull`), each one's output side by side as it comes, and its exit status. It runs in your login shell from your home folder; right-click a machine › **Run a command…** to start with just that one. **Snippets** are commands you save once, in folders, and run with one click: there on the machines picked, from the palette (⇧⌘P), or typed into the terminal you're in from its **Snippets** menu. Recent commands are kept across restarts.
 - **Open in your editor:** sessions, workspaces, GitHub checkouts and Compose projects have a button that lists the editors on this computer (Zed, Cursor, VS Code) and opens their folder in the one you pick, over the editor's own ssh support. Settings › General › Editor picks which comes first (and which `muxin edit` uses).
 - **What's running:** a machine's **Services › Processes** lists its busiest processes (CPU, memory, how long they've run, GPU memory on NVIDIA) and stops or kills one; its page shows its GPU (NVIDIA, AMD on Linux, Apple), how busy it is and its memory.
-- **Fleet warnings and Wake:** a machine's page and the Overview say when it wants a reboot (Linux updates) or has failed services. A machine that's asleep or off has a **Wake** button (Wake on LAN, sent from this computer and from your machines on its network) once Muxin has seen its network card.
+- **Fleet warnings and Wake:** a machine's page and the Overview say when it wants a reboot (Linux updates) or has failed services. A machine that's asleep or off has a **Wake** button. A Mac that's asleep is woken for real by its agent, as a key press there would. Otherwise it's Wake on LAN, sent from this computer and from your machines on its network, once Muxin has seen its network card.
 - **Copy files:** a two-pane dialog to copy files and folders from one machine to another (see [Files and the clipboard](#files-and-the-clipboard)); or drop files from the Finder onto a machine in the sidebar.
 - **Activity (⌘J):** one timeline of everything happening on your machines: operations started in the app (with live output) and every command agents ran in workspaces, filterable by kind or failures.
 - **Boxes (⌃3):** tasks you hand to an agent that works on them by itself, each in a container on one of your machines (see [Boxes](#boxes)). Below them, **Agents' workspaces**: folders that AI tools you use elsewhere work in through Muxin. Open one to see every command it ran, with its exit code and output, review its git changes, copy a shell command to step in, or destroy it.
@@ -223,7 +223,7 @@ The MCP server has these tools:
 | `machine_processes`, `process_signal` | A machine's busiest processes and its GPUs; stop or kill one. |
 | `run_on_machines` | Runs one shell command on several machines at once, with each one's output and exit status. |
 | `snippet_list`, `snippet_save`, `snippet_delete`, `snippet_run` | Your snippets (saved commands, in folders): list, add or change, delete, and run one on several machines. |
-| `wake_machine` | Wakes a machine that's asleep or off (Wake on LAN). |
+| `wake_machine` | Wakes a machine: one that's asleep through its agent, one that's off with Wake on LAN. |
 | `machine_power` | Powers a machine on or off, or restarts it: a cloud machine, a VM in a Docker container on another of your machines, or any other machine through its own system (off and restart) |
 | `vm_options`, `vm_create`, `vm_destroy` | VMs on your machines: Windows (Docker with KVM) or Linux containers, added to your machines. |
 | `recipe_check`, `recipe_apply` | Which of Muxin's components a machine has (git, Docker, Node.js, languages, agent CLIs); install the missing ones, and update the agent CLIs. See [Recipes](#recipes). |
@@ -293,6 +293,8 @@ Every command takes `--json`. In that mode stdout carries JSON only, and errors 
 - `1`: the operation failed.
 - `2`: bad input, or the thing wasn't found.
 
+Commands that start long work (installing runners, copying files, making a VM, a cloud machine or a box) wait until it's done and print its log as it goes. The command's own process does the work, so there is no `--no-wait`: to get your prompt back, run the command in your shell's background (`muxin cp … &`). `install` and `runner` take `--timeout <seconds>` to give up sooner; the work stops there, and the command says so and exits 1.
+
 ```sh
 muxin status [--refresh]                 # overview + what needs attention
 muxin machines | machine <id>
@@ -307,7 +309,7 @@ muxin run --on beelink,mac-studio -- df -h /   # one command on several machines
 muxin snippet add "Disk space" --folder Checks -- df -h /   # save a snippet (ls, rm, run --on a,b too)
 muxin ps beelink [-n 20]                  # its busiest processes and its GPUs
 muxin kill beelink 4242 [--force]         # stop a process (--force: SIGKILL)
-muxin wake beelink                        # Wake on LAN
+muxin wake beelink                        # wake it: through its agent when it's asleep, else Wake on LAN
 muxin power win11 off                     # shut a machine down (or restart it); a VM or cloud machine also turns on
 muxin vm create win-test --system windows-11 --on beelink   # a VM on one of your machines
 muxin recipe check beelink [claude]       # which of Muxin's components it has (git, docker, node, claude, ...)
@@ -318,8 +320,8 @@ muxin edit beelink:~/code/api [--editor zed] [--print]   # open a folder there i
 muxin disconnect <id>                     # stop connecting to it (its sessions go on there)
 muxin connect <id>                        # connect again, and check it
 muxin ignore <id> low-disk [--undo]       # stop showing one of its warnings (--undo: show it again)
-muxin install <machine-id> [--scope acme] [--count N | --name a --name b] [--label gpu] [--mode auto|service|background|docker] [--image IMAGE] [--docker-socket] [--no-wait]
-muxin runner <start|stop|restart|logs|remove> <runner-id> [--delete-files]
+muxin install <machine-id> [--scope acme] [--count N | --name a --name b] [--label gpu] [--mode auto|service|background|docker] [--image IMAGE] [--docker-socket] [--timeout SECONDS]
+muxin runner <start|stop|restart|logs|remove> <runner-id> [--delete-files] [--timeout SECONDS]
 muxin watch <org|owner/repo>... / unwatch ...
 muxin settings [--poll 20] [--scan-repos 10] [--check-interval 15]
 muxin ssh-hosts                          # ~/.ssh/config, your tailnet, and this network
@@ -500,6 +502,8 @@ Muxin first reaches a machine with `ssh`, installs its small agent there, and fr
 - **Direct**: on a machine's page, **Connect directly** pairs the app with its agent (each trusts only the other's certificate, swapped over ssh) and runs the agent's listener as a user service there (systemd or launchd) on UDP port 47821. Muxin then connects over QUIC, falling back to ssh whenever the direct connection is down. Machines you add are connected to directly by themselves once they answer (uncheck it in the Add dialog, or `muxin add-machine --ssh-only`); **Settings › General › Connections** turns that off. Over a direct connection each terminal has a stream of its own, and the one you're typing in goes first.
 - `MUXEN_NO_LINK=1` turns all of this off: one ssh connection per request, as before.
 - **Disconnect** (a machine's right-click menu, or its Connection section) stops all of it for that machine: Muxin closes the connection and stops checking it and reading its sessions, which keep running there. It shows as Disconnected until you **Connect** (its page, its menu, or search). It's kept in `config.toml` as `disconnected = true`.
+- **Asleep.** A Mac says when it's going to sleep, and Muxin lets it: it shows as **Asleep**, the connection is closed, and nothing reaches for it (no keep-alive, no reconnecting, no look at its sessions). A sleeping Mac with "Wake for network access" on wakes for any packet sent to it, for a few seconds with its display off: a connection kept open would wake it over and over, it would look online, and it would never rest. What would reach it meanwhile (a new terminal, a command) says it's asleep instead. **Wake** wakes it for real, as a key press there would; a laptop with its lid closed can't stay awake, and Muxin says so. Muxin finds it awake again at its next check of your machines (every 15 minutes unless you changed that), which wakes a sleeping Mac for a moment, or when you check it yourself. Linux and Windows machines don't say when they sleep yet; asleep, they show as offline.
+- **Hearing when a Mac wakes.** **Settings › General › Connections › Let sleeping Macs tell Muxin when they wake** has the Mac's agent tell the app the moment it wakes, and Muxin then leaves it alone while it sleeps, so nothing Muxin sends wakes it (it looks once every two hours all the same, in case the word was lost on the way). It's off unless you turn it on: the agent has to start a connection on your local network for it, macOS asks on that Mac to allow Muxin Agent to (Privacy & Security › Local Network), and it asks again after each update of the agent there. Until it's allowed, that Mac's page says so and Muxin looks at each check as before. A Mac reached only over ssh has no way to say it woke.
 
 **iPads.** Muxin for iPad reaches your machines directly too, with a key of its own. Add a machine on the iPad by its address (it signs in once with an ssh client of its own, installs the agent and sets up the direct connection), or pair it from here. Pair one in **Settings › iPads › Pair an iPad**: the iPad scans the QR code that shows (or you paste its link), both show the same six digits, and you click **Allow**. Each machine you picked then trusts the iPad's key, and the iPad gets their addresses; your Mac isn't needed after that. **Unpair** takes the key off those machines again, and an iPad connected at the time is let go within seconds. With **Alerts** on in the iPad's settings, each machine tells the iPad when an agent there is waiting for you, rang the bell, or exited with an error, even while the app is closed: encrypted on the machine with the iPad's own key, through muxin.dev to Apple's push service, which can't read it. From a terminal: `muxin ipad pair`, `muxin ipad ls` and `muxin ipad rm <name>`.
 
@@ -549,7 +553,7 @@ muxin desktop input beelink '[{"type":"click","x":100,"y":200},{"type":"text","t
 
 AI agents get the same: `machine_connection`, `direct_connection`, `desktop_screenshot` (an image they can look at) and `desktop_input`.
 
-**When the connection drops** (another network, a hiccup, the machine's agent restarting), terminals and the desktop pick themselves back up ("Reconnecting…") instead of stopping. A machine that's shut down is noticed within seconds and shown as offline.
+**When the connection drops** (another network, a hiccup, the machine's agent restarting), terminals and the desktop pick themselves back up ("Reconnecting…") instead of stopping. A machine that's shut down is noticed within seconds and shown as offline; a Mac that goes to sleep says so first, and shows as asleep.
 
 ## Tailscale and moving between networks
 
@@ -614,7 +618,7 @@ muxin services beelink stop postgres --container
 ```sh
 muxin files beelink:~/build
 muxin cp beelink:~/build/app.tar.gz adibs-macbook-pro:~/Downloads
-muxin cp adibs-macbook-pro:~/Projects/site beelink:~/www --no-wait
+muxin cp adibs-macbook-pro:~/Projects/site beelink:~/www    # waits until it's copied, with progress
 ```
 
 **Shared clipboard.** Turn it on in Settings › Clipboard. Text you copy on your Mac can then be pasted on your Linux desktops, Windows PCs and other Macs, and what you copy there lands on your Mac (and on the other machines). Passwords copied from password managers (marked private on the clipboard) aren't shared. Neither is text a program in a terminal copies. One exception: the app on Linux can't tell which copies on its own computer are passwords.

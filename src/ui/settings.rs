@@ -1238,7 +1238,9 @@ impl SettingsPage {
 
     fn connections_section(&self, theme: &Theme) -> impl IntoElement {
         let on = self.engine.settings().connect_directly;
+        let wakes = self.engine.settings().wake_notices;
         let engine = self.engine.clone();
+        let engine2 = self.engine.clone();
         div()
             .flex()
             .flex_col()
@@ -1259,6 +1261,27 @@ impl SettingsPage {
                     .children(["Without ssh in between, terminals and the desktop respond faster.", "Muxin's agent runs there as a service of yours, listening on UDP.", "Machines you already have are asked about once."].map(|line| {
                         div().text_size(px(11.5)).text_color(theme.text_placeholder).child(line)
                     })),
+            )
+            .child(
+                card(theme)
+                    .px(px(14.))
+                    .py(px(12.))
+                    .gap(px(6.))
+                    .child(kit::checkbox(theme, "wake-notices", wakes, "Let sleeping Macs tell Muxin when they wake", move |on, _, cx| {
+                        let mut s = engine2.settings();
+                        s.wake_notices = *on;
+                        let _ = engine2.update_settings(s);
+                        cx.refresh_windows();
+                    }))
+                    // Short lines: Settings text doesn't wrap.
+                    .children([
+                        "Muxin leaves a Mac that's asleep alone, so nothing it sends wakes it.",
+                        "On: its agent tells Muxin when it wakes, and Muxin doesn't look meanwhile.",
+                        "macOS asks on that Mac to allow Muxin Agent on the local network,",
+                        "and asks again after each update of the agent there.",
+                        "Off: Muxin looks at each check, which wakes the Mac for a moment.",
+                    ]
+                    .map(|line| div().text_size(px(11.5)).text_color(theme.text_placeholder).child(line))),
             )
     }
 

@@ -839,6 +839,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn zeros_after_the_end_of_an_archive_dont_fail_a_copy() {
+        let _turn = crate::sleep::test_lock();
         let base = std::env::temp_dir().join(format!("muxen-link-copy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let (src, dst) = (base.join("src"), base.join("dst"));

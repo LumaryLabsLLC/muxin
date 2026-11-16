@@ -44,6 +44,7 @@ mod gui;
 mod link;
 mod proto;
 mod push;
+mod quiet;
 mod repos;
 mod saved;
 mod schedules;

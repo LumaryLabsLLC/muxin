@@ -1277,8 +1277,6 @@ impl SettingsPage {
                     .children([
                         "Muxin leaves a Mac that's asleep alone, so nothing it sends wakes it.",
                         "On: its agent tells Muxin when it wakes, and Muxin never looks meanwhile.",
-                        "macOS asks on that Mac to allow Muxin Agent on the local network,",
-                        "and asks again after each update of the agent there.",
                         "Off: Muxin looks at each check, which wakes the Mac for a moment.",
                     ]
                     .map(|line| div().text_size(px(11.5)).text_color(theme.text_placeholder).child(line))),

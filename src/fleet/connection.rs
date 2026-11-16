@@ -62,6 +62,8 @@ impl Engine {
             self.trigger_check(Some(spec.id.clone()));
         } else {
             link::reset(&spec.id);
+            // Asleep, it's left as it is: closing this sends it nothing.
+            super::quiet::let_go(&spec.id);
         }
         Ok(())
     }

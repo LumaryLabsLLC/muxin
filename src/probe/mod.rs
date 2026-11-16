@@ -100,18 +100,14 @@ pub struct ProbeResult {
     /// awake for a moment, its display off). Not `ok`: Muxin leaves it alone.
     #[serde(default)]
     pub asleep: bool,
-    /// Where its agent sends its notice when it wakes (the app that was
-    /// linked to it, as the machine saw it). None: nobody is told, so only a
+    /// The connection its agent says it woke on: the end of it at the app
+    /// that stays open (see fleet::quiet). None: nobody is told, so only a
     /// check finds it awake.
     #[serde(default)]
     pub wake_notice: Option<String>,
     /// Asleep with its lid closed (a laptop).
     #[serde(default)]
     pub lid_closed: bool,
-    /// Its agent couldn't get a wake notice through to this app (on a Mac:
-    /// it isn't allowed on the local network there).
-    #[serde(default)]
-    pub wake_notice_failed: bool,
 }
 
 /// A Docker container that publishes ports on its machine.
@@ -239,7 +235,7 @@ impl ProbeResult {
 
     /// The machine is asleep, as its agent said (`told`) or now does.
     pub fn asleep(started: Instant, told: &crate::fleet::asleep::Told) -> ProbeResult {
-        ProbeResult { asleep: true, wake_notice: told.notice.clone(), lid_closed: told.lid_closed, wake_notice_failed: told.notice_failed, ..ProbeResult::failed(started, ASLEEP) }
+        ProbeResult { asleep: true, wake_notice: told.notice.clone(), lid_closed: told.lid_closed, ..ProbeResult::failed(started, ASLEEP) }
     }
 }
 
@@ -946,11 +942,11 @@ mod tests {
         assert!(!parse("probe=1\nos=linux\nasleep=0\n").asleep);
 
         let up = ProbeResult { ok: true, checked_at: Utc::now() - chrono::Duration::minutes(9), shell: Some(Shell::Sh), os: Some("darwin".into()), hostname: Some("book".into()), mac: Some("3c:22:fb:9a:41:07".into()), ..Default::default() }.after(None);
-        // Its agent said so, and where its notice goes when it wakes.
-        let told = crate::fleet::asleep::Told { notice: Some("192.168.1.20:53312".into()), lid_closed: true, notice_failed: false };
+        // Its agent said so, and the app waits to hear it wake.
+        let told = crate::fleet::asleep::Told { notice: Some("192.168.1.20:61234".into()), lid_closed: true };
         let asleep = ProbeResult::asleep(Instant::now(), &told).after(Some(&up));
         assert!(!asleep.ok && asleep.asleep && asleep.lid_closed);
-        assert_eq!((asleep.error.as_deref(), asleep.wake_notice.as_deref()), (Some(ASLEEP), Some("192.168.1.20:53312")));
+        assert_eq!((asleep.error.as_deref(), asleep.wake_notice.as_deref()), (Some(ASLEEP), Some("192.168.1.20:61234")));
         assert_eq!((asleep.last_seen_at, asleep.os.as_deref(), asleep.mac.as_deref()), (Some(up.checked_at), Some("darwin"), Some("3c:22:fb:9a:41:07")));
         // Not a kind of trouble a later check should chase.
         assert!(!crate::fleet::build::comes_back_by_itself(crate::fleet::build::unreachable_kind(ASLEEP)));

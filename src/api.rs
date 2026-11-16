@@ -424,7 +424,8 @@ pub struct MachineSummary {
     pub id: String,
     pub name: String,
     pub host: String,
-    /// "online" | "offline" (unreachable) | "unchecked" | "manual" (no host) | "disconnected" (on purpose: connect_machine)
+    /// "online" | "offline" (unreachable) | "unchecked" | "manual" (no host: also a cloud machine
+    /// that was created and hasn't started, with `cloud.power` "starting") | "disconnected" (on purpose: connect_machine)
     pub status: String,
     pub checking: bool,
     /// e.g. "darwin-arm64", "linux-x64", "windows-x64"
@@ -491,7 +492,8 @@ pub struct CloudOut {
     /// The most it costs in a month, in USD.
     pub price_monthly: f64,
     pub idle_since: Option<DateTime<Utc>>,
-    /// "on", "off" (still billed) or "starting", as last seen; null until known.
+    /// "on", "off" (still billed) or "starting" (created and billed, no address yet:
+    /// Muxin fills it in at a machine check once it has started), as last seen; null until known.
     pub power: Option<String>,
 }
 

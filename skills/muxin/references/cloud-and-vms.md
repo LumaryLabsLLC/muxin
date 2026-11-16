@@ -15,6 +15,7 @@ muxin cloud destroy dev-1 --json
 
 - **It costs money every hour it exists.** Before `cloud create`, tell the user the size and its price and get their OK.
 - `cloud create` sets it up (the user's account and SSH key, and what `--install` lists, or the user's settings) and adds it to their machines. It waits until that's done.
+- It's one of the user's machines from the moment DigitalOcean makes it, before it has started: `status` is `manual`, `host` is empty and `cloud.power` is `starting`, and it's billed from then. When `cloud create` fails or is cut off, run `muxin status --json` before creating again: if the machine is listed, the droplet exists, `cloud usage` counts it and `cloud destroy` deletes it. Muxin fills in its address at a machine check once it has started. One that hasn't started after ten minutes is in `attention`.
 - A powered-off droplet is still billed. Only `cloud destroy` stops the charges, and it deletes the droplet with everything on it: confirm first, and make sure work there is pushed.
 - A cloud machine's `cloud` field in `muxin machine dev-1 --json` has its region, size, price, cost so far and how long it has been idle.
 

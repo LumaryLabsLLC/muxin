@@ -151,6 +151,52 @@ pub fn set_machine_cloud(text: &str, machine_id: &str, cloud: Option<&crate::con
     finish(doc)
 }
 
+/// Appends a cloud machine that exists and has no address yet: its name,
+/// `host = ""`, the account ssh will sign in to (`user`) and where it lives
+/// (`cloud`), all keys Muxin has always read, so an older Muxin still reads
+/// the file (and can cost and destroy the machine). Returns the new text and
+/// the machine's id. When a machine already is this droplet, nothing changes
+/// and that machine's id is returned.
+pub fn add_cloud_machine(text: &str, name: &str, user: &str, cloud: &crate::config::CloudRef) -> Result<(String, String), String> {
+    let known = Inventory::parse(text).map_err(|e| format!("config.toml doesn't read, so it wasn't changed: {e}"))?;
+    if let Some(m) = known.machines.iter().find(|m| m.cloud.as_ref().is_some_and(|c| c.provider == cloud.provider && c.id == cloud.id)) {
+        return Ok((text.to_string(), m.id.clone()));
+    }
+    let (text, id) = add_machine_at(text, name, "", None)?;
+    let mut doc = parse(&text)?;
+    let machines = machines_mut(&mut doc)?;
+    let index = find_machine(machines, &id)?;
+    let table = machines.get_mut(index).ok_or("That machine isn't in config.toml.")?;
+    if !user.trim().is_empty() {
+        table["user"] = value(user.trim());
+    }
+    let text = finish(doc)?;
+    Ok((set_machine_cloud(&text, &id, Some(cloud))?, id))
+}
+
+/// Gives a cloud machine that had no address its ssh destination
+/// ("user@203.0.113.7"). The `user` it was waiting with is in there now, so
+/// that key goes.
+pub fn set_machine_address(text: &str, machine_id: &str, host: &str) -> Result<String, String> {
+    let mut doc = parse(text)?;
+    let machines = machines_mut(&mut doc)?;
+    let index = find_machine(machines, machine_id)?;
+    let table = machines.get_mut(index).ok_or("That machine isn't in config.toml.")?;
+    // Keep a comment after the old value (`host = "" # starting`).
+    match table.get_mut("host").and_then(Item::as_value_mut) {
+        Some(v) => {
+            let decor = v.decor().clone();
+            *v = host.trim().into();
+            *v.decor_mut() = decor;
+        }
+        None => table["host"] = value(host.trim()),
+    }
+    if host.contains('@') {
+        table.remove("user");
+    }
+    finish(doc)
+}
+
 /// Makes a machine one Muxin created as a VM: how ssh reaches it (through its
 /// host, to the port its container publishes) and what it is.
 pub fn set_machine_vm(text: &str, machine_id: &str, port: u16, user: &str, ssh_options: &[String], direct_address: Option<&str>, vm: &crate::config::VmRef) -> Result<String, String> {
@@ -500,6 +546,44 @@ mod tests {
         assert_eq!(inv.machines[0].cloud.as_ref(), Some(&cloud));
         let text = super::set_machine_cloud(&text, &id, None).unwrap();
         assert!(crate::config::Inventory::parse(&text).unwrap().machines[0].cloud.is_none());
+    }
+
+    #[test]
+    fn a_cloud_machine_is_written_before_it_has_an_address() {
+        let cloud = crate::config::CloudRef {
+            provider: "digitalocean".into(),
+            id: 42,
+            region: "nyc3".into(),
+            size: "s-2vcpu-4gb".into(),
+            price_hourly: 0.03571,
+            created_at: "2026-11-16T12:00:00Z".into(),
+        };
+        let (text, id) = super::add_cloud_machine("# my fleet\n", "Dev Box", "me", &cloud).unwrap();
+        assert_eq!(id, "dev-box");
+        // Only keys Muxin has read since cloud machines came (0.2.0): an older
+        // Muxin, which refuses keys it doesn't know, still reads the file.
+        assert_eq!(
+            text,
+            "# my fleet\n\n[[machine]]\nname = \"Dev Box\"\nhost = \"\"\nuser = \"me\"\ncloud = { provider = \"digitalocean\", id = 42, region = \"nyc3\", size = \"s-2vcpu-4gb\", price_hourly = 0.03571, created_at = \"2026-11-16T12:00:00Z\" }\n"
+        );
+        let m = &crate::config::Inventory::parse(&text).unwrap().machines[0];
+        assert!(m.awaits_address() && !m.is_checkable());
+        assert_eq!((m.user.as_deref(), m.cloud.as_ref()), (Some("me"), Some(&cloud)));
+
+        // Written twice (two Muxin processes catching up at once): one machine.
+        let (again, same) = super::add_cloud_machine(&text, "Dev Box (42)", "me", &cloud).unwrap();
+        assert_eq!((again.as_str(), same.as_str()), (text.as_str(), "dev-box"));
+        // Another droplet under a name that's taken is refused, as for any machine.
+        let other = crate::config::CloudRef { id: 43, ..cloud.clone() };
+        assert!(super::add_cloud_machine(&text, "dev box", "me", &other).is_err());
+
+        // Started: the address goes in, with the account, as cloud machines have always been written.
+        let text = super::set_machine_address(&text, &id, "me@203.0.113.7").unwrap();
+        assert!(text.starts_with("# my fleet\n\n[[machine]]\nname = \"Dev Box\"\nhost = \"me@203.0.113.7\"\ncloud = {"), "{text}");
+        let m = &crate::config::Inventory::parse(&text).unwrap().machines[0];
+        assert!(!m.awaits_address() && m.is_checkable() && m.user.is_none());
+        assert_eq!(m.cloud.as_ref(), Some(&cloud));
+        assert!(super::set_machine_address(&text, "nope", "x@y").is_err());
     }
 
     use super::*;

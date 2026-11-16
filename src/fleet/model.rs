@@ -191,7 +191,9 @@ pub struct Machine {
     /// "runner" when it hosts runners, otherwise "other".
     pub kind: String,
     /// "online" | "offline" | "unchecked" | "manual" | "disconnected" (on
-    /// purpose: Muxin leaves it alone until it's connected again)
+    /// purpose: Muxin leaves it alone until it's connected again). "manual"
+    /// is a machine with no host: one the user listed that way, or a cloud
+    /// machine that hasn't started (`awaits_address`).
     pub status: String,
     pub checking: bool,
     pub notes: Option<String>,
@@ -282,6 +284,12 @@ impl Machine {
     pub fn is_disconnected(&self) -> bool {
         self.status == "disconnected"
     }
+
+    /// A cloud machine that exists (and is billed) and has no address yet:
+    /// still starting, or its create was cut off before it started.
+    pub fn awaits_address(&self) -> bool {
+        self.cloud.is_some() && self.host.is_empty()
+    }
 }
 
 /// One of a machine's monitors: a real one, or a virtual one Muxin added.
@@ -350,7 +358,8 @@ pub struct CloudInfo {
     pub price_monthly: f64,
     /// Idle (no busy session, job or CPU) since then, as this app has seen it.
     pub idle_since: Option<DateTime<Utc>>,
-    /// "on", "off" or "starting", as last seen; None until known.
+    /// "on", "off" or "starting", as last seen; None until known. "starting"
+    /// from the moment it's created until it has an address.
     pub power: Option<String>,
 }
 

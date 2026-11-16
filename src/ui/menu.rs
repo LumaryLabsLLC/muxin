@@ -390,7 +390,8 @@ impl Root {
                 if m.cloud.is_some() {
                     let off = m.status == "offline";
                     let label = if off { "Power on" } else { "Power off" };
-                    power.push((None, if busy { Item::Off { label: label.into(), glyph: Glyph::Icon("power") } } else { act(label, "power", Action::CloudPower(id.clone(), off)) }));
+                    // One that hasn't started has nothing to power yet.
+                    power.push((None, if busy || m.awaits_address() { Item::Off { label: label.into(), glyph: Glyph::Icon("power") } } else { act(label, "power", Action::CloudPower(id.clone(), off)) }));
                 }
                 // A VM or container on another machine: started and stopped there.
                 if let Some(p) = m.parent.as_ref().filter(|p| m.cloud.is_none() && p.container.is_some() && s.machines.iter().any(|h| h.id == p.machine_id && !h.is_down())) {

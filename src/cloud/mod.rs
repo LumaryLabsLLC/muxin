@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod digitalocean;
+pub mod pending;
 pub mod secrets;
 pub mod setup;
 pub mod usage;

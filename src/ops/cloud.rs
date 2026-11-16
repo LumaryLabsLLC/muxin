@@ -1,6 +1,16 @@
 //! Cloud machine operations: create a droplet and make it one of your machines,
 //! power it off or on, destroy it; and the idle watch that warns, powers off
 //! or destroys machines nobody is using (as the user chose in Settings › Cloud).
+//!
+//! A droplet is billed from the moment DigitalOcean makes it, so Muxin never
+//! has one it doesn't list. Creating writes down what it's about to ask for
+//! (cloud::pending), and the droplet goes into config.toml the moment
+//! DigitalOcean answers, as a machine with no address yet
+//! (`MachineSpec::awaits_address`). If the Muxin that asked is quit, crashes
+//! or loses the answer, the next machine check of any Muxin catches up
+//! (`cloud_catch_up`): it finds a droplet whose answer was lost by its name,
+//! and fills in an address once the droplet has started. Until then the
+//! machine is listed, costed (`cloud_usage`) and can be destroyed.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,9 +20,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use super::inventory_edit;
-use super::NewMachine;
-use crate::cloud::digitalocean::{Client, same_key};
-use crate::cloud::{CloudCreate, CloudOptions, TAILSCALE_KEY, auth, nearest_region, secrets, setup, usage};
+use crate::cloud::digitalocean::{Client, Droplet, same_key};
+use crate::cloud::{CloudCreate, CloudOptions, TAILSCALE_KEY, auth, nearest_region, pending, secrets, setup, usage};
 use crate::config::{CloudRef, MachineSpec};
 use crate::fleet::Engine;
 
@@ -29,18 +38,39 @@ pub static IDLE: Mutex<Option<IdleState>> = Mutex::new(None);
 
 impl Engine {
     async fn do_client(&self) -> Result<Client, String> {
+        #[cfg(test)]
+        if let Some(s) = crate::cloud::digitalocean::stand_in::of(&self.paths().dir) {
+            return Ok(Client::for_stand_in(&s.api));
+        }
         let method = self.settings().cloud.digitalocean_auth;
         auth::token(&method, &self.paths().dir).await.map(Client::new)
+    }
+
+    /// Whether there's a DigitalOcean sign-in to use (without asking DigitalOcean).
+    fn do_signed_in(&self) -> bool {
+        #[cfg(test)]
+        if crate::cloud::digitalocean::stand_in::of(&self.paths().dir).is_some() {
+            return true;
+        }
+        auth::signed_in(&self.settings().cloud.digitalocean_auth, &self.paths().dir)
+    }
+
+    /// How long a new droplet gets to start: (between asks, asks). 6 minutes.
+    fn start_wait(&self) -> (Duration, u32) {
+        #[cfg(test)]
+        if let Some(wait) = crate::cloud::digitalocean::stand_in::of(&self.paths().dir).and_then(|s| s.start_wait) {
+            return wait;
+        }
+        (Duration::from_secs(4), 90)
     }
 
     /// The account, regions, sizes and defaults for a new cloud machine.
     pub async fn cloud_options(self: &Arc<Self>) -> CloudOptions {
         let settings = self.settings().cloud;
-        let dir = self.paths().dir.clone();
         let mut out = CloudOptions {
             provider: "digitalocean".into(),
             method: settings.digitalocean_auth.clone(),
-            signed_in: auth::signed_in(&settings.digitalocean_auth, &dir),
+            signed_in: self.do_signed_in(),
             oauth_available: auth::oauth_available(),
             default_size: settings.size.clone(),
             ssh_key: crate::probe::default_ssh_key(),
@@ -81,8 +111,9 @@ impl Engine {
         out
     }
 
-    /// Creates a droplet, waits for it to set itself up, and adds it to the
-    /// machines. Returns the operation that tracks it.
+    /// Creates a droplet, adds it to the machines the moment it exists, and
+    /// waits for it to start and set itself up. Returns the operation that
+    /// tracks it.
     pub fn cloud_create(self: &Arc<Self>, req: CloudCreate) -> Result<u64, String> {
         if self.demo_world().is_some() {
             return Err("The demo doesn't create cloud machines.".into());
@@ -126,6 +157,16 @@ impl Engine {
         extras: Vec<String>,
     ) -> Result<(), String> {
         let client = self.do_client().await?;
+        // A create that was cut off earlier is settled first, so the same
+        // droplet is never asked for twice.
+        self.catch_up(&client).await;
+        if self.current().machines.iter().any(|m| m.name.eq_ignore_ascii_case(&name)) {
+            return Err(format!("You already have a machine called \"{name}\"."));
+        }
+        let dir = self.paths().dir.clone();
+        if pending::read(&dir).iter().any(|a| a.name.eq_ignore_ascii_case(&name)) {
+            return Err(format!("Muxin asked DigitalOcean for \"{name}\" a moment ago and didn't hear back. It's finding out whether the droplet was made: try again in a minute or two."));
+        }
         let options = self.cloud_options().await;
         if let Some(e) = options.error {
             return Err(e);
@@ -149,42 +190,84 @@ impl Engine {
             }
         };
 
-        let user = setup::user_name(&std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default());
+        let user = local_user();
         let droplet_name = crate::util::slug(&name);
+        // Written down before asking: the droplet is billed from the moment
+        // DigitalOcean makes it, whether or not its answer gets here.
+        let asked = pending::Asked {
+            name: name.clone(),
+            droplet: droplet_name.clone(),
+            region: region.clone(),
+            size: size.clone(),
+            price_hourly: size_info.price_hourly,
+            user: user.clone(),
+            asked_at: Utc::now(),
+        };
+        pending::add(&dir, &asked)?;
         self.op_log(op, format!("▸ Creating {droplet_name} in {region} ({size}, ${:.3}/h)", size_info.price_hourly));
         // With recipes, the extras are applied over ssh once its first boot is done (below).
         #[cfg(feature = "recipes")]
         let (recipe, extras) = (extras, Vec::<String>::new());
-        let created = client.create_droplet(&droplet_name, &region, &size, key.id, &setup::script(&user, &extras)).await?;
-        let id = created.id;
+        let made = match client.create_droplet(&droplet_name, &region, &size, key.id, &setup::script(&user, &extras)).await {
+            Ok(d) => d,
+            // Turned down, or never sent: there's no droplet.
+            Err(e) if !e.maybe_made => {
+                pending::remove(&dir, &asked);
+                return Err(e.message);
+            }
+            // The answer was lost. DigitalOcean may have made it all the same.
+            Err(e) => {
+                let said = sentence(e.message.trim_end_matches(" Try again in a moment."));
+                self.op_log(op, format!("! {said}"));
+                self.op_log(op, "▸ Asking DigitalOcean whether it made the droplet all the same");
+                match self.find_made(&client, &asked).await {
+                    Ok(Some(d)) => {
+                        self.op_log(op, "✓ It did");
+                        d
+                    }
+                    // Not there (yet), or no answer: it stays written down, and is looked for again.
+                    Ok(None) => {
+                        self.catch_up_later();
+                        return Err(format!("{said} DigitalOcean doesn't list the droplet, so it probably wasn't made. Muxin looks once more at the next machine check, and adds it to your machines if it's there after all."));
+                    }
+                    Err(why) => {
+                        self.catch_up_later();
+                        return Err(format!("{said} Muxin couldn't find out whether DigitalOcean made the droplet all the same ({}). It asks again at the next machine check, and adds it to your machines if it's there.", why.trim_end_matches('.')));
+                    }
+                }
+            }
+        };
+
+        // Into the fleet right away, marked as a cloud machine: it exists
+        // and is billed, so it's listed, costed and can be destroyed from
+        // here on, whatever happens to this operation. Its address comes later.
+        let machine_id = self
+            .record_droplet(&asked, &made)
+            .map_err(|e| format!("DigitalOcean made the droplet ({}), and it's billed from now, but Muxin couldn't add it to config.toml: {} Muxin tries again at the next machine check.", made.id, sentence(&e)))?;
+        self.op_log(op, "✓ Created; it's in your machines, and DigitalOcean bills for it from now");
 
         // Running, with an address.
         self.op_log(op, "▸ Waiting for it to start");
-        let mut ip = None;
-        for _ in 0..90 {
-            tokio::time::sleep(Duration::from_secs(4)).await;
-            let d = client.droplet(id).await?;
-            if d.status == "active" && d.ipv4.is_some() {
-                ip = d.ipv4;
+        let (every, asks) = self.start_wait();
+        let mut host = None;
+        for _ in 0..asks {
+            tokio::time::sleep(every).await;
+            // Another Muxin may have destroyed it meanwhile.
+            self.refresh_from_disk();
+            if self.machine(&machine_id).is_none() {
+                return Err(format!("{name} was destroyed (or taken out of config.toml) while it was being created."));
+            }
+            // A blip while asking isn't a failure; the next ask tries again.
+            if let Ok(Some(h)) = self.fill_address(&client, &machine_id).await {
+                host = Some(h);
                 break;
             }
         }
-        let ip = ip.ok_or("It didn't start within 6 minutes. It's still in your DigitalOcean account; destroy it there if you don't want it.")?;
-        self.op_log(op, format!("✓ Started at {ip}"));
-
-        // Into the fleet, marked as a cloud machine.
-        let machine_id = self.add_machine(NewMachine { name: name.clone(), host: format!("{user}@{ip}"), port: None })?;
-        let cloud = CloudRef {
-            provider: "digitalocean".into(),
-            id,
-            region: region.clone(),
-            size: size.clone(),
-            price_hourly: size_info.price_hourly,
-            created_at: Utc::now().to_rfc3339(),
-        };
-        let edit = |text: &str| inventory_edit::set_machine_cloud(text, &machine_id, Some(&cloud));
-        inventory_edit::edit_file(self.inventory_path(), edit)?;
-        self.reload_inventory_now();
+        let host = host.ok_or_else(|| {
+            format!("It didn't start within 6 minutes. It stays in your machines as {name}, and DigitalOcean bills for it: Muxin adds its address at a machine check once it has started (what it was to come with isn't installed then). Destroy it if you don't want it.")
+        })?;
+        self.op_log(op, format!("✓ Started at {}", host.rsplit('@').next().unwrap_or(&host)));
+        self.trigger_check(Some(machine_id.clone()));
 
         // Its first boot installs what was asked for; follow along.
         self.op_log(op, "▸ Setting it up (a few minutes)");
@@ -219,6 +302,10 @@ impl Engine {
         let check = format!("if [ -f {} ]; then echo muxen-ready; fi; grep -E '^muxen-(step|warn):' {} 2>/dev/null | tail -n 4", setup::READY, setup::LOG);
         while started.elapsed() < timeout {
             tokio::time::sleep(Duration::from_secs(6)).await;
+            // Destroyed meanwhile: its address may be someone else's machine by now.
+            if self.machine(&spec.id).is_none() {
+                return Err(format!("{} was destroyed (or taken out of config.toml) while it was being set up.", spec.name));
+            }
             let Ok(out) = tokio::process::Command::new("ssh").args(crate::probe::ssh_args(spec)).arg(&check).output().await else { continue };
             if !out.status.success() {
                 continue; // Not answering ssh yet.
@@ -276,6 +363,141 @@ impl Engine {
         }
     }
 
+    /// Brings Muxin level with DigitalOcean after a create that was cut off
+    /// (Muxin quit or crashed, or the answer was lost): a droplet asked for
+    /// and never heard of is looked for by name and added to the machines,
+    /// and a cloud machine with no address gets one once its droplet has
+    /// started. Run with every machine check, by any Muxin process; it asks
+    /// DigitalOcean nothing when there's nothing to catch up with. Best
+    /// effort: not signed in, or a blip, and the next check tries again.
+    pub(crate) async fn cloud_catch_up(self: &Arc<Self>) {
+        if self.demo_world().is_some() || !self.cloud_behind() {
+            return;
+        }
+        match self.do_client().await {
+            Ok(client) => self.catch_up(&client).await,
+            Err(e) => tracing::warn!("a cloud machine is waiting on DigitalOcean, and Muxin can't ask it: {e}"),
+        }
+    }
+
+    /// Whether there's anything to catch up with (without asking DigitalOcean).
+    fn cloud_behind(&self) -> bool {
+        let now = Utc::now();
+        let dir = &self.paths().dir;
+        (pending::any(dir) && pending::read(dir).iter().any(|a| a.settled(now))) || self.current().machines.iter().any(|m| m.awaits_address())
+    }
+
+    async fn catch_up(self: &Arc<Self>, client: &Client) {
+        if self.demo_world().is_some() || !self.cloud_behind() {
+            return;
+        }
+        // One at a time: two checks at once would both write the same machine.
+        static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _one = ONE.lock().await;
+        self.refresh_from_disk();
+        let dir = self.paths().dir.clone();
+        let now = Utc::now();
+        // Asked for and never heard of. Younger ones are left alone: the
+        // Muxin that asked may still be waiting for the answer.
+        for asked in pending::read(&dir).into_iter().filter(|a| a.settled(now)) {
+            match self.find_made(client, &asked).await {
+                Ok(Some(made)) => match self.record_droplet(&asked, &made) {
+                    Ok(id) => tracing::info!("DigitalOcean made droplet {} for a create that was cut off; it's in your machines as {id}", made.id),
+                    Err(e) => tracing::warn!("DigitalOcean made droplet {} for a create that was cut off, and Muxin couldn't add it to config.toml: {e}", made.id),
+                },
+                // DigitalOcean answered, and has no such droplet: nothing was made.
+                Ok(None) => pending::remove(&dir, &asked),
+                Err(e) => tracing::warn!("couldn't ask DigitalOcean whether it made {}: {e}", asked.droplet),
+            }
+        }
+        // Made, and without an address when last looked.
+        let waiting: Vec<String> = self.current().machines.iter().filter(|m| m.awaits_address()).map(|m| m.id.clone()).collect();
+        for id in waiting {
+            match self.fill_address(client, &id).await {
+                Ok(Some(host)) => {
+                    tracing::info!("{id} has started; it's at {host}");
+                    self.trigger_check(Some(id));
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!("couldn't ask DigitalOcean about {id}: {e}"),
+            }
+        }
+    }
+
+    /// Catches up once what was just asked for has settled (see `Asked::settled`).
+    fn catch_up_later(self: &Arc<Self>) {
+        let me = self.clone();
+        self.runtime().spawn(async move {
+            tokio::time::sleep(Duration::from_secs(pending::SETTLE_SECS as u64 + 5)).await;
+            me.cloud_catch_up().await;
+        });
+    }
+
+    /// The droplet DigitalOcean made for what was asked, if it made one.
+    async fn find_made(&self, client: &Client, asked: &pending::Asked) -> Result<Option<Droplet>, String> {
+        let named = client.droplets_named(&asked.droplet).await?;
+        let known: Vec<u64> = self.current().machines.iter().filter_map(|m| m.cloud.as_ref().map(|c| c.id)).collect();
+        Ok(asked.made(&named, &known).cloned())
+    }
+
+    /// Writes a droplet DigitalOcean made into config.toml, as a machine
+    /// with no address yet, and crosses it off what was asked for. Returns
+    /// the machine's id.
+    fn record_droplet(self: &Arc<Self>, asked: &pending::Asked, made: &Droplet) -> Result<String, String> {
+        // Billed from when DigitalOcean made it, as it says.
+        let created_at = if DateTime::parse_from_rfc3339(&made.created_at).is_ok() { made.created_at.clone() } else { asked.asked_at.to_rfc3339() };
+        let cloud = CloudRef {
+            provider: "digitalocean".into(),
+            id: made.id,
+            region: asked.region.clone(),
+            size: asked.size.clone(),
+            price_hourly: asked.price_hourly,
+            created_at,
+        };
+        // A machine took its name meanwhile: the droplet is written down all the same.
+        let names = [asked.name.clone(), format!("{} ({})", asked.name, made.id)];
+        let mut written = Err(String::new());
+        for name in &names {
+            let mut id = None;
+            let edit = |text: &str| {
+                let (out, new_id) = inventory_edit::add_cloud_machine(text, name, &asked.user, &cloud)?;
+                id = Some(new_id);
+                Ok(out)
+            };
+            written = inventory_edit::edit_file(self.inventory_path(), edit).and_then(|()| id.ok_or_else(|| "The machine wasn't added.".to_string()));
+            if written.is_ok() {
+                break;
+            }
+        }
+        let id = written?;
+        pending::remove(&self.paths().dir, asked);
+        self.reload_inventory_now();
+        self.set_droplet_status(&id, if made.status.is_empty() { "new" } else { &made.status });
+        Ok(id)
+    }
+
+    /// Gives a cloud machine with no address the one its droplet has, once
+    /// the droplet has started: "user@203.0.113.7", as returned. None: not yet.
+    async fn fill_address(self: &Arc<Self>, client: &Client, machine_id: &str) -> Result<Option<String>, String> {
+        let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in Muxin anymore.")?;
+        if spec.is_checkable() {
+            return Ok(Some(spec.host.trim().to_string()));
+        }
+        let cloud = spec.cloud.as_ref().ok_or_else(|| format!("{} isn't a cloud machine Muxin created.", spec.name))?;
+        let droplet = client.droplet(cloud.id).await?;
+        if !droplet.status.is_empty() {
+            self.set_droplet_status(machine_id, &droplet.status);
+        }
+        // "new" has an address before anything answers at it.
+        let Some(ip) = droplet.ipv4.filter(|_| matches!(droplet.status.as_str(), "active" | "off")) else { return Ok(None) };
+        let user = spec.user.clone().filter(|u| !u.trim().is_empty()).unwrap_or_else(local_user);
+        let host = format!("{}@{ip}", user.trim());
+        let edit = |text: &str| inventory_edit::set_machine_address(text, machine_id, &host);
+        inventory_edit::edit_file(self.inventory_path(), edit)?;
+        self.reload_inventory_now();
+        Ok(Some(host))
+    }
+
     /// Destroys a cloud machine: deletes the droplet and removes it from Muxin.
     pub fn cloud_destroy(self: &Arc<Self>, machine_id: &str) -> Result<u64, String> {
         let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in Muxin anymore.")?;
@@ -299,7 +521,7 @@ impl Engine {
                 // Not remove_machine: this operation is the one keeping the machine busy.
                 me.forget_machine(&spec.id)?;
                 // Its address may be reused by someone else's droplet.
-                if let Some(ip) = spec.host.rsplit('@').next() {
+                if let Some(ip) = spec.host.rsplit('@').next().map(str::trim).filter(|ip| !ip.is_empty()) {
                     let _ = tokio::process::Command::new("ssh-keygen").args(["-R", ip]).output().await;
                 }
                 me.op_log(op, "✓ Destroyed");
@@ -315,6 +537,9 @@ impl Engine {
     pub fn cloud_power(self: &Arc<Self>, machine_id: &str, on: bool) -> Result<u64, String> {
         let (spec, _) = self.machine(machine_id).ok_or("That machine isn't in Muxin anymore.")?;
         let cloud = spec.cloud.clone().ok_or_else(|| format!("{} isn't a cloud machine Muxin created.", spec.name))?;
+        if spec.awaits_address() {
+            return Err(format!("{} hasn't started yet, so there's nothing to power {}. Muxin adds its address once it has; destroy it if you don't want it.", spec.name, if on { "on" } else { "off" }));
+        }
         if self.machine_busy(&spec.id) {
             return Err("An operation is still running on this machine. Wait for it to finish.".into());
         }
@@ -393,6 +618,8 @@ impl Engine {
     /// What the cloud machines cost: each one (destroyed ones this month
     /// too), the totals, and the account's bill when the sign-in may read it.
     pub async fn cloud_usage(self: &Arc<Self>) -> usage::CloudUsage {
+        // A create that was cut off counts too: find it first.
+        self.cloud_catch_up().await;
         let now = Utc::now();
         let month = usage::month_start(now);
         let snap = self.current();
@@ -557,6 +784,18 @@ impl Engine {
     }
 }
 
+/// `text` as a sentence others can follow: with its full stop.
+fn sentence(text: &str) -> String {
+    let text = text.trim();
+    if text.ends_with(['.', '!', '?']) { text.to_string() } else { format!("{text}.") }
+}
+
+/// The account a new machine's first boot makes, which ssh signs in to: this
+/// computer's user's name.
+fn local_user() -> String {
+    setup::user_name(&std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default())
+}
+
 /// How long a machine has been idle, as the idle watch sees it.
 pub fn idle_since(machine_id: &str) -> Option<DateTime<Utc>> {
     IDLE.lock().ok()?.as_ref()?.last_active.get(machine_id).copied()
@@ -604,3 +843,6 @@ fn demo_options(mut out: CloudOptions) -> CloudOptions {
     out.default_region = "nyc3".into();
     out
 }
+
+#[cfg(test)]
+mod tests;

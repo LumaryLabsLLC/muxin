@@ -205,11 +205,16 @@ pub fn build(input: &Inputs) -> Snapshot {
                     power: if status == "online" {
                         Some("on".into())
                     } else {
-                        input.droplets.get(&spec.id).map(|s| match s.as_str() {
-                            "active" => "on".into(),
-                            "new" => "starting".into(),
-                            other => other.to_string(),
-                        })
+                        input
+                            .droplets
+                            .get(&spec.id)
+                            .map(|s| match s.as_str() {
+                                "active" => "on".into(),
+                                "new" => "starting".into(),
+                                other => other.to_string(),
+                            })
+                            // Created, and not heard of since: it hasn't started as far as Muxin knows.
+                            .or_else(|| spec.awaits_address().then(|| "starting".into()))
                     },
                 }
             }),
@@ -820,7 +825,22 @@ fn runner_diagnostics(
     }
 }
 
+/// How long a cloud machine may go without an address before it needs
+/// attention: longer than creating one waits for it to start (six minutes).
+const STARTING_TOO_LONG_MINUTES: i64 = 10;
+
 fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Option<&ProbeResult>, unreachable: Option<&Unreachable>) {
+    // A cloud machine from the moment it's created: no host isn't a mistake in config.toml.
+    if spec.awaits_address() {
+        out.push(diag(
+            "info",
+            "cloud-starting",
+            "It's created on DigitalOcean and billed from then; it has no address yet.".into(),
+            Some("Muxin adds its address at a machine check once it has started. Destroy it if you don't want it.".into()),
+            None,
+        ));
+        return;
+    }
     if !spec.is_checkable() {
         out.push(diag(
             "info",
@@ -1117,6 +1137,24 @@ fn attention(
         out.push(Attention { id: "stuck-jobs".into(), level: "warning".into(), title, detail, action: action("View queue", "queue", None) });
     }
 
+    // Cloud machines that were created and never started, as far as Muxin
+    // knows: a create that was cut off (Muxin quit, or crashed), or a droplet
+    // that's taking far longer than the six minutes creating one waits. They're billed.
+    for m in machines.iter().filter(|m| m.awaits_address()) {
+        let Some(c) = &m.cloud else { continue };
+        let minutes = c.created_at.map(|t| (input.now - t).num_minutes()).unwrap_or(STARTING_TOO_LONG_MINUTES);
+        if minutes >= STARTING_TOO_LONG_MINUTES {
+            let since = if minutes >= 120 { format!("{}h", minutes / 60) } else { format!("{minutes}m") };
+            out.push(Attention {
+                id: format!("cloud-starting-{}", m.id),
+                level: "warning".into(),
+                title: format!("{} was created {since} ago and hasn't started", m.name),
+                detail: format!("It costs ${:.3} an hour while it exists. Muxin adds its address at a machine check once it has started. Destroy it from its page if you don't want it.", c.price_hourly),
+                action: action("View machine", "machine", Some(m.id.clone())),
+            });
+        }
+    }
+
     // Cloud machines nobody has used for a while (Settings › Cloud says how long).
     let idle_hours = input.settings.cloud.idle_hours;
     if idle_hours > 0 && input.settings.cloud.idle_action != "off" {
@@ -1307,6 +1345,41 @@ mod tests {
             paired: &HashSet::new(),
             ssh_only: &HashSet::new(),
         })
+    }
+
+    #[test]
+    fn a_cloud_machine_without_an_address_is_starting_and_soon_needs_attention() {
+        let ago = |minutes: i64| (Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
+        let cloud = |id: u64, created_at: &str| format!("cloud = {{ provider = \"digitalocean\", id = {id}, region = \"nyc3\", size = \"s-1vcpu-1gb\", price_hourly = 0.00893, created_at = \"{created_at}\" }}");
+        let inv = inventory(&format!(
+            "[[machine]]\nname = \"Fresh\"\nhost = \"\"\nuser = \"me\"\n{}\n\n[[machine]]\nname = \"Cut Off\"\nhost = \"\"\nuser = \"me\"\n{}\n\n[[machine]]\nname = \"Up\"\nhost = \"me@203.0.113.7\"\n{}\n\n[[machine]]\nname = \"Shelf\"\n",
+            cloud(1, &ago(2)),
+            cloud(2, &ago(190)),
+            cloud(3, &ago(600)),
+        ));
+        let snap = run(&inv, &Settings::default(), &HashMap::new(), None);
+        let by = |id: &str| snap.machines.iter().find(|m| m.id == id).unwrap();
+        // Listed, and billed, from the moment it's created.
+        for id in ["fresh", "cut-off"] {
+            let m = by(id);
+            assert!(m.awaits_address());
+            assert_eq!((m.status.as_str(), m.cloud.as_ref().unwrap().power.as_deref()), ("manual", Some("starting")));
+            assert_eq!(m.diagnostics.iter().map(|d| (d.level.as_str(), d.code.as_str())).collect::<Vec<_>>(), [("info", "cloud-starting")]);
+            assert!(m.cloud.as_ref().unwrap().cost_so_far >= 0.01);
+        }
+        // One with an address, and one the user listed without a host, are as they were.
+        assert!(!by("up").awaits_address() && by("up").cloud.as_ref().unwrap().power.is_none());
+        assert_eq!(by("shelf").diagnostics.iter().map(|d| d.code.as_str()).collect::<Vec<_>>(), ["no-host"]);
+
+        // A create waits six minutes for it to start: past that, nobody's waiting anymore.
+        let stuck: Vec<&Attention> = snap.attention.iter().filter(|a| a.id.starts_with("cloud-starting-")).collect();
+        assert_eq!(stuck.len(), 1, "{:?}", snap.attention);
+        assert_eq!((stuck[0].id.as_str(), stuck[0].level.as_str()), ("cloud-starting-cut-off", "warning"));
+        assert_eq!(stuck[0].title, "Cut Off was created 3h ago and hasn't started");
+        assert_eq!(
+            stuck[0].detail,
+            "It costs $0.009 an hour while it exists. Muxin adds its address at a machine check once it has started. Destroy it from its page if you don't want it."
+        );
     }
 
     #[test]

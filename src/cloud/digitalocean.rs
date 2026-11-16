@@ -1,6 +1,6 @@
 //! DigitalOcean's API (v2), for the few things Muxin does there: who's signed
 //! in, which regions and sizes exist, the account's SSH keys, and creating,
-//! reading, powering and destroying droplets.
+//! reading, finding by name, powering and destroying droplets.
 
 use std::time::Duration;
 
@@ -16,6 +16,26 @@ pub const IMAGE: &str = "ubuntu-24-04-x64";
 pub struct Client {
     http: reqwest::Client,
     token: String,
+    /// Where the API is: DigitalOcean's, or a test's stand-in.
+    api: String,
+}
+
+/// Why a request failed. `maybe_done`: what was asked for may have happened
+/// all the same, because the request went out and DigitalOcean's answer never
+/// came, or was an error of its own (a 5xx). False when the request never got
+/// there, or DigitalOcean turned it down (a 4xx): nothing changed there.
+struct Failure {
+    message: String,
+    maybe_done: bool,
+}
+
+/// A droplet that wasn't created, as far as Muxin heard.
+#[derive(Debug, Clone)]
+pub struct CreateError {
+    pub message: String,
+    /// DigitalOcean's answer was lost: it may have made the droplet (which is
+    /// billed) all the same. `droplets_named` finds out.
+    pub maybe_made: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -78,38 +98,62 @@ pub struct SshKey {
 
 impl Client {
     pub fn new(token: String) -> Client {
+        Client::at(API, token)
+    }
+
+    fn at(api: &str, token: String) -> Client {
         let http = crate::util::http_client(|| reqwest::Client::builder().timeout(Duration::from_secs(30)));
-        Client { http, token }
+        Client { http, token, api: api.trim_end_matches('/').to_string() }
+    }
+
+    /// A client for a test's stand-in for the API (see `stand_in`).
+    #[cfg(test)]
+    pub(crate) fn for_stand_in(api: &str) -> Client {
+        Client::at(api, "stand-in".into())
     }
 
     async fn call(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value, String> {
+        self.request(method, path, body).await.map_err(|f| f.message)
+    }
+
+    async fn request(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value, Failure> {
         let mut req = self
             .http
-            .request(method, format!("{API}{path}"))
+            .request(method, format!("{}{path}", self.api))
             .bearer_auth(&self.token)
             .header("User-Agent", concat!("muxen/", env!("CARGO_PKG_VERSION")));
         if let Some(b) = body {
             req = req.json(&b);
         }
+        let lost = |message: String| Failure { message, maybe_done: true };
         let resp = req.send().await.map_err(|e| {
             if e.is_timeout() {
-                "DigitalOcean didn't answer within 30 seconds. Try again in a moment.".to_string()
+                lost("DigitalOcean didn't answer within 30 seconds. Try again in a moment.".to_string())
             } else {
-                format!("Couldn't reach DigitalOcean: {}", root_cause(&e))
+                // No connection (no network, no such host): the request never left.
+                Failure { message: format!("Couldn't reach DigitalOcean: {}", root_cause(&e)), maybe_done: !e.is_connect() }
             }
         })?;
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        // An answer that breaks off is as good as none: what it said isn't known.
+        let text = match resp.text().await {
+            Ok(t) => t,
+            Err(_) if status.is_success() => return Err(lost("DigitalOcean's answer broke off. Try again in a moment.".into())),
+            Err(_) => String::new(),
+        };
         if status.is_success() {
             return Ok(if text.trim().is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::Null) });
         }
         let message = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["message"].as_str().map(str::to_string)).unwrap_or_default();
-        Err(match status {
-            StatusCode::UNAUTHORIZED => "DigitalOcean didn't accept the sign-in. Connect again in Settings › Cloud.".into(),
-            StatusCode::FORBIDDEN => format!("DigitalOcean refused: {message} (the token may be read-only)"),
-            StatusCode::TOO_MANY_REQUESTS => "DigitalOcean is rate-limiting requests; try again in a minute.".into(),
-            _ if message.is_empty() => format!("DigitalOcean answered {status}"),
-            _ => format!("DigitalOcean: {message}"),
+        Err(Failure {
+            message: match status {
+                StatusCode::UNAUTHORIZED => "DigitalOcean didn't accept the sign-in. Connect again in Settings › Cloud.".into(),
+                StatusCode::FORBIDDEN => format!("DigitalOcean refused: {message} (the token may be read-only)"),
+                StatusCode::TOO_MANY_REQUESTS => "DigitalOcean is rate-limiting requests; try again in a minute.".into(),
+                _ if message.is_empty() => format!("DigitalOcean answered {status}"),
+                _ => format!("DigitalOcean: {message}"),
+            },
+            maybe_done: !status.is_client_error(),
         })
     }
 
@@ -190,7 +234,10 @@ impl Client {
         Ok(SshKey { id: k["id"].as_u64().unwrap_or(0), public_key: k["public_key"].as_str().unwrap_or_default().to_string() })
     }
 
-    pub async fn create_droplet(&self, name: &str, region: &str, size: &str, ssh_key: u64, user_data: &str) -> Result<Droplet, String> {
+    /// Asks for a new droplet. It's billed from the moment DigitalOcean makes
+    /// it, which can be before (or without) its answer getting here: see
+    /// `CreateError::maybe_made`, and `droplets_named` to find out.
+    pub async fn create_droplet(&self, name: &str, region: &str, size: &str, ssh_key: u64, user_data: &str) -> Result<Droplet, CreateError> {
         let body = json!({
             "name": name,
             "region": region,
@@ -201,8 +248,23 @@ impl Client {
             "monitoring": true,
             "ipv6": true,
         });
-        let v = self.call(Method::POST, "/droplets", Some(body)).await?;
-        Ok(droplet(&v["droplet"]))
+        let v = self.request(Method::POST, "/droplets", Some(body)).await.map_err(|f| CreateError { message: f.message, maybe_made: f.maybe_done })?;
+        let made = droplet(&v["droplet"]);
+        // Accepted, but the answer doesn't say which droplet it made.
+        if made.id == 0 {
+            return Err(CreateError { message: "DigitalOcean's answer didn't name the new droplet.".into(), maybe_made: true });
+        }
+        Ok(made)
+    }
+
+    /// The account's droplets with this name (it's no id: there can be several).
+    pub async fn droplets_named(&self, name: &str) -> Result<Vec<Droplet>, String> {
+        // Names are letters, digits, '-' and '.': nothing a URL needs escaped.
+        let safe: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_')).collect();
+        let v = self.call(Method::GET, &format!("/droplets?name={safe}&per_page=200"), None).await?;
+        let list = v["droplets"].as_array().ok_or("DigitalOcean's list of droplets didn't read.")?;
+        // Filtered here too, in case the list comes back whole.
+        Ok(list.iter().map(droplet).filter(|d| d.name.eq_ignore_ascii_case(name)).collect())
     }
 
     pub async fn droplet(&self, id: u64) -> Result<Droplet, String> {
@@ -251,6 +313,35 @@ fn droplet(d: &Value) -> Droplet {
     }
 }
 
+/// Tests' stand-ins for the API, by the config folder of the engine that
+/// uses one: such an engine talks to the stand-in's address and never reads
+/// the sign-in (the Keychain). `start_wait` is how long it waits for a new
+/// droplet to start: (between asks, asks).
+#[cfg(test)]
+pub(crate) mod stand_in {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    #[derive(Clone)]
+    pub struct StandIn {
+        pub api: String,
+        pub start_wait: Option<(Duration, u32)>,
+    }
+
+    static ALL: Mutex<Vec<(PathBuf, StandIn)>> = Mutex::new(Vec::new());
+
+    pub fn set(dir: &Path, stand_in: StandIn) {
+        let mut all = ALL.lock().unwrap();
+        all.retain(|(d, _)| d != dir);
+        all.push((dir.to_path_buf(), stand_in));
+    }
+
+    pub fn of(dir: &Path) -> Option<StandIn> {
+        ALL.lock().unwrap().iter().find(|(d, _)| d == dir).map(|(_, s)| s.clone())
+    }
+}
+
 /// Whether two public keys are the same key (type and body; the comment doesn't matter).
 pub fn same_key(a: &str, b: &str) -> bool {
     let core = |k: &str| k.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
@@ -272,5 +363,15 @@ mod tests {
         assert_eq!((d.id, d.ipv4.as_deref(), d.region.as_str(), d.size.as_str()), (7, Some("203.0.113.7"), "nyc3", "s-2vcpu-4gb"));
         assert!(same_key("ssh-ed25519 AAAA me@mac", "ssh-ed25519 AAAA other comment"));
         assert!(!same_key("ssh-ed25519 AAAA", "ssh-ed25519 BBBB"));
+    }
+
+    #[tokio::test]
+    async fn a_request_that_never_left_made_nothing() {
+        // A port nothing listens on: the connection is refused.
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        let client = Client::for_stand_in(&format!("http://127.0.0.1:{port}/v2"));
+        let e = client.create_droplet("dev", "nyc3", "s-1vcpu-1gb", 1, "").await.unwrap_err();
+        assert!(e.message.starts_with("Couldn't reach DigitalOcean: "), "{}", e.message);
+        assert!(!e.maybe_made, "no connection, no droplet: nothing to look for");
     }
 }

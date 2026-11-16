@@ -4,4 +4,12 @@ name = "Deno"
 requires = ["unzip"]
 # In ~/.deno/bin, which the installer adds to the shell's rc file.
 check = 'PATH="$PATH:$HOME/.deno/bin" deno --version'
-install = "curl -fsSL https://deno.land/install.sh | sh -s -- -y"
+# deno.land's build needs glibc: on Alpine (musl) it installs and can't
+# start. Alpine packages its own, which takes root, so say so instead.
+install = '''
+if ldd --version 2>&1 | grep -qi musl; then
+  echo "error: deno.land has no build for Alpine Linux (musl libc). Alpine packages its own: as root, apk add deno" >&2
+  exit 1
+fi
+curl -fsSL https://deno.land/install.sh | sh -s -- -y
+'''

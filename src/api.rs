@@ -1443,7 +1443,8 @@ pub struct CloudCreateRequest {
     pub region: Option<String>,
     #[serde(default)]
     pub size: Option<String>,
-    /// What it comes with, by id (cloud::setup::EXTRAS: tools, languages, agent CLIs, tailscale).
+    /// What it comes with, by id (cloud::setup::EXTRAS: tools, languages, agent CLIs, tailscale;
+    /// with the `recipes` feature, any component's id).
     #[serde(default)]
     pub install: Option<Vec<String>>,
     /// Wait until it's set up and added (default true; takes a few minutes).
@@ -1595,7 +1596,8 @@ pub struct VmCreateRequest {
     pub memory_gb: Option<u32>,
     #[serde(default)]
     pub disk_gb: Option<u32>,
-    /// Agent CLIs to install on a Linux VM: claude, codex, gemini, opencode, amp, pi.
+    /// Agent CLIs to install on a Linux VM: claude, codex, gemini, opencode, amp, pi
+    /// (with the `recipes` feature, any component's id).
     #[serde(default)]
     pub install: Vec<String>,
     #[serde(default = "yes")]
@@ -3887,7 +3889,7 @@ pub struct RecipeApplyRequest {
     /// Wait for it to finish (default true).
     #[serde(default = "yes")]
     pub wait: bool,
-    /// How long to wait, in seconds (default 900).
+    /// How long to wait, in seconds (default 900; from the CLI, as long as it can take).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
 }
@@ -3923,9 +3925,15 @@ pub async fn recipe_apply(engine: &Arc<Engine>, req: RecipeApplyRequest, surface
         if unknown { err.with_hint(known()) } else { err }
     })?;
     let others = catalog.conflicting(&components).into_iter().cloned().collect();
+    // The CLI's own process runs the operation, so it waits for all of it: what's
+    // left when it stops waiting never runs. An MCP server goes on running.
+    let limit = req.timeout_secs.unwrap_or(match surface {
+        Surface::Cli => crate::recipe::longest(components.len()).as_secs(),
+        Surface::Mcp => INSTALL_TIMEOUT_SECS,
+    });
     let (op, mut results) = engine.recipe_apply(&m.id, components.into_iter().cloned().collect(), others, req.update).map_err(op_error)?;
     let operation = if req.wait {
-        wait_operation(engine, op, Duration::from_secs(req.timeout_secs.unwrap_or(INSTALL_TIMEOUT_SECS).max(1)), on_line).await
+        wait_operation(engine, op, Duration::from_secs(limit.max(1)), on_line).await
     } else {
         engine.current().operations.iter().find(|o| o.id == op).cloned()
     }
@@ -3939,7 +3947,7 @@ pub async fn recipe_apply(engine: &Arc<Engine>, req: RecipeApplyRequest, surface
         next: (!finished).then(|| {
             surface.say(
                 format!("Still running. Poll get_operation(operation_id={op}) until status isn't \"running\"; its log ends with a line per component."),
-                format!("Still running in the background; this command stopped waiting. See what's there with `muxin recipe check {}`.", m.id),
+                format!("This command stopped waiting, and what was left didn't run. See what's there with `muxin recipe check {}`, then apply again.", m.id),
             )
         }),
     };

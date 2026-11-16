@@ -615,7 +615,7 @@ pub fn tools() -> Vec<Value> {
                 "name": { "type": "string" },
                 "region": { "type": "string", "description": "Region slug, e.g. nyc3. Default: the user's setting, else the nearest." },
                 "size": { "type": "string", "description": "Size slug, e.g. s-2vcpu-4gb. Default: the user's setting." },
-                "install": { "type": "array", "items": { "type": "string", "enum": crate::cloud::setup::EXTRAS.iter().map(|(id, _)| *id).collect::<Vec<_>>() }, "description": "What it comes with besides git: tools, languages (node, python, go, rust, php, ruby, java, bun, deno, dotnet), agent CLIs, tailscale. Default: the user's setting." },
+                "install": { "type": "array", "items": { "type": "string", "enum": cloud_install() }, "description": "What it comes with besides git: tools, languages (node, python, go, rust, php, ruby, java, bun, deno, dotnet), agent CLIs, tailscale. Default: the user's setting." },
                 "wait": { "type": "boolean", "description": "Wait until it's ready. Default true." },
                 "timeout_secs": { "type": "integer", "minimum": 1 }
             }), &["name"]),
@@ -700,7 +700,7 @@ pub fn tools() -> Vec<Value> {
                 "cpus": { "type": "integer", "minimum": 1, "description": "Default 4." },
                 "memory_gb": { "type": "integer", "minimum": 1, "description": "Default 8." },
                 "disk_gb": { "type": "integer", "minimum": 32, "description": "Windows' disk, grown as needed. Default 64." },
-                "install": { "type": "array", "items": { "type": "string" }, "description": "Agent CLIs to install on a Linux VM (with Node.js): claude, codex, gemini, opencode, amp, pi. They sign in on first use." },
+                "install": { "type": "array", "items": { "type": "string" }, "description": VM_INSTALL },
                 "wait": { "type": "boolean", "description": "Wait for it to be ready. Default true (up to timeout_secs, default 600)." },
                 "timeout_secs": { "type": "integer", "minimum": 1 }
             }), &["name", "system"]),
@@ -1386,7 +1386,7 @@ pub fn tools() -> Vec<Value> {
     #[cfg(feature = "recipes")]
     let tools = [tools, vec![json!({
         "name": "recipe_check",
-        "description": "Which of Muxin's components (git, the GitHub CLI, Node.js, Claude Code) a machine has: each is present, missing, or unsupported on its system. Runs their read-only checks in one go, in the user's login shell over ssh (or locally for host \"local\"). Changes nothing.",
+        "description": "Which of Muxin's components (git, Docker, the GitHub CLI, Node.js and other languages, the agent CLIs, Tailscale) a machine has: each is present, missing, or unsupported on its system. Runs their read-only checks in one go, in the user's login shell over ssh (or locally for host \"local\"). Changes nothing.",
         "inputSchema": schema(json!({
             "machine_id": { "type": "string", "description": MACHINE_ID },
             "components": { "type": "array", "items": { "type": "string", "enum": crate::recipe::catalog().map(|c| c.ids()).unwrap_or_default() }, "description": "Component ids; what they require is checked too. Omit for all." }
@@ -1394,7 +1394,7 @@ pub fn tools() -> Vec<Value> {
         "annotations": annotations("Check components", true, false, true, true),
     }), json!({
         "name": "recipe_apply",
-        "description": "Install what's missing of Muxin's components (git, the GitHub CLI, Node.js, Claude Code) on a machine, as an operation: checks first, installs only what's missing in order (requirements first) in the user's login shell, checks each again, and says per component already, installed, failed, skipped (not tried; error says why, often with a hint) or unsupported. With update, what's there and has a newer version out (the agent CLIs ask npm) is updated too, and only that: current or updated. Never removes or rolls back anything, so a second run changes nothing. On Linux, steps that need root run through `sudo -n` and are skipped when sudo asks for a password. Changes the real machine: confirm with the user first unless they asked for exactly that.",
+        "description": "Install what's missing of Muxin's components (git, Docker, the GitHub CLI, Node.js and other languages, the agent CLIs, Tailscale) on a machine, as an operation: checks first, installs only what's missing in order (requirements first) in the user's login shell, checks each again, and says per component already, installed, failed, skipped (not tried; error says why, often with a hint) or unsupported. With update, what's there and has a newer version out (the agent CLIs ask npm) is updated too, and only that: current or updated. Never removes or rolls back anything, so a second run changes nothing. On Linux, steps that need root run through `sudo -n` and are skipped when sudo asks for a password. Changes the real machine: confirm with the user first unless they asked for exactly that.",
         "inputSchema": schema(json!({
             "machine_id": { "type": "string", "description": MACHINE_ID },
             "components": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": crate::recipe::catalog().map(|c| c.ids()).unwrap_or_default() }, "description": "Component ids to install where missing; what they require goes first." },
@@ -1406,6 +1406,20 @@ pub fn tools() -> Vec<Value> {
     })]]
     .concat();
     tools
+}
+
+/// What `vm_create`'s `install` takes.
+#[cfg(not(feature = "recipes"))]
+const VM_INSTALL: &str = "Agent CLIs to install on a Linux VM (with Node.js): claude, codex, gemini, opencode, amp, pi. They sign in on first use.";
+#[cfg(feature = "recipes")]
+const VM_INSTALL: &str = "What to install on a Linux VM, by component id as in recipe_check (what they require comes too): agent CLIs (claude, codex, gemini, opencode, amp, pi), which sign in on first use, or any other component.";
+
+/// The ids `cloud_create`'s `install` takes: the extras, or every component once recipes install them.
+fn cloud_install() -> Vec<&'static str> {
+    #[cfg(feature = "recipes")]
+    return crate::recipe::catalog().map(|c| c.ids()).unwrap_or_default();
+    #[cfg(not(feature = "recipes"))]
+    crate::cloud::setup::EXTRAS.iter().map(|(id, _)| *id).collect()
 }
 
 /// Ready-to-paste setup for common MCP clients.

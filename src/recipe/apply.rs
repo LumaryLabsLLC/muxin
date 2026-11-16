@@ -29,6 +29,14 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const UP_TO_DATE_TIMEOUT: Duration = Duration::from_secs(120);
 /// apply.sh's exit status when a step needs root and sudo wants a password: nothing ran.
 const NEEDS_ROOT: i32 = 77;
+
+/// The longest applying this many components can take: the checks and tests
+/// at the start, then each one's step, its check and its test again. The CLI
+/// waits this long, since the operation runs in its own process and ends with it.
+pub fn longest(components: usize) -> Duration {
+    let start = super::CHECK_TIMEOUT + UP_TO_DATE_TIMEOUT + Duration::from_secs(60);
+    start + (STEP_TIMEOUT + super::CHECK_TIMEOUT + UP_TO_DATE_TIMEOUT) * components as u32
+}
 /// What a Linux machine in the demo has to begin with, like Muxin's VMs. A Mac there has everything.
 const DEMO_LINUX: &[&str] = &["git", "gh"];
 
@@ -484,6 +492,55 @@ mod tests {
         let (out, exit) = run(true, "", "echo ran");
         assert_eq!(exit, "77");
         assert!(!out.contains("ran") && out.contains("sudo -n true"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The prelude's pkg_manager and pkg_install, run here with stand-ins: which
+    /// package manager is used, and that an Arch system whose lists were never
+    /// fetched is brought up to date rather than half-upgraded.
+    #[cfg(unix)]
+    #[test]
+    fn pkg_install_uses_the_systems_package_manager() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("muxen-recipe-pkg-{}", std::process::id()));
+        let bin = dir.join("bin");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&bin).unwrap();
+        for tool in ["sh", "id"] {
+            let real = ["/bin", "/usr/bin"].iter().map(|d| std::path::Path::new(d).join(tool)).find(|p| p.exists()).unwrap();
+            std::os::unix::fs::symlink(real, bin.join(tool)).unwrap();
+        }
+        let log = dir.join("log");
+        let stand_in = |name: &str| {
+            let p = bin.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\necho \"{name} $*\" >> {}\n", log.display())).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // What pkg_manager says, what pkg_install ran, and its exit status and stderr.
+        let run = || -> (String, String, bool, String) {
+            let _ = std::fs::remove_file(&log);
+            let script = format!("{PRELUDE_SH}\npkg_manager\npkg_install git");
+            let out = std::process::Command::new("/bin/sh").args(["-c", &script]).env_clear().env("PATH", &bin).output().unwrap();
+            let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            (said, std::fs::read_to_string(&log).unwrap_or_default(), out.status.success(), String::from_utf8_lossy(&out.stderr).to_string())
+        };
+
+        // Nothing Muxin knows: an error that names them.
+        let (said, ran, ok, err) = run();
+        assert!(said.is_empty() && ran.is_empty() && !ok && err.contains("no package manager Muxin knows"), "{said} {ran} {err}");
+        // Arch: lists that were never fetched (as here, where there's no pacman) mean a fresh system, upgraded whole.
+        stand_in("pacman");
+        let (said, ran, ok, _) = run();
+        assert!(said == "pacman" && ok, "{said}");
+        if !std::path::Path::new("/var/lib/pacman/sync/core.db").exists() {
+            assert_eq!(ran, "pacman -Syu --noconfirm --needed git\n");
+        }
+        // The system's own before pacman, in pkg_install's order; Homebrew first when this isn't root.
+        for (name, command) in [("apk", "apk add git"), ("dnf", "dnf install -y git"), ("apt-get", "apt-get -o DPkg::Lock::Timeout=600 install -y git"), ("brew", "brew install git")] {
+            stand_in(name);
+            let (said, ran, ok, _) = run();
+            assert_eq!((said.as_str(), ran.trim_end(), ok), (name.trim_end_matches("-get"), command, true));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

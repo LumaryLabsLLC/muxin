@@ -187,6 +187,33 @@ Muxin can make a VM on one of the user's machines and add it to them, shown unde
 
 The CLI equivalents are `muxin vm options|create|destroy` and `muxin power <machine> on|off|restart`.
 
+## Recipes: what a machine has installed
+
+A component is one thing a machine can have: git, Docker, the GitHub CLI, Node.js, a language, an agent CLI, Tailscale. Each has a check that says whether it's there, an install step, sometimes an update step, the components it requires, the systems it works on, and whether its steps need root. A recipe is a list of component ids. Muxin has 22 built in: `git`, `docker`, `gh`, `node`, `uv`, `python`, `go`, `rust`, `php`, `ruby`, `java`, `unzip`, `bun`, `deno`, `dotnet`, `claude`, `codex`, `gemini`, `opencode`, `amp`, `pi`, `tailscale`.
+
+A Muxin built without the `recipes` feature (a headless build made with `--no-default-features` alone) has neither these two tools nor `muxin recipe`: when `recipe_check` isn't among your tools, this Muxin doesn't have them.
+
+- `recipe_check(machine_id, components?)` says which components a machine has: its `os`, and each component as `present`, `missing` or `unsupported` (it has no steps for that system). Omit `components` for all of them. What a component requires is checked too, and listed before it: `["claude"]` answers for `node`, then `claude`. Every check runs in one script in the user's login shell, so tools from Homebrew, mise, nvm or `~/.local/bin` count. It uses no network and changes nothing. Read-only.
+- `node` is `present` from Node.js 22, which the agent CLIs need. An older Node.js is `missing`, and applying installs 22.
+- `recipe_apply(machine_id, components, update?)` installs what's missing, as an operation. It checks first, installs in order (each requirement before what needs it, otherwise the order given), and checks each one again. The result's `components` has one entry each, requirements included: `already`, `installed`, `failed`, `skipped` (not tried: `error` says why, often with a `hint`) or `unsupported`. Nothing is removed or rolled back, so a second run changes nothing.
+- With `update: true` it also updates what's there and has a newer version out, and only that: `updated`, or `current` when there's nothing newer. Only the agent CLIs (`claude`, `codex`, `gemini`, `opencode`, `amp`, `pi`) have an update step; they ask npm. Other components that are there stay `already`, and without `update` nothing is updated.
+- It fails with `operation_failed` when any component is `failed` or `skipped`. The others may have installed all the same: the error's `details.components` has every result, and its `hint` is the first one a component gave. `failed` means its step failed, or finished while its check (when updating, its up-to-date test) still fails; the operation's `log_tail` has the step's output.
+- **Root.** Steps never call sudo themselves. On Linux a component that needs root runs through `sudo -n`. When sudo asks for a password it's `skipped` with nothing of it run, and so is whatever requires it. Pass the hint on (passwordless sudo for the user there, or installing it by hand); don't work around it. The agent CLIs install as the user when the user can write where the step writes: the folder of the copy on PATH when there is one (an update writes there), else npm's own (theirs with a Node.js from mise, nvm or Homebrew). Otherwise they install as root. On a Mac every step runs as the user, and packages come from Homebrew.
+- **Systems.** Steps are `sh`, for Linux and macOS. On Linux they're tested on Ubuntu, Debian, Fedora, Alpine and Arch. `deno` and `amp` have no build for Alpine: they're `failed` there, and the log says so. On Arch, a machine whose package lists are old is `failed` with a line asking for `sudo pacman -Syu` first: Muxin doesn't upgrade a whole system to install one tool. `docker`, `python`, `go`, `php`, `ruby`, `java`, `dotnet` and `tailscale` have Linux steps only. On a Windows machine everything is `unsupported` and nothing runs.
+- `tailscale` only installs it: joining a tailnet takes a key or the user's approval. `docker` also adds the user to the `docker` group.
+- A machine accepts one changing operation at a time; `busy` means wait and retry. It waits by default, up to `timeout_secs` (900). One component's step may take 15 minutes, so a long recipe can outlast that: `finished` is false then, and `get_operation`'s log ends with a line per component.
+- **New machines.** `cloud_create` and `vm_create` (Linux) apply their `install` list the same way once the new machine answers ssh, inside the operation that makes it. A component that doesn't install is a `!` line in that log, with the `muxin recipe apply` command that tries again, and the machine is still ready. Both take any component's id, and refuse one that isn't.
+- **In the app.** A machine's page has a Components card: what's there, **Install** for the missing ones the user picks, **Update** for the agent CLIs. The user can save what's picked as a recipe (a name and component ids, kept in `recipes.json`), apply a saved one from that page, or pick one in Add machine, which applies it once the new machine answers. Each is the same `recipe` operation as `recipe_apply`, so you may find one running that you didn't start (`busy`). No tool lists, saves or applies a saved recipe: pass component ids, and when the user names a saved recipe, ask which components it holds.
+- `recipe_apply` installs software on the user's real machine, some of it as root. Do it when the user asked for exactly that; otherwise say which components you'd install and ask. `recipe_check` is fine any time.
+
+**"Put Claude Code and the GitHub CLI on beelink."**
+
+1. Call `recipe_check(machine_id: "beelink", components: ["gh", "claude"])`. It answers for `gh`, `node` and `claude`. If all three are `present`, say so and stop.
+2. Call `recipe_apply(machine_id: "beelink", components: ["gh", "claude"])`. The user asked for exactly this, so don't ask again.
+3. Report each component's result. For one that's `skipped` or `failed`, give its `error`, and its `hint` verbatim.
+
+The CLI equivalents are `muxin recipe check <machine> [ids]` and `muxin recipe apply <machine> <ids> [--update]`. `apply` prints its log as it goes, waits until it's done (the CLI's own process does the applying, so it has no `--no-wait`), and exits 1 when anything failed or was skipped.
+
 ## Schedules
 
 A schedule runs a command, or starts an agent session, on one machine at set times. It's kept on that machine and run by Muxin's agent through the machine's own scheduler (cron on Linux, launchd on a Mac, Task Scheduler on Windows), so it runs whether or not Muxin is open anywhere. Times are the machine's own.

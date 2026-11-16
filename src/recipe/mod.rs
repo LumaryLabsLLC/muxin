@@ -12,7 +12,7 @@
 //! saved in the window are in saved.rs.
 
 mod apply;
-pub use apply::Applied;
+pub use apply::{Applied, longest};
 // Only the window saves and applies them.
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub mod saved;
@@ -397,22 +397,30 @@ mod tests {
     /// VM's agent CLIs, now in one place.
     #[test]
     fn every_extra_is_a_component() {
-        use crate::cloud::setup::{EXTRAS, npm_package};
+        use crate::cloud::setup::{EXTRAS, npm_install, npm_package};
         let catalog = catalog().unwrap();
         for (id, name) in EXTRAS {
             let c = catalog.get(id).unwrap_or_else(|| panic!("{id} is an extra but no component"));
             assert_eq!(c.name, *name);
             if let Some(package) = npm_package(id) {
-                assert_eq!(c.install, format!("npm install -g {package}"), "{id}");
+                // The step ends with what cloud machines and VMs run, flags and all (Amp first says so where it can't start).
+                let installs = c.install.trim().lines().last().unwrap();
+                assert_eq!(installs, format!("npm install -g {}", npm_install(id).unwrap()), "{id}");
                 // Updating looks at the copy on PATH, the command being the id.
                 let at = format!("--prefix \"$(npm_prefix {id})\"");
-                assert_eq!(c.update.as_deref(), Some(format!("npm install -g {at} {package}@latest").as_str()), "{id}");
+                let updates = c.update.as_deref().unwrap();
+                assert!(updates.starts_with("npm install -g ") && updates.contains(&format!(" {at} ")) && updates.ends_with(&format!(" {package}@latest")), "{id}: {updates}");
                 let name = package.rsplit(' ').next().unwrap();
                 assert_eq!(c.up_to_date.as_deref(), Some(format!("npm outdated -g {at} {name}").as_str()), "{id}");
                 // Root unless the user can write where the step writes: the copy on PATH, else npm's own folder.
                 let root_unless = format!("test -w \"$(npm_prefix {id})\"");
                 assert_eq!((c.requires.as_slice(), c.root, c.root_unless.as_deref()), (&["node".to_string()][..], true, Some(root_unless.as_str())), "{id}");
             }
+        }
+        // npm 12 runs install scripts only when told to: the CLIs whose script fetches their binary say so, installing and updating.
+        for (id, package) in [("claude", "@anthropic-ai/claude-code"), ("opencode", "opencode-ai"), ("amp", "@ampcode/cli")] {
+            let (c, flag) = (catalog.get(id).unwrap(), format!(" --allow-scripts={package} "));
+            assert!(c.install.contains(&flag) && c.update.as_deref().unwrap().contains(&flag), "{id}");
         }
         // What the extras brought besides themselves.
         assert_eq!(catalog.get("python").unwrap().requires, ["uv"]);

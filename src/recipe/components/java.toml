@@ -3,4 +3,12 @@ name = "Java"
 os = ["linux"]
 root = true
 check = "javac -version && command -v mvn"
-install = "pkg_install default-jdk-headless maven"
+# The system's default JDK, with Maven.
+install = '''
+case "$(pkg_manager)" in
+  dnf) pkg_install java-devel maven ;;
+  apk) pkg_install openjdk21 maven ;;
+  pacman) pkg_install jdk-openjdk maven ;;
+  *) pkg_install default-jdk-headless maven ;;
+esac
+'''

@@ -32,6 +32,24 @@ muxin connection beelink --json             # direct (QUIC) or ssh, round trip, 
 muxin connection beelink --direct on --json # pair for direct connections (installs a user service there; only when asked)
 ```
 
+## What's installed (recipes)
+
+```sh
+muxin recipe check beelink --json                        # every component: present, missing or unsupported
+muxin recipe check beelink claude --json                 # node, then claude: what a component requires is checked too
+muxin recipe apply beelink gh claude --json              # install what's missing, what they require first
+muxin recipe apply beelink claude codex --update --json  # and update the agent CLIs that have a newer version out
+```
+
+- A component is one thing a machine can have. Muxin has 22: `git`, `docker`, `gh`, `node`, `uv`, `python`, `go`, `rust`, `php`, `ruby`, `java`, `unzip`, `bun`, `deno`, `dotnet`, `claude`, `codex`, `gemini`, `opencode`, `amp`, `pi`, `tailscale`. An id it doesn't know is refused, with the list.
+- `check` only looks, in the user's login shell, without the network: fine any time. `node` counts from Node.js 22, which the agent CLIs need.
+- `apply` installs software on the user's real machine, some of it as root: only when they asked for exactly that; otherwise say which components you'd install and ask. It installs only what's missing, checks each again, and never removes anything, so a second run changes nothing.
+- Each component comes back `already`, `installed`, `failed`, `skipped` (not tried: `error` says why, often with a `hint`) or `unsupported`; with `--update` also `current` or `updated` (the agent CLIs only). It exits 1 when any is `failed` or `skipped`; the others may have installed, and the error's `details.components` has every result.
+- On Linux a component that needs root goes through `sudo -n`. When sudo asks for a password it's `skipped`, and so is what requires it: pass the hint on, don't work around it. On a Mac every step runs as the user, and packages come from Homebrew.
+- `apply` waits until it's done and has no `--no-wait`. Linux and macOS only: on a Windows machine everything is `unsupported`.
+- Recipes the user saved in the app (a name for some components, applied from a machine's page or as a machine is added) aren't in the CLI: name the components by id, and ask which ones a saved recipe holds.
+- A headless Muxin built with `--no-default-features` alone has no `muxin recipe`.
+
 ## What's running
 
 ```sh

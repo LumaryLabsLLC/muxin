@@ -397,15 +397,15 @@ mod tests {
     /// VM's agent CLIs, now in one place.
     #[test]
     fn every_extra_is_a_component() {
-        use crate::cloud::setup::{EXTRAS, npm_package};
+        use crate::cloud::setup::{EXTRAS, npm_install, npm_package};
         let catalog = catalog().unwrap();
         for (id, name) in EXTRAS {
             let c = catalog.get(id).unwrap_or_else(|| panic!("{id} is an extra but no component"));
             assert_eq!(c.name, *name);
             if let Some(package) = npm_package(id) {
-                // The step ends with what cloud machines run (Amp first says so where it can't start).
+                // The step ends with what cloud machines and VMs run, flags and all (Amp first says so where it can't start).
                 let installs = c.install.trim().lines().last().unwrap();
-                assert!(installs.starts_with("npm install -g ") && installs.ends_with(&format!(" {package}")), "{id}: {installs}");
+                assert_eq!(installs, format!("npm install -g {}", npm_install(id).unwrap()), "{id}");
                 // Updating looks at the copy on PATH, the command being the id.
                 let at = format!("--prefix \"$(npm_prefix {id})\"");
                 let updates = c.update.as_deref().unwrap();

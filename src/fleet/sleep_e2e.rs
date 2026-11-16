@@ -9,8 +9,9 @@
 //! Muxin first (an older one keeps waking it, and puts its own agent back).
 //! Every run is a new app to the machine (a test run's certificate is its
 //! own): `unpair` before `stop`, or it stays in the machine's trusted list.
-//! On a Mac, a new agent build may be asked about under Privacy & Security ›
-//! Local Network before its wake notice gets through (`notice` says).
+//! A Mac must not ask about the agent under Privacy & Security › Local
+//! Network: it only answers (`notice` says whether this copy waits to hear
+//! the machine wake, and on which connection).
 //!
 //! ```text
 //! MUXEN_AGENTS_DIR=dist/agents MUXIN_SLEEP_TEST_HOST=<ssh host> MUXIN_SLEEP_TEST_DIR=<folder> \
@@ -23,7 +24,7 @@
 //! does what's written to `<folder>/do`, a line each:
 //!
 //! - `check` (that machine, by name), `check-all` (every machine)
-//! - `wake`, `connection`, `sessions`, `notice` (can its agent tell this copy when it wakes?)
+//! - `wake`, `connection`, `sessions`, `notice` (does this copy wait to hear it wake?)
 //! - `run <command>` (on the machine, in its login shell)
 //! - `unpair` (this copy's direct connection), `stop`
 //!
@@ -134,13 +135,11 @@ fn watch_a_machine_that_sleeps() {
                             Err(e) => say(&log, format!("run: {} ({})", e.message, e.code)),
                         }
                     }
-                    // Asks the agent again whether it can tell this app when the machine wakes.
-                    ("notice", _) => match (super::link::current(&id), super::direct::notice_port()) {
-                        (Some(l), Some(port)) => match l.request(serde_json::json!({ "op": "ping", "wake_notice": port }), Duration::from_secs(10)).await {
-                            Ok(r) => say(&log, format!("notice: to {} · {}", r["wake_notice"].as_str().unwrap_or("nowhere"), r["wake_notice_error"].as_str().unwrap_or("it got through"))),
-                            Err(e) => say(&log, format!("notice: {e}")),
-                        },
-                        _ => say(&log, "notice: no link, or this copy takes none"),
+                    // Whether this copy waits to hear the machine wake, and on what.
+                    ("notice", _) => match (super::quiet::held(&id), super::link::current(&id)) {
+                        (Some(at), _) => say(&log, format!("notice: it says so on the connection from {at}")),
+                        (None, Some(l)) => say(&log, format!("notice: none (its agent offers one: {}; this copy wants one: {})", l.offers_wake_notice(), super::quiet::wanted())),
+                        (None, None) => say(&log, "notice: none, and no link"),
                     },
                     ("unpair", _) => match engine.set_direct(&id, false).await {
                         Ok(c) => say(&log, format!("unpaired: now {}", c.via)),

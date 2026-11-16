@@ -31,6 +31,9 @@ const OFFLINE_RECHECK: Duration = Duration::from_secs(30);
 /// How long a machine's promise to say when it wakes is taken at its word:
 /// past that, a check of every machine looks at it again, this often.
 const PROMISE_HOLDS: Duration = Duration::from_secs(2 * 3600);
+/// A machine whose connection for saying it woke keeps ending is looked at,
+/// or has that connection made again, this often at most.
+const HEAR_AGAIN_EVERY: Duration = Duration::from_secs(600);
 /// Operation output can be chatty; coalesce snapshot publishes to this rate.
 const OP_PUBLISH_INTERVAL: Duration = Duration::from_millis(120);
 
@@ -92,10 +95,17 @@ struct State {
     /// Stop flags of the operations that can be cancelled.
     cancels: HashMap<u64, Arc<std::sync::atomic::AtomicBool>>,
     /// Machines asleep whose agents tell this app when they wake (see
-    /// fleet::asleep): they aren't checked meanwhile.
+    /// fleet::quiet): they aren't checked meanwhile.
     wake_notices: HashSet<String>,
-    /// This app stays open and takes those notices (`start`).
+    /// This app stays open and hears them wake (`start`), unless the user
+    /// turned that off.
     takes_notices: bool,
+    /// When each machine was last looked at because its agent could no
+    /// longer say it woke (`notice_lost`).
+    looked_for_lost: HashMap<String, Instant>,
+    /// When the connection a machine that's up would say it woke on was last
+    /// made again (`hear_again`).
+    heard_again: HashMap<String, Instant>,
 }
 
 pub struct Engine {
@@ -208,6 +218,8 @@ impl Engine {
             cancels: HashMap::new(),
             wake_notices: HashSet::new(),
             takes_notices: false,
+            looked_for_lost: HashMap::new(),
+            heard_again: HashMap::new(),
         };
         let (tx, _) = watch::channel(Arc::new(Snapshot::default()));
         super::direct::init(paths.dir.clone());
@@ -280,25 +292,11 @@ impl Engine {
 
     /// Starts the background loops. Call once.
     pub fn start(self: &Arc<Self>) {
-        // An app that stays open can hear from machines that wake (their
-        // agents connect to it), so it needn't look at them while they
-        // sleep: when the user turned that on (Settings::wake_notices).
         if self.demo.is_none() {
-            let weak = Arc::downgrade(self);
-            super::direct::take_notices(move |machine_id| {
-                if let Some(engine) = weak.upgrade() {
-                    let id = machine_id.to_string();
-                    let rt = engine.rt.clone();
-                    rt.spawn(async move { engine.machine_woke(&id).await });
-                }
-            });
-            {
-                let mut st = self.state.lock().unwrap();
-                st.takes_notices = st.settings.wake_notices;
-                super::direct::set_notices(st.takes_notices);
-            }
-            // Machines that were asleep when Muxin last ran don't know this
-            // app is back: one look at each (it tells them where to say so).
+            self.take_wake_notices();
+            // The connections machines asleep would have said they woke on
+            // went with the Muxin that ran before: one look at each (which
+            // makes a new one).
             let me = self.clone();
             self.rt.spawn(async move {
                 let asleep = me.asleep_machines();
@@ -364,14 +362,8 @@ impl Engine {
             let mut st = self.state.lock().unwrap();
             st.settings_mtime = mtime(&self.paths.settings);
             let scopes_changed = st.settings.github != new.github;
-            // Hearing from machines that wake, or not any more: asked of
-            // each as it links, so they link afresh.
-            if st.settings.wake_notices != new.wake_notices && self.demo.is_none() {
-                st.takes_notices = new.wake_notices;
-                super::direct::set_notices(new.wake_notices);
-                for m in st.inventory.machines.iter().filter(|m| !m.is_local()) {
-                    super::link::reset(&m.id);
-                }
+            if st.settings.wake_notices != new.wake_notices {
+                self.hear_wakes(&mut st, new.wake_notices);
             }
             if st.settings.share_clipboard != new.share_clipboard {
                 if new.share_clipboard {
@@ -408,6 +400,33 @@ impl Engine {
         }
     }
 
+    /// An app that stays open hears from machines that wake (on a connection
+    /// it made to each beforehand: fleet::quiet), so it needn't look at them
+    /// while they sleep. Unless the user turned that off
+    /// (Settings::wake_notices). `start` calls this, once.
+    pub(crate) fn take_wake_notices(self: &Arc<Self>) {
+        let (woke, lost) = (Arc::downgrade(self), Arc::downgrade(self));
+        super::quiet::take(
+            move |machine_id| {
+                if let Some(engine) = woke.upgrade() {
+                    let id = machine_id.to_string();
+                    let rt = engine.rt.clone();
+                    rt.spawn(async move { engine.machine_woke(&id).await });
+                }
+            },
+            move |machine_id| {
+                if let Some(engine) = lost.upgrade() {
+                    let id = machine_id.to_string();
+                    let rt = engine.rt.clone();
+                    rt.spawn(async move { engine.notice_lost(&id).await });
+                }
+            },
+        );
+        let mut st = self.state.lock().unwrap();
+        st.takes_notices = st.settings.wake_notices;
+        super::quiet::set_on(st.takes_notices);
+    }
+
     /// A machine's agent said it's going to sleep (or, to something that
     /// reached for it, that it's asleep): Muxin lets go of it, and leaves it
     /// alone until it wakes. False for a machine it doesn't apply to (this
@@ -434,21 +453,99 @@ impl Engine {
     /// A machine's agent said it has woken: look at it now. Only one that
     /// was asleep (an agent can't have Muxin check its machine at will).
     pub(crate) async fn machine_woke(self: &Arc<Self>, machine_id: &str) {
-        {
+        let was_asleep = {
             let mut st = self.state.lock().unwrap();
-            let Some(p) = st.probes.get_mut(machine_id).filter(|p| p.asleep) else { return };
             // It said it's awake, and its promise to say so is kept: a look
             // that gets no answer now finds it offline, not still asleep.
-            p.asleep = false;
-            p.wake_notice = None;
-            st.wake_notices.remove(machine_id);
-        }
+            let was = st.probes.get_mut(machine_id).filter(|p| p.asleep).map(|p| (p.asleep, p.wake_notice) = (false, None)).is_some();
+            if was {
+                st.wake_notices.remove(machine_id);
+            }
+            // Whether a check is on its way to the machine already.
+            was.then(|| st.checking.contains(machine_id))
+        };
+        let Some(in_flight) = was_asleep else {
+            // Up all along, as far as this app knew: it slept and woke
+            // between two words from it. The connection it said so on is
+            // used up, and its next sleep needs one.
+            self.hear_again(machine_id);
+            return;
+        };
         tracing::debug!("{machine_id} woke; checking it");
-        self.run_check(Some(vec![machine_id.to_string()])).await;
+        let me = vec![machine_id.to_string()];
+        self.run_check(Some(me.clone())).await;
+        // That check was reaching the machine as it woke, and what it brought
+        // back is from before: asleep, it says. Looked at again, now.
+        if in_flight && self.state.lock().unwrap().probes.get(machine_id).is_some_and(|p| p.asleep) {
+            tracing::debug!("{machine_id} woke while a check was reaching it; checking it again");
+            self.run_check(Some(me)).await;
+        }
+    }
+
+    /// The connection a machine asleep would have said it woke on is gone,
+    /// without a word (its agent started again, the machine is shutting
+    /// down, this computer left the network). Nobody will say it woke now,
+    /// so checks look at it again; and once now, since something happened
+    /// there. Not again and again, should that go wrong each time.
+    ///
+    /// Lost while the machine is up (something on the way dropped it), it's
+    /// made again over the machine's link: its next sleep needs one.
+    pub(crate) async fn notice_lost(self: &Arc<Self>, machine_id: &str) {
+        let look = {
+            let mut st = self.state.lock().unwrap();
+            st.wake_notices.remove(machine_id);
+            let promised = st.probes.get_mut(machine_id).filter(|p| p.asleep && p.wake_notice.is_some()).map(|p| p.wake_notice = None).is_some();
+            if !promised {
+                let up = st.probes.get(machine_id).is_some_and(|p| !p.asleep);
+                drop(st);
+                if up {
+                    self.hear_again(machine_id);
+                }
+                return;
+            }
+            if self.demo.is_none() {
+                self.save_state(&mut st);
+            }
+            self.publish(&mut st);
+            let before = st.looked_for_lost.insert(machine_id.to_string(), Instant::now());
+            before.is_none_or(|at| at.elapsed() > HEAR_AGAIN_EVERY)
+        };
+        if look {
+            tracing::debug!("{machine_id} can no longer say when it wakes; checking it");
+            self.run_check(Some(vec![machine_id.to_string()])).await;
+        }
+    }
+
+    /// The connection a machine would say it woke on ended while the machine
+    /// is up. Made again over its link, in the app that hears machines wake.
+    /// Not again and again, should it end each time: then its next sleep has
+    /// none, and checks look at it.
+    fn hear_again(self: &Arc<Self>, machine_id: &str) {
+        let spec = {
+            let mut st = self.state.lock().unwrap();
+            if !st.takes_notices || st.heard_again.get(machine_id).is_some_and(|at| at.elapsed() < HEAR_AGAIN_EVERY) {
+                return;
+            }
+            let Some(spec) = st.inventory.machines.iter().find(|m| m.id == machine_id && m.is_connected() && !m.is_local()).cloned() else { return };
+            st.heard_again.insert(machine_id.to_string(), Instant::now());
+            spec
+        };
+        tracing::debug!("{machine_id} lost the connection it would say it woke on; making it again");
+        self.rt.spawn(async move {
+            let _ = super::link::wait_to_hear_again(&spec).await;
+        });
     }
 
     /// Stores a machine's check, and whether its wake notice comes here.
-    fn keep_probe(&self, st: &mut State, machine_id: &str, result: ProbeResult) {
+    fn keep_probe(&self, st: &mut State, machine_id: &str, mut result: ProbeResult) {
+        // In the app that hears machines wake, a promise is the connection
+        // it holds for the machine, no more and no less. What an earlier
+        // check wrote down (the Muxin that ran before this one, then a look
+        // that got no answer) is none without it: nobody would say it woke.
+        // And only while a word would still arrive on it (`quiet::holds`).
+        if result.asleep && st.takes_notices {
+            result.wake_notice = super::quiet::holds(machine_id);
+        }
         if result.asleep && result.wake_notice.is_some() && st.takes_notices {
             st.wake_notices.insert(machine_id.to_string());
         } else {
@@ -467,7 +564,7 @@ impl Engine {
     /// another network): they have to be looked at.
     pub(crate) fn asleep_out_of_reach(&self) -> Vec<String> {
         let st = self.state.lock().unwrap();
-        st.wake_notices.iter().filter(|id| !st.probes.get(*id).and_then(|p| p.wake_notice.as_deref()).is_some_and(super::direct::notice_arrives)).cloned().collect()
+        st.wake_notices.iter().filter(|id| !st.probes.get(*id).and_then(|p| p.wake_notice.as_deref()).is_some_and(super::quiet::arrives)).cloned().collect()
     }
 
     /// Kicks off a machine check (all machines, or one) plus a GitHub refresh.
@@ -1073,10 +1170,13 @@ impl Engine {
                         let _ = self.refresh_sessions(&link.machine).await;
                     }
                     // Going to sleep: let go of it now, and leave it alone.
-                    // (This computer's own agent says so too when the Mac
-                    // sleeps; its link stays, and goes on being followed.)
+                    // It says it woke on the connection made for that, when
+                    // there is one. (This computer's own agent says so too
+                    // when the Mac sleeps; its link stays, and goes on being
+                    // followed.)
                     Some("sleep") => {
-                        if self.machine_slept(&link.machine, &super::asleep::Told::from(&e)) {
+                        let told = super::asleep::Told { notice: super::quiet::holds(&link.machine), ..super::asleep::Told::from(&e) };
+                        if self.machine_slept(&link.machine, &told) {
                             break;
                         }
                     }
@@ -1225,12 +1325,22 @@ impl Engine {
                 // A check of every machine lets one sleep when an app is told
                 // of its waking (this one, or the one that's open): only a
                 // check of it by name looks. For a while: a notice can be
-                // lost (the machine woke somewhere else and gave up), so
+                // lost with nothing to show for it (the machine woke on
+                // another network than the one its connection was made on,
+                // or lost power; the app that held the connection quit), so
                 // past that the check looks all the same, once in a while.
+                //
+                // Whose word a promise is taken on: in the app that hears
+                // machines wake, its own (it holds the connection). Anywhere
+                // else (a command, an agent's MCP server), that app's, for
+                // as long as it runs: once it quit, nobody is left to hear.
                 .filter(|m| {
                     !full
                         || !st.probes.get(&m.id).is_some_and(|p| {
-                            p.asleep && p.wake_notice.is_some() && (!st.takes_notices || st.wake_notices.contains(&m.id)) && Utc::now() - p.checked_at < chrono::Duration::from_std(PROMISE_HOLDS).unwrap_or_default()
+                            p.asleep
+                                && p.wake_notice.is_some()
+                                && Utc::now() - p.checked_at < chrono::Duration::from_std(PROMISE_HOLDS).unwrap_or_default()
+                                && if st.takes_notices { st.wake_notices.contains(&m.id) } else { super::asleep::app_open(&self.paths.dir) }
                         })
                 })
                 .cloned()
@@ -1347,8 +1457,33 @@ impl Engine {
         if loaded.github != st.settings.github && loaded.github.orgs.is_empty() && loaded.github.repos.is_empty() {
             st.github = None;
         }
+        if loaded.wake_notices != st.settings.wake_notices {
+            self.hear_wakes(st, loaded.wake_notices);
+        }
         st.settings = loaded;
         true
+    }
+
+    /// The user turned hearing machines wake on or off (in the app that
+    /// stays open: no other hears them).
+    fn hear_wakes(&self, st: &mut State, on: bool) {
+        if self.demo.is_some() || !super::quiet::taking() {
+            return;
+        }
+        st.takes_notices = on;
+        super::quiet::set_on(on);
+        if on {
+            // The machines linked now can say so from here on; one that's
+            // asleep is asked at its next check.
+            super::link::wait_to_hear_all(&st.inventory.machines);
+        } else {
+            // Nobody hears them any more: they're looked at, at each check.
+            st.wake_notices.clear();
+            for p in st.probes.values_mut().filter(|p| p.asleep) {
+                p.wake_notice = None;
+            }
+            self.save_state(st);
+        }
     }
 
     /// Writes state.json (checks and what Tailscale knows).
@@ -1437,6 +1572,9 @@ impl Engine {
                 st.inventory = inv;
                 for id in left {
                     super::link::reset(&id);
+                    // And what it would have said it woke on: this app no
+                    // longer has the machine. (Letting go sends nothing.)
+                    super::quiet::let_go(&id);
                 }
                 true
             }
@@ -1635,7 +1773,7 @@ mod tests {
     /// again, and what rode on it ends (the shared clipboard).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_machine_disconnected_or_removed_elsewhere_loses_its_link_here() {
-        use super::super::{asleep, clipboard, link};
+        use super::super::{asleep, clipboard, link, quiet};
         let dir = std::env::temp_dir().join(format!("muxen-xlink-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1676,10 +1814,16 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(clipboard::sharing("xlink-mac"));
+        // And the connection the Mac would have said it woke on, made by
+        // the window like its link.
+        let wakes = quiet::tests::fake_agent();
+        quiet::open("xlink-mac", &wakes.paired, wakes.at).await.unwrap();
+        assert!(quiet::held("xlink-mac").is_some());
         window.refresh_from_disk();
         assert_eq!(window.current().machines.iter().find(|m| m.id == "xlink-mac").unwrap().status, "disconnected");
         gone("xlink-mac", l, agent).await;
         assert!(!clipboard::sharing("xlink-mac"));
+        assert!(quiet::held("xlink-mac").is_none(), "the window still waits to hear a machine it no longer has");
 
         // The CLI removes the box.
         later().await;
@@ -1750,7 +1894,7 @@ mod tests {
         assert_eq!((status(&engine, &nap), asleep::is(&nap)), ("online".to_string(), false));
 
         // Nap's agent will say when it wakes; Doze's can't (it's reached over ssh).
-        assert!(engine.machine_slept(&nap, &Told { notice: Some("192.168.1.20:53312".into()), lid_closed: true, notice_failed: false }));
+        assert!(engine.machine_slept(&nap, &Told { notice: Some("192.168.1.20:61234".into()), lid_closed: true }));
         assert!(engine.machine_slept(&doze, &Told::default()));
         // This computer runs Muxin: it isn't asleep, whatever its agent says
         // (it says so when this computer sleeps), and its link is kept.
@@ -1780,6 +1924,11 @@ mod tests {
         // Muxin's other processes (the CLI, an agent's MCP server) read the same.
         let other = Engine::new(paths.clone(), false);
         assert_eq!((status(&other, &nap), status(&other, &doze)), ("asleep".to_string(), "asleep".to_string()));
+        // The Muxin that stays open, which made the promise's connection and
+        // hears Nap wake: it holds this for as long as it runs.
+        let app = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("app.lock")).unwrap();
+        app.lock().unwrap();
+        assert!(asleep::app_open(&dir));
 
         // A check of every machine lets Nap sleep (its app is told when it
         // wakes), and looks at Doze, the only way to find it awake. Here it
@@ -1796,7 +1945,7 @@ mod tests {
         assert!(checked(&engine, &doze) > doze_before, "it was looked at");
 
         // A promise is taken at its word for a while only (a notice can be
-        // lost: the machine woke somewhere else and gave up). Past that, the
+        // lost: the machine woke somewhere else, or lost power). Past that, the
         // check of every machine looks at Nap too, and it keeps its promise
         // when it doesn't answer.
         {
@@ -1806,10 +1955,19 @@ mod tests {
         engine.run_check(None).await;
         assert!(Utc::now() - checked(&engine, &nap) < chrono::Duration::minutes(1), "looked at after 3 hours");
         let (_, p) = engine.machine(&nap).unwrap();
-        assert_eq!((status(&engine, &nap), p.unwrap().wake_notice.as_deref()), ("asleep".to_string(), Some("192.168.1.20:53312")));
+        assert_eq!((status(&engine, &nap), p.unwrap().wake_notice.as_deref()), ("asleep".to_string(), Some("192.168.1.20:61234")));
         let before = checked(&engine, &nap);
         engine.run_check(None).await;
         assert_eq!(checked(&engine, &nap), before, "and left alone again after");
+        // The app quits while Nap sleeps: nobody is left to hear it wake, so
+        // the promise it made counts for nothing in the processes that
+        // remain. Their check of every machine looks at Nap again.
+        drop(app);
+        assert!(!asleep::app_open(&dir));
+        other.run_check(None).await;
+        assert!(checked(&other, &nap) > before, "looked at once the app is gone");
+        assert_eq!(status(&other, &nap), "asleep");
+        engine.refresh_from_disk();
 
         // A machine that isn't asleep can't have itself checked by saying it woke.
         engine.run_check(Some(vec![here.clone()])).await;
@@ -1828,12 +1986,229 @@ mod tests {
         drop(other);
 
         // Asleep again, a check of it by name looks all the same.
-        engine.machine_slept(&nap, &Told { notice: Some("192.168.1.20:53312".into()), lid_closed: false, notice_failed: false });
+        engine.machine_slept(&nap, &Told { notice: Some("192.168.1.20:61234".into()), lid_closed: false });
         assert_eq!(status(&engine, &nap), "asleep");
         let before = checked(&engine, &nap);
         engine.run_check(Some(vec![nap.clone()])).await;
         assert!(checked(&engine, &nap) > before);
         assert_eq!(status(&engine, &nap), "asleep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The connection a sleeping machine would have said it woke on ended
+    /// without a word: nobody will say it woke, so it's looked at again, now
+    /// (once) and at each check.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_machine_that_can_no_longer_say_it_woke_is_looked_at_again() {
+        use super::super::asleep::{self, Told};
+        let dir = std::env::temp_dir().join(format!("muxen-notice-lost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid = std::process::id();
+        std::fs::write(dir.join("config.toml"), format!("[[machine]]\nname = \"Nod {pid}\"\nhost = \"nod-{pid}.invalid\"\n\n[[machine]]\nname = \"Up {pid}\"\nhost = \"up-{pid}.invalid\"\n")).unwrap();
+        let engine = Engine::new(Paths::resolve(Some(dir.clone()), None), false);
+        let (nod, up) = (format!("nod-{pid}"), format!("up-{pid}"));
+        let seen = |e: &Engine, id: &str| e.current().machines.iter().find(|m| m.id == id).map(|m| (m.status.clone(), m.unreachable.as_ref().map(|u| u.detail.clone()).unwrap_or_default())).unwrap();
+        let checked = |e: &Engine, id: &str| e.machine(id).unwrap().1.unwrap().checked_at;
+        {
+            let mut st = engine.state.lock().unwrap();
+            for id in [&nod, &up] {
+                let was_up = ProbeResult { ok: true, checked_at: Utc::now() - chrono::Duration::minutes(1), os: Some("darwin".into()), ..Default::default() };
+                st.probes.insert(id.to_string(), was_up.after(None));
+            }
+            engine.publish(&mut st);
+        }
+        let waiting = Told { notice: Some("192.168.1.20:61234".into()), lid_closed: false };
+        engine.machine_slept(&nod, &waiting);
+        assert_eq!(seen(&engine, &nod), ("asleep".to_string(), "Muxin lets it sleep, and reconnects when it wakes.".to_string()));
+
+        // A machine that's up loses nothing by it: it isn't looked at.
+        let before = checked(&engine, &up);
+        engine.notice_lost(&up).await;
+        assert_eq!(checked(&engine, &up), before);
+        // Asleep: looked at right away. Here it gets no answer, as from a
+        // Mac that wakes too slowly for the look: it's still asleep, and the
+        // words say that checks look from here on.
+        let before = checked(&engine, &nod);
+        engine.notice_lost(&nod).await;
+        assert!(checked(&engine, &nod) > before, "it was looked at");
+        assert_eq!(seen(&engine, &nod), ("asleep".to_string(), "Muxin lets it sleep, and looks again at each check.".to_string()));
+        // Lost again a moment later: not looked at twice in a row.
+        assert!(engine.machine_slept(&nod, &waiting));
+        assert_eq!(seen(&engine, &nod).1, "Muxin lets it sleep, and reconnects when it wakes.");
+        let before = checked(&engine, &nod);
+        engine.notice_lost(&nod).await;
+        assert_eq!(checked(&engine, &nod), before);
+        assert_eq!(seen(&engine, &nod), ("asleep".to_string(), "Muxin lets it sleep, and looks again at each check.".to_string()));
+        assert!(asleep::is(&nod));
+        // Muxin's other processes read the same.
+        let other = Engine::new(Paths::resolve(Some(dir.clone()), None), false);
+        assert_eq!(seen(&other, &nod).1, "Muxin lets it sleep, and looks again at each check.");
+        drop(other);
+        // And a check of every machine looks at it again, with no two hours
+        // to wait out: nothing is promised any more.
+        engine.run_check(None).await;
+        assert!(checked(&engine, &nod) > before, "looked at by the check of every machine");
+        assert_eq!(seen(&engine, &nod).0, "asleep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The app that hears machines wake takes a promise for what it is: the
+    /// connection it holds. One written down by the Muxin that ran before
+    /// it, kept by a look that got no answer, is none: checks look again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_promise_with_no_connection_behind_it_is_none() {
+        use super::super::asleep::Told;
+        let dir = std::env::temp_dir().join(format!("muxen-stale-promise-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid = std::process::id();
+        std::fs::write(dir.join("config.toml"), format!("[[machine]]\nname = \"Kip {pid}\"\nhost = \"kip-{pid}.invalid\"\n")).unwrap();
+        let engine = Engine::new(Paths::resolve(Some(dir.clone()), None), false);
+        let kip = format!("kip-{pid}");
+        let seen = |e: &Engine| e.current().machines.iter().find(|m| m.id == kip).map(|m| (m.status.clone(), m.unreachable.as_ref().map(|u| u.detail.clone()).unwrap_or_default())).unwrap();
+        let checked = |e: &Engine| e.machine(&kip).unwrap().1.unwrap().checked_at;
+        {
+            let mut st = engine.state.lock().unwrap();
+            let was_up = ProbeResult { ok: true, checked_at: Utc::now() - chrono::Duration::minutes(1), os: Some("darwin".into()), ..Default::default() };
+            st.probes.insert(kip.clone(), was_up.after(None));
+            engine.publish(&mut st);
+        }
+        // Asleep, with a promise written down: the Muxin before this one made it.
+        assert!(engine.machine_slept(&kip, &Told { notice: Some("192.168.1.20:61234".into()), lid_closed: false }));
+        assert_eq!(seen(&engine), ("asleep".to_string(), "Muxin lets it sleep, and reconnects when it wakes.".to_string()));
+        // This one hears machines wake, and holds no connection to Kip. Its
+        // look as it starts gets no answer (a Mac that wakes too slowly for
+        // it): still asleep, and nothing is promised.
+        engine.state.lock().unwrap().takes_notices = true;
+        engine.run_check(Some(vec![kip.clone()])).await;
+        assert_eq!(seen(&engine), ("asleep".to_string(), "Muxin lets it sleep, and looks again at each check.".to_string()));
+        // So the check of every machine looks at it, with no two hours to wait.
+        let before = checked(&engine);
+        engine.run_check(None).await;
+        assert!(checked(&engine) > before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The app that stays open hears a machine wake on the connection it
+    /// made, through what `start` sets up: the machine is looked at at once.
+    /// A connection that ends without a word leaves nothing promised.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_app_that_stays_open_hears_a_machine_wake() {
+        use super::super::asleep::Told;
+        use super::super::quiet;
+        let dir = std::env::temp_dir().join(format!("muxen-hears-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid = std::process::id();
+        std::fs::write(dir.join("config.toml"), format!("[[machine]]\nname = \"Wink {pid}\"\nhost = \"wink-{pid}.invalid\"\n")).unwrap();
+        let engine = Engine::new(Paths::resolve(Some(dir.clone()), None), false);
+        let wink = format!("wink-{pid}");
+        let seen = |e: &Engine| e.current().machines.iter().find(|m| m.id == wink).map(|m| (m.status.clone(), m.unreachable.as_ref().map(|u| u.detail.clone()).unwrap_or_default())).unwrap();
+        let checked = |e: &Engine| e.machine(&wink).unwrap().1.unwrap().checked_at;
+        // Waits until the machine has been looked at since `before` (and
+        // that look has come back), with nobody here asking for one.
+        let looked_at = |engine: Arc<Engine>, before: chrono::DateTime<Utc>| {
+            let checked = &checked;
+            async move {
+                let deadline = Instant::now() + Duration::from_secs(15);
+                while checked(&engine) <= before && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                checked(&engine) > before
+            }
+        };
+        {
+            let mut st = engine.state.lock().unwrap();
+            let was_up = ProbeResult { ok: true, checked_at: Utc::now() - chrono::Duration::minutes(1), os: Some("darwin".into()), ..Default::default() };
+            st.probes.insert(wink.clone(), was_up.after(None));
+            engine.publish(&mut st);
+        }
+        // What `start` does for an app that stays open (without its loops).
+        engine.take_wake_notices();
+        assert!(engine.state.lock().unwrap().takes_notices && quiet::wanted());
+
+        // Its agent's end of the connection, and the app's call to it while
+        // the machine is up.
+        let agent = quiet::tests::fake_agent();
+        quiet::open(&wink, &agent.paired, agent.at).await.unwrap();
+        // It goes to sleep. What's promised is the connection this app
+        // holds, whatever the word about it says.
+        assert!(engine.machine_slept(&wink, &Told { notice: Some("192.0.2.7:61234".into()), lid_closed: false }));
+        assert_eq!(seen(&engine), ("asleep".to_string(), "Muxin lets it sleep, and reconnects when it wakes.".to_string()));
+        assert_eq!(engine.machine(&wink).unwrap().1.unwrap().wake_notice, quiet::holds(&wink));
+        let before = checked(&engine);
+        engine.run_check(None).await;
+        assert_eq!(checked(&engine), before, "left alone while it sleeps");
+
+        // Its agent says it woke: looked at, with nobody asking. It said
+        // it's awake, so not finding it (here) means offline.
+        agent.say.send(Some("awake\n")).unwrap();
+        assert!(looked_at(engine.clone(), before).await, "it said it woke, and wasn't looked at");
+        assert_eq!(seen(&engine).0, "offline");
+
+        // Asleep again, and this time the connection ends without a word
+        // (its agent stopped): nothing is promised any more, it's looked at
+        // once, and the words say that checks look from here on.
+        quiet::open(&wink, &agent.paired, agent.at).await.unwrap();
+        assert!(engine.machine_slept(&wink, &Told::default()));
+        assert_eq!(seen(&engine).1, "Muxin lets it sleep, and reconnects when it wakes.");
+        let before = checked(&engine);
+        agent.say.send(None).unwrap();
+        assert!(looked_at(engine.clone(), before).await, "its connection ended, and it wasn't looked at");
+        assert_eq!(seen(&engine), ("asleep".to_string(), "Muxin lets it sleep, and looks again at each check.".to_string()));
+        assert!(quiet::held(&wink).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A machine says it woke while a check is on its way to it. What that
+    /// check brings back is from before the wake (asleep, it says): the
+    /// machine is looked at once more, not left asleep on that word.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_wake_said_while_a_check_reaches_the_machine_is_looked_at_again() {
+        use super::super::asleep::Told;
+        let dir = std::env::temp_dir().join(format!("muxen-stir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid = std::process::id();
+        std::fs::write(dir.join("config.toml"), format!("[[machine]]\nname = \"Stir {pid}\"\nhost = \"stir-{pid}.invalid\"\n")).unwrap();
+        let engine = Engine::new(Paths::resolve(Some(dir.clone()), None), false);
+        let stir = format!("stir-{pid}");
+        {
+            let mut st = engine.state.lock().unwrap();
+            let was_up = ProbeResult { ok: true, checked_at: Utc::now() - chrono::Duration::minutes(1), os: Some("darwin".into()), ..Default::default() };
+            st.probes.insert(stir.clone(), was_up.after(None));
+            engine.publish(&mut st);
+        }
+        assert!(engine.machine_slept(&stir, &Told::default()));
+        // A check is reaching it (as `run_check` marks one), and comes back
+        // in a moment with what the machine said before it woke.
+        engine.state.lock().unwrap().checking.insert(stir.clone());
+        let reaching = {
+            let (engine, stir) = (engine.clone(), stir.clone());
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let mut st = engine.state.lock().unwrap();
+                st.checking.remove(&stir);
+                let from_before = ProbeResult::asleep(Instant::now(), &Told::default()).after(st.probes.get(&stir));
+                engine.keep_probe(&mut st, &stir, from_before);
+                engine.publish(&mut st);
+            })
+        };
+        engine.machine_woke(&stir).await;
+        reaching.await.unwrap();
+        // The last word on it is a look of its own, after that one (here it
+        // gets no answer, which says so itself), not the word from before.
+        let (_, p) = engine.machine(&stir).unwrap();
+        let p = p.unwrap();
+        assert_ne!(p.error.as_deref(), Some(probe::ASLEEP), "left on a word from before it woke");
+        assert!(p.error.is_some_and(|e| e.contains("stir-")), "looked at by name");
+
+        // A wake said with no check on its way is one look, as ever.
+        assert!(engine.machine_slept(&stir, &Told::default()));
+        let before = engine.machine(&stir).unwrap().1.unwrap().checked_at;
+        engine.machine_woke(&stir).await;
+        assert!(engine.machine(&stir).unwrap().1.unwrap().checked_at > before);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

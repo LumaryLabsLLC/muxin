@@ -25,8 +25,8 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::direct;
 use super::link::{self, DATA, Link};
+use super::{direct, quiet};
 use crate::config::MachineSpec;
 
 /// A slow link to `agent`: returns the port to reach it at.
@@ -148,37 +148,93 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     RUNTIME.get_or_init(|| tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().expect("a runtime"))
 }
 
-/// The machines whose agents said they woke, for every test here (the app
-/// takes wake notices one way, set once a process).
-fn woke() -> tokio::sync::broadcast::Receiver<String> {
-    static HEARD: std::sync::OnceLock<tokio::sync::broadcast::Sender<String>> = std::sync::OnceLock::new();
-    HEARD
-        .get_or_init(|| {
-            let (tx, _) = tokio::sync::broadcast::channel(16);
-            let heard = tx.clone();
-            direct::take_notices(move |id| {
-                let _ = heard.send(id.to_string());
-            });
-            tx
-        })
-        .subscribe()
+/// What a test here waits to hear about `id`, when it comes within `within`.
+async fn heard(from: &mut tokio::sync::broadcast::Receiver<String>, id: &str, within: Duration) -> bool {
+    tokio::time::timeout(within, async {
+        loop {
+            match from.recv().await {
+                Ok(who) if who == id => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false)
 }
 
-/// A plain way to `agent` that counts what the app sends it: returns the
-/// port to reach it at, and the count.
-async fn counted_link(agent: SocketAddr) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
-    let front = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+/// Waits until this app has a quiet connection for `id` (and, with `through`,
+/// one that goes that way). Returns its end of it.
+async fn waits_to_hear(id: &str, through: Option<&Counted>) -> Option<String> {
+    for _ in 0..100 {
+        if let Some(at) = quiet::held(id) {
+            if through.is_none_or(|way| way.callers.lock().unwrap().iter().any(|from| from.to_string() == at)) {
+                return Some(at);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    None
+}
+
+/// A plain way to an agent that counts what the app sends it, over UDP (its
+/// link) and TCP (the connection it hears the wake on): the port to reach it
+/// at, the same for both as the agent's own is.
+struct Counted {
+    port: u16,
+    /// UDP packets from the app; and on TCP every connection it made, every
+    /// read of what it wrote, and the end of its side.
+    events: Arc<std::sync::atomic::AtomicUsize>,
+    /// The app's TCP connections as the machine's own system would hold them
+    /// (kept open, to read its counts), and where each came from.
+    held: Arc<Mutex<Vec<socket2::Socket>>>,
+    callers: Arc<Mutex<Vec<SocketAddr>>>,
+}
+
+impl Counted {
+    /// Everything the app has sent so far. On a Mac that includes every TCP
+    /// packet, as the system at this end counts them: a goodbye or a reset
+    /// carries no data to read, and would wake a sleeping machine all the same.
+    fn sent(&self) -> usize {
+        self.events.load(std::sync::atomic::Ordering::Relaxed) + self.held.lock().unwrap().iter().map(tcp_packets_received).sum::<usize>()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn tcp_packets_received(s: &socket2::Socket) -> usize {
+    use std::os::fd::AsRawFd;
+    let mut info: libc::tcp_connection_info = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::tcp_connection_info>() as libc::socklen_t;
+    let got = unsafe { libc::getsockopt(s.as_raw_fd(), libc::IPPROTO_TCP, libc::TCP_CONNECTION_INFO, (&raw mut info).cast(), &raw mut len) };
+    if got == 0 { info.tcpi_rxpackets as usize } else { 0 }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn tcp_packets_received(_: &socket2::Socket) -> usize {
+    0
+}
+
+async fn counted_link(agent: SocketAddr) -> Counted {
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // One port number free for both.
+    let (listener, front) = loop {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        if let Ok(front) = UdpSocket::bind(listener.local_addr().unwrap()).await {
+            break (listener, Arc::new(front));
+        }
+    };
     let back = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     back.connect(agent).await.unwrap();
     let port = front.local_addr().unwrap().port();
-    let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let app: Arc<Mutex<Option<SocketAddr>>> = Default::default();
-    let (f, b, a, n) = (front.clone(), back.clone(), app.clone(), sent.clone());
+    let (f, b, a, n) = (front.clone(), back.clone(), app.clone(), events.clone());
     tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
         while let Ok((len, from)) = f.recv_from(&mut buf).await {
             *a.lock().unwrap() = Some(from);
-            n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            n.fetch_add(1, Ordering::Relaxed);
             let _ = b.send(&buf[..len]).await;
         }
     });
@@ -191,7 +247,39 @@ async fn counted_link(agent: SocketAddr) -> (u16, Arc<std::sync::atomic::AtomicU
             }
         }
     });
-    (port, sent)
+    let held: Arc<Mutex<Vec<socket2::Socket>>> = Default::default();
+    let callers: Arc<Mutex<Vec<SocketAddr>>> = Default::default();
+    let (n, kept, came) = (events.clone(), held.clone(), callers.clone());
+    tokio::spawn(async move {
+        while let Ok((from_app, caller)) = listener.accept().await {
+            n.fetch_add(1, Ordering::Relaxed);
+            let Ok(to_agent) = tokio::net::TcpStream::connect(agent).await else { continue };
+            if let Ok(same) = socket2::SockRef::from(&from_app).try_clone() {
+                kept.lock().unwrap().push(same);
+            }
+            came.lock().unwrap().push(caller);
+            let (mut app_said, mut to_app) = from_app.into_split();
+            let (mut agent_said, mut to_agent) = to_agent.into_split();
+            let n = n.clone();
+            // Each way by itself: the app closes its half long before the agent says anything.
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 16384];
+                loop {
+                    let len = app_said.read(&mut buf).await.unwrap_or(0);
+                    n.fetch_add(1, Ordering::Relaxed);
+                    if len == 0 || to_agent.write_all(&buf[..len]).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = to_agent.shutdown().await;
+            });
+            tokio::spawn(async move {
+                let _ = tokio::io::copy(&mut agent_said, &mut to_app).await;
+                let _ = to_app.shutdown().await;
+            });
+        }
+    });
+    Counted { port, events, held, callers }
 }
 
 /// A test agent listening in a home of its own.
@@ -445,7 +533,8 @@ fn an_old_app_is_served_as_before() {
 
 /// A machine that sleeps says so before it does, is left alone while it
 /// sleeps (reached all the same, it says it's asleep), and tells the app
-/// when it has woken, with no link left to say it on. The agent is told it
+/// when it has woken, with no link left to say it on: on a connection the
+/// app made beforehand, which the agent only answers. The agent is told it
 /// sleeps and wakes by a file (`MUXEN_TEST_POWER`), not by this computer.
 ///
 /// Run with a new agent. With one from before it could say any of this
@@ -457,9 +546,9 @@ fn a_machine_that_sleeps_says_so_and_says_when_it_wakes() {
     runtime().block_on(async {
         let power = std::env::temp_dir().join(format!("muxin-e2e-power-{}", std::process::id()));
         std::fs::write(&power, "awake").unwrap();
-        // This app takes wake notices, as the window does.
-        let mut woke = woke();
-        let (machine, l) = TestAgent::start_with("sleeper", None, &[("MUXEN_TEST_POWER", &power)]).await;
+        // This app waits to hear machines wake, as the window does.
+        let (mut woke, mut lost) = quiet::test_heard();
+        let (mut machine, l) = TestAgent::start_with("sleeper", None, &[("MUXEN_TEST_POWER", &power)]).await;
         let id = machine.id.clone();
         let spec: MachineSpec = toml::from_str(&format!("name = \"{id}\"\nid = \"{id}\"\nhost = \"{id}.invalid\"")).unwrap();
         let mut events = l.subscribe();
@@ -479,52 +568,52 @@ fn a_machine_that_sleeps_says_so_and_says_when_it_wakes() {
         }
 
         if !l.says_sleep() {
-            // An agent from before: it says nothing, and the link stays up.
+            // An agent from before: it says nothing, there's no waiting to
+            // hear it wake, and the link stays up.
             eprintln!("agent {}: from before it could say its machine sleeps", l.version());
             assert_eq!(l.asleep(), None);
+            assert!(!l.offers_wake_notice());
             std::fs::write(&power, "asleep").unwrap();
             assert!(event(&mut events, "sleep", Duration::from_secs(2)).await.is_none());
-            let pong = l.request(json!({ "op": "ping", "wake_notice": 53312 }), Duration::from_secs(5)).await.unwrap();
-            assert_eq!((pong["ok"].as_bool(), pong.get("asleep"), pong.get("wake_notice")), (Some(true), None, None));
+            let pong = l.request(json!({ "op": "ping" }), Duration::from_secs(5)).await.unwrap();
+            assert_eq!((pong["ok"].as_bool(), pong.get("asleep")), (Some(true), None));
             assert!(l.alive());
+            assert_eq!(quiet::held(&id), None, "no connection was made to it for that");
             let _ = std::fs::remove_file(&power);
             machine.stop(&l).await;
             return;
         }
         eprintln!("agent {}: says when its machine sleeps", l.version());
-        // The agent tries the way to this app before it promises a notice: to
-        // a port nobody listens on, it says so (the app then looks for itself).
-        let nobody = l.request(json!({ "op": "ping", "wake_notice": 9 }), Duration::from_secs(10)).await.unwrap();
-        assert_eq!((nobody["ok"].as_bool(), nobody.get("wake_notice")), (Some(true), None), "{nobody}");
-        assert!(nobody["wake_notice_error"].is_string(), "{nobody}");
-        // To this app's own port (as the link said when it came up), it got
-        // through: that try wakes nobody.
-        let port = direct::notice_port().expect("this app takes wake notices");
-        let there = l.request(json!({ "op": "ping", "wake_notice": port }), Duration::from_secs(10)).await.unwrap();
-        assert_eq!(there["wake_notice"].as_str().and_then(|a| a.rsplit(':').next()), Some(port.to_string().as_str()), "{there}");
-        assert!(tokio::time::timeout(Duration::from_millis(500), woke.recv()).await.is_err(), "a try at the way isn't a wake");
+        // Its hello offers a way to hear it wake, and the link took it: a
+        // connection of this app's own making, with nothing said on it.
+        assert!(l.offers_wake_notice());
+        let before = waits_to_hear(&id, None).await.expect("a connection to hear its wake on");
+        assert!(quiet::arrives(&before), "{before}");
+        assert!(!quiet::arrives("192.0.2.7:1"), "an address this computer doesn't have");
+        assert!(!heard(&mut woke, &id, Duration::from_millis(500)).await && !heard(&mut lost, &id, Duration::from_millis(100)).await);
 
-        // Going to sleep: said on the link, with where the wake notice will go.
+        // Going to sleep: said on the link.
         std::fs::write(&power, "asleep").unwrap();
-        let said = event(&mut events, "sleep", Duration::from_secs(5)).await.expect("it says it's going to sleep");
-        let notice = said["wake_notice"].as_str().expect("where its wake notice goes").to_string();
-        assert!(direct::notice_arrives(&notice), "{notice}");
-        assert!(!direct::notice_arrives("192.0.2.7:1"), "an address this computer doesn't have");
+        event(&mut events, "sleep", Duration::from_secs(5)).await.expect("it says it's going to sleep");
         // As the engine does: let go of it, and leave it alone.
         const OWNER: usize = 9001;
         asleep::sync(OWNER, [&id].into_iter());
         link::reset(&id);
         assert!(link::current_or_direct(&spec).await.is_none() && link::get(&spec).await.is_none());
         assert_eq!(spec.refuse_if_disconnected().unwrap_err(), format!("{id} is asleep. Wake it first."));
+        assert_eq!(quiet::held(&id).as_deref(), Some(before.as_str()), "letting go of the link leaves it");
 
         // Looked at on purpose (a check of it by name): reached in its
-        // sleep, it says it's asleep, and no link is kept.
+        // sleep, it says it's asleep, and no link is kept. The look makes
+        // the connection anew (an app that just started has none).
         {
             let _looking = asleep::look(&id);
             let since = std::time::Instant::now();
             assert!(link::current_or_direct(&spec).await.is_none());
             let told = asleep::told_since(&id, since).expect("its agent said it's asleep");
-            assert_eq!(told.notice.as_deref(), Some(notice.as_str()));
+            let now = quiet::held(&id).expect("still waiting to hear it wake");
+            assert_eq!(told.notice.as_deref(), Some(now.as_str()));
+            assert_ne!(now, before);
             assert!(link::current(&id).is_none());
             // Asked to wake, it says where it stands (the file doesn't wake).
             let reached = link::reach(&spec).await.expect("reached to wake it");
@@ -533,18 +622,29 @@ fn a_machine_that_sleeps_says_so_and_says_when_it_wakes() {
             assert_eq!((r["ok"].as_bool(), r["awake"].as_bool()), (Some(true), Some(false)), "{r}");
             reached.hang_up();
         }
-        assert!(tokio::time::timeout(Duration::from_secs(2), woke.recv()).await.is_err(), "nothing is said while it sleeps");
+        assert!(!heard(&mut woke, &id, Duration::from_secs(2)).await, "nothing is said while it sleeps");
 
         // It wakes: this app hears, with nothing linked to it.
         std::fs::write(&power, "awake").unwrap();
-        let who = tokio::time::timeout(Duration::from_secs(15), woke.recv()).await.expect("its wake notice").unwrap();
-        assert_eq!(who, id);
+        assert!(heard(&mut woke, &id, Duration::from_secs(15)).await, "its wake notice");
+        assert_eq!(quiet::held(&id), None, "said once, on a connection that ended there");
         asleep::sync(OWNER, std::iter::empty());
         direct::retry_now(&id);
         let again = link::current_or_direct(&spec).await.expect("linked again");
         assert!(again.asleep().is_none() && again.says_sleep());
-        // Told once: nothing more comes.
-        assert!(tokio::time::timeout(Duration::from_secs(3), woke.recv()).await.is_err());
+        // Told once: nothing more comes (the agent also said it on the
+        // connection this app had let go of, to nobody), and the new link
+        // waits to hear the next wake.
+        assert!(!heard(&mut woke, &id, Duration::from_secs(3)).await && !heard(&mut lost, &id, Duration::from_millis(100)).await);
+        let held = waits_to_hear(&id, None).await.expect("a new connection for the next wake");
+
+        // The agent stops (an update, the machine shutting down): the
+        // connection ends without a word, and this app knows nobody will say
+        // the machine woke.
+        let _ = machine.listener.kill();
+        let _ = machine.listener.wait();
+        assert!(heard(&mut lost, &id, Duration::from_secs(10)).await, "its connection was lost");
+        assert!(quiet::held(&id).is_none() && !quiet::arrives(&held));
         let _ = std::fs::remove_file(&power);
         machine.stop(&again).await;
     });
@@ -552,21 +652,24 @@ fn a_machine_that_sleeps_says_so_and_says_when_it_wakes() {
 
 /// The whole of it, with the engine: a machine that goes to sleep shows as
 /// asleep within a moment, nothing is sent to it while it sleeps (counted on
-/// the way: no keep-alive, no check, no try at linking again, for longer
-/// than any of them waits), and it's online again when it says it woke.
+/// the way, UDP and TCP: no keep-alive, no check, no try at linking again,
+/// for longer than any of them waits), and it's online again when it says it
+/// woke. Then the same with the app gone while it sleeps (its connection
+/// closed, as quitting closes it): that sends nothing either, nobody hears
+/// the wake, and a check finds it awake.
 /// Run with a new agent.
 #[test]
 #[ignore]
 fn nothing_is_sent_to_a_machine_while_it_sleeps() {
     use super::Engine;
-    use std::sync::atomic::Ordering;
     runtime().block_on(async {
         let power = std::env::temp_dir().join(format!("muxin-e2e-power2-{}", std::process::id()));
         std::fs::write(&power, "awake").unwrap();
-        let mut woke = woke();
+        let (mut woke, _lost) = quiet::test_heard();
         let id = "quiet";
         // The engine reaches the machine one way only, which counts what's sent to it.
-        let (port, sent) = counted_link(SocketAddr::from(([127, 0, 0, 1], TestAgent::port(id)))).await;
+        let way = counted_link(SocketAddr::from(([127, 0, 0, 1], TestAgent::port(id)))).await;
+        let port = way.port;
         // The engine first: it follows every new link.
         let dir = std::env::temp_dir().join(format!("muxin-e2e-engine-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -577,6 +680,10 @@ fn nothing_is_sent_to_a_machine_while_it_sleeps() {
         )
         .unwrap();
         let engine = Engine::new(crate::config::Paths::resolve(Some(dir.clone()), None), false);
+        // It hears machines wake as the app that stays open does: what
+        // `start` sets up for that, without its loops (they'd reach for the
+        // machine by themselves, and the test does that by hand to count it).
+        engine.take_wake_notices();
         let (machine, l) = TestAgent::start_with(id, None, &[("MUXEN_TEST_POWER", &power)]).await;
         if !l.says_sleep() {
             eprintln!("agent {}: from before it could say its machine sleeps; nothing to see here", l.version());
@@ -601,42 +708,84 @@ fn nothing_is_sent_to_a_machine_while_it_sleeps() {
             }
             status(&engine)
         };
+        let detail = |engine: &Engine| engine.current().machines.iter().find(|m| m.id == id).and_then(|m| m.unreachable.as_ref().map(|u| (u.kind.clone(), u.detail.clone())));
         engine.run_check(Some(vec![id.to_string()])).await;
         assert_eq!(status(&engine), "online", "{:?}", engine.machine(id).and_then(|(_, p)| p).and_then(|p| p.error));
         assert!(link::current(id).is_some_and(|l| l.transport() == "direct"));
+        // It hears the wake on a connection that goes the counted way too.
+        waits_to_hear(id, Some(&way)).await.expect("a connection to hear its wake on, the counted way");
         // The link's keep-alives are counted, as they'd wake a sleeping Mac.
-        let before = sent.load(Ordering::Relaxed);
+        let before = way.sent();
         tokio::time::sleep(Duration::from_secs(9)).await;
-        assert!(sent.load(Ordering::Relaxed) > before, "an idle link still sends");
+        assert!(way.sent() > before, "an idle link still sends");
 
         // It goes to sleep, and says so.
         std::fs::write(&power, "asleep").unwrap();
         assert_eq!(until(engine.clone(), "asleep", Duration::from_secs(5)).await, "asleep");
-        let s = engine.current();
-        let m = s.machines.iter().find(|m| m.id == id).unwrap();
-        assert_eq!(m.unreachable.as_ref().map(|u| (u.kind.as_str(), u.detail.as_str())), Some(("asleep", "Muxin lets it sleep, and reconnects when it wakes.")));
+        assert_eq!(detail(&engine), Some(("asleep".to_string(), "Muxin lets it sleep, and reconnects when it wakes.".to_string())));
         assert!(link::current(id).is_none());
         // The goodbye goes while it still hears; then nothing. What would
         // have reached for it: the link's keep-alive (4 s), a look at its
         // sessions (8 s), a check after the link was lost, the look for a
         // machine that's offline (30 s), a check of every machine, a request.
         tokio::time::sleep(Duration::from_secs(2)).await;
-        let quiet = sent.load(Ordering::Relaxed);
+        let quiet = way.sent();
         engine.run_check(None).await;
         assert!(engine.refresh_sessions(id).await.is_err());
         assert!(engine.connection(id).await.is_ok_and(|c| c.via == "none"));
         tokio::time::sleep(Duration::from_secs(40)).await;
-        assert_eq!(sent.load(Ordering::Relaxed), quiet, "something was sent to a machine that's asleep");
+        assert_eq!(way.sent(), quiet, "something was sent to a machine that's asleep");
         assert_eq!(status(&engine), "asleep");
+        assert!(quiet::held(id).is_some());
 
-        // It wakes and says so: the app (as the window does) looks at it.
+        // It wakes and says so, and the engine looks at it at once: nobody
+        // asks it to (its own hearing does, as in the window).
         std::fs::write(&power, "awake").unwrap();
-        let who = tokio::time::timeout(Duration::from_secs(15), woke.recv()).await.expect("its wake notice").unwrap();
-        assert_eq!(who, id);
-        engine.machine_woke(id).await;
+        assert!(heard(&mut woke, id, Duration::from_secs(15)).await, "its wake notice");
+        assert_eq!(until(engine.clone(), "online", Duration::from_secs(15)).await, "online");
+        assert!(link::current(id).is_some(), "linked again");
+        assert!(way.sent() > quiet);
+
+        // The connection for its next wake ends while it's up (here its
+        // agent lets go of this app's oldest, as it does past four): the
+        // engine makes it again, so the next sleep has one.
+        let first = waits_to_hear(id, Some(&way)).await.expect("a connection for the next wake");
+        let paired = direct::paired(id).expect("paired");
+        let agent_at = SocketAddr::from(([127, 0, 0, 1], port));
+        for n in 0..4 {
+            quiet::open(&format!("{id}-other-{n}"), &paired, agent_at).await.expect("another call from this app");
+        }
+        let mut again = None;
+        for _ in 0..100 {
+            again = quiet::held(id).filter(|at| *at != first);
+            if again.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(again.is_some(), "the connection that ended while it was up wasn't made again");
+        for n in 0..4 {
+            quiet::let_go(&format!("{id}-other-{n}"));
+        }
+
+        // Asleep again, and this time the app goes (it quits, or drops the
+        // connection): closing it sends the machine nothing.
+        let held = waits_to_hear(id, Some(&way)).await.expect("a connection for the next wake");
+        std::fs::write(&power, "asleep").unwrap();
+        assert_eq!(until(engine.clone(), "asleep", Duration::from_secs(5)).await, "asleep");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let quiet = way.sent();
+        quiet::let_go(id);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(!quiet::arrives(&held));
+        assert_eq!(way.sent(), quiet, "letting go of the connection sent something to a machine that's asleep");
+        // Nobody hears this wake: a check finds it awake, as before all this.
+        std::fs::write(&power, "awake").unwrap();
+        assert!(!heard(&mut woke, id, Duration::from_secs(3)).await);
+        assert_eq!(status(&engine), "asleep");
+        engine.run_check(Some(vec![id.to_string()])).await;
         assert_eq!(status(&engine), "online");
         let again = link::current(id).expect("linked again");
-        assert!(sent.load(Ordering::Relaxed) > quiet);
         let _ = std::fs::remove_file(&power);
         machine.stop(&again).await;
         let _ = std::fs::remove_dir_all(&dir);

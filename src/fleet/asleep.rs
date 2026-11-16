@@ -6,7 +6,8 @@
 //! says when it's going to sleep and when it has woken (agent/src/sleep.rs),
 //! so while a machine is asleep nothing here reaches for it: no link, no
 //! request, no check by itself. What's left is a check of that machine by
-//! name, Wake, and the agent's own notice that it woke (direct.rs).
+//! name, Wake, and the agent's own word that it woke, on a connection the
+//! app that stays open made for it beforehand (quiet.rs).
 //!
 //! This is the list of them in this process. It follows the machines' last
 //! checks (`ProbeResult::asleep`, which state.json shares between Muxin's
@@ -19,28 +20,23 @@ use std::time::Instant;
 
 use crate::config::MachineSpec;
 
-/// What a machine's agent said when it said it's asleep.
+/// What's known of a machine when its agent says it's asleep.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Told {
-    /// Where its notice goes when it wakes ("192.168.1.20:53312": this app,
-    /// as the machine sees it). None: it won't send one (over ssh, or this
-    /// app didn't ask).
+    /// This app's end of the connection its agent says it woke on
+    /// ("192.168.1.20:61234"; see quiet.rs). None: nobody will hear (it's
+    /// reached over ssh, its agent is from before, or this isn't the app
+    /// that stays open), so only a check finds it awake.
     pub notice: Option<String>,
     /// A laptop with its lid closed.
     pub lid_closed: bool,
-    /// This app asked for a notice and the agent couldn't get one through
-    /// (on a Mac: it isn't allowed on the local network there).
-    pub notice_failed: bool,
 }
 
 impl Told {
-    /// From a link's hello, a ping's reply or its `sleep` event.
+    /// From a link's hello, a ping's reply or its `sleep` event. Whoever
+    /// reached the machine adds where it will say it woke.
     pub fn from(message: &serde_json::Value) -> Told {
-        Told {
-            notice: message["wake_notice"].as_str().map(str::to_string),
-            lid_closed: message["lid_closed"].as_bool() == Some(true),
-            notice_failed: message["wake_notice"].is_null() && message["wake_notice_error"].is_string(),
-        }
+        Told { notice: None, lid_closed: message["lid_closed"].as_bool() == Some(true) }
     }
 }
 
@@ -115,6 +111,16 @@ pub fn told_since(machine_id: &str, since: Instant) -> Option<Told> {
     state().lock().unwrap().told.get(machine_id).filter(|(at, _)| *at >= since).map(|(_, what)| what.clone())
 }
 
+/// Whether a Muxin that stays open runs on this config folder: it holds
+/// `app.lock` there for as long as it runs, however it ends (instance.rs).
+/// A command or an agent's MCP server asks this before it takes a machine's
+/// promise to say when it wakes at its word: that app made the promise's
+/// connection, and with it gone nobody is there to hear.
+pub fn app_open(dir: &std::path::Path) -> bool {
+    let Ok(lock) = std::fs::OpenOptions::new().write(true).open(dir.join("app.lock")) else { return false };
+    matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+}
+
 /// While this is held, the machine may be reached though it's asleep: a
 /// check of it by name, or waking it.
 pub struct Looking(String);
@@ -165,11 +171,8 @@ mod tests {
     fn remembers_what_an_agent_just_said() {
         let before = Instant::now();
         assert_eq!(told_since("asleep-test-told", before), None);
-        let said = Told::from(&serde_json::json!({ "event": "sleep", "wake_notice": "192.168.1.20:53312", "lid_closed": true }));
-        assert_eq!(said, Told { notice: Some("192.168.1.20:53312".into()), lid_closed: true, notice_failed: false });
-        // The agent tried the way to this app and nothing came back.
-        let blocked = Told::from(&serde_json::json!({ "event": "sleep", "wake_notice_error": "no answer" }));
-        assert_eq!(blocked, Told { notice: None, lid_closed: false, notice_failed: true });
+        let said = Told { notice: Some("192.168.1.20:61234".into()), ..Told::from(&serde_json::json!({ "event": "sleep", "lid_closed": true })) };
+        assert_eq!(said, Told { notice: Some("192.168.1.20:61234".into()), lid_closed: true });
         told("asleep-test-told", said.clone());
         assert_eq!(told_since("asleep-test-told", before), Some(said));
         assert_eq!(told_since("asleep-test-told", Instant::now() + std::time::Duration::from_secs(1)), None);

@@ -608,12 +608,10 @@ pub struct Settings {
     /// are asked about once (see fleet::build).
     pub connect_directly: bool,
     /// A Mac that sleeps is left alone, so nothing Muxin sends wakes it. With
-    /// this on, its agent tells this app when it wakes (it connects to the
-    /// app: see fleet::direct), and Muxin never looks at it meanwhile. macOS
-    /// asks on each Mac to allow Muxin Agent on the local network for that,
-    /// and again after every update of the agent there, so it's off until
-    /// the user turns it on: Muxin then looks at a sleeping Mac at each
-    /// check, which wakes it for a moment.
+    /// this on, its agent tells this app when it wakes, on a connection the
+    /// app made to it beforehand (see fleet::quiet), and Muxin never looks
+    /// at it meanwhile. Off, Muxin looks at a sleeping Mac at each check,
+    /// which wakes it for a moment.
     pub wake_notices: bool,
     /// The editor machines' folders open in: "zed", "cursor", "vscode", or "" for the first one installed.
     pub editor: String,
@@ -833,7 +831,7 @@ impl Default for Settings {
             desktop_shortcuts: true,
             check_updates: true,
             connect_directly: true,
-            wake_notices: false,
+            wake_notices: true,
             editor: String::new(),
             cloud: CloudSettings::default(),
             prompts: Default::default(),
@@ -1239,10 +1237,10 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(&path, "[settings]\ncheck_interval_minutes = 5\n").unwrap();
         assert!(Settings::load(&path).connect_directly);
-        // Off unless asked for: macOS asks about it on every Mac.
-        assert!(!Settings::load(&path).wake_notices);
-        std::fs::write(&path, "[settings]\nconnect_directly = false\n").unwrap();
-        assert!(!Settings::load(&path).connect_directly);
+        // On unless turned off: a Mac's agent only answers for it, so macOS asks nothing there.
+        assert!(Settings::load(&path).wake_notices);
+        std::fs::write(&path, "[settings]\nconnect_directly = false\nwake_notices = false\n").unwrap();
+        assert!(!Settings::load(&path).connect_directly && !Settings::load(&path).wake_notices);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

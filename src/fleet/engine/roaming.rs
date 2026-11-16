@@ -198,6 +198,14 @@ impl Engine {
             self.rt.spawn(async move {
                 let Some(l) = link::current(&id) else { return };
                 if l.request(json!({ "op": "ping" }), Duration::from_secs(3)).await.is_ok() {
+                    // The link moved with this computer (QUIC does). The
+                    // connection the machine would say it woke on didn't:
+                    // it was made from where this computer was, and nothing
+                    // arrives there now. Made again from here, while the
+                    // machine is up.
+                    if let Some((spec, _)) = me.machine(&id) {
+                        let _ = link::wait_to_hear_again(&spec).await;
+                    }
                     me.move_home(&id).await;
                 }
             });

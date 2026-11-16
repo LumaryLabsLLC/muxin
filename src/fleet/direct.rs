@@ -3,10 +3,9 @@
 //! accept only each other's, by SHA-256 fingerprint; the fingerprints are
 //! swapped over ssh when pairing (see agent/src/direct.rs).
 //!
-//! A machine that's asleep is left alone (asleep.rs), so its agent says when
-//! it has woken: it connects to this app, with the same pinned certificates
-//! the other way round (`WAKE_ALPN`, on a socket of its own; see
-//! `take_notices`). The connection is the whole message.
+//! A machine that's asleep is left alone (asleep.rs). Its agent says when it
+//! has woken on a connection this app made beforehand (quiet.rs: TCP to the
+//! same address and port, the same pinned certificates).
 //!
 //! Files, in Muxin's config folder: `identity/cert.der` and
 //! `identity/key.der` (this app), `direct.json` (paired machines).
@@ -21,20 +20,13 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
-use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
+use rustls::{DigitallySignedStruct, SignatureScheme};
 use serde::{Deserialize, Serialize};
 
 use crate::config::MachineSpec;
 use crate::probe;
 
 const ALPN: &[u8] = b"muxen/1";
-/// A wake notice: a connection from a machine's agent to this app.
-const WAKE_ALPN: &[u8] = b"muxen-wake/1";
-/// The same way, tried by the agent while its machine is up (a Mac lets it
-/// start a connection on the local network only once that was allowed
-/// there): nothing woke.
-const WAKE_TEST_ALPN: &[u8] = b"muxen-wake-test/1";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// After a direct connection fails, use ssh for this long before trying again
 /// (sooner when the network or Tailscale changes: see `retry_all`).
@@ -136,12 +128,17 @@ pub fn set_ssh_only(machine_id: &str, keep: bool) -> Result<(), String> {
 pub fn save(machine_id: &str, entry: Option<Paired>) -> Result<(), String> {
     let path = store().ok_or("Muxin's config folder isn't set")?;
     let mut all = load();
+    let unpaired = entry.is_none();
     match entry {
         Some(e) => all.insert(machine_id.to_string(), e),
         None => all.remove(machine_id),
     };
     crate::config::write_atomic(&path, &serde_json::to_vec_pretty(&all).unwrap_or_default()).map_err(|e| e.to_string())?;
     failures().lock().unwrap().remove(machine_id);
+    // No longer paired: nothing waits to hear it wake.
+    if unpaired {
+        super::quiet::let_go(machine_id);
+    }
     Ok(())
 }
 
@@ -216,163 +213,6 @@ impl ServerCertVerifier for PinnedAgent {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.algorithms.supported_schemes()
     }
-}
-
-/// Accepts only the agents of machines this app is paired with.
-#[derive(Debug)]
-struct PairedAgents {
-    algorithms: WebPkiSupportedAlgorithms,
-}
-
-impl ClientCertVerifier for PairedAgents {
-    fn root_hint_subjects(&self) -> &[DistinguishedName] {
-        &[]
-    }
-
-    fn verify_client_cert(&self, cert: &CertificateDer<'_>, _: &[CertificateDer<'_>], _: UnixTime) -> Result<ClientCertVerified, rustls::Error> {
-        let agent = fingerprint(cert.as_ref());
-        if load().values().any(|p| p.fingerprint == agent) {
-            Ok(ClientCertVerified::assertion())
-        } else {
-            Err(rustls::Error::General("this app isn't paired with that machine".into()))
-        }
-    }
-
-    fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls12_signature(message, cert, dss, &self.algorithms)
-    }
-
-    fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls13_signature(message, cert, dss, &self.algorithms)
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.algorithms.supported_schemes()
-    }
-}
-
-type OnWake = Arc<dyn Fn(&str) + Send + Sync>;
-
-/// What to do with a machine's wake notice, once this app takes them.
-static ON_WAKE: OnceLock<OnWake> = OnceLock::new();
-/// Whether it asks machines for them now (the user's choice: `set_notices`).
-static NOTICES_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Where they arrive: made when first needed, and kept (a machine that's
-/// asleep can't be told of a new port without waking it).
-static NOTICES: OnceLock<Option<quinn::Endpoint>> = OnceLock::new();
-
-/// This app takes wake notices from now on: `woke` is called with the id of
-/// a machine whose agent says it has woken. Only an app that stays open
-/// does (the window, an iPad); a command that runs and ends has nobody left
-/// to tell.
-pub fn take_notices(woke: impl Fn(&str) + Send + Sync + 'static) {
-    let _ = ON_WAKE.set(Arc::new(woke));
-    set_notices(true);
-}
-
-/// Asks machines for wake notices from now on, or stops asking (links made
-/// before go on as they were made).
-pub fn set_notices(on: bool) {
-    NOTICES_ON.store(on, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// The port wake notices arrive on, when this app takes them. Must be
-/// called from the runtime.
-pub fn notice_port() -> Option<u16> {
-    if !NOTICES_ON.load(std::sync::atomic::Ordering::SeqCst) {
-        return None;
-    }
-    let woke = ON_WAKE.get()?.clone();
-    NOTICES
-        .get_or_init(|| match notice_endpoint(woke) {
-            Ok(e) => Some(e),
-            Err(e) => {
-                tracing::debug!("can't take wake notices: {e}");
-                None
-            }
-        })
-        .as_ref()
-        .and_then(|e| e.local_addr().ok())
-        .map(|a| a.port())
-}
-
-fn notice_endpoint(woke: OnWake) -> Result<quinn::Endpoint, String> {
-    let (cert, key) = identity()?;
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let verifier = PairedAgents { algorithms: provider.signature_verification_algorithms };
-    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|e| e.to_string())?
-        .with_client_cert_verifier(Arc::new(verifier))
-        .with_single_cert(vec![cert], key)
-        .map_err(|e| e.to_string())?;
-    tls.alpn_protocols = vec![WAKE_ALPN.to_vec(), WAKE_TEST_ALPN.to_vec()];
-    let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).map_err(|e| e.to_string())?;
-    let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-    // Nothing is said on it: no streams.
-    let mut transport = quinn::TransportConfig::default();
-    transport.max_concurrent_bidi_streams(0u32.into());
-    transport.max_concurrent_uni_streams(0u32.into());
-    transport.max_idle_timeout(Some(Duration::from_secs(10).try_into().map_err(|_| "bad timeout")?));
-    config.transport_config(Arc::new(transport));
-    // IPv6 and IPv4 both, where the computer has IPv6.
-    let socket = notice_socket("[::]:0".parse().expect("valid address")).or_else(|_| notice_socket("0.0.0.0:0".parse().expect("valid address"))).map_err(|e| e.to_string())?;
-    let endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), Some(config), socket, Arc::new(quinn::TokioRuntime)).map_err(|e| e.to_string())?;
-    let accepting = endpoint.clone();
-    tokio::spawn(async move {
-        while let Some(incoming) = accepting.accept().await {
-            let woke = woke.clone();
-            tokio::spawn(async move {
-                let from = incoming.remote_address();
-                let conn = match incoming.await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::debug!("a wake notice from {from} didn't get through: {e}");
-                        return;
-                    }
-                };
-                let agent = conn.peer_identity().and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok()).and_then(|certs| certs.first().map(|c| fingerprint(c.as_ref())));
-                let trying = conn
-                    .handshake_data()
-                    .and_then(|d| d.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
-                    .and_then(|d| d.protocol)
-                    .is_some_and(|p| p == WAKE_TEST_ALPN);
-                if let Some(agent) = agent {
-                    for (id, _) in load().into_iter().filter(|(_, p)| p.fingerprint == agent) {
-                        if trying {
-                            tracing::debug!("{id} can tell this app when it wakes");
-                        } else {
-                            tracing::debug!("{id} says it woke");
-                            woke(&id);
-                        }
-                    }
-                }
-                // The agent hangs up once it's through.
-                let _ = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
-                conn.close(0u32.into(), b"heard");
-            });
-        }
-    });
-    Ok(endpoint)
-}
-
-fn notice_socket(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
-    use socket2::{Domain, Protocol, Socket, Type};
-    let s = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
-    if addr.is_ipv6() {
-        s.set_only_v6(false)?;
-    }
-    s.bind(&addr.into())?;
-    Ok(s.into())
-}
-
-/// Whether a wake notice sent to `notice` (this app, as a machine saw it
-/// when it went to sleep) would still arrive: this computer still has that
-/// address, and the app still listens on that port.
-pub fn notice_arrives(notice: &str) -> bool {
-    let Ok(addr) = notice.parse::<SocketAddr>() else { return false };
-    let ours = std::net::UdpSocket::bind((addr.ip().to_canonical(), 0)).is_ok();
-    ours && NOTICES.get().and_then(|e| e.as_ref()).and_then(|e| e.local_addr().ok()).is_some_and(|a| a.port() == addr.port())
 }
 
 fn failures() -> &'static Mutex<HashMap<String, Instant>> {
@@ -509,7 +349,9 @@ pub async fn lan_answers(p: &Paired) -> bool {
     false
 }
 
-fn client_config(p: &Paired) -> Result<quinn::ClientConfig, String> {
+/// How this app calls a paired machine's agent, for `alpn`: as itself, and
+/// taking only the agent it was paired with.
+pub(super) fn client_tls(p: &Paired, alpn: &[u8]) -> Result<rustls::ClientConfig, String> {
     let (cert, key) = identity()?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier = PinnedAgent { fingerprint: p.fingerprint.clone(), algorithms: provider.signature_verification_algorithms };
@@ -520,7 +362,12 @@ fn client_config(p: &Paired) -> Result<quinn::ClientConfig, String> {
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_client_auth_cert(vec![cert], key)
         .map_err(|e| e.to_string())?;
-    tls.alpn_protocols = vec![ALPN.to_vec()];
+    tls.alpn_protocols = vec![alpn.to_vec()];
+    Ok(tls)
+}
+
+fn client_config(p: &Paired) -> Result<quinn::ClientConfig, String> {
+    let tls = client_tls(p, ALPN)?;
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|e| e.to_string())?;
     let mut config = quinn::ClientConfig::new(Arc::new(crypto));
     let mut transport = quinn::TransportConfig::default();

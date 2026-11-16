@@ -294,7 +294,7 @@ impl World {
                 // A laptop with its lid closed: asleep, as its agent said.
                 error: Some(crate::probe::ASLEEP.into()),
                 asleep: true,
-                wake_notice: Some("192.168.1.20:53312".into()),
+                wake_notice: Some("192.168.1.20:61234".into()),
                 lid_closed: true,
                 os: Some(hw.os.into()),
                 arch: Some(hw.arch.into()),
@@ -410,7 +410,6 @@ impl World {
             asleep: false,
             wake_notice: None,
             lid_closed: false,
-            wake_notice_failed: false,
         }
     }
 

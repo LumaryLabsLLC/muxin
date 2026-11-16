@@ -11,7 +11,8 @@
 //! - While it's asleep, dark wakes included, a link's hello and its pings say
 //!   `"asleep": true`: an app that reaches it then knows to leave it alone.
 //! - When it has fully woken, links say `{"event": "awake"}`, and `listen`
-//!   tells the apps that asked (direct.rs: a wake notice).
+//!   says so to the apps that wait to hear it, each on a connection it made
+//!   beforehand (quiet.rs). The agent never calls an app.
 //! - `{"op": "wake_self"}` wakes it for real, as a key press would.
 //!
 //! macOS only for now (IOKit's system power notices: mac_power.c). On other

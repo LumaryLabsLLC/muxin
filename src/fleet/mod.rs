@@ -23,6 +23,7 @@ pub mod model;
 pub mod order;
 pub mod ports;
 pub mod procs;
+pub mod quiet;
 pub mod remote_desktop;
 pub mod report;
 pub mod sessions;

@@ -293,6 +293,8 @@ Every command takes `--json`. In that mode stdout carries JSON only, and errors 
 - `1`: the operation failed.
 - `2`: bad input, or the thing wasn't found.
 
+Commands that start long work (installing runners, copying files, making a VM, a cloud machine or a box) wait until it's done and print its log as it goes. The command's own process does the work, so there is no `--no-wait`: to get your prompt back, run the command in your shell's background (`muxin cp … &`). `install` and `runner` take `--timeout <seconds>` to give up sooner; the work stops there, and the command says so and exits 1.
+
 ```sh
 muxin status [--refresh]                 # overview + what needs attention
 muxin machines | machine <id>
@@ -318,8 +320,8 @@ muxin edit beelink:~/code/api [--editor zed] [--print]   # open a folder there i
 muxin disconnect <id>                     # stop connecting to it (its sessions go on there)
 muxin connect <id>                        # connect again, and check it
 muxin ignore <id> low-disk [--undo]       # stop showing one of its warnings (--undo: show it again)
-muxin install <machine-id> [--scope acme] [--count N | --name a --name b] [--label gpu] [--mode auto|service|background|docker] [--image IMAGE] [--docker-socket] [--no-wait]
-muxin runner <start|stop|restart|logs|remove> <runner-id> [--delete-files]
+muxin install <machine-id> [--scope acme] [--count N | --name a --name b] [--label gpu] [--mode auto|service|background|docker] [--image IMAGE] [--docker-socket] [--timeout SECONDS]
+muxin runner <start|stop|restart|logs|remove> <runner-id> [--delete-files] [--timeout SECONDS]
 muxin watch <org|owner/repo>... / unwatch ...
 muxin settings [--poll 20] [--scan-repos 10] [--check-interval 15]
 muxin ssh-hosts                          # ~/.ssh/config, your tailnet, and this network
@@ -614,7 +616,7 @@ muxin services beelink stop postgres --container
 ```sh
 muxin files beelink:~/build
 muxin cp beelink:~/build/app.tar.gz adibs-macbook-pro:~/Downloads
-muxin cp adibs-macbook-pro:~/Projects/site beelink:~/www --no-wait
+muxin cp adibs-macbook-pro:~/Projects/site beelink:~/www    # waits until it's copied, with progress
 ```
 
 **Shared clipboard.** Turn it on in Settings › Clipboard. Text you copy on your Mac can then be pasted on your Linux desktops, Windows PCs and other Macs, and what you copy there lands on your Mac (and on the other machines). Passwords copied from password managers (marked private on the clipboard) aren't shared. Neither is text a program in a terminal copies. One exception: the app on Linux can't tell which copies on its own computer are passwords.

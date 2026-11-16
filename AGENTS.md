@@ -19,7 +19,7 @@ Use the MCP tools when they're connected: start the server with `muxin mcp`, and
    - `internal`
 
    Many errors also have a `hint`, often a command such as `gh auth refresh -h github.com -s admin:org`. Pass hints to the user verbatim; don't improvise around permission problems.
-5. **Long operations wait by default** and return a `log_tail`. With `wait: false` you get an `operation_id`; poll `get_operation` until `status` is no longer `running`.
+5. **Long operations wait by default** and return a `log_tail`. With `wait: false` you get an `operation_id`; poll `get_operation` until `status` is no longer `running`. That's the MCP server, which goes on running. A CLI command's own process does the work, so it always waits until it's done and has no `--no-wait`: run a slow one in the background of your shell tool. `muxin install` and `muxin runner` take `--timeout <seconds>`; when it passes, the work stops there and the command exits 1.
 
 ## Ids
 

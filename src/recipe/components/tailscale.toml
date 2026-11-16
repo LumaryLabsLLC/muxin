@@ -4,4 +4,12 @@ os = ["linux"]
 root = true
 # Installing only: joining a tailnet needs its auth key or a person's approval.
 check = "tailscale version"
-install = "curl -fsSL https://tailscale.com/install.sh | sh"
+# Tailscale's own script. On Alpine it registers the service with OpenRC,
+# which an Alpine container doesn't have: there, only the package.
+install = '''
+if command -v apk >/dev/null 2>&1 && ! command -v rc-update >/dev/null 2>&1; then
+  pkg_install tailscale
+else
+  curl -fsSL https://tailscale.com/install.sh | sh
+fi
+'''

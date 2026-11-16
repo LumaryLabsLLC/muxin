@@ -97,8 +97,15 @@ impl Engine {
         let key_path = crate::probe::default_ssh_key().ok_or("There's no SSH key on this computer to sign in with. Make one with `ssh-keygen -t ed25519`.")?;
         let settings = self.settings().cloud;
         let extras = req.install.unwrap_or(settings.install);
+        #[cfg(not(feature = "recipes"))]
         if let Some(bad) = extras.iter().find(|e| !setup::EXTRAS.iter().any(|(id, _)| id == e)) {
             return Err(format!("Muxin doesn't know how to install \"{bad}\". It knows: {}.", setup::EXTRAS.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(", ")));
+        }
+        // With recipes, any component, as for a VM (they're applied over ssh, below).
+        #[cfg(feature = "recipes")]
+        {
+            let catalog = crate::recipe::catalog()?;
+            catalog.resolve(&extras).map_err(|e| if e.starts_with("No component") { format!("{e} Muxin knows: {}.", catalog.ids().join(", ")) } else { e })?;
         }
         let op = self.begin_op("cloud-create", format!("Create {name} on DigitalOcean"), None, None);
         let me = self.clone();

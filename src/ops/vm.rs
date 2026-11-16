@@ -111,6 +111,7 @@ pub struct VmCreate {
     #[serde(default)]
     pub disk_gb: Option<u32>,
     /// Agent CLIs to install (Linux): "claude", "codex", "gemini", "opencode", "amp", "pi".
+    /// With the `recipes` feature, any component's id.
     #[serde(default)]
     pub install: Vec<String>,
 }

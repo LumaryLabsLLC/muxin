@@ -26,8 +26,8 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --workspace --locked
-      # Recipes are behind a feature that is off by default: build and test them too.
-      - run: 'cargo test --locked --features recipes -- recipe:: mcp::'
+      # Recipes are a feature that is on by default: the window without them still builds, and lists its tools.
+      - run: 'cargo test --locked --no-default-features --features gui -- mcp::'
 
   linux:
     runs-on: ubuntu-22.04
@@ -42,8 +42,10 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --workspace --locked
-      # Recipes are behind a feature that is off by default: build and test them too.
-      - run: 'cargo test --locked --features recipes -- recipe:: mcp::'
+      # Recipes are a feature that is on by default: the window without them still builds, and lists its tools.
+      - run: 'cargo test --locked --no-default-features --features gui -- mcp::'
+      # The headless build the README gives (no window, with recipes).
+      - run: cargo check --locked --no-default-features --features recipes
 
   windows:
     runs-on: windows-2022
@@ -62,5 +64,6 @@ jobs:
         shell: bash
         run: "! git ls-files --eol '*.sh' | grep crlf"
       - run: cargo build --workspace --locked
-      - run: cargo check --locked --features recipes
+      # Without recipes, which are on by default.
+      - run: cargo check --locked --no-default-features --features gui
       - run: cargo test -p muxen-agent --locked

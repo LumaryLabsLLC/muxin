@@ -1,6 +1,6 @@
 ---
 name: muxin
-description: Drive Muxin, the app for all of the user's machines, through its `muxin` CLI with --json. Use it when the user asks about their machines or what runs on them, here or from their phone. That covers checking machines; agent sessions (Claude Code, Codex, OpenCode, ...) running on them, what those sessions are asking, and asking them to review a pull request, fix its review comments, resolve its conflicts, commit, push or open a PR; boxes (tasks an agent works on alone in a container); workspaces; self-hosted GitHub Actions runners and queued jobs; the user's GitHub inbox, issues and checkouts; logs, services, processes, files and desktops; schedules; cloud machines and VMs.
+description: Drive Muxin, the app for all of the user's machines, through its `muxin` CLI with --json. Use it when the user asks about their machines or what runs on them, here or from their phone. That covers checking machines; agent sessions (Claude Code, Codex, OpenCode, ...) running on them, what those sessions are asking, and asking them to review a pull request, fix its review comments, resolve its conflicts, commit, push or open a PR; boxes (tasks an agent works on alone in a container); workspaces; self-hosted GitHub Actions runners and queued jobs; the user's GitHub inbox, issues and checkouts; logs, services, processes, files and desktops; which tools a machine has, and installing them (recipes); schedules; cloud machines and VMs.
 license: Apache-2.0
 compatibility: Needs Muxin's `muxin` command on the PATH (Settings › General › Command line, or `muxin shell-command install`).
 metadata:
@@ -67,7 +67,7 @@ Read the one that fits the task:
 - [GitHub and git](references/github.md): inbox, repositories, issues and PRs, checkouts, git setup on a machine.
 - [Workspaces](references/workspaces.md): a folder on one of the user's machines to work in yourself: run commands, read and write files, sync code.
 - [Runners and jobs](references/runners.md): self-hosted GitHub Actions runners, installing them, jobs that don't start.
-- [Machines](references/machines.md): adding machines, services and containers, logs, processes, ports, files, desktops, commands on several machines, schedules.
+- [Machines](references/machines.md): adding machines, what's installed on them (recipes), services and containers, logs, processes, ports, files, desktops, commands on several machines, schedules.
 - [Cloud machines and VMs](references/cloud-and-vms.md): DigitalOcean droplets (they cost money) and VMs on the user's machines.
 
 Every command has `--help`. `--demo` runs any command against simulated machines, safe to practice on.

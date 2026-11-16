@@ -7,8 +7,11 @@ root = true
 # where the copy on PATH is (npm_prefix), so that's the folder tested.
 root_unless = 'test -w "$(npm_prefix claude)"'
 check = "command -v claude"
-install = "npm install -g @anthropic-ai/claude-code"
+# Its install script fetches its native binary, and npm runs install scripts
+# only when told to since npm 12 (--allow-scripts; older ones take the flag
+# and run them anyway). Without it `claude` is there and can't start.
+install = "npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code"
 # Both look at the copy on PATH (npm_prefix), which may be outside npm's own
 # folder once Node.js changed. npm outdated exits 1 when there's a newer version.
 up_to_date = 'npm outdated -g --prefix "$(npm_prefix claude)" @anthropic-ai/claude-code'
-update = 'npm install -g --prefix "$(npm_prefix claude)" @anthropic-ai/claude-code@latest'
+update = 'npm install -g --allow-scripts=@anthropic-ai/claude-code --prefix "$(npm_prefix claude)" @anthropic-ai/claude-code@latest'

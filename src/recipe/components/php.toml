@@ -3,7 +3,13 @@ name = "PHP"
 os = ["linux"]
 root = true
 check = "php --version && command -v composer"
+# Composer's installer needs phar and openssl: packages of their own on
+# Alpine, part of PHP elsewhere. Arch's php has the common extensions built in.
 install = '''
-pkg_install php-cli php-mbstring php-xml php-curl php-zip php-sqlite3 php-intl
+case "$(pkg_manager)" in
+  apk) pkg_install php-cli php-phar php-openssl php-iconv php-mbstring php-xml php-curl php-zip php-sqlite3 php-intl ;;
+  pacman) pkg_install php ;;
+  *) pkg_install php-cli php-mbstring php-xml php-curl php-zip php-sqlite3 php-intl ;;
+esac
 curl -fsSL https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 '''

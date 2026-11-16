@@ -609,6 +609,7 @@ struct VmCreateArgs {
     disk: Option<u32>,
     /// Agent CLIs to install on a Linux VM, comma-separated: claude, codex, gemini, opencode, amp, pi
     #[arg(long)]
+    #[cfg_attr(feature = "recipes", arg(help = "What to install on a Linux VM, comma-separated: agent CLIs (claude, codex, gemini, opencode, amp, pi) or any other component (see `muxin recipe check`)"))]
     install: Option<String>,
     /// Return right away with the operation id
     #[arg(long)]
@@ -679,6 +680,7 @@ struct CloudCreateArgs {
     /// java, bun, deno, dotnet, claude, codex, gemini, opencode, amp, pi, tailscale
     /// ("" for nothing; default: Settings)
     #[arg(long)]
+    #[cfg_attr(feature = "recipes", arg(help = "What it comes with, comma-separated: docker, gh, node, python, go, rust, php, ruby, java, bun, deno, dotnet, claude, codex, gemini, opencode, amp, pi, tailscale, or any other component (see `muxin recipe check`) (\"\" for nothing; default: Settings)"))]
     install: Option<String>,
     /// Return right away with the operation id
     #[arg(long)]
@@ -1103,9 +1105,6 @@ struct RecipeApplyArgs {
     /// Also update the ones there that have a newer version out (those with an update step: the agent CLIs)
     #[arg(long)]
     update: bool,
-    /// Return right away with the operation id
-    #[arg(long)]
-    no_wait: bool,
 }
 
 #[derive(Args)]
@@ -1865,7 +1864,8 @@ fn main() -> ExitCode {
         }
         #[cfg(feature = "recipes")]
         Some(Command::Recipe(RecipeCommand::Apply(a))) => {
-            let req = api::RecipeApplyRequest { machine_id: a.machine, components: a.components, update: a.update, wait: !a.no_wait, timeout_secs: None };
+            // It waits until it's done: this process is what applies, so nothing would go on without it.
+            let req = api::RecipeApplyRequest { machine_id: a.machine, components: a.components, update: a.update, wait: true, timeout_secs: None };
             run(&runtime, &a.agent, async move |e| api::recipe_apply(&e, req, api::Surface::Cli, stream_line).await, cli::recipe_apply)
         }
         Some(Command::Desktop(cmd)) => desktop(cmd, &runtime),

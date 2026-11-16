@@ -78,8 +78,10 @@ Requirements:
 For servers, CI boxes and agent machines there's a headless build with no GUI libraries: just the CLI and the MCP server.
 
 ```sh
-cargo build --release --no-default-features
+cargo build --release --no-default-features --features recipes
 ```
+
+`--no-default-features` alone also leaves out [recipes](#recipes) (`muxin recipe`, `recipe_check` and `recipe_apply`).
 
 There's nothing else to set up. Fonts and icons are compiled into the binary.
 
@@ -108,7 +110,8 @@ muxin status
 
 - **Overview:** the day in one line (machines online, agents working, runners busy), a few notices for what needs a look (each with a button that fixes or explains it), a card per machine with what's running on it (its agents, desktop and runners) and live CPU, memory and disk, and every agent session across your machines. The Jobs page shows how busy your runners have been over the last few minutes.
 - **Machines and runners:** install runners on a machine, and start, stop, restart, show logs for or remove each one. A machine that's off or out of reach says so in plain words (offline, Remote Login off, ssh key not accepted, Tailscale off on this Mac, …), with when it was last seen and what to do; Muxin picks it back up by itself when it returns.
-- **Adding machines (⌘N):** suggestions from your `~/.ssh/config`, your Tailscale network, and this network (machines advertising ssh over Bonjour, and Macs that would be addable once Remote Login is on).
+- **Adding machines (⌘N):** suggestions from your `~/.ssh/config`, your Tailscale network, and this network (machines advertising ssh over Bonjour, and Macs that would be addable once Remote Login is on). Once you've saved a recipe, the dialog can apply one as soon as the new machine answers.
+- **Components:** a machine's page says which tools it has (git, Docker, Node.js and other languages, the agent CLIs), installs the ones you pick, and updates the agent CLIs. What you pick can be saved as a recipe for the next machine (see [Recipes](#recipes)).
 - **Agent sessions (⌘T):** a real terminal on any machine running Claude Code, Codex, OpenCode, Gemini CLI, Antigravity, Amp, Pi, Copilot CLI, Cursor Agent, Qwen Code, Droid, Kimi Code or a shell. Sessions are listed under their machine in the sidebar (a spinner while the agent works, an amber dot when it needs you, a dot in the accent color when it's done), with its open desktop and one line for its runners, and keep running when you quit the app. A long list shows the first five (and any that need you) with the rest behind **more**, a folded machine still shows what's on screen from it, and right-click › **Hide** takes a session out of the lists until it needs you. Terminal font size, line height and a blinking cursor are in Settings.
 - **Usage (⌃5):** what Claude Code and Codex used on all your machines today or over the last 7, 30 or 90 days, read from their own logs there: tokens and requests by day, model, machine and folder, and what it would cost at Anthropic's and OpenAI's API list prices. With a Claude or ChatGPT plan you don't pay per token; it's what the same use would cost through the API.
 - **Run (⌃6):** one command on several machines at once (`df -h /`, `brew upgrade`, `git -C ~/code/api pull`), each one's output side by side as it comes, and its exit status. It runs in your login shell from your home folder; right-click a machine › **Run a command…** to start with just that one. **Snippets** are commands you save once, in folders, and run with one click: there on the machines picked, from the palette (⇧⌘P), or typed into the terminal you're in from its **Snippets** menu. Recent commands are kept across restarts.
@@ -136,6 +139,7 @@ Muxin keeps everything you set in one file, `config.toml`, in `~/.config/muxin/`
 - `[ui]` holds the app's look: theme, icons, terminal font and size, shortcuts, favorite machines.
 - `state.json` holds the last machine check, and what Tailscale last said about each machine.
 - `direct.json` holds the machines paired for direct connections, and their addresses.
+- `recipes.json` holds the [recipes](#recipes) you saved.
 
 ```toml
 [[machine]]
@@ -222,6 +226,7 @@ The MCP server has these tools:
 | `wake_machine` | Wakes a machine that's asleep or off (Wake on LAN). |
 | `machine_power` | Powers a machine on or off, or restarts it: a cloud machine, a VM in a Docker container on another of your machines, or any other machine through its own system (off and restart) |
 | `vm_options`, `vm_create`, `vm_destroy` | VMs on your machines: Windows (Docker with KVM) or Linux containers, added to your machines. |
+| `recipe_check`, `recipe_apply` | Which of Muxin's components a machine has (git, Docker, Node.js, languages, agent CLIs); install the missing ones, and update the agent CLIs. See [Recipes](#recipes). |
 | `schedule_list`, `schedule_save`, `schedule_delete`, `schedule_run`, `schedule_log` | Commands and agent sessions that run on a machine at set times, run there by its own scheduler. |
 | `agent_usage` | What Claude Code and Codex used over the last N days: tokens, requests and cost at API prices, by model and machine. |
 | `install_runners` | Downloads, registers and starts runners on a machine. |
@@ -305,6 +310,8 @@ muxin kill beelink 4242 [--force]         # stop a process (--force: SIGKILL)
 muxin wake beelink                        # Wake on LAN
 muxin power win11 off                     # shut a machine down (or restart it); a VM or cloud machine also turns on
 muxin vm create win-test --system windows-11 --on beelink   # a VM on one of your machines
+muxin recipe check beelink [claude]       # which of Muxin's components it has (git, docker, node, claude, ...)
+muxin recipe apply beelink gh claude [--update]   # install the missing ones (--update: and update the agent CLIs)
 muxin schedule add beelink --name Tests --every day --at 09:00 --command "make test"
 muxin usage [--days 30] [beelink]             # what the agents used, and the cost at API prices
 muxin edit beelink:~/code/api [--editor zed] [--print]   # open a folder there in your editor
@@ -643,6 +650,40 @@ muxin power win-test off
 muxin vm destroy win-test
 ```
 
+## Recipes
+
+Which tools does a machine have, and can Muxin put the missing ones there? A **component** is one thing a machine can have: git, Docker, Node.js, a language, an agent CLI. Each one has a check that says whether it's there, an install step, sometimes an update step, the components it requires, the systems it works on, and whether its steps need root. A **recipe** is a list of components: the ids you name on the command line, or one you saved under a name in the app. Muxin has 22 components built in:
+
+- **Tools:** `git`, `docker`, `gh` (the GitHub CLI), `unzip`, `tailscale`.
+- **Languages:** `node`, `python` (it brings `uv`), `go`, `rust`, `php`, `ruby`, `java`, `bun`, `deno`, `dotnet`.
+- **Agent CLIs:** `claude`, `codex`, `gemini`, `opencode`, `amp`, `pi`.
+
+In the app, a machine's page has a **Components** card, under Git:
+
+- **What's there and what isn't.** Every component Muxin has for that machine's system is listed: a check mark when it's there, a box to pick it when it's missing. The card checks when the page is first shown, and again with its refresh button.
+- **Install** installs what you picked, what they need first. **Update** shows once an agent CLI is there, and brings the agent CLIs to their newest versions. Both run as an operation you watch in Activity, and the card checks again when it's done.
+- **Save as recipe…** saves what's picked under a name. **Saved recipes**, under the grid, lists them: **Apply** installs one on this machine, and each can be renamed or deleted. They're kept in `recipes.json` beside `config.toml`.
+- **Add machine** has a **Recipe** row once you've saved one. Pick it, and it's applied as soon as the new machine answers. When the machine doesn't answer within 10 minutes, a failed operation says so, and nothing is installed.
+- A Windows machine's card says Muxin has no components for it yet.
+
+From a terminal and for agents, the same things are `check` and `apply`:
+
+- **Check** runs every check in one read-only script, in your login shell, so tools from Homebrew, mise, nvm or `~/.local/bin` count. Each component comes back `present`, `missing`, or `unsupported` (it has no steps for that system). Name no component and you get all of them; what a component requires is checked too. Node.js counts from version 22, which the agent CLIs need: an older one is `missing`.
+- **Apply** installs what's missing, as an operation: one per machine at a time, its log printed as it goes, and the command waits until it's done. It checks first, installs in order (each requirement before what needs it, otherwise the order you gave, so Node.js goes before Claude Code), and checks each one again. Each component comes back `already`, `installed`, `failed`, `skipped` (not tried, with why and often a hint) or `unsupported`. An install that finishes while its check still fails is `failed`. Nothing is removed or rolled back, so a second run changes nothing. The command fails when anything failed or was skipped.
+- **Update** (`--update`) also updates what's there and has a newer version out, and only that. The six agent CLIs have an update step; they ask npm. Each comes back `updated`, or `current` when there's nothing newer. Everything else that's there stays `already`.
+- **Root.** Steps never call sudo themselves. On Linux, a component that needs root runs through `sudo -n`. When sudo asks for a password it's `skipped` with nothing of it run, and so is whatever requires it; the hint says what to do. The agent CLIs install as you when you can write where the step writes: the folder of the copy on your PATH when there is one, else npm's own (yours with a Node.js from mise, nvm or Homebrew). Otherwise they install as root (`root_unless` in their files). On a Mac every step runs as you, and packages come from Homebrew.
+- **Systems.** Steps are `sh`, for Linux and macOS. On Linux they're tested on the systems Muxin's VMs come in: Ubuntu, Debian, Fedora, Alpine and Arch, each with its own package names. Deno and Amp have no build for Alpine, and fail there saying so. Docker, Python, Go, PHP, Ruby, Java, .NET and Tailscale have Linux steps only. A Windows machine answers `unsupported` for everything, and nothing runs there.
+- **New cloud machines and Linux VMs** get what you picked for them the same way: once the machine answers ssh, Muxin applies those components inside the operation that makes it. One that doesn't install is a warning in that log, with the command that tries again, and the machine is still ready.
+
+```sh
+muxin recipe check beelink                         # all 22: present, missing or unsupported
+muxin recipe check beelink claude                  # Node.js, then Claude Code
+muxin recipe apply beelink gh claude               # install what's missing, requirements first
+muxin recipe apply beelink claude codex --update   # and update the agent CLIs that are behind
+```
+
+Your AI agents have the same through MCP: `recipe_check` and `recipe_apply`. Saved recipes are the app's: the CLI and agents name components by id. The components are the TOML files in [`src/recipe/components`](src/recipe/components), built into the binary.
+
 ## Schedules
 
 A schedule runs a command, or starts an agent session, on one of your machines at set times: every few minutes, every hour, every day, weekdays, or some days of the week, in that machine's own time. It's kept on the machine and run by its own scheduler (cron, launchd or Task Scheduler), so it runs even when Muxin isn't open. The **Schedules** page lists them with their last run, runs one now, pauses one, and shows each run's output. An agent schedule ("every morning, go through new issues") starts a session you find under the machine, waiting for you.
@@ -695,6 +736,7 @@ Source layout:
 - `src/share`: sharing sessions by link (the host's gateway, joining, WebRTC); `share-server/`: the server that introduces the two sides and serves the browser's join page.
 - `src/fleet`: the engine and snapshot model; `link.rs` and `direct.rs` (connections), `tailscale.rs` and `engine/roaming.rs` (moving between networks), `files.rs`, `clipboard.rs`, `discover.rs` (machines on this network).
 - `src/probe`: machine checks.
+- `src/recipe`: [recipes](#recipes). The components (`components/*.toml`), checking a machine for them (`mod.rs`), applying them (`apply.rs`, with the scripts every step runs through in `scripts/`) and the saved ones (`saved.rs`). The window's side is `src/ui/recipes.rs` and `src/ui/saved_recipes.rs`.
 - `src/github`: the GitHub API client.
 - `src/ops`: installs and runner control.
 - `src/fleet/workspaces/`: agent workspaces (host and Docker).

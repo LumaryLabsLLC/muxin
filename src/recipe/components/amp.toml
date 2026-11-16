@@ -4,6 +4,15 @@ requires = ["node"]
 root = true
 root_unless = 'test -w "$(npm_prefix amp)"'
 check = "command -v amp"
-install = "npm install -g @sourcegraph/amp"
+# Its native binary needs glibc: on Alpine (musl) npm installs the package
+# and `amp` can't start, so say so instead. The binary comes with the install
+# script of @ampcode/cli, which the package brings (see claude.toml).
+install = '''
+if ldd --version 2>&1 | grep -qi musl; then
+  echo "error: Amp has no build for Alpine Linux (musl libc)." >&2
+  exit 1
+fi
+npm install -g --allow-scripts=@ampcode/cli @sourcegraph/amp
+'''
 up_to_date = 'npm outdated -g --prefix "$(npm_prefix amp)" @sourcegraph/amp'
-update = 'npm install -g --prefix "$(npm_prefix amp)" @sourcegraph/amp@latest'
+update = 'npm install -g --allow-scripts=@ampcode/cli --prefix "$(npm_prefix amp)" @sourcegraph/amp@latest'

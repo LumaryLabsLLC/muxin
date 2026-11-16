@@ -403,9 +403,25 @@ pub fn read_with(r: &Rules, screen: &str) -> Question {
             break;
         }
     }
-    // Its last paragraph, past status lines ("✻ Baked for 3s").
+    let (mut text, on) = last_paragraph(r, &lines[..bottom]);
+    // Rows on the input box's edge, under the turn's status line ("✻ Baked
+    // for 2s"): a status line of the user's own, not what it said.
+    if !on.is_empty()
+        && lines[on.end..bottom].iter().all(|l| is_rule(r, l))
+        && let Some(above) = lines[..on.start].iter().rposition(|l| !clean(r, l).is_empty() && !is_rule(r, l))
+        && is_status(r, &clean(r, lines[above]))
+    {
+        text = last_paragraph(r, &lines[..above]).0;
+    }
+    Question { text, options: Vec::new(), selected: None, confirm: false, read_at }
+}
+
+/// The last paragraph of `lines`, past status lines ("✻ Baked for 3s"), and
+/// the lines it's on.
+fn last_paragraph(r: &Rules, lines: &[&str]) -> (Vec<String>, std::ops::Range<usize>) {
     let mut text: Vec<String> = Vec::new();
-    for line in lines[..bottom].iter().rev() {
+    let mut on = lines.len()..lines.len();
+    for (i, line) in lines.iter().enumerate().rev() {
         let t = clean(r, line);
         if is_rule(r, line) || t.is_empty() {
             if text.is_empty() {
@@ -416,6 +432,10 @@ pub fn read_with(r: &Rules, screen: &str) -> Question {
         if text.is_empty() && is_status(r, &t) {
             continue;
         }
+        if text.is_empty() {
+            on.end = i + 1;
+        }
+        on.start = i;
         text.push(t.trim_start_matches(|c: char| Rules::one_of(&r.bullets, c)).trim_start().to_string());
         if text.len() >= 8 {
             break;
@@ -425,7 +445,7 @@ pub fn read_with(r: &Rules, screen: &str) -> Question {
     while text.first().is_some_and(String::is_empty) {
         text.remove(0);
     }
-    Question { text, options: Vec::new(), selected: None, confirm: false, read_at }
+    (text, on)
 }
 
 #[cfg(test)]
@@ -522,6 +542,23 @@ mod tests {
         // A long prompt of yours wraps under its ❯: not a menu.
         let wrapped = "❯ Fix the failing test in billing and then\n  run the whole suite again\n\n● Done: 214 passed.\n\n──────\n❯\n──────\n";
         assert!(!read(wrapped).is_choice());
+    }
+
+    #[test]
+    fn a_status_line_over_the_input_box_isnt_what_it_said() {
+        // Claude Code 2.1.325, done, as read off a real screen (160 columns):
+        // two rows of a status line of the user's own over its input box, the
+        // first with the same mark as its reply.
+        let rule = "─".repeat(160);
+        let screen = format!(
+            " ▐▛███▛█   Claude Code v2.1.325\n▝▜██████▀  Opus 5.5 · Claude API\n ▝▝   ▝▝   ~/GitHub/app\n\n  Fable 5.2 is here for your longest and toughest coding tasks. It draws down usage faster than Opus 5.5. Switch with /model.\n\n❯ Responde solo con la palabra: hola\n\n● hola\n\n✻ Baked for 2s · done 2:14 PM\n{}{:<126}Review  Audit  Board  Details [-]\n{:>158}\n{rule}\n❯\n{rule}\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n",
+            "\n".repeat(30),
+            "● full  $0.11  last $0.11  3s",
+            "◐ medium · /effort",
+        );
+        let q = read(&screen);
+        assert!(!q.is_choice());
+        assert_eq!(q.text, ["hola"]);
     }
 
     #[test]

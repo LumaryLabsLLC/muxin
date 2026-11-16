@@ -647,6 +647,16 @@ mod tests {
         assert!(launch("shell").is_none());
     }
 
+    /// Claude Code, OpenCode and Amp fetch their binaries in an install
+    /// script, which the image's npm (Node.js 22's) runs without being told
+    /// to. npm 12 (Node.js 26) doesn't: a base image with it needs
+    /// --allow-scripts on the Dockerfile's install, as cloud::setup::npm_install has it.
+    #[test]
+    fn the_images_npm_runs_install_scripts() {
+        let older = ["FROM node:22-", "FROM node:24-"].iter().any(|from| DOCKERFILE.contains(from));
+        assert!(older || DOCKERFILE.contains("--allow-scripts="));
+    }
+
     #[test]
     fn the_start_script_continues_after_the_first_time() {
         let s = start_script(&launch("codex").unwrap());

@@ -240,8 +240,8 @@ impl Engine {
         let cpus = req.cpus.unwrap_or(4).clamp(1, 64);
         let memory = req.memory_gb.unwrap_or(8).clamp(1, 512);
         let disk = req.disk_gb.unwrap_or(64).clamp(32, 4096);
-        // The agent CLIs asked for, as npm packages (Linux; Windows has its own ways).
-        let npm = if windows { String::new() } else { req.install.iter().filter_map(|a| crate::cloud::setup::npm_package(a)).collect::<Vec<_>>().join(" ") };
+        // The agent CLIs asked for, as npm packages, each after its own flags (Linux; Windows has its own ways).
+        let npm = if windows { String::new() } else { req.install.iter().filter_map(|a| crate::cloud::setup::npm_install(a)).collect::<Vec<_>>().join(" ") };
         // With recipes, they're applied over ssh once it answers instead.
         #[cfg(feature = "recipes")]
         let npm = { drop(npm); String::new() };
@@ -464,6 +464,51 @@ mod tests {
         assert_eq!(a.len(), 20);
         assert_ne!(a, b);
         assert!(a.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    /// Arch can't install from newer package lists without upgrading the system.
+    #[test]
+    fn an_arch_vm_is_brought_up_to_date() {
+        assert!(LINUX_SETUP_SH.contains("pacman -Syu --noconfirm --needed openssh ") && !LINUX_SETUP_SH.contains("pacman -Sy "));
+    }
+
+    /// The setup script's loop over MUXEN_NPM, run here with a stand-in npm:
+    /// one install per CLI, with its own flags and nobody else's, and a
+    /// failed one is named and leaves the rest to install.
+    #[cfg(unix)]
+    #[test]
+    fn installs_each_agent_cli_with_its_own_flags() {
+        use std::os::unix::fs::PermissionsExt;
+        let asked: Vec<String> = ["claude", "codex", "pi", "amp"].iter().filter_map(|a| crate::cloud::setup::npm_install(a)).collect();
+        let (start, end) = (LINUX_SETUP_SH.find("  flags=\n").unwrap(), LINUX_SETUP_SH.find("\n  done\n").unwrap());
+        let each = format!("{}\necho \"failed=$failed\"", &LINUX_SETUP_SH[start..end + "\n  done".len()]);
+        let dir = std::env::temp_dir().join(format!("muxen-vm-npm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("log");
+        let run = |npm: &str| -> (String, String) {
+            let _ = std::fs::remove_file(&log);
+            std::fs::write(dir.join("npm"), format!("#!/bin/sh\necho \"$*\" >> {}\n{npm}\n", log.display())).unwrap();
+            std::fs::set_permissions(dir.join("npm"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            let out = std::process::Command::new("/bin/sh").args(["-c", &each]).env("PATH", format!("{}:/usr/bin:/bin", dir.display())).env("MUXEN_NPM", asked.join(" ")).output().unwrap();
+            (std::fs::read_to_string(&log).unwrap_or_default(), String::from_utf8_lossy(&out.stdout).to_string())
+        };
+
+        let (ran, said) = run("");
+        let installs: Vec<&str> = ran.lines().collect();
+        assert_eq!(
+            installs,
+            [
+                "install -g --no-fund --no-audit --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code",
+                "install -g --no-fund --no-audit @openai/codex",
+                "install -g --no-fund --no-audit --ignore-scripts @earendil-works/pi-coding-agent",
+                "install -g --no-fund --no-audit --allow-scripts=@ampcode/cli @sourcegraph/amp",
+            ]
+        );
+        assert_eq!(said, "failed=\n");
+        let (ran, said) = run("case \"$*\" in *codex*) exit 1 ;; esac");
+        assert_eq!((ran.lines().count(), said.as_str()), (4, "npm couldn't install @openai/codex\nfailed=1\n"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -37,6 +37,8 @@ impl Root {
             // look again when it's back.
             self.machine_conn.remove(&m.id);
             self.machine_git.remove(&m.id);
+            #[cfg(feature = "recipes")]
+            self.recipes.forget(&m.id);
         }
         let checked = match &m.probe {
             Some(p) => format!("Updated {} (took {:.1}s)", format::ago(Some(p.checked_at)), p.duration_ms as f64 / 1000.0),
@@ -275,6 +277,10 @@ impl Root {
                     body = body.child(self.machine_connection(&theme, &m, cx));
                 }
                 body = body.child(self.machine_git(&theme, &m, cx));
+                #[cfg(feature = "recipes")]
+                {
+                    body = body.child(self.machine_components(&theme, &m, cx));
+                }
             }
         }
 

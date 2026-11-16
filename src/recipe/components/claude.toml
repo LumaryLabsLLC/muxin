@@ -3,8 +3,9 @@ name = "Claude Code"
 requires = ["node"]
 root = true
 # npm installs into Node.js's own folder: the user's when their Node.js is
-# (mise, nvm, Homebrew), and then the step runs as the user.
-root_unless = 'test -w "$(npm prefix -g)"'
+# (mise, nvm, Homebrew), and then the step runs as the user. An update writes
+# where the copy on PATH is (npm_prefix), so that's the folder tested.
+root_unless = 'test -w "$(npm_prefix claude)"'
 check = "command -v claude"
 # Its install script fetches its native binary, and npm runs install scripts
 # only when told to since npm 12 (--allow-scripts; older ones take the flag

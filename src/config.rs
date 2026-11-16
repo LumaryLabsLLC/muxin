@@ -623,61 +623,6 @@ pub struct Settings {
     /// order they were added.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub snippets: Vec<Snippet>,
-    /// The assistant's chat (see crate::chat): what it runs on, and what it
-    /// may do without asking.
-    #[serde(skip_serializing_if = "ChatSettings::is_default")]
-    pub chat: ChatSettings,
-}
-
-/// The assistant's chat (`[settings.chat]`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct ChatSettings {
-    /// The chat is on. Off (the default), the app has no Chat page and
-    /// `muxin chat` answers nothing: the user turns it on, in Settings › Chat
-    /// or with `muxin chat --on`.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub enabled: bool,
-    /// What answers: "claude" (Claude Code), "codex" or "grok" (Grok Build);
-    /// "" for the first there is.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub brain: String,
-    /// "bypass": new chats start without asking before tools that change
-    /// things. Anything else (the default): they ask.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub mode: String,
-    /// Tool calls the user answered "Yes, and don't ask again" to: a tool's
-    /// name, or `tool:action` for a tool with several (`runner_action:restart`).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub allow: Vec<String>,
-    /// The model and effort picked last for each brain ("claude", "grok",
-    /// ...), which its next new chat starts with.
-    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub picked: std::collections::BTreeMap<String, ChatPick>,
-}
-
-/// A model and how hard it's asked to think; "" for the brain's own choice.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct ChatPick {
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub model: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub effort: String,
-}
-
-impl ChatSettings {
-    /// What a new chat with `brain` starts with: the model and effort picked
-    /// for it last.
-    pub fn pick(&self, brain: &str) -> (Option<String>, Option<String>) {
-        let some = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
-        let picked = self.picked.get(brain);
-        (picked.and_then(|p| some(&p.model)), picked.and_then(|p| some(&p.effort)))
-    }
-
-    fn is_default(&self) -> bool {
-        *self == ChatSettings::default()
-    }
 }
 
 /// A saved command (`[[settings.snippets]]`): run from the Run page on the
@@ -886,7 +831,6 @@ impl Default for Settings {
             share: ShareSettings::default(),
             agents: AgentSettings::default(),
             snippets: Vec::new(),
-            chat: ChatSettings::default(),
         }
     }
 }

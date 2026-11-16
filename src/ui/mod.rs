@@ -4,7 +4,6 @@ mod about;
 mod agent_list;
 mod box_dialog;
 mod boxes;
-mod chat;
 mod activity;
 mod cloud_dialog;
 mod assets;
@@ -18,10 +17,11 @@ mod hosted;
 mod input;
 mod kit;
 mod logs;
-mod markdown;
 mod menu;
 mod notify;
 mod move_dialog;
+#[cfg(target_os = "macos")]
+mod mouse_hook;
 mod overview;
 mod palette;
 mod panes;
@@ -35,10 +35,13 @@ mod share;
 mod settings;
 mod shortcuts;
 mod terminal;
-mod text_rows;
 mod theme;
 mod tray;
 mod run;
+#[cfg(feature = "recipes")]
+mod recipes;
+#[cfg(feature = "recipes")]
+mod saved_recipes;
 mod schedule_dialog;
 mod schedules;
 mod snippets;

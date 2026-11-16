@@ -114,6 +114,9 @@ pub struct AddMachineDialog {
     share_link: Option<String>,
     /// Connect to it directly once it answers (starts as the setting says).
     direct: bool,
+    /// A saved recipe to apply once it answers (saved_recipes.rs).
+    #[cfg(feature = "recipes")]
+    pub(super) recipe: super::saved_recipes::RecipePick,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -155,7 +158,12 @@ impl AddMachineDialog {
         .detach();
         let hosts = if engine.demo_world().is_some() { Vec::new() } else { ssh_hosts() };
         let direct = engine.settings().connect_directly;
-        AddMachineDialog { engine, name, host, hosts, tailnet: Vec::new(), network: None, note: None, share_link: None, direct, error: None, _subscriptions: subs }
+        #[cfg(feature = "recipes")]
+        let recipe = super::saved_recipes::RecipePick::new(&engine);
+        AddMachineDialog { engine, name, host, hosts, tailnet: Vec::new(), network: None, note: None, share_link: None, direct, error: None, _subscriptions: subs,
+            #[cfg(feature = "recipes")]
+            recipe,
+        }
     }
 
     pub fn first_focus(&self, cx: &App) -> FocusHandle {
@@ -173,6 +181,8 @@ impl AddMachineDialog {
                 // Only a choice that differs from the setting is kept for it.
                 let choice = (self.direct != self.engine.settings().connect_directly).then_some(self.direct);
                 self.engine.connect_directly_once_up(&id, choice);
+                #[cfg(feature = "recipes")]
+                self.recipe.apply_once_up(&self.engine, &id);
                 cx.emit(DialogEvent::MachineAdded(id))
             }
             Err(e) => {
@@ -209,7 +219,7 @@ impl Render for AddMachineDialog {
                     .into_any_element(),
             );
         }
-        frame(
+        let dialog = frame(
             &theme,
             "Add a machine",
             Some("Muxin reaches machines with your system ssh, keys and ~/.ssh/config. Checks are read-only.".into()),
@@ -299,7 +309,10 @@ impl Render for AddMachineDialog {
                 } else {
                     "It stays on ssh. You can connect directly later from its page."
                 })),
-        )
+        );
+        #[cfg(feature = "recipes")]
+        let dialog = dialog.children(self.recipe.menu(&theme, cx));
+        dialog
         // Someone else's machine comes by link: a way there, or the link pasted here.
         .child({
             let (text, button) = match &self.share_link {
@@ -677,8 +690,6 @@ pub enum RenameTarget {
     Session(String),
     /// A machine's display: (machine, display id).
     Display(String, String),
-    /// One of the assistant's chats.
-    Chat(String),
 }
 
 pub struct RenameDialog {
@@ -717,8 +728,7 @@ impl RenameDialog {
             return;
         }
         let text = self.name.read(cx).text().trim().to_string();
-        // A chat without a title of its own goes by what was first asked in it.
-        if text.is_empty() && !matches!(self.target, RenameTarget::Chat(_)) {
+        if text.is_empty() {
             self.error = Some("Give it a name.".into());
             cx.notify();
             return;
@@ -728,14 +738,6 @@ impl RenameDialog {
                 Ok(()) => cx.emit(DialogEvent::Dismissed),
                 Err(e) => {
                     self.error = Some(e);
-                    cx.notify();
-                }
-            },
-            // Kept on this computer, beside the chat.
-            RenameTarget::Chat(id) => match crate::chat::store(&self.engine).rename(&id, &text) {
-                Ok(_) => cx.emit(DialogEvent::Dismissed),
-                Err(e) => {
-                    self.error = Some(format!("Couldn't rename it: {e}"));
                     cx.notify();
                 }
             },
@@ -801,7 +803,6 @@ impl Render for RenameDialog {
                 format!("What Muxin calls this monitor on {}. Its windows and settings stay as they are.", self.machine),
                 "Name",
             ),
-            RenameTarget::Chat(_) => ("Rename chat", "The title it's listed under. Left empty, it goes back to the first thing you asked in it.".to_string(), "Title"),
             RenameTarget::Session(_) => (
                 "Rename session",
                 format!("Muxin's agent on {} keeps the title, so it shows wherever you use Muxin. What runs in the session isn't touched.", self.machine),

@@ -8,10 +8,14 @@
 //! Muxin checks machines with them (every check of a recipe in one script,
 //! `recipe_check`, changing nothing) and applies them (`recipe_apply`, in
 //! apply.rs: installs what's missing and, when asked, updates what's behind),
-//! also to the cloud machines and VMs it makes (`recipe_setup`).
+//! also to the cloud machines and VMs it makes (`recipe_setup`). Recipes
+//! saved in the window are in saved.rs.
 
 mod apply;
 pub use apply::{Applied, longest};
+// Only the window saves and applies them.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub mod saved;
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -75,10 +79,11 @@ pub struct Component {
     /// run as the user, as Homebrew wants.) Steps never call sudo themselves.
     #[serde(default)]
     pub root: bool,
-    /// With root: a test, run as the user like `check`, that lets the steps run
-    /// as the user when it exits 0. For tools that live where whoever installed
-    /// them put them: npm's global folder is the user's own when their Node.js
-    /// is (mise, nvm, Homebrew), and only root's when it's the system's.
+    /// With root: a test, run as the user like `check` and after the prelude
+    /// like the steps, that lets the steps run as the user when it exits 0.
+    /// For tools that live where whoever installed them put them: npm's global
+    /// folder is the user's own when their Node.js is (mise, nvm, Homebrew),
+    /// and only root's when it's the system's.
     pub root_unless: Option<String>,
     /// Exits 0 when the component is there. Fast, no network, changes nothing.
     pub check: String,
@@ -265,6 +270,16 @@ pub struct MachineCheck {
     pub components: Vec<ComponentState>,
 }
 
+impl MachineCheck {
+    /// The components found there that have an update step: what the machine
+    /// page's Update asks for.
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub fn updatable(&self) -> Vec<String> {
+        let has_update = |id: &str| catalog().ok().and_then(|c| c.get(id)).is_some_and(|c| c.update.is_some());
+        self.components.iter().filter(|c| c.result == "present" && has_update(&c.id)).map(|c| c.id.clone()).collect()
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ComponentState {
     pub id: String,
@@ -397,7 +412,9 @@ mod tests {
                 assert!(updates.starts_with("npm install -g ") && updates.contains(&format!(" {at} ")) && updates.ends_with(&format!(" {package}@latest")), "{id}: {updates}");
                 let name = package.rsplit(' ').next().unwrap();
                 assert_eq!(c.up_to_date.as_deref(), Some(format!("npm outdated -g {at} {name}").as_str()), "{id}");
-                assert_eq!((c.requires.as_slice(), c.root, c.root_unless.as_deref()), (&["node".to_string()][..], true, claude_root_unless()), "{id}");
+                // Root unless the user can write where the step writes: the copy on PATH, else npm's own folder.
+                let root_unless = format!("test -w \"$(npm_prefix {id})\"");
+                assert_eq!((c.requires.as_slice(), c.root, c.root_unless.as_deref()), (&["node".to_string()][..], true, Some(root_unless.as_str())), "{id}");
             }
         }
         // npm 12 runs install scripts only when told to: the CLIs whose script fetches their binary say so, installing and updating.
@@ -410,10 +427,6 @@ mod tests {
         assert_eq!((catalog.get("bun").unwrap().requires.as_slice(), catalog.get("deno").unwrap().requires.as_slice()), (&["unzip".to_string()][..], &["unzip".to_string()][..]));
         // Pi's package is the one that isn't deprecated.
         assert!(catalog.get("pi").unwrap().install.ends_with(" @earendil-works/pi-coding-agent"));
-    }
-
-    fn claude_root_unless() -> Option<&'static str> {
-        catalog().unwrap().get("claude").unwrap().root_unless.as_deref()
     }
 
     #[test]
@@ -511,6 +524,10 @@ mod tests {
         assert_eq!(results, [("git", "present"), ("gh", "missing"), ("node", "present"), ("claude", "unsupported")]);
         let err = read_checks("os=linux\ncheck.git=present\n", &all).unwrap_err();
         assert_eq!(err, "The check didn't say whether GitHub CLI is there.");
+        // Only what's there and has an update step can be updated.
+        assert!(found.updatable().is_empty(), "git and Node.js have none; Claude Code isn't there");
+        let there = read_checks("os=linux\ncheck.git=present\ncheck.gh=present\ncheck.node=present\ncheck.claude=present\n", &all).unwrap();
+        assert_eq!(there.updatable(), ["claude"]);
     }
 
     /// The script, run here: checks that fail, read stdin, exit or don't parse

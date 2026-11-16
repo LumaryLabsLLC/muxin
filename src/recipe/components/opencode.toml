@@ -2,7 +2,7 @@ id = "opencode"
 name = "OpenCode"
 requires = ["node"]
 root = true
-root_unless = 'test -w "$(npm prefix -g)"'
+root_unless = 'test -w "$(npm_prefix opencode)"'
 check = "command -v opencode"
 # Its install script has to run (see claude.toml).
 install = "npm install -g --allow-scripts=opencode-ai opencode-ai"

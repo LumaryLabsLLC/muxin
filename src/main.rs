@@ -1,6 +1,5 @@
 mod api;
 mod capture;
-mod chat;
 mod cli;
 mod cloud;
 mod config;
@@ -12,7 +11,6 @@ mod github;
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 mod instance;
 mod mcp;
-mod oauth;
 mod ops;
 mod probe;
 #[cfg(feature = "recipes")]
@@ -162,8 +160,6 @@ enum Command {
     /// Boxes: hand a task to an agent that works on it in a container of its own
     #[command(name = "box", alias = "boxes", subcommand)]
     Boxes(BoxCommand),
-    /// Ask Muxin's assistant: it works across your machines with Muxin's own tools, and asks before it changes anything
-    Chat(ChatArgs),
     /// Run the MCP server on stdio for AI agents (Claude Code, Codex, ...)
     Mcp(McpArgs),
     /// The Muxin skill that teaches agents (Claude Code, Codex, Hermes, ...) this CLI: its guide, and a stub in their skills folders that reads it
@@ -1633,72 +1629,6 @@ struct McpArgs {
     /// Print setup snippets for Claude Code, Codex and other MCP clients, then exit
     #[arg(long)]
     print_config: bool,
-
-    /// Serve the tools of the Muxin that holds a chat, through its socket
-    /// (what a chat's own Claude Code or Codex is started with; see chat::bridge)
-    #[arg(long, value_name = "SOCKET", hide = true)]
-    chat: Option<PathBuf>,
-}
-
-#[derive(Args)]
-struct ChatArgs {
-    #[command(flatten)]
-    common: CommonArgs,
-
-    /// Use simulated machines (safe to experiment with; nothing touches real machines or GitHub)
-    #[arg(long)]
-    demo: bool,
-
-    /// What to ask. Without it, a conversation starts: type it line by line
-    prompt: Vec<String>,
-
-    /// Go on with a chat from before, by its id (`last`: the one used last)
-    #[arg(long, value_name = "ID")]
-    chat: Option<String>,
-
-    /// What answers: claude (Claude Code), codex or grok (Grok Build) [default: your setting, else the first there is]
-    #[arg(long, value_name = "NAME")]
-    brain: Option<String>,
-
-    /// The model to answer with, by its id (sonnet, gpt-6.1-sol, grok-4.7, ...) [default: the one picked last, else the brain's own]
-    #[arg(long, value_name = "ID")]
-    model: Option<String>,
-
-    /// How hard it's asked to think (low, medium, high, ...; what each model takes differs) [default: the model's own]
-    #[arg(long, value_name = "LEVEL")]
-    effort: Option<String>,
-
-    /// List the models there are to answer with, and the efforts each takes (with --brain: that one's)
-    #[arg(long)]
-    models: bool,
-
-    /// A file that goes with the message: text, a picture (PNG, JPEG, GIF, WebP) or a PDF (repeat for more)
-    #[arg(long, value_name = "FILE")]
-    attach: Vec<std::path::PathBuf>,
-
-    /// Bypass permissions: don't ask before tools that change things
-    #[arg(long)]
-    bypass: bool,
-
-    /// List the chats
-    #[arg(long)]
-    list: bool,
-
-    /// Name a chat: its id (or `last`), then the title. An empty title ("") goes back to the first thing asked in it
-    #[arg(long, num_args = 2, value_names = ["ID", "TITLE"])]
-    rename: Option<Vec<String>>,
-
-    /// Delete a chat, by its id: what was said in it and the files attached in it
-    #[arg(long, value_name = "ID")]
-    delete: Option<String>,
-
-    /// Turn the chat on: it's off until you do (the same switch as Settings › Chat in the app)
-    #[arg(long)]
-    on: bool,
-
-    /// Turn the chat off again
-    #[arg(long, conflicts_with = "on")]
-    off: bool,
 }
 
 #[derive(Subcommand)]
@@ -2076,7 +2006,6 @@ fn main() -> ExitCode {
                 None => run(&runtime, &a.agent, async move |e| api::machine_connection(&e, &machine).await, cli::connection),
             }
         }
-        Some(Command::Chat(a)) => chat(a, &runtime),
         Some(Command::Mcp(a)) => mcp(a, &runtime),
         Some(Command::Skill(cmd)) => skill(cmd),
         Some(Command::Check(args)) => {
@@ -3153,41 +3082,10 @@ fn exec_attach(cmd: fleet::sessions::AttachCommand) -> u8 {
     }
 }
 
-/// `muxin chat`: the assistant, in the terminal.
-fn chat(args: ChatArgs, runtime: &tokio::runtime::Runtime) -> u8 {
-    let _guard = runtime.enter();
-    let engine = Engine::new(args.common.paths(), args.demo);
-    let ask = chat::term::Ask {
-        prompt: args.prompt.join(" "),
-        options: chat::Options { chat: args.chat, brain: args.brain, mode: args.bypass.then_some(chat::gate::Mode::Bypass), model: args.model, effort: args.effort },
-        list: args.list,
-        switch: if args.on { Some(true) } else if args.off { Some(false) } else { None },
-        delete: args.delete,
-        rename: args.rename.and_then(|said| {
-            let mut said = said.into_iter();
-            Some((said.next()?, said.next()?))
-        }),
-        models: args.models,
-        attach: args.attach,
-    };
-    runtime.block_on(chat::term::run(engine, ask))
-}
-
 fn mcp(args: McpArgs, runtime: &tokio::runtime::Runtime) -> u8 {
     if args.print_config {
         print!("{}", mcp::print_config());
         return 0;
-    }
-    if let Some(socket) = &args.chat {
-        let code = match runtime.block_on(chat::bridge::proxy(socket)) {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("error: couldn't reach the chat's Muxin at {}: {e}", socket.display());
-                1
-            }
-        };
-        // Not by returning: the runtime would wait for a read of stdin that can't be cancelled.
-        std::process::exit(code);
     }
     let _guard = runtime.enter();
     // No background loops: tools refresh what they need on demand.

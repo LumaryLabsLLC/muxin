@@ -2,7 +2,7 @@ id = "amp"
 name = "Amp"
 requires = ["node"]
 root = true
-root_unless = 'test -w "$(npm prefix -g)"'
+root_unless = 'test -w "$(npm_prefix amp)"'
 check = "command -v amp"
 # Its native binary needs glibc: on Alpine (musl) npm installs the package
 # and `amp` can't start, so say so instead. The binary comes with the install

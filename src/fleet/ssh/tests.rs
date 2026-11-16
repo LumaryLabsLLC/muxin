@@ -128,10 +128,11 @@ fn fixed_key(tag: &str) -> PrivateKey {
     PrivateKey::new(KeypairData::Ed25519(Ed25519Keypair::from_seed(&seed)), "test").unwrap()
 }
 
+/// The app's folder (its key, known_hosts). `direct::init` gives a test run
+/// one of its own, new each run, whichever it's asked for: these tests never
+/// see the host keys another run's servers left on the same ports.
 fn app_home() {
-    let dir = std::env::temp_dir().join(format!("muxin-ssh-app-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    crate::fleet::direct::init(dir);
+    crate::fleet::direct::init(PathBuf::new());
 }
 
 fn spec(id: &str, port: u16) -> MachineSpec {

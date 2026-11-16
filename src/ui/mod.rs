@@ -20,6 +20,8 @@ mod logs;
 mod menu;
 mod notify;
 mod move_dialog;
+#[cfg(target_os = "macos")]
+mod mouse_hook;
 mod overview;
 mod palette;
 mod panes;

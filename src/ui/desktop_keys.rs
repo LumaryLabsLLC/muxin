@@ -407,27 +407,38 @@ pub struct Buttons {
 }
 
 impl Buttons {
-    /// `(here, there)` from `button_there`.
-    pub fn press(&mut self, (here, there): (u64, u64)) {
-        self.down.retain(|(h, t)| *h != here && *t != there);
+    /// `(here, there)` from `button_there`. Returns the buttons to let go
+    /// there first: an older press of this button here, or of the same one
+    /// there, whose release was never heard. Forgotten without that, it
+    /// stayed held there with nothing left to let it go (after a ⌃-click,
+    /// the right button under every later left click).
+    pub fn press(&mut self, (here, there): (u64, u64)) -> Vec<u64> {
+        let (held, down): (Vec<_>, Vec<_>) = std::mem::take(&mut self.down).into_iter().partition(|(h, t)| *h == here || *t == there);
+        self.down = down;
         self.down.push((here, there));
+        held.into_iter().map(|(_, there)| there).collect()
     }
 
     /// The button to let go there: the one its press pressed, whatever GPUI
     /// calls this release. Without the mouse's own event to say which it is,
     /// a left or right release that isn't down there is the other, when that
-    /// one is (only a Mac changes them).
-    pub fn release(&mut self, (here, there): (u64, u64)) -> u64 {
+    /// one is (only a Mac changes them). A release with no press here
+    /// (pressed outside the view) still goes, as the button GPUI calls it.
+    pub fn release(&mut self, button: (u64, u64)) -> u64 {
+        self.release_pressed(button).unwrap_or(button.1)
+    }
+
+    /// The same for a release outside the view, which hears of every one in
+    /// its window there: the button to let go, when its press went through
+    /// here. None when it didn't: a click on the toolbar isn't the machine's.
+    pub fn release_pressed(&mut self, (here, _): (u64, u64)) -> Option<u64> {
         let other = match here {
             1 => 3,
             3 => 1,
             _ => here,
         };
         let i = self.down.iter().position(|(h, _)| *h == here).or_else(|| self.down.iter().position(|(h, _)| *h == other).filter(|_| cfg!(target_os = "macos")));
-        match i {
-            Some(i) => self.down.remove(i).1,
-            None => there,
-        }
+        i.map(|i| self.down.remove(i).1)
     }
 
     /// The view is going away from the mouse: every button down there, to let go.
@@ -713,6 +724,48 @@ mod tests {
         assert_eq!(buttons.let_go(), vec![1]);
         // A release with no press here (pressed outside the picture) still goes.
         assert_eq!(buttons.release(button_there(Left, true).unwrap()), 1);
+    }
+
+    #[test]
+    fn a_press_lets_go_of_a_button_still_down_there() {
+        use gpui::MouseButton::{Left, Middle, Right};
+        let none = Vec::<u64>::new();
+        let mut buttons = Buttons::default();
+        // A ⌃-click (the right button there) whose release was never heard.
+        // The next plain click forgot it, and the right button stayed held
+        // there with nothing left to let it go: it's let go first.
+        assert_eq!(buttons.press(button_there(Right, true).unwrap()), none);
+        assert_eq!(buttons.press(button_there(Left, true).unwrap()), vec![3]);
+        assert_eq!(buttons.release(button_there(Left, true).unwrap()), 1);
+        assert_eq!(buttons.let_go(), none);
+        // The same button again, its release never heard: let go, then pressed.
+        assert_eq!(buttons.press(button_there(Left, true).unwrap()), none);
+        assert_eq!(buttons.press(button_there(Left, true).unwrap()), vec![1]);
+        // The machine has one right button: a ⌃-click with it already down
+        // there (a right click never let go) lets go of it first too.
+        assert_eq!(buttons.let_go(), vec![1]);
+        assert_eq!(buttons.press(button_there(Right, false).unwrap()), none);
+        assert_eq!(buttons.press(button_there(Right, true).unwrap()), vec![3]);
+        // Another button down is left alone.
+        assert_eq!(buttons.press(button_there(Middle, false).unwrap()), none);
+        assert_eq!(buttons.let_go(), vec![3, 2]);
+    }
+
+    #[test]
+    fn a_release_outside_the_view_lets_go_of_what_its_press_pressed_there() {
+        use gpui::MouseButton::{Left, Right};
+        let mut buttons = Buttons::default();
+        // Pressed on the picture, let go over the toolbar.
+        let _ = buttons.press(button_there(Left, true).unwrap());
+        assert_eq!(buttons.release_pressed(button_there(Left, true).unwrap()), Some(1));
+        // A click on the toolbar is heard out there as well, and isn't the
+        // machine's: nothing went down there for it.
+        assert_eq!(buttons.release_pressed(button_there(Left, true).unwrap()), None);
+        assert_eq!(buttons.release_pressed(button_there(Right, false).unwrap()), None);
+        // A ⌃-click let go out there after ⌃ was (GPUI: a left release).
+        let _ = buttons.press(button_there(Right, true).unwrap());
+        assert_eq!(buttons.release_pressed(button_there(Left, true).unwrap()), Some(3));
+        assert_eq!(buttons.let_go(), Vec::<u64>::new());
     }
 
     #[test]

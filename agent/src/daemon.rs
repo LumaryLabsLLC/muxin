@@ -493,6 +493,8 @@ fn launch(state: &Arc<State>, s: &Arc<Session>) -> anyhow::Result<()> {
             cmd.env_remove(name);
         }
     }
+    // A program in a terminal is started by forking (see `before_fork`).
+    sys::before_fork();
     let child = pair.slave.spawn_command(cmd)?;
     drop(pair.slave);
     let reader = pair.master.try_clone_reader()?;

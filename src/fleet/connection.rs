@@ -307,6 +307,10 @@ impl Engine {
     /// (only this one). In the background and best-effort: a machine that
     /// can't be reached is removed all the same. `unpaired` waits for it.
     /// The machine's link, kept up for this (`remove_machine`), goes after.
+    ///
+    /// One that's asleep is told too. Removing it is the user's own act, so
+    /// it's reached for this one word, as Wake reaches it: it wakes for a
+    /// moment, and sleeps on.
     pub(crate) fn unpair_removed(self: &Arc<Self>, spec: MachineSpec) {
         if spec.is_local() || self.demo_world().is_some() {
             link::reset(&spec.id);
@@ -314,13 +318,27 @@ impl Engine {
         }
         let id = spec.id.clone();
         let task = self.runtime().spawn(async move {
+            // Reached on purpose, asleep or not, until this is done.
+            let _looking = super::asleep::look(&spec.id);
+            // A link made for this isn't kept: it's hung up below, however
+            // the asking ends.
+            let mut own = None;
             let ask = async {
                 let app = direct::app_fingerprint().ok()?;
-                let l = link::get(&spec).await?;
+                // Over its link when it has one. Else over one made for
+                // this: `link::get` lets go of a link whose machine says
+                // it's asleep before a word goes over it.
+                let l = match link::current(&spec.id) {
+                    Some(l) => l,
+                    None => own.insert(link::reach(&spec).await.ok()?).clone(),
+                };
                 l.request(json!({ "op": "unpair", "client": app }), Duration::from_secs(15)).await.ok()
             };
             if tokio::time::timeout(Duration::from_secs(20), ask).await.ok().flatten().is_none() {
                 tracing::debug!("couldn't unpair {} on its way out", spec.name);
+            }
+            if let Some(l) = own {
+                l.hang_up();
             }
             link::reset(&spec.id);
         });
@@ -357,7 +375,8 @@ mod tests {
     /// A paired machine that's removed is unpaired here, reached or not. The
     /// second machine has a link: its agent is told over that one, which
     /// taking it out of config.toml leaves up until then and closes after.
-    /// (Both in one test: tests share one direct.json, and two saving a
+    /// The third is asleep: its agent is told all the same.
+    /// (All in one test: tests share one direct.json, and two saving a
     /// pairing at the same moment would lose one.)
     #[tokio::test(flavor = "multi_thread")]
     async fn a_removed_machine_leaves_no_pairing_behind() {
@@ -365,7 +384,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         // Disconnected, so nothing reaches out to it.
-        let text = "[[machine]]\nname = \"Paired\"\nhost = \"paired.invalid\"\ndisconnected = true\n\n[[machine]]\nname = \"Told\"\nhost = \"told.invalid\"\n";
+        let text = "[[machine]]\nname = \"Paired\"\nhost = \"paired.invalid\"\ndisconnected = true\n\n[[machine]]\nname = \"Told\"\nhost = \"told.invalid\"\n\n[[machine]]\nname = \"Dozing\"\nhost = \"dozing.invalid\"\n";
         std::fs::write(tmp.join("config.toml"), text).unwrap();
         let engine = Engine::new(Paths::resolve(Some(tmp.clone()), None), false);
         let pairing = |host: &str| direct::Paired { fingerprint: "f".repeat(64), host: host.into(), port: 47821, lan: Vec::new(), tailnet: Vec::new() };
@@ -374,19 +393,43 @@ mod tests {
         engine.unpaired("paired").await;
         assert!(engine.machine("paired").is_none() && direct::paired("paired").is_none());
 
+        // What an agent got before its end of the link closed.
+        async fn asked(mut agent: tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>) -> Vec<String> {
+            let mut ops = Vec::new();
+            while let Some(request) = tokio::time::timeout(Duration::from_secs(10), agent.recv()).await.expect("something still holds the link") {
+                ops.push(request["op"].as_str().unwrap_or_default().to_string());
+            }
+            ops
+        }
+
         direct::save("told", Some(pairing("told.invalid"))).unwrap();
-        let (l, mut agent) = link::piped(&engine.machine("told").unwrap().0).await;
+        let (l, agent) = link::piped(&engine.machine("told").unwrap().0).await;
         engine.remove_machine("told").unwrap();
         engine.unpaired("told").await;
         assert!(engine.machine("told").is_none() && direct::paired("told").is_none());
         assert!(link::current("told").is_none() && !l.alive());
         drop(l);
-        // What the agent got before its end of the link closed.
-        let mut asked = Vec::new();
-        while let Some(request) = tokio::time::timeout(Duration::from_secs(10), agent.recv()).await.expect("something still holds the link") {
-            asked.push(request["op"].as_str().unwrap_or_default().to_string());
-        }
-        assert_eq!(asked, ["unpair"]);
+        assert_eq!(asked(agent).await, ["unpair"]);
+
+        // A machine that sleeps has no link, and Muxin leaves it alone; not
+        // when it's leaving. It's reached for this one word, which wakes it
+        // for a moment (its agent says it's asleep), over a link that isn't
+        // kept, and it's left alone again after.
+        use super::super::asleep;
+        direct::save("dozing", Some(pairing("dozing.invalid"))).unwrap();
+        assert!(engine.machine_slept("dozing", &Default::default()) && asleep::is("dozing"));
+        // Asleep on another's word too, which outlasts the removal: nothing
+        // here leans on the removal dropping the machine's last check first.
+        let (another, dozing) = (7075, "dozing".to_string());
+        asleep::sync(another, [&dozing].into_iter());
+        let agent = link::piped_asleep(&engine.machine("dozing").unwrap().0).await;
+        engine.remove_machine("dozing").unwrap();
+        engine.unpaired("dozing").await;
+        assert!(engine.machine("dozing").is_none() && direct::paired("dozing").is_none());
+        assert!(link::current("dozing").is_none(), "the link made for it isn't kept");
+        assert_eq!(asked(agent).await, ["unpair"]);
+        assert!(asleep::is("dozing"), "nothing is still looking at it");
+        asleep::sync(another, std::iter::empty());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

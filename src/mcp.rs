@@ -610,7 +610,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "cloud_create",
-            "description": "Create a DigitalOcean droplet in the user's account, set it up (their user and SSH key, git, and the extras chosen: Docker, GitHub CLI, languages like Go, Rust, Python or PHP, agent CLIs, Tailscale), and add it to the user's machines. It COSTS MONEY every hour it exists: tell the user the size and price (cloud_options) and get their OK first. Takes a few minutes.",
+            "description": "Create a DigitalOcean droplet in the user's account, set it up (their user and SSH key, git, and the extras chosen: Docker, GitHub CLI, languages like Go, Rust, Python or PHP, agent CLIs, Tailscale), and add it to the user's machines. It COSTS MONEY every hour it exists: tell the user the size and price (cloud_options) and get their OK first. Takes a few minutes. It's one of the user's machines from the moment DigitalOcean makes it, before it has started (status \"manual\", cloud.power \"starting\"): if this fails or is cut off after that, the droplet still exists and is billed, cloud_usage counts it and cloud_destroy deletes it; Muxin fills in its address at a machine check once it has started.",
             "inputSchema": schema(json!({
                 "name": { "type": "string" },
                 "region": { "type": "string", "description": "Region slug, e.g. nyc3. Default: the user's setting, else the nearest." },

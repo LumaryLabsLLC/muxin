@@ -331,6 +331,9 @@ pub struct MachineSpec {
 
 /// Where a cloud machine lives, as config.toml records it:
 /// `cloud = { provider = "digitalocean", id = 123, region = "nyc3", size = "s-2vcpu-4gb", price_hourly = 0.03571, created_at = "..." }`.
+/// It's written the moment the droplet exists, with `host = ""` until it has
+/// an address (see `MachineSpec::awaits_address`). No key can be added here:
+/// a Muxin from before it would refuse the whole file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CloudRef {
@@ -417,6 +420,13 @@ impl MachineSpec {
     /// Muxin may reach it: it has a host and isn't disconnected.
     pub fn is_connected(&self) -> bool {
         self.is_checkable() && !self.disconnected
+    }
+
+    /// A cloud machine that exists (and is billed) and has no address yet:
+    /// it's still starting, or the Muxin that created it was cut off before
+    /// it started. Whichever Muxin checks the machines next fills it in.
+    pub fn awaits_address(&self) -> bool {
+        self.cloud.is_some() && !self.is_checkable()
     }
 
     /// Err for a machine disconnected on purpose, or asleep: what the user

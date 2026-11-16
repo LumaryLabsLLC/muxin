@@ -317,6 +317,10 @@ impl Engine {
         self.rt.spawn(async move { me.tailnet_loop().await });
         let me = self.clone();
         self.rt.spawn(async move { me.rules_loop().await });
+        // A cloud machine whose create was cut off last time: found now, not
+        // at the next check (there's none while automatic checks are off).
+        let me = self.clone();
+        self.rt.spawn(async move { me.cloud_catch_up().await });
         let me = self.clone();
         self.rt.spawn(async move { me.network_loop().await });
         // Monitors aren't kept between runs: ask the machines with a desktop
@@ -1359,6 +1363,12 @@ impl Engine {
             }).collect();
             (jobs, in_flight.into_iter().map(|m| m.id).collect())
         };
+        // A cloud machine whose create was cut off: found, or given its
+        // address, alongside the check (it's then checked like the others).
+        if self.demo.is_none() {
+            let me = self.clone();
+            self.rt.spawn(async move { me.cloud_catch_up().await });
+        }
         // These are looked at on purpose, asleep or not.
         let _looking: Vec<super::asleep::Looking> = jobs.iter().map(|(s, _)| super::asleep::look(&s.id)).collect();
 

@@ -22,7 +22,7 @@ impl Root {
 
         // A VM Muxin made is its container on its host, not the 127.0.0.1 ssh goes to.
         let place = m.vm.as_ref().map(|v| format!("{} on {}", v.container, m.parent.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| v.host.clone())));
-        let mut meta = vec![place.unwrap_or_else(|| if m.host.is_empty() { "no host".to_string() } else { m.host.clone() })];
+        let mut meta = vec![place.unwrap_or_else(|| if m.awaits_address() { "no address yet".to_string() } else if m.host.is_empty() { "no host".to_string() } else { m.host.clone() })];
         if !m.platform.is_empty() {
             meta.push(m.platform.clone());
         }
@@ -339,6 +339,8 @@ impl Root {
     /// Where a cloud machine runs, what it costs, and its power.
     fn cloud_card(&self, theme: &Theme, s: &Snapshot, m: &Machine, c: &crate::fleet::model::CloudInfo, busy: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let off = m.status == "offline";
+        // Created, and not started as far as Muxin knows: nothing to power yet, but it's billed.
+        let starting = m.awaits_address();
         let powering = s.operations.iter().find(|o| o.status == "running" && o.machine_id.as_deref() == Some(&m.id)).and_then(|o| match o.kind.as_str() {
             "cloud-power-on" => Some(true),
             "cloud-power-off" => Some(false),
@@ -347,6 +349,7 @@ impl Root {
         let power_label = match powering {
             Some(true) => "Powering on…",
             Some(false) => "Shutting down…",
+            None if starting => "Starting…",
             None if off => "Power on",
             None => "Power off",
         };
@@ -356,6 +359,7 @@ impl Root {
         let state = match powering {
             Some(true) => ("Powering on…".to_string(), theme.text_muted),
             Some(false) => ("Shutting down…".to_string(), theme.text_muted),
+            None if starting => ("Starting · billed from now".to_string(), theme.warning),
             None if off => ("Powered off · still billed".to_string(), theme.warning),
             None => (format!("Running{}", idle.unwrap_or_default()), theme.text_placeholder),
         };
@@ -404,7 +408,7 @@ impl Root {
                             .child(div().truncate().text_size(px(13.)).child(title))
                             .child(div().text_size(px(11.5)).text_color(state.1).child(state.0)),
                     )
-                    .child(Button::new("m-cloud-power", power_label).icon("power").disabled(busy).on_click(cx.listener(move |this, _, _, cx| this.cloud_power(&mid, off, cx))))
+                    .child(Button::new("m-cloud-power", power_label).icon("power").disabled(busy || starting).on_click(cx.listener(move |this, _, _, cx| this.cloud_power(&mid, off, cx))))
                     .child(Button::new("m-cloud-destroy", "Destroy…").style(ButtonStyle::Danger).disabled(busy).on_click(cx.listener(move |this, _, window, cx| this.confirm_remove_machine(&machine, window, cx)))),
             )
             .child(
@@ -975,6 +979,7 @@ fn status_label(m: &Machine) -> &'static str {
     match m.status.as_str() {
         "online" => "Online",
         "offline" | "asleep" => format::unreachable_word(m),
+        "manual" if m.awaits_address() => "Starting",
         "manual" => "No host",
         _ => "Not checked",
     }

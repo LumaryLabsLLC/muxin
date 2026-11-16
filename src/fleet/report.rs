@@ -103,6 +103,7 @@ fn row(m: &Machine) -> [String; 8] {
             "online" => "connected".into(),
             "offline" => "offline".into(),
             "asleep" => "asleep".into(),
+            _ if m.awaits_address() => "starting".into(),
             _ => "not checked".into(),
         }
     } else {
@@ -129,6 +130,7 @@ fn row(m: &Machine) -> [String; 8] {
     let diagnostics = match m.status.as_str() {
         "offline" => "unreachable".to_string(),
         "asleep" => "asleep".to_string(),
+        "manual" if m.awaits_address() => "no address yet".to_string(),
         "unchecked" | "manual" => "not checked".to_string(),
         _ if warnings > 0 => format!("{warnings} warning{}", if warnings == 1 { "" } else { "s" }),
         _ if unknown > 0 => format!("{unknown} unknown"),

@@ -82,7 +82,13 @@ pub fn machine(m: &MachineDetail) -> String {
     let _ = writeln!(
         out,
         "{}  ·  {}{}",
-        if s.host.is_empty() { "no host" } else { &s.host },
+        if !s.host.is_empty() {
+            &s.host
+        } else if s.cloud.is_some() {
+            "no address yet"
+        } else {
+            "no host"
+        },
         dash(&s.platform),
         m.os_version.as_ref().map(|v| format!("  ·  {v}")).unwrap_or_default()
     );

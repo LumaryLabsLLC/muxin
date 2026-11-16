@@ -680,6 +680,10 @@ fn nothing_is_sent_to_a_machine_while_it_sleeps() {
         )
         .unwrap();
         let engine = Engine::new(crate::config::Paths::resolve(Some(dir.clone()), None), false);
+        // It hears machines wake as the app that stays open does: what
+        // `start` sets up for that, without its loops (they'd reach for the
+        // machine by themselves, and the test does that by hand to count it).
+        engine.take_wake_notices();
         let (machine, l) = TestAgent::start_with(id, None, &[("MUXEN_TEST_POWER", &power)]).await;
         if !l.says_sleep() {
             eprintln!("agent {}: from before it could say its machine sleeps; nothing to see here", l.version());
@@ -734,13 +738,35 @@ fn nothing_is_sent_to_a_machine_while_it_sleeps() {
         assert_eq!(status(&engine), "asleep");
         assert!(quiet::held(id).is_some());
 
-        // It wakes and says so: the app (as the window does) looks at it.
+        // It wakes and says so, and the engine looks at it at once: nobody
+        // asks it to (its own hearing does, as in the window).
         std::fs::write(&power, "awake").unwrap();
         assert!(heard(&mut woke, id, Duration::from_secs(15)).await, "its wake notice");
-        engine.machine_woke(id).await;
-        assert_eq!(status(&engine), "online");
+        assert_eq!(until(engine.clone(), "online", Duration::from_secs(15)).await, "online");
         assert!(link::current(id).is_some(), "linked again");
         assert!(way.sent() > quiet);
+
+        // The connection for its next wake ends while it's up (here its
+        // agent lets go of this app's oldest, as it does past four): the
+        // engine makes it again, so the next sleep has one.
+        let first = waits_to_hear(id, Some(&way)).await.expect("a connection for the next wake");
+        let paired = direct::paired(id).expect("paired");
+        let agent_at = SocketAddr::from(([127, 0, 0, 1], port));
+        for n in 0..4 {
+            quiet::open(&format!("{id}-other-{n}"), &paired, agent_at).await.expect("another call from this app");
+        }
+        let mut again = None;
+        for _ in 0..100 {
+            again = quiet::held(id).filter(|at| *at != first);
+            if again.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(again.is_some(), "the connection that ended while it was up wasn't made again");
+        for n in 0..4 {
+            quiet::let_go(&format!("{id}-other-{n}"));
+        }
 
         // Asleep again, and this time the app goes (it quits, or drops the
         // connection): closing it sends the machine nothing.

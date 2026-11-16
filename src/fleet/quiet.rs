@@ -21,10 +21,16 @@
 //! iPad): `take` says what to do when a machine woke, or when its
 //! connection ended without a word (nobody will say it woke, so the app
 //! looks for itself again).
+//!
+//! What can't be helped: a call cut short before this app's half is closed
+//! (no answer within `SETUP`, or its caller gone) closes a connection that's
+//! still open both ways, and that sends a packet. Calls are made while the
+//! machine is up, or in the seconds a look woke it for; one that went back
+//! to sleep in that moment is woken once more by it.
 
 use std::collections::HashMap;
 use std::io::{self, Read};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -48,7 +54,12 @@ struct Hooks {
     lost: Hook,
 }
 
-static HOOKS: OnceLock<Hooks> = OnceLock::new();
+/// Who hears: the app that stays open, once (and each test that listens).
+fn hooks() -> &'static Mutex<Vec<Arc<Hooks>>> {
+    static HOOKS: OnceLock<Mutex<Vec<Arc<Hooks>>>> = OnceLock::new();
+    HOOKS.get_or_init(Default::default)
+}
+
 /// The user's choice (Settings::wake_notices).
 static ON: AtomicBool = AtomicBool::new(false);
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -58,6 +69,8 @@ struct Held {
     serial: u64,
     /// This app's end of it, as the machine sees it.
     local: SocketAddr,
+    /// The same as this computer has it (an IPv6 address with its scope).
+    bound: SocketAddr,
     waiting: tokio::task::JoinHandle<()>,
 }
 
@@ -71,12 +84,12 @@ fn held_ones() -> &'static Mutex<HashMap<String, Held>> {
 /// without that. Only an app that stays open does (the window, an iPad); a
 /// command that runs and ends has nobody left to hear.
 pub fn take(woke: impl Fn(&str) + Send + Sync + 'static, lost: impl Fn(&str) + Send + Sync + 'static) {
-    let _ = HOOKS.set(Hooks { woke: Arc::new(woke), lost: Arc::new(lost) });
+    hooks().lock().unwrap().push(Arc::new(Hooks { woke: Arc::new(woke), lost: Arc::new(lost) }));
 }
 
 /// Whether this app is one that hears them (`take` was called).
 pub fn taking() -> bool {
-    HOOKS.get().is_some()
+    !hooks().lock().unwrap().is_empty()
 }
 
 /// Waits to hear machines wake from now on, or no longer does: the
@@ -102,6 +115,22 @@ pub fn held(machine_id: &str) -> Option<String> {
     held_ones().lock().unwrap().get(machine_id).map(|h| h.local.to_string())
 }
 
+/// The same, when the machine's word would still get here on it: this
+/// computer still has the address the connection was made from. (One that
+/// went away while the machine was up, on leaving a network, leaves a
+/// connection nothing arrives on.) What a machine going to sleep is said to
+/// have promised.
+pub fn holds(machine_id: &str) -> Option<String> {
+    let (local, bound) = held_ones().lock().unwrap().get(machine_id).map(|h| (h.local, h.bound))?;
+    here(bound).then(|| local.to_string())
+}
+
+/// Whether this computer has the address now.
+fn here(mut addr: SocketAddr) -> bool {
+    addr.set_port(0);
+    UdpSocket::bind(addr).is_ok()
+}
+
 /// Lets go of a machine's connection (the machine was removed, or unpaired).
 /// Nothing is sent: its agent finds out when it next has something to say.
 pub fn let_go(machine_id: &str) {
@@ -115,28 +144,38 @@ pub fn let_go(machine_id: &str) {
 /// still has that connection, and this computer still has that address.
 pub fn arrives(notice: &str) -> bool {
     let Ok(addr) = notice.parse::<SocketAddr>() else { return false };
-    let have = held_ones().lock().unwrap().values().any(|h| h.local == addr);
-    have && std::net::UdpSocket::bind((addr.ip().to_canonical(), 0)).is_ok()
+    let bound = held_ones().lock().unwrap().values().find(|h| h.local == addr).map(|h| h.bound);
+    bound.is_some_and(here)
 }
 
 /// Opens the machine's connection, at `to` (where its direct link goes),
 /// and waits on it from now on. Returns this app's end of it. One it had
-/// before is let go of.
+/// before is let go of, also when this one can't be made: that one was made
+/// another way or at another time, and whether a word still arrives on it
+/// is anyone's guess. Better none, and a look at the machine at each check.
 pub async fn open(machine_id: &str, paired: &Paired, to: SocketAddr) -> Result<String, String> {
-    let (conn, local) = tokio::time::timeout(SETUP, call(paired, to)).await.map_err(|_| format!("{to}: no answer"))??;
+    let made = tokio::time::timeout(SETUP, call(paired, to)).await.map_err(|_| format!("{to}: no answer")).and_then(|made| made);
+    let (conn, bound) = match made {
+        Ok(made) => made,
+        Err(e) => {
+            let_go(machine_id);
+            return Err(e);
+        }
+    };
+    let local = SocketAddr::new(bound.ip().to_canonical(), bound.port());
     let serial = NEXT.fetch_add(1, Ordering::Relaxed);
     let id = machine_id.to_string();
     // Kept before it's waited on: what the wait hears is about this one.
     let mut all = held_ones().lock().unwrap();
     let waiting = tokio::spawn(wait(id.clone(), serial, conn));
-    if let Some(before) = all.insert(id, Held { serial, local, waiting }) {
+    if let Some(before) = all.insert(id, Held { serial, local, bound, waiting }) {
         before.waiting.abort();
     }
     Ok(local.to_string())
 }
 
 /// The call itself: connected, known to be the machine's agent, told
-/// `ready`, and this app's half closed.
+/// `ready`, and this app's half closed. With this computer's end of it.
 async fn call(paired: &Paired, to: SocketAddr) -> Result<(Conn, SocketAddr), String> {
     let config = direct::client_tls(paired, ALPN)?;
     let tcp = TcpStream::connect(to).await.map_err(|e| format!("{to}: {e}"))?;
@@ -155,7 +194,7 @@ async fn call(paired: &Paired, to: SocketAddr) -> Result<(Conn, SocketAddr), Str
     conn.tls.send_close_notify();
     conn.flush().await.map_err(|e| e.to_string())?;
     conn.tcp.shutdown().await.map_err(|e| e.to_string())?;
-    Ok((conn, SocketAddr::new(local.ip().to_canonical(), local.port())))
+    Ok((conn, local))
 }
 
 /// Waits for what the agent says next, which is that its machine woke.
@@ -170,15 +209,18 @@ async fn wait(machine_id: String, serial: u64, mut conn: Conn) {
         }
         ours
     };
-    let Some(hooks) = HOOKS.get().filter(|_| ours) else { return };
+    if !ours {
+        return;
+    }
+    let hearing: Vec<Arc<Hooks>> = hooks().lock().unwrap().clone();
     match said {
         Ok(Some(said)) if said == "awake" => {
             tracing::debug!("{machine_id} says it woke");
-            (hooks.woke)(&machine_id);
+            hearing.iter().for_each(|h| (h.woke)(&machine_id));
         }
         other => {
             tracing::debug!("{machine_id} won't say when it wakes any more: {other:?}");
-            (hooks.lost)(&machine_id);
+            hearing.iter().for_each(|h| (h.lost)(&machine_id));
         }
     }
 }
@@ -231,8 +273,8 @@ impl Conn {
 }
 
 /// What this app heard, for tests: the ids of machines that woke, and of
-/// those whose connection ended without a word. (What to do with them is
-/// said once a process, so every test hears through this.)
+/// those whose connection ended without a word. (One listener for all the
+/// tests of a process; an engine that hears adds its own.)
 #[cfg(test)]
 pub(crate) fn test_heard() -> (tokio::sync::broadcast::Receiver<String>, tokio::sync::broadcast::Receiver<String>) {
     use tokio::sync::broadcast::{Sender, channel};
@@ -255,38 +297,78 @@ pub(crate) fn test_heard() -> (tokio::sync::broadcast::Receiver<String>, tokio::
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use rustls::client::danger::HandshakeSignatureValid;
+    use rustls::pki_types::{CertificateDer, UnixTime};
+    use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+    use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
     use std::io::Write;
     use std::sync::mpsc;
 
     #[test]
     fn nothing_is_held_for_a_machine_never_called() {
-        assert_eq!(held("quiet-test-nobody"), None);
+        assert_eq!((held("quiet-test-nobody"), holds("quiet-test-nobody")), (None, None));
         assert!(!arrives("192.0.2.7:1") && !arrives("not an address"));
+        // An address this computer has, and one it doesn't (any more): a
+        // connection made from the second is one nothing arrives on.
+        assert!(here("127.0.0.1:61234".parse().unwrap()) && !here("192.0.2.7:61234".parse().unwrap()));
         // Letting go of nothing is fine.
         let_go("quiet-test-nobody");
     }
 
+    /// How a caller left: whether its half is closed for good (TLS's goodbye
+    /// with nothing before it, then the connection's own end), and whose
+    /// certificate it showed.
+    pub(crate) type Left = (bool, Option<String>);
+
     /// Something that answers as an agent does, one caller at a time: it
-    /// says `ready`, reads until the app has closed its half (and says on
-    /// `closed` whether that was all the app sent), then says what it's told
-    /// to and closes (None: closes without a word).
-    struct FakeAgent {
-        paired: Paired,
-        at: SocketAddr,
-        closed: mpsc::Receiver<bool>,
-        say: mpsc::Sender<Option<&'static str>>,
+    /// asks who calls, says `ready`, reads until the app has closed its half
+    /// (and says on `closed` how it left), then says what it's told to and
+    /// closes (None: closes without a word).
+    pub(crate) struct FakeAgent {
+        pub(crate) paired: Paired,
+        pub(crate) at: SocketAddr,
+        pub(crate) closed: mpsc::Receiver<Left>,
+        pub(crate) say: mpsc::Sender<Option<&'static str>>,
     }
 
-    fn fake_agent() -> FakeAgent {
+    /// Takes any app's certificate, as long as it shows one: the stand-in
+    /// says whose it was, and the test checks it.
+    #[derive(Debug)]
+    struct AnyApp(rustls::crypto::WebPkiSupportedAlgorithms);
+
+    impl ClientCertVerifier for AnyApp {
+        fn root_hint_subjects(&self) -> &[DistinguishedName] {
+            &[]
+        }
+
+        fn verify_client_cert(&self, _: &CertificateDer<'_>, _: &[CertificateDer<'_>], _: UnixTime) -> Result<ClientCertVerified, rustls::Error> {
+            Ok(ClientCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0)
+        }
+
+        fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0)
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.0.supported_schemes()
+        }
+    }
+
+    pub(crate) fn fake_agent() -> FakeAgent {
         let made = rcgen::generate_simple_self_signed(vec!["muxen-agent".to_string()]).unwrap();
         let (cert, key) = (made.cert.der().to_vec(), made.key_pair.serialize_der());
         let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let apps = AnyApp(provider.signature_verification_algorithms);
         let mut tls = rustls::ServerConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13])
             .unwrap()
-            .with_no_client_auth()
+            .with_client_cert_verifier(Arc::new(apps))
             .with_single_cert(vec![cert.clone().into()], rustls::pki_types::PrivateKeyDer::Pkcs8(key.into()))
             .unwrap();
         tls.alpn_protocols = vec![ALPN.to_vec()];
@@ -300,17 +382,21 @@ mod tests {
             for tcp in listener.incoming() {
                 let Ok(mut tcp) = tcp else { return };
                 let Ok(mut conn) = rustls::ServerConnection::new(tls.clone()) else { return };
-                let mut stream = rustls::Stream::new(&mut conn, &mut tcp);
-                if stream.write_all(b"ready\n").is_err() {
+                if rustls::Stream::new(&mut conn, &mut tcp).write_all(b"ready\n").is_err() {
                     // Not an app this agent's certificate is good for.
                     continue;
                 }
                 let mut rest = Vec::new();
-                let ended = stream.read_to_end(&mut rest);
-                let _ = closed_tx.send(ended.is_ok() && rest.is_empty());
+                let goodbye = rustls::Stream::new(&mut conn, &mut tcp).read_to_end(&mut rest).is_ok() && rest.is_empty();
+                // And the connection's own end behind TLS's goodbye: the
+                // app's half is closed, not only said to be.
+                let _ = tcp.set_read_timeout(Some(Duration::from_secs(2)));
+                let ended = matches!(tcp.read(&mut [0u8; 1]), Ok(0));
+                let app = conn.peer_certificates().and_then(|certs| certs.first()).map(|c| direct::fingerprint(c.as_ref()));
+                let _ = closed_tx.send((goodbye && ended, app));
                 match told.recv() {
                     Ok(Some(text)) => {
-                        let _ = stream.write_all(text.as_bytes());
+                        let _ = rustls::Stream::new(&mut conn, &mut tcp).write_all(text.as_bytes());
                         conn.send_close_notify();
                         let _ = conn.complete_io(&mut tcp);
                     }
@@ -339,9 +425,10 @@ mod tests {
         .unwrap_or(false)
     }
 
-    /// The whole of this app's side: it calls, is told `ready`, closes its
-    /// half at once, and hears `awake` however much later. A connection that
-    /// ends without that is said to be lost; one let go of says nothing.
+    /// The whole of this app's side: it calls as itself (its certificate),
+    /// is told `ready`, closes its half at once, and hears `awake` however
+    /// much later. A connection that ends without that is said to be lost;
+    /// one let go of says nothing.
     #[tokio::test(flavor = "multi_thread")]
     async fn hears_a_machine_wake_on_a_connection_it_closed_its_half_of() {
         direct::init(std::env::temp_dir().join("muxin-quiet-test"));
@@ -350,12 +437,14 @@ mod tests {
         let id = "quiet-test-book";
         let long = Duration::from_secs(10);
         let short = Duration::from_millis(400);
+        // Its half closed for good, and the certificate it's paired by shown.
+        let left = Ok((true, Some(direct::app_fingerprint().unwrap())));
 
         let at = open(id, &agent.paired, agent.at).await.expect("its agent takes the call");
-        assert_eq!(held(id), Some(at.clone()));
+        assert_eq!((held(id), holds(id)), (Some(at.clone()), Some(at.clone())));
         assert!(arrives(&at) && wanted());
         // This app's goodbye is with the agent already: it has nothing left to send.
-        assert_eq!(agent.closed.recv_timeout(long), Ok(true));
+        assert_eq!(agent.closed.recv_timeout(long), left);
         assert!(!next(&mut woke, id, short).await, "nothing is heard while it sleeps");
         agent.say.send(Some("awake\n")).unwrap();
         assert!(next(&mut woke, id, long).await);
@@ -364,20 +453,20 @@ mod tests {
 
         // Its agent stopped, or the machine is shutting down: no word.
         open(id, &agent.paired, agent.at).await.unwrap();
-        assert_eq!(agent.closed.recv_timeout(long), Ok(true));
+        assert_eq!(agent.closed.recv_timeout(long), left);
         agent.say.send(None).unwrap();
         assert!(next(&mut lost, id, long).await);
         assert_eq!(held(id), None);
         // Words that aren't `awake` count for nothing either.
         open(id, &agent.paired, agent.at).await.unwrap();
-        assert_eq!(agent.closed.recv_timeout(long), Ok(true));
+        assert_eq!(agent.closed.recv_timeout(long), left);
         agent.say.send(Some("asleep\n")).unwrap();
         assert!(next(&mut lost, id, long).await);
 
         // Let go of on purpose (the machine was removed): whatever its
         // agent says later is for nobody.
         open(id, &agent.paired, agent.at).await.unwrap();
-        assert_eq!(agent.closed.recv_timeout(long), Ok(true));
+        assert_eq!(agent.closed.recv_timeout(long), left);
         let_go(id);
         assert_eq!(held(id), None);
         agent.say.send(Some("awake\n")).unwrap();
@@ -386,9 +475,9 @@ mod tests {
         // A new call takes the place of the one before, which then counts for nothing.
         let other = fake_agent();
         let first = open(id, &agent.paired, agent.at).await.unwrap();
-        assert_eq!(agent.closed.recv_timeout(long), Ok(true));
+        assert_eq!(agent.closed.recv_timeout(long), left);
         let second = open(id, &other.paired, other.at).await.unwrap();
-        assert_eq!(other.closed.recv_timeout(long), Ok(true));
+        assert_eq!(other.closed.recv_timeout(long), left);
         assert_ne!(first, second);
         assert_eq!(held(id), Some(second));
         agent.say.send(None).unwrap();
@@ -400,8 +489,15 @@ mod tests {
         let wrong = Paired { fingerprint: agent.paired.fingerprint.clone(), ..other.paired.clone() };
         assert!(open(id, &wrong, other.at).await.is_err());
         assert_eq!(held(id), None);
-        // Nothing listens there at all.
+        // Nothing listens there at all. A call that fails doesn't leave the
+        // one from before in its place: whether a word still comes on that
+        // one, nobody knows.
+        open(id, &agent.paired, agent.at).await.unwrap();
+        assert_eq!(agent.closed.recv_timeout(long), left);
         let nobody = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap();
         assert!(open(id, &agent.paired, nobody).await.is_err());
+        assert_eq!((held(id), holds(id)), (None, None));
+        agent.say.send(None).unwrap();
+        assert!(!next(&mut lost, id, short).await, "and it's let go of without a word");
     }
 }

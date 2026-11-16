@@ -34,7 +34,8 @@ use std::time::{Duration, Instant};
 pub const ALPN: &[u8] = b"muxen-wake/2";
 const READY: &[u8] = b"ready\n";
 const AWAKE: &[u8] = b"awake\n";
-/// How long a caller gets to say who it is.
+/// How long a caller gets to say who it is, in all: however slowly it
+/// sends, it's let go of then.
 const HANDSHAKE: Duration = Duration::from_secs(10);
 /// Callers saying who they are at once; more are turned away.
 const HANDSHAKES: usize = 16;
@@ -129,7 +130,7 @@ fn start(listener: TcpListener) -> Result<(), String> {
             }
             let config = config.clone();
             thread::spawn(move || {
-                let _ = admit(tcp, config);
+                let _ = admit(tcp, config, HANDSHAKE);
                 HANDSHAKING.fetch_sub(1, Ordering::SeqCst);
             });
         }
@@ -138,20 +139,35 @@ fn start(listener: TcpListener) -> Result<(), String> {
     Ok(())
 }
 
-/// One caller: a paired app (its certificate says which) is kept, and told so.
-fn admit(mut tcp: TcpStream, config: Arc<rustls::ServerConfig>) -> Result<(), String> {
+/// One caller: a paired app (its certificate says which) is kept, and told
+/// so. It has `within` to say who it is.
+fn admit(mut tcp: TcpStream, config: Arc<rustls::ServerConfig>, within: Duration) -> Result<(), String> {
     let from = tcp.peer_addr().map_err(|e| e.to_string())?;
     let _ = tcp.set_nodelay(true);
-    tcp.set_read_timeout(Some(HANDSHAKE)).and_then(|_| tcp.set_write_timeout(Some(HANDSHAKE))).map_err(|e| e.to_string())?;
     let mut tls = rustls::ServerConnection::new(config).map_err(|e| e.to_string())?;
-    let deadline = Instant::now() + HANDSHAKE;
+    // The handshake, a step at a time, each with the time that's left: a
+    // caller that sends a byte now and then doesn't get to stay for it.
+    // (rustls' own `complete_io` goes on for as long as anything comes.)
+    const TOO_LONG: &str = "it took too long to say who it is";
+    let stopped = |e: io::Error| match e.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => TOO_LONG.to_string(),
+        _ => e.to_string(),
+    };
+    let deadline = Instant::now() + within;
     while tls.is_handshaking() {
-        if Instant::now() > deadline {
-            return Err("it took too long to say who it is".into());
+        let left = deadline.checked_duration_since(Instant::now()).filter(|left| !left.is_zero()).ok_or(TOO_LONG)?;
+        tcp.set_read_timeout(Some(left)).and_then(|_| tcp.set_write_timeout(Some(left))).map_err(|e| e.to_string())?;
+        if tls.wants_write() {
+            tls.write_tls(&mut tcp).map_err(stopped)?;
+        } else {
+            if tls.read_tls(&mut tcp).map_err(stopped)? == 0 {
+                return Err("it hung up".into());
+            }
+            tls.process_new_packets().map_err(|e| e.to_string())?;
         }
-        tls.complete_io(&mut tcp).map_err(|e| e.to_string())?;
     }
     let app = tls.peer_certificates().and_then(|certs| certs.first()).map(|c| crate::direct::fingerprint(c.as_ref())).ok_or("it showed no certificate")?;
+    tcp.set_write_timeout(Some(Duration::from_secs(2))).map_err(|e| e.to_string())?;
     // Kept before it's told so: a wake from here on reaches it.
     let mut all = waiting().lock().unwrap();
     tls.writer().write_all(READY).map_err(|e| e.to_string())?;
@@ -315,6 +331,43 @@ mod tests {
         waiting().lock().unwrap().len()
     }
 
+    /// Whether what was read is the connection's end with nothing said: not
+    /// a word, and not a wait that ran out with the connection still there.
+    fn ended(read: io::Result<String>) -> bool {
+        match read {
+            Ok(said) => said.is_empty(),
+            Err(e) => !matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut),
+        }
+    }
+
+    /// A caller gets so long to say who it is, in all: one that sends a
+    /// byte now and then is let go of all the same, and doesn't keep others
+    /// from calling.
+    #[test]
+    fn a_caller_that_dawdles_is_let_go_of() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let config = Arc::new(rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_protocol_versions(&[&rustls::version::TLS13]).unwrap().with_no_client_auth().with_cert_resolver(Arc::new(rustls::server::ResolvesServerCertUsingSni::new())));
+        let dawdler = thread::spawn(move || {
+            let mut tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            // The start of a handshake message of 512 bytes, then a byte of
+            // it every so often: never enough to answer, never silent for long.
+            let _ = tcp.write_all(&[0x16, 0x03, 0x01, 0x02, 0x00]);
+            for _ in 0..80 {
+                thread::sleep(Duration::from_millis(100));
+                if tcp.write_all(&[0]).is_err() {
+                    break;
+                }
+            }
+        });
+        let (tcp, _) = listener.accept().unwrap();
+        let began = Instant::now();
+        let turned_away = admit(tcp, config, Duration::from_millis(600)).unwrap_err();
+        assert_eq!(turned_away, "it took too long to say who it is");
+        assert!(began.elapsed() < Duration::from_secs(3), "{:?}", began.elapsed());
+        let _ = dawdler.join();
+    }
+
     /// An app that waits hears `awake` when the machine has fully woken, and
     /// nothing before; one that isn't paired isn't taken. What an app left
     /// behind is let go of as new ones come.
@@ -352,18 +405,28 @@ mod tests {
         assert_eq!(line(&mut tls, &mut tcp).unwrap(), "", "closed after it");
         assert_eq!(held(), 0);
 
-        // An app that came back again and again without a word: the oldest go.
-        let calls: Vec<_> = (0..PER_APP + 2).map(|_| call(port, &config).unwrap()).collect();
+        // An app that came back again and again without a word: the oldest
+        // go, at once (their connections end, with nothing said on them),
+        // and the newest are the ones told at the next wake.
+        let mut calls: Vec<_> = (0..PER_APP + 2).map(|_| call(port, &config).unwrap()).collect();
         assert_eq!(held(), PER_APP);
-        let (mut first_tls, mut first_tcp) = calls.into_iter().next().unwrap();
-        assert_ne!(line(&mut first_tls, &mut first_tcp).ok().as_deref(), Some("awake"), "let go of, not told");
+        let kept = calls.split_off(2);
+        for (mut tls, mut tcp) in calls {
+            assert!(ended(line(&mut tls, &mut tcp)), "the oldest are let go of, not told");
+        }
+        test_change(Change::Sleep);
+        test_change(Change::Awake);
+        for (mut tls, mut tcp) in kept {
+            assert_eq!(line(&mut tls, &mut tcp).unwrap(), "awake");
+        }
 
-        // Unpaired while it waits: it hears nothing at the next wake.
+        // Unpaired while it waits: it hears nothing at the next wake, and
+        // its connection ends.
         let (mut tls, mut tcp) = call(port, &config).unwrap();
         std::fs::write(&trusted, "").unwrap();
         test_change(Change::Sleep);
         test_change(Change::Awake);
-        assert_ne!(line(&mut tls, &mut tcp).ok().as_deref(), Some("awake"));
+        assert!(ended(line(&mut tls, &mut tcp)));
         // The wake's listeners run on a thread of their own.
         let deadline = Instant::now() + Duration::from_secs(5);
         while held() != 0 && Instant::now() < deadline {

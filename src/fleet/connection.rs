@@ -313,9 +313,14 @@ impl Engine {
     /// One that's asleep is told too. Removing it is the user's own act, so
     /// it's reached for this one word, as Wake reaches it: it wakes for a
     /// moment, and sleeps on.
+    ///
+    /// The connection it would have said it woke on goes too, however this
+    /// ends (told, not reached, or out of time): letting go of it sends
+    /// nothing, and nobody waits to hear a machine that has left.
     pub(crate) fn unpair_removed(self: &Arc<Self>, spec: MachineSpec) {
         if spec.is_local() || self.demo_world().is_some() {
             link::reset(&spec.id);
+            super::quiet::let_go(&spec.id);
             return;
         }
         let id = spec.id.clone();
@@ -343,6 +348,7 @@ impl Engine {
                 l.hang_up();
             }
             link::reset(&spec.id);
+            super::quiet::let_go(&spec.id);
         });
         unpairing().lock().unwrap().insert(id, task);
     }
@@ -425,9 +431,14 @@ mod tests {
         let (another, dozing) = (7075, "dozing".to_string());
         asleep::sync(another, [&dozing].into_iter());
         let agent = link::piped_asleep(&engine.machine("dozing").unwrap().0).await;
+        // It had said it would tell this app when it wakes, on a connection
+        // the app holds: that goes with it.
+        let wakes = super::super::quiet::tests::fake_agent();
+        super::super::quiet::open("dozing", &wakes.paired, wakes.at).await.unwrap();
         engine.remove_machine("dozing").unwrap();
         engine.unpaired("dozing").await;
         assert!(engine.machine("dozing").is_none() && direct::paired("dozing").is_none());
+        assert!(super::super::quiet::held("dozing").is_none(), "still waiting to hear a machine that has left");
         assert!(link::current("dozing").is_none(), "the link made for it isn't kept");
         assert_eq!(asked(agent).await, ["unpair"]);
         assert!(asleep::is("dozing"), "nothing is still looking at it");

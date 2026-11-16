@@ -111,6 +111,16 @@ pub fn told_since(machine_id: &str, since: Instant) -> Option<Told> {
     state().lock().unwrap().told.get(machine_id).filter(|(at, _)| *at >= since).map(|(_, what)| what.clone())
 }
 
+/// Whether a Muxin that stays open runs on this config folder: it holds
+/// `app.lock` there for as long as it runs, however it ends (instance.rs).
+/// A command or an agent's MCP server asks this before it takes a machine's
+/// promise to say when it wakes at its word: that app made the promise's
+/// connection, and with it gone nobody is there to hear.
+pub fn app_open(dir: &std::path::Path) -> bool {
+    let Ok(lock) = std::fs::OpenOptions::new().write(true).open(dir.join("app.lock")) else { return false };
+    matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+}
+
 /// While this is held, the machine may be reached though it's asleep: a
 /// check of it by name, or waking it.
 pub struct Looking(String);

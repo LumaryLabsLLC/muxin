@@ -380,10 +380,27 @@ async fn awake(spec: &MachineSpec, link: Arc<Link>) -> Option<Arc<Link>> {
     // Where it will say it woke, made now: whatever woke the machine keeps
     // it up for a few seconds.
     told.notice = wait_to_hear(spec, &link).await;
+    // It may have fully woken since its hello (its lid opened as this
+    // reached it). Its word then went out on the connection from before,
+    // which the one just made took the place of, and nothing more would
+    // come on the new one. So it's asked again, with the new one in place:
+    // awake now, it's linked like any machine that's up; asleep still, a
+    // wake from here on is said on the new one.
+    if told.notice.is_some() && !still_asleep(&link).await {
+        tracing::debug!("{} woke as it was reached", spec.name);
+        return Some(link);
+    }
     tracing::debug!("{} is asleep; leaving it alone", spec.name);
     link.hang_up();
     super::asleep::told(&spec.id, told);
     None
+}
+
+/// Whether a machine found asleep still is, asked now. One that doesn't
+/// answer is taken to be.
+async fn still_asleep(link: &Link) -> bool {
+    let now = link.request(json!({ "op": "ping" }), Duration::from_secs(3)).await;
+    !now.is_ok_and(|pong| pong["ok"].as_bool() == Some(true) && pong["asleep"].as_bool() != Some(true))
 }
 
 /// Opens the connection this app hears the machine's wake on (quiet.rs),
@@ -417,6 +434,15 @@ pub fn wait_to_hear_all(specs: &[MachineSpec]) {
             });
         }
     }
+}
+
+/// Makes the connection a linked machine would say it woke on again, in
+/// place of the one it had: that one ended while the machine is up, or was
+/// made from where this computer no longer is. Nothing for a machine with
+/// no link (it gets one when it's next linked).
+pub async fn wait_to_hear_again(spec: &MachineSpec) -> Option<String> {
+    let link = current(&spec.id)?;
+    wait_to_hear(spec, &link).await
 }
 
 /// A link to the machine whether or not it's asleep, for waking it, or for
@@ -791,6 +817,43 @@ mod tests {
         let (link, _agent) = piped("link-asleep-here", r#"{"event":"hello","version":"0.7.0","sleeps":true,"asleep":true}"#).await;
         let here: MachineSpec = toml::from_str("name = \"Here\"\nid = \"link-asleep-here\"\nhost = \"local\"").unwrap();
         assert!(awake(&here, link).await.is_some());
+    }
+
+    /// Found asleep, a machine is asked once more, with the connection for
+    /// its wake in place: awake by then (its lid opened as it was reached),
+    /// it isn't written down as asleep on its hello's word.
+    #[tokio::test]
+    async fn a_machine_that_woke_as_it_was_reached_is_asked_again() {
+        let (link, mut agent) = piped("link-woke-meanwhile", r#"{"event":"hello","version":"0.7.0","now":1,"sleeps":true,"asleep":true}"#).await;
+        assert!(link.asleep().is_some());
+        // Its agent answers two pings: still asleep, then awake.
+        let answers = tokio::spawn(async move {
+            for asleep in [true, false] {
+                let mut head = [0u8; 9];
+                agent.read_exact(&mut head).await.unwrap();
+                let mut payload = vec![0u8; u32::from_be_bytes([head[5], head[6], head[7], head[8]]) as usize];
+                agent.read_exact(&mut payload).await.unwrap();
+                let asked: Value = serde_json::from_slice(&payload).unwrap();
+                assert_eq!(asked["op"], "ping");
+                let mut reply = json!({ "id": asked["id"], "ok": true, "sleeps": true });
+                if asleep {
+                    reply["asleep"] = json!(true);
+                }
+                let reply = serde_json::to_vec(&reply).unwrap();
+                let mut f = CONTROL.to_be_bytes().to_vec();
+                f.push(JSON);
+                f.extend((reply.len() as u32).to_be_bytes());
+                f.extend(reply);
+                agent.write_all(&f).await.unwrap();
+            }
+            agent
+        });
+        assert!(still_asleep(&link).await);
+        assert!(!still_asleep(&link).await);
+        // And one that doesn't answer is taken to be asleep still.
+        let agent = answers.await.unwrap();
+        drop(agent);
+        assert!(still_asleep(&link).await);
     }
 
     /// The word that a machine is going to sleep can fail to arrive. Every

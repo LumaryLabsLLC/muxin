@@ -91,6 +91,9 @@ pub struct Link {
     rt: tokio::runtime::Handle,
     /// A stream of its own for one terminal (`lane`), not the machine's link.
     lane: AtomicBool,
+    /// An answer of its agent's said the machine is asleep (said on to
+    /// whoever follows the link, once).
+    said_asleep: AtomicBool,
 }
 
 enum Holder {
@@ -416,8 +419,8 @@ pub fn wait_to_hear_all(specs: &[MachineSpec]) {
     }
 }
 
-/// A link to the machine whether or not it's asleep, for waking it: not
-/// kept, and the caller hangs up.
+/// A link to the machine whether or not it's asleep, for waking it, or for
+/// a last word to one that's leaving Muxin: not kept, and the caller hangs up.
 pub async fn reach(spec: &MachineSpec) -> Result<Arc<Link>, String> {
     spec.refuse_if_disconnected()?;
     let gate = gate(&spec.id);
@@ -494,6 +497,13 @@ fn local_agent() -> PathBuf {
 
 /// Directly when the machine is paired and reachable, else over ssh.
 async fn connect(spec: &MachineSpec) -> Result<Arc<Link>, String> {
+    // In a test, the pretend agent that waits for this (`piped_asleep`).
+    #[cfg(test)]
+    {
+        if let Some(link) = waiting().lock().unwrap().remove(&spec.id) {
+            return Ok(link);
+        }
+    }
     if let Some(paired) = super::direct::paired(&spec.id).filter(|_| !spec.is_local()) {
         match connect_direct(spec, &paired).await {
             Ok(link) => return Ok(link),
@@ -613,6 +623,80 @@ pub fn network_of(ip: std::net::IpAddr) -> &'static str {
     }
 }
 
+/// For tests: a link over pipes to a pretend agent that says yes to every
+/// request, kept as the machine's link. The receiver gets each request the
+/// agent reads, and ends once the app's end of the pipe closes: the link was
+/// dropped and nothing holds it any more.
+#[cfg(test)]
+pub(crate) async fn piped(spec: &MachineSpec) -> (Arc<Link>, mpsc::UnboundedReceiver<Value>) {
+    let (link, requests) = pretend(spec, false).await;
+    slots().lock().unwrap().insert(spec.id.clone(), Slot::Up(link.clone()));
+    (link, requests)
+}
+
+/// For tests: a machine that's asleep, so it has no link. The next
+/// connection made to it (`reach`, `get`) is one to a pretend agent that
+/// was woken by it for a moment, and says so; nothing is dialed. The
+/// receiver is `piped`'s.
+#[cfg(test)]
+pub(crate) async fn piped_asleep(spec: &MachineSpec) -> mpsc::UnboundedReceiver<Value> {
+    let (link, requests) = pretend(spec, true).await;
+    waiting().lock().unwrap().insert(spec.id.clone(), link);
+    requests
+}
+
+/// Pretend agents waiting to be connected to, by machine.
+#[cfg(test)]
+fn waiting() -> &'static Mutex<HashMap<String, Arc<Link>>> {
+    static WAITING: OnceLock<Mutex<HashMap<String, Arc<Link>>>> = OnceLock::new();
+    WAITING.get_or_init(Default::default)
+}
+
+/// The pretend agent and a link to it. `asleep`: its machine sleeps, as its
+/// hello and every answer say.
+#[cfg(test)]
+async fn pretend(spec: &MachineSpec, asleep: bool) -> (Arc<Link>, mpsc::UnboundedReceiver<Value>) {
+    // One pipe each way: letting go of the app's end is what the agent sees.
+    let (to_agent, mut agent_in) = tokio::io::duplex(1 << 16);
+    let (mut agent_out, from_agent) = tokio::io::duplex(1 << 16);
+    let frame = |payload: &[u8]| {
+        let mut f = CONTROL.to_be_bytes().to_vec();
+        f.push(JSON);
+        f.extend((payload.len() as u32).to_be_bytes());
+        f.extend(payload);
+        f
+    };
+    let (seen, requests) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let hello: &[u8] = if asleep { br#"{"event":"hello","version":"0.13.0","sleeps":true,"asleep":true}"# } else { br#"{"event":"hello","version":"0.13.0"}"# };
+        if agent_out.write_all(&frame(hello)).await.is_err() {
+            return;
+        }
+        loop {
+            let mut head = [0u8; 9];
+            if agent_in.read_exact(&mut head).await.is_err() {
+                break;
+            }
+            let mut payload = vec![0u8; u32::from_be_bytes([head[5], head[6], head[7], head[8]]) as usize];
+            if agent_in.read_exact(&mut payload).await.is_err() {
+                break;
+            }
+            let Some(request) = serde_json::from_slice::<Value>(&payload).ok().filter(|_| head[..4] == CONTROL.to_be_bytes() && head[4] == JSON) else { continue };
+            let mut reply = json!({ "id": request["id"], "ok": true });
+            if asleep {
+                reply["asleep"] = json!(true);
+            }
+            let reply = serde_json::to_vec(&reply).unwrap_or_default();
+            let _ = seen.send(request);
+            if agent_out.write_all(&frame(&reply)).await.is_err() {
+                break;
+            }
+        }
+    });
+    let link = start(spec, Box::pin(from_agent), Writer::Pipe(Box::pin(to_agent)), Holder::Lane, "ssh").await.expect("a piped link");
+    (link, requests)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,6 +793,38 @@ mod tests {
         assert!(awake(&here, link).await.is_some());
     }
 
+    /// The word that a machine is going to sleep can fail to arrive. Every
+    /// answer its agent gives in its sleep says so, and whoever follows the
+    /// link then hears it as the word itself, once. When the agent's own
+    /// word does come, that's the one heard, and nothing is made up after it.
+    #[tokio::test]
+    async fn an_answer_that_says_asleep_is_the_word_that_it_sleeps() {
+        let frame = |payload: &str| {
+            let mut f = CONTROL.to_be_bytes().to_vec();
+            f.push(JSON);
+            f.extend((payload.len() as u32).to_be_bytes());
+            f.extend(payload.as_bytes());
+            f
+        };
+        let (link, mut agent) = piped("link-asleep-answer", r#"{"event":"hello","version":"0.7.0","now":1,"sleeps":true}"#).await;
+        let mut events = link.subscribe();
+        // Two answers in its sleep, and no word from the agent before them.
+        agent.write_all(&frame(r#"{"id":41,"ok":true,"asleep":true}"#)).await.unwrap();
+        agent.write_all(&frame(r#"{"id":42,"ok":true,"asleep":true,"lid_closed":true}"#)).await.unwrap();
+        let heard = tokio::time::timeout(Duration::from_secs(3), events.recv()).await.expect("said on").unwrap();
+        assert_eq!((heard["event"].as_str(), heard["lid_closed"].as_bool()), (Some("sleep"), None));
+        assert!(tokio::time::timeout(Duration::from_millis(900), events.recv()).await.is_err(), "once");
+
+        // The agent's own word, right behind an answer: only that is heard.
+        let (link, mut agent) = piped("link-asleep-word", r#"{"event":"hello","version":"0.7.0","now":1,"sleeps":true}"#).await;
+        let mut events = link.subscribe();
+        agent.write_all(&frame(r#"{"id":7,"ok":true,"asleep":true}"#)).await.unwrap();
+        agent.write_all(&frame(r#"{"event":"sleep","lid_closed":true}"#)).await.unwrap();
+        let heard = tokio::time::timeout(Duration::from_secs(3), events.recv()).await.expect("the word").unwrap();
+        assert_eq!((heard["event"].as_str(), heard["lid_closed"].as_bool()), (Some("sleep"), Some(true)));
+        assert!(tokio::time::timeout(Duration::from_millis(900), events.recv()).await.is_err(), "and nothing made up after it");
+    }
+
     /// Nothing reaches for a machine that's asleep: no link is made, and no
     /// try at one is counted as a failure to wait out.
     #[tokio::test]
@@ -766,6 +882,7 @@ impl Link {
             priority: Arc::new(AtomicI32::new(BACKGROUND)),
             rt,
             lane: AtomicBool::new(false),
+            said_asleep: AtomicBool::new(false),
         });
         (link, out_rx)
     }
@@ -822,6 +939,21 @@ impl Link {
                 if channel == CONTROL {
                     let Ok(msg) = serde_json::from_slice::<Value>(&payload) else { continue };
                     if let Some(id) = msg["id"].as_u64() {
+                        // Asleep, says an answer: the word that it was going
+                        // to sleep didn't get here (or this link was made in
+                        // its sleep). Whoever follows the link hears it now,
+                        // unless the agent's own word comes in a moment (one
+                        // word is enough).
+                        if msg["asleep"].as_bool() == Some(true) && !link.said_asleep.load(Ordering::Relaxed) {
+                            let (weak, said) = (weak.clone(), json!({ "event": "sleep", "lid_closed": msg["lid_closed"] }));
+                            link.rt.spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                                let Some(link) = weak.upgrade() else { return };
+                                if !link.said_asleep.swap(true, Ordering::Relaxed) {
+                                    let _ = link.events.send(said);
+                                }
+                            });
+                        }
                         if let Some(tx) = link.pending.lock().unwrap().remove(&id) {
                             let _ = tx.send(msg);
                         }
@@ -831,6 +963,11 @@ impl Link {
                             let _ = tx.send(msg);
                         }
                     } else {
+                        if msg["event"] == "sleep" {
+                            link.said_asleep.store(true, Ordering::Relaxed);
+                        } else if msg["event"] == "awake" {
+                            link.said_asleep.store(false, Ordering::Relaxed);
+                        }
                         let _ = link.events.send(msg);
                     }
                 } else if kind == CLOSE {

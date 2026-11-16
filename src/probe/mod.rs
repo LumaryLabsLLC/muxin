@@ -172,6 +172,16 @@ impl ProbeResult {
             if !self.ok {
                 self.desktop = self.desktop.or(p.desktop);
             }
+            // Asleep, and this look got no answer (it wakes more slowly than
+            // the look waits, or its name isn't answered in its sleep): it's
+            // still asleep, not gone, and what it promised stands. One that
+            // answered and turned this computer away is something else.
+            let turned_away = self.locked_key.is_some() || matches!(crate::fleet::build::unreachable_kind(self.error.as_deref().unwrap_or("")), "auth" | "host-key");
+            if p.asleep && !self.asleep && !turned_away {
+                self.asleep = true;
+                self.wake_notice = p.wake_notice.clone();
+                self.lid_closed = p.lid_closed;
+            }
         }
         self
     }
@@ -950,6 +960,20 @@ mod tests {
         assert_eq!((asleep.last_seen_at, asleep.os.as_deref(), asleep.mac.as_deref()), (Some(up.checked_at), Some("darwin"), Some("3c:22:fb:9a:41:07")));
         // Not a kind of trouble a later check should chase.
         assert!(!crate::fleet::build::comes_back_by_itself(crate::fleet::build::unreachable_kind(ASLEEP)));
+        // A look that gets no answer (it wakes too slowly for the look, or
+        // its name isn't answered while it sleeps) leaves it asleep, with
+        // what it promised: not offline, to be reached for every 30 seconds.
+        for silence in ["ssh: connect to host book.local port 22: Operation timed out", "ssh: Could not resolve hostname book.local: nodename nor servname provided, or not known", "192.168.1.9:47821: no answer (is UDP port 47821 open?)", "Timed out after 30s"] {
+            let still = ProbeResult::failed(Instant::now(), silence).after(Some(&asleep));
+            assert!(!still.ok && still.asleep && still.lid_closed, "{silence}");
+            assert_eq!((still.wake_notice.as_deref(), still.last_seen_at), (Some("192.168.1.20:61234"), Some(up.checked_at)), "{silence}");
+            assert!(still.checked_at >= asleep.checked_at);
+        }
+        // One that answered and turned this computer away isn't asleep.
+        let denied = ProbeResult::failed(Instant::now(), "ahanna@book.local: Permission denied (publickey).").after(Some(&asleep));
+        assert!(!denied.ok && !denied.asleep && denied.wake_notice.is_none());
+        // A machine that wasn't asleep and doesn't answer is offline, as ever.
+        assert!(!ProbeResult::failed(Instant::now(), "ssh: connect to host book.local port 22: Operation timed out").after(Some(&up)).asleep);
         // Awake again: nothing of the sleep is left.
         let back = ProbeResult { ok: true, checked_at: Utc::now(), ..Default::default() }.after(Some(&asleep));
         assert!(back.ok && !back.asleep && back.wake_notice.is_none() && !back.lid_closed);

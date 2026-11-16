@@ -293,6 +293,8 @@ Every command takes `--json`. In that mode stdout carries JSON only, and errors 
 - `1`: the operation failed.
 - `2`: bad input, or the thing wasn't found.
 
+Commands that start long work (installing runners, copying files, making a VM, a cloud machine or a box) wait until it's done and print its log as it goes. The command's own process does the work, so there is no `--no-wait`: to get your prompt back, run the command in your shell's background (`muxin cp … &`). `install` and `runner` take `--timeout <seconds>` to give up sooner; the work stops there, and the command says so and exits 1.
+
 ```sh
 muxin status [--refresh]                 # overview + what needs attention
 muxin machines | machine <id>
@@ -318,8 +320,8 @@ muxin edit beelink:~/code/api [--editor zed] [--print]   # open a folder there i
 muxin disconnect <id>                     # stop connecting to it (its sessions go on there)
 muxin connect <id>                        # connect again, and check it
 muxin ignore <id> low-disk [--undo]       # stop showing one of its warnings (--undo: show it again)
-muxin install <machine-id> [--scope acme] [--count N | --name a --name b] [--label gpu] [--mode auto|service|background|docker] [--image IMAGE] [--docker-socket] [--no-wait]
-muxin runner <start|stop|restart|logs|remove> <runner-id> [--delete-files]
+muxin install <machine-id> [--scope acme] [--count N | --name a --name b] [--label gpu] [--mode auto|service|background|docker] [--image IMAGE] [--docker-socket] [--timeout SECONDS]
+muxin runner <start|stop|restart|logs|remove> <runner-id> [--delete-files] [--timeout SECONDS]
 muxin watch <org|owner/repo>... / unwatch ...
 muxin settings [--poll 20] [--scan-repos 10] [--check-interval 15]
 muxin ssh-hosts                          # ~/.ssh/config, your tailnet, and this network
@@ -501,7 +503,7 @@ Muxin first reaches a machine with `ssh`, installs its small agent there, and fr
 - `MUXEN_NO_LINK=1` turns all of this off: one ssh connection per request, as before.
 - **Disconnect** (a machine's right-click menu, or its Connection section) stops all of it for that machine: Muxin closes the connection and stops checking it and reading its sessions, which keep running there. It shows as Disconnected until you **Connect** (its page, its menu, or search). It's kept in `config.toml` as `disconnected = true`.
 - **Asleep.** A Mac says when it's going to sleep, and Muxin lets it: it shows as **Asleep**, the connection is closed, and nothing reaches for it (no keep-alive, no reconnecting, no look at its sessions, no check). A sleeping Mac with "Wake for network access" on wakes for any packet sent to it, for a few seconds with its display off: a connection kept open would wake it over and over, it would look online, and it would never rest. What would reach it meanwhile (a new terminal, a command) says it's asleep instead. **Wake** wakes it for real, as a key press there would; a laptop with its lid closed can't stay awake, and Muxin says so. Its agent tells Muxin when it has woken, and it's online again within seconds. Linux and Windows machines don't say when they sleep yet; asleep, they show as offline.
-- **Hearing when a Mac wakes.** While a Mac is up, Muxin makes a second connection to its agent (TCP on the same port, with the same pinned certificates) and closes its own half of it right away. Nothing is sent on it after that, by either side, until the Mac has fully woken: its agent then says so on it. The agent only answers a connection Muxin made, so macOS asks nothing on that Mac (a program that starts a connection on the local network needs its owner's leave there; one that answers doesn't). And with Muxin's half closed from the start, quitting Muxin or moving to another network sends a sleeping Mac nothing. It takes the app being open (the window, or an iPad) and a direct connection. A Mac reached only over ssh, or with an older agent, is found awake at Muxin's next check of your machines (every 15 minutes unless you changed that), which wakes it for a moment; so is one that slept while Muxin was closed, once, when Muxin starts. **Settings › General › Connections › Let sleeping Macs tell Muxin when they wake** turns this off: Muxin then looks at every sleeping Mac at each check.
+- **Hearing when a Mac wakes.** While a Mac is up, Muxin makes a second connection to its agent (TCP on the same port, with the same pinned certificates) and closes its own half of it right away. Nothing is sent on it after that, by either side, until the Mac has fully woken: its agent then says so on it. The agent only answers a connection Muxin made, so macOS asks nothing on that Mac (a program that starts a connection on the local network needs its owner's leave there; one that answers doesn't). And with Muxin's half closed from the start, quitting Muxin or moving to another network sends a sleeping Mac nothing. It takes the app being open (the window, or an iPad) and a direct connection. A Mac reached only over ssh, or with an older agent, is found awake at Muxin's next check of your machines (every 15 minutes unless you changed that), which wakes it for a moment; so is one that slept while Muxin was closed, once, when Muxin starts. A Mac that Muxin waits to hear from is looked at once every two hours all the same, in case its word was lost on the way (it woke on another network, say). **Settings › General › Connections › Let sleeping Macs tell Muxin when they wake** turns this off: Muxin then looks at every sleeping Mac at each check.
 
 **iPads.** Muxin for iPad reaches your machines directly too, with a key of its own. Add a machine on the iPad by its address (it signs in once with an ssh client of its own, installs the agent and sets up the direct connection), or pair it from here. Pair one in **Settings › iPads › Pair an iPad**: the iPad scans the QR code that shows (or you paste its link), both show the same six digits, and you click **Allow**. Each machine you picked then trusts the iPad's key, and the iPad gets their addresses; your Mac isn't needed after that. **Unpair** takes the key off those machines again, and an iPad connected at the time is let go within seconds. With **Alerts** on in the iPad's settings, each machine tells the iPad when an agent there is waiting for you, rang the bell, or exited with an error, even while the app is closed: encrypted on the machine with the iPad's own key, through muxin.dev to Apple's push service, which can't read it. From a terminal: `muxin ipad pair`, `muxin ipad ls` and `muxin ipad rm <name>`.
 
@@ -616,7 +618,7 @@ muxin services beelink stop postgres --container
 ```sh
 muxin files beelink:~/build
 muxin cp beelink:~/build/app.tar.gz adibs-macbook-pro:~/Downloads
-muxin cp adibs-macbook-pro:~/Projects/site beelink:~/www --no-wait
+muxin cp adibs-macbook-pro:~/Projects/site beelink:~/www    # waits until it's copied, with progress
 ```
 
 **Shared clipboard.** Turn it on in Settings › Clipboard. Text you copy on your Mac can then be pasted on your Linux desktops, Windows PCs and other Macs, and what you copy there lands on your Mac (and on the other machines). Passwords copied from password managers (marked private on the clipboard) aren't shared. Neither is text a program in a terminal copies. One exception: the app on Linux can't tell which copies on its own computer are passwords.

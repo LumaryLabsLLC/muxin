@@ -74,6 +74,13 @@ pub fn is(machine_id: &str) -> bool {
     st.asleep.values().any(|ids| ids.contains(machine_id)) && !st.looking.contains_key(machine_id)
 }
 
+/// Whether the machine is asleep as far as this process knows, looked at on
+/// purpose or not. (What reaches for it then may get no answer in time: it
+/// takes a sleeping Mac a moment to wake for a packet.)
+pub fn known(machine_id: &str) -> bool {
+    state().lock().unwrap().asleep.values().any(|ids| ids.contains(machine_id))
+}
+
 /// How every refusal of a machine that's asleep ends.
 pub const WAKE_FIRST: &str = "is asleep. Wake it first.";
 

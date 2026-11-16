@@ -34,6 +34,9 @@ const PROMISE_HOLDS: Duration = Duration::from_secs(2 * 3600);
 /// A machine whose connection for saying it woke keeps ending is looked at,
 /// or has that connection made again, this often at most.
 const HEAR_AGAIN_EVERY: Duration = Duration::from_secs(600);
+/// How long a machine counts as having just woken: its link may still be on
+/// its way back to the direct connection (`Engine::just_woke`).
+const JUST_WOKE: Duration = Duration::from_secs(120);
 /// Operation output can be chatty; coalesce snapshot publishes to this rate.
 const OP_PUBLISH_INTERVAL: Duration = Duration::from_millis(120);
 
@@ -106,6 +109,8 @@ struct State {
     /// When the connection a machine that's up would say it woke on was last
     /// made again (`hear_again`).
     heard_again: HashMap<String, Instant>,
+    /// When a machine last woke from a sleep, as far as this app saw.
+    woke_at: HashMap<String, Instant>,
 }
 
 pub struct Engine {
@@ -220,6 +225,7 @@ impl Engine {
             takes_notices: false,
             looked_for_lost: HashMap::new(),
             heard_again: HashMap::new(),
+            woke_at: HashMap::new(),
         };
         let (tx, _) = watch::channel(Arc::new(Snapshot::default()));
         super::direct::init(paths.dir.clone());
@@ -476,6 +482,7 @@ impl Engine {
             return;
         };
         tracing::debug!("{machine_id} woke; checking it");
+        self.note_woke(machine_id);
         let me = vec![machine_id.to_string()];
         self.run_check(Some(me.clone())).await;
         // That check was reaching the machine as it woke, and what it brought
@@ -484,6 +491,46 @@ impl Engine {
             tracing::debug!("{machine_id} woke while a check was reaching it; checking it again");
             self.run_check(Some(me)).await;
         }
+        self.direct_again_soon(machine_id);
+    }
+
+    /// The machine woke just now (its agent said so, or Wake woke it). Its
+    /// direct way is tried at once by whatever links to it next: a try that
+    /// got no answer while it slept, or as it was being woken, isn't held
+    /// against it.
+    pub(crate) fn note_woke(&self, machine_id: &str) {
+        super::direct::retry_now(machine_id);
+        self.state.lock().unwrap().woke_at.insert(machine_id.to_string(), Instant::now());
+    }
+
+    /// Whether the machine woke a moment ago. A link to it over ssh then
+    /// isn't a sign that something blocks the direct way: it was made as
+    /// the machine woke, and moves back by itself (`direct_again_soon`).
+    pub(crate) fn just_woke(&self, machine_id: &str) -> bool {
+        self.state.lock().unwrap().woke_at.get(machine_id).is_some_and(|at| at.elapsed() < JUST_WOKE)
+    }
+
+    /// After a wake, a paired machine's link may have come up over ssh all
+    /// the same: its direct way didn't answer yet while it woke. Tried again
+    /// in a moment, twice, so the link is direct (and the connection for its
+    /// next wake is made: only a direct link has one) without waiting for
+    /// the next look at the network.
+    pub(crate) fn direct_again_soon(self: &Arc<Self>, machine_id: &str) {
+        let over_ssh = |id: &str| super::direct::paired(id).is_some() && super::link::current(id).is_some_and(|l| l.transport() == "ssh");
+        if self.demo.is_some() || !over_ssh(machine_id) {
+            return;
+        }
+        let (me, id) = (self.clone(), machine_id.to_string());
+        self.rt.spawn(async move {
+            for wait in [3, 12] {
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                if !over_ssh(&id) {
+                    return;
+                }
+                tracing::debug!("{id} woke and is linked over ssh; trying its direct connection again");
+                me.move_home(&id).await;
+            }
+        });
     }
 
     /// The connection a machine asleep would have said it woke on is gone,
@@ -2168,6 +2215,48 @@ mod tests {
         assert!(looked_at(engine.clone(), before).await, "its connection ended, and it wasn't looked at");
         assert_eq!(seen(&engine), ("asleep".to_string(), "Muxin lets it sleep, and looks again at each check.".to_string()));
         assert!(quiet::held(&wink).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A machine that wakes is reached the direct way at once. A try at it
+    /// that got no answer earlier (it was going to sleep, or was being
+    /// woken) would keep its link on ssh for a minute otherwise, with no
+    /// connection for its next wake: only a direct link has one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_machine_that_wakes_is_tried_the_direct_way_at_once() {
+        use super::super::asleep::Told;
+        use super::super::direct;
+        let dir = std::env::temp_dir().join(format!("muxen-rise-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid = std::process::id();
+        std::fs::write(dir.join("config.toml"), format!("[[machine]]\nname = \"Rise {pid}\"\nhost = \"rise-{pid}.invalid\"\n")).unwrap();
+        let engine = Engine::new(Paths::resolve(Some(dir.clone()), None), false);
+        let rise = format!("rise-{pid}");
+        {
+            let mut st = engine.state.lock().unwrap();
+            let was_up = ProbeResult { ok: true, checked_at: Utc::now() - chrono::Duration::minutes(1), os: Some("darwin".into()), ..Default::default() };
+            st.probes.insert(rise.clone(), was_up.after(None));
+            engine.publish(&mut st);
+        }
+        // Its direct way didn't answer a moment ago, and it's asleep.
+        direct::test_hold_back(&rise);
+        assert!(engine.machine_slept(&rise, &Told::default()));
+        assert!(direct::held_back(&rise) && !engine.just_woke(&rise));
+        // It says it woke: nothing is held against its direct way when it's
+        // looked at, and for a moment it counts as having just woken (what
+        // `connection` says of a link over ssh then).
+        engine.machine_woke(&rise).await;
+        assert!(!direct::held_back(&rise), "its direct way is still left alone after it woke");
+        assert!(engine.just_woke(&rise));
+
+        // One that says it woke without having been asleep here changes
+        // nothing: an agent can't have its machine's direct way retried at will.
+        direct::test_hold_back(&rise);
+        engine.state.lock().unwrap().woke_at.clear();
+        engine.machine_woke(&rise).await;
+        assert!(direct::held_back(&rise) && !engine.just_woke(&rise));
+        direct::retry_now(&rise);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

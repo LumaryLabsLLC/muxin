@@ -740,10 +740,16 @@ fn nothing_is_sent_to_a_machine_while_it_sleeps() {
 
         // It wakes and says so, and the engine looks at it at once: nobody
         // asks it to (its own hearing does, as in the window).
+        // A try at its direct way got no answer meanwhile (one made as it's
+        // being woken does: a sleeping Mac is slow to answer). That isn't
+        // held against it once it's awake: it's linked directly again right
+        // away, not over ssh for a minute.
+        direct::test_hold_back(id);
         std::fs::write(&power, "awake").unwrap();
         assert!(heard(&mut woke, id, Duration::from_secs(15)).await, "its wake notice");
         assert_eq!(until(engine.clone(), "online", Duration::from_secs(15)).await, "online");
-        assert!(link::current(id).is_some(), "linked again");
+        assert!(link::current(id).is_some_and(|l| l.transport() == "direct"), "linked again, directly");
+        assert!(!direct::held_back(id) && engine.just_woke(id));
         assert!(way.sent() > quiet);
 
         // The connection for its next wake ends while it's up (here its

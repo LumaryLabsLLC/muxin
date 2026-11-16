@@ -161,9 +161,17 @@ impl Engine {
             }
         }
         link.hang_up();
+        // Awake now, as far as its agent could tell. Reaching it in its
+        // sleep often goes over ssh (its direct way wakes too slowly to
+        // answer in time), and that isn't held against the direct way: the
+        // check that follows tries it first.
+        self.note_woke(&spec.id);
         self.run_check(Some(vec![spec.id.clone()])).await;
         match self.current().machines.iter().any(|m| m.id == spec.id && m.status == "online") {
-            true => Some(Roused::Awake),
+            true => {
+                self.direct_again_soon(&spec.id);
+                Some(Roused::Awake)
+            }
             false => Some(Roused::StillAsleep { lid_closed }),
         }
     }

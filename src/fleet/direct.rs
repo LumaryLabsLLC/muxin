@@ -142,7 +142,8 @@ pub fn save(machine_id: &str, entry: Option<Paired>) -> Result<(), String> {
     Ok(())
 }
 
-/// Try the direct connection again right away (after the agent was updated).
+/// Try the direct connection again right away (after the agent was updated,
+/// or the machine woke).
 pub fn retry_now(machine_id: &str) {
     failures().lock().unwrap().remove(machine_id);
 }
@@ -263,14 +264,30 @@ fn udp_socket(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
 
 /// Opens a direct connection to a paired machine (or says why not).
 pub async fn connect(machine_id: &str, p: &Paired) -> Result<quinn::Connection, String> {
-    if failures().lock().unwrap().get(machine_id).is_some_and(|t| t.elapsed() < RETRY_AFTER) {
+    if held_back(machine_id) {
         return Err("a direct connection failed a moment ago".into());
     }
     let result = try_connect(p).await;
-    if result.is_err() {
+    // No answer from a machine that's asleep says nothing about the way to
+    // it: a sleeping Mac takes longer to wake for a packet than this waits.
+    // It isn't held against the next try, which is often the one right
+    // after it woke.
+    if result.is_err() && !super::asleep::known(machine_id) {
         failures().lock().unwrap().insert(machine_id.to_string(), Instant::now());
     }
     result
+}
+
+/// Whether the direct way to the machine is left alone for now, because it
+/// didn't answer a moment ago (`RETRY_AFTER`).
+pub fn held_back(machine_id: &str) -> bool {
+    failures().lock().unwrap().get(machine_id).is_some_and(|t| t.elapsed() < RETRY_AFTER)
+}
+
+/// For tests: as if the machine's direct way didn't answer just now.
+#[cfg(test)]
+pub(crate) fn test_hold_back(machine_id: &str) {
+    failures().lock().unwrap().insert(machine_id.to_string(), Instant::now());
 }
 
 async fn try_connect(p: &Paired) -> Result<quinn::Connection, String> {
@@ -391,4 +408,49 @@ pub async fn resolve_host(spec: &MachineSpec) -> Option<String> {
     }
     let out = tokio::process::Command::new("ssh").arg("-G").args(probe::ssh_args(spec)).output().await.ok()?;
     String::from_utf8_lossy(&out.stdout).lines().find_map(|l| l.strip_prefix("hostname ").map(|h| h.trim().to_string())).filter(|h| !h.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A direct way that doesn't answer is left alone for a while, and ssh
+    /// is used meanwhile. Not when the machine is asleep: a sleeping Mac
+    /// takes longer to wake for a packet than a try waits, so its silence
+    /// says nothing about the way to it, and the next try (often the one
+    /// right after it woke) goes ahead.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_answer_from_a_machine_asleep_doesnt_hold_back_the_next_try() {
+        init(std::env::temp_dir().join("muxin-direct-test"));
+        // An address nobody answers at.
+        let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let nobody = Paired { fingerprint: "f".repeat(64), host: "127.0.0.1".into(), port, lan: vec!["127.0.0.1".into()], tailnet: Vec::new() };
+        const HELD: &str = "a direct connection failed a moment ago";
+        let (up, nap) = (format!("direct-test-up-{port}"), format!("direct-test-nap-{port}"));
+
+        // A machine that's up, as far as anyone knows: tried once, then left
+        // alone for a while.
+        assert_ne!(connect(&up, &nobody).await.unwrap_err(), HELD);
+        assert!(held_back(&up));
+        assert_eq!(connect(&up, &nobody).await.unwrap_err(), HELD);
+
+        // One that's asleep (and looked at on purpose, as a check of it by
+        // name or Wake does): every try is a real one.
+        const OWNER: usize = 9202;
+        super::super::asleep::sync(OWNER, [&nap].into_iter());
+        let _looking = super::super::asleep::look(&nap);
+        assert!(super::super::asleep::known(&nap) && !super::super::asleep::is(&nap));
+        for _ in 0..2 {
+            assert_ne!(connect(&nap, &nobody).await.unwrap_err(), HELD);
+            assert!(!held_back(&nap));
+        }
+        super::super::asleep::sync(OWNER, std::iter::empty());
+        assert!(!super::super::asleep::known(&nap));
+
+        // What was held against a machine goes when it's to be tried again
+        // right away (it woke, its agent was updated).
+        retry_now(&up);
+        assert!(!held_back(&up));
+        assert_ne!(connect(&up, &nobody).await.unwrap_err(), HELD);
+    }
 }

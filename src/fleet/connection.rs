@@ -127,14 +127,8 @@ impl Engine {
             let host = parent.map(|p| p.name).unwrap_or_default();
             out.note = Some(format!("{host} doesn't forward a UDP port to it, so it's ssh. VMs Muxin makes now get one."));
         } else if out.direct && out.via == "ssh" {
-            // A Mac blocks the agent's network until Local Network access is allowed there.
             let mac = self.current().machines.iter().any(|m| m.id == spec.id && m.platform.starts_with("darwin"));
-            out.note = Some(if mac {
-                // Muxin Agent since 0.10.0, a plain muxen-agent before.
-                format!("On {}, allow Muxin Agent (or muxen-agent, with an older agent) under Privacy & Security › Local Network.", spec.name)
-            } else {
-                "Direct didn't connect (UDP 47821 blocked?), so it's ssh.".into()
-            });
+            out.note = Some(over_ssh_note(&spec.name, mac, self.just_woke(&spec.id)));
         }
         // Its local-network address didn't answer, so the connection took the
         // long way. Away from home that's expected; but when Tailscale itself
@@ -375,10 +369,41 @@ fn same_network(d: &super::model::TailnetDevice, lan: &[String]) -> bool {
     super::tailscale::cached_direct_addr(&d.dns_name).is_some_and(|a| lan.iter().any(|l| a.starts_with(&format!("{l}:"))))
 }
 
+/// What to say of a paired machine that's reached over ssh.
+fn over_ssh_note(name: &str, mac: bool, just_woke: bool) -> String {
+    if just_woke {
+        // Linked as it woke, before its direct way answered: nothing is
+        // blocked, and it moves back by itself.
+        format!("{name} just woke, so it's ssh for a moment. Muxin goes back to the direct connection by itself.")
+    } else if mac {
+        // A Mac blocks the agent's network until Local Network access is
+        // allowed there. Muxin Agent since 0.10.0, a plain muxen-agent before.
+        format!("On {name}, allow Muxin Agent (or muxen-agent, with an older agent) under Privacy & Security › Local Network.")
+    } else {
+        "Direct didn't connect (UDP 47821 blocked?), so it's ssh.".into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Paths;
+
+    /// A paired machine reached over ssh: on a Mac that usually means its
+    /// agent isn't allowed on the local network yet. Not when it just woke:
+    /// its link was made before its direct way answered, nothing is blocked,
+    /// and nobody should be sent to that Mac's settings for it.
+    #[test]
+    fn a_machine_that_just_woke_isnt_said_to_be_blocked() {
+        let blocked = over_ssh_note("Book", true, false);
+        assert!(blocked.contains("Local Network") && blocked.starts_with("On Book,"));
+        let woke = over_ssh_note("Book", true, true);
+        assert_eq!(woke, "Book just woke, so it's ssh for a moment. Muxin goes back to the direct connection by itself.");
+        assert!(!woke.contains("Local Network"));
+        // The same for a machine that isn't a Mac.
+        assert!(over_ssh_note("Box", false, false).contains("UDP 47821"));
+        assert!(!over_ssh_note("Box", false, true).contains("UDP"));
+    }
 
     /// A paired machine that's removed is unpaired here, reached or not. The
     /// second machine has a link: its agent is told over that one, which

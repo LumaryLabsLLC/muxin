@@ -1635,12 +1635,12 @@ mod tests {
     /// again, and what rode on it ends (the shared clipboard).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_machine_disconnected_or_removed_elsewhere_loses_its_link_here() {
-        use super::super::{clipboard, link};
+        use super::super::{asleep, clipboard, link};
         let dir = std::env::temp_dir().join(format!("muxen-xlink-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let machine = |name: &str| format!("[[machine]]\nname = \"Xlink {name}\"\nhost = \"xlink-{}.invalid\"\n\n", name.to_lowercase());
-        let text = format!("[settings]\nshare_clipboard = true\n\n{}{}{}{}", machine("Mac"), machine("Box"), machine("Nas"), machine("Stay"));
+        let text = format!("[settings]\nshare_clipboard = true\n\n{}", ["Mac", "Box", "Nas", "Nap", "Doze", "Stay"].map(machine).concat());
         std::fs::write(dir.join("config.toml"), text).unwrap();
         let paths = Paths::resolve(Some(dir.clone()), None);
         let window = Engine::new(paths.clone(), false);
@@ -1694,6 +1694,24 @@ mod tests {
         let (l, agent) = link::piped(&spec("xlink-nas").unwrap()).await;
         window.remove_machine("xlink-nas").unwrap();
         gone("xlink-nas", l, agent).await;
+
+        // Asleep makes no difference. Muxin has let go of such a machine, but
+        // a link to it can be up all the same (it's being looked at, or
+        // woken): disconnected or removed elsewhere, that one closes too.
+        let status = |id: &str| window.current().machines.iter().find(|m| m.id == id).map(|m| m.status.clone());
+        for id in ["xlink-nap", "xlink-doze"] {
+            assert!(window.machine_slept(id, &Default::default()) && asleep::is(id));
+            assert_eq!(status(id).as_deref(), Some("asleep"));
+        }
+        later().await;
+        cli.set_connected("xlink-nap", false).unwrap();
+        cli.remove_machine("xlink-doze").unwrap();
+        let (nap, nap_agent) = link::piped(&spec("xlink-nap").unwrap()).await;
+        let (doze, doze_agent) = link::piped(&spec("xlink-doze").unwrap()).await;
+        window.refresh_from_disk();
+        assert_eq!((status("xlink-nap").as_deref(), status("xlink-doze")), (Some("disconnected"), None));
+        gone("xlink-nap", nap, nap_agent).await;
+        gone("xlink-doze", doze, doze_agent).await;
 
         assert!(stay.alive() && link::current("xlink-stay").is_some_and(|l| Arc::ptr_eq(&l, &stay)));
         link::reset("xlink-stay");

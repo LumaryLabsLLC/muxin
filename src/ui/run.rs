@@ -116,7 +116,7 @@ impl Root {
                 .when(!can, |d| d.opacity(0.45))
                 .when(can, |d| d.cursor_pointer().hover(|st| st.bg(theme.element_hover)).on_click(cx.listener(move |this, _, _, cx| this.toggle_run_machine(&id, cx))))
                 .when(!can, |d| {
-                    let why: SharedString = if m.is_disconnected() { "Disconnected".into() } else { "Offline".into() };
+                    let why: SharedString = if m.is_disconnected() { "Disconnected".into() } else if m.is_asleep() { "Asleep".into() } else { "Offline".into() };
                     d.tooltip(move |window, cx| kit::Tooltip::view(why.clone(), window, cx))
                 })
                 .child(kit::tile(format::machine_icon(m), from, to, 20.))

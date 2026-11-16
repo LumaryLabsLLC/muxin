@@ -400,7 +400,7 @@ impl DesktopView {
                         if m.is_disconnected() {
                             Some(format!("Disconnected from {}: connect to it to see its desktop", m.name))
                         } else {
-                            (m.status == "offline").then(|| m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("Can't reach {}", m.name)))
+                            (m.status == "offline" || m.is_asleep()).then(|| m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("Can't reach {}", m.name)))
                         }
                     })
                 };

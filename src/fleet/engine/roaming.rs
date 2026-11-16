@@ -30,6 +30,9 @@ const NETWORK_EVERY: Duration = Duration::from_secs(2);
 /// How often to see whether a connection through Tailscale could take the
 /// local network instead, and how long to leave one alone after trying.
 const MOVE_HOME_EVERY: Duration = Duration::from_secs(120);
+/// A wait between two looks at the network this much longer than
+/// `NETWORK_EVERY` means this computer slept through it.
+const THIS_COMPUTER_SLEPT: Duration = Duration::from_secs(60);
 const MOVE_HOME_PAUSE: Duration = Duration::from_secs(600);
 
 /// What changed in one reading of Tailscale.
@@ -133,9 +136,13 @@ impl Engine {
                 link::retry_all();
                 self.check_soon(self.offline_machines());
             }
-            if !changes.flipped.is_empty() {
-                tracing::debug!("Tailscale sees a change: {:?}", changes.flipped);
-                self.check_soon(changes.flipped);
+            // Not a machine that's asleep: Tailscale sees it for the moments
+            // it wakes by itself, and a look then would wake it again.
+            let asleep = self.asleep_machines();
+            let flipped: Vec<String> = changes.flipped.into_iter().filter(|id| !asleep.contains(id)).collect();
+            if !flipped.is_empty() {
+                tracing::debug!("Tailscale sees a change: {flipped:?}");
+                self.check_soon(flipped);
             }
             let wait = if self.offline_machines().is_empty() { WATCH } else { WATCH_OFFLINE };
             tokio::time::sleep(wait).await;
@@ -150,8 +157,16 @@ impl Engine {
         }
         let mut last = tokio::task::spawn_blocking(route_signature).await.unwrap_or_default();
         let mut since_move = Instant::now();
+        let mut ticked = std::time::SystemTime::now();
         loop {
             tokio::time::sleep(NETWORK_EVERY).await;
+            // A long gap: this computer slept, and a machine that woke
+            // meanwhile couldn't say so. One look at those that were asleep.
+            let before = std::mem::replace(&mut ticked, std::time::SystemTime::now());
+            if ticked.duration_since(before).is_ok_and(|gap| gap > THIS_COMPUTER_SLEPT) {
+                tracing::debug!("this computer slept; looking at machines that were asleep");
+                self.check_soon(self.asleep_machines());
+            }
             let now = tokio::task::spawn_blocking(route_signature).await.unwrap_or_default();
             if now != last {
                 tracing::info!("network changed ({last} → {now})");
@@ -187,8 +202,11 @@ impl Engine {
                 }
             });
         }
-        // Machines that were out of reach may not be from here.
+        // Machines that were out of reach may not be from here. And one
+        // that's asleep can't tell this app it woke where the app no longer
+        // is: those are looked at once.
         self.check_soon(self.offline_machines());
+        self.check_soon(self.asleep_out_of_reach());
         let me = self.clone();
         self.rt.spawn(async move {
             me.refresh_tailnet().await;
@@ -250,10 +268,11 @@ impl Engine {
         self.rt.spawn(async move { me.run_check(Some(ids)).await });
     }
 
-    /// Machines the last check couldn't reach.
+    /// Machines the last check couldn't reach (not those asleep: they're
+    /// left alone).
     fn offline_machines(&self) -> Vec<String> {
         let st = self.state.lock().unwrap();
-        st.inventory.machines.iter().filter(|m| m.is_checkable() && st.probes.get(&m.id).is_some_and(|p| !p.ok)).map(|m| m.id.clone()).collect()
+        st.inventory.machines.iter().filter(|m| m.is_checkable() && st.probes.get(&m.id).is_some_and(|p| !p.ok && !p.asleep)).map(|m| m.id.clone()).collect()
     }
 
     /// Machines with a live connection right now.

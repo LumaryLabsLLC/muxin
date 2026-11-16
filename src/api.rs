@@ -48,7 +48,14 @@ pub struct ApiError {
 
 impl ApiError {
     fn new(code: &'static str, message: impl Into<String>) -> ApiError {
-        ApiError { code, message: message.into(), hint: None, details: None }
+        let message = message.into();
+        // A machine that's asleep is out of reach whatever was asked of it,
+        // and Muxin doesn't wake it by itself.
+        if message.ends_with(crate::fleet::asleep::WAKE_FIRST) {
+            let hint = "wake_machine (`muxin wake <machine>`) wakes it. It's asleep on purpose: wake it only when the user asked.";
+            return ApiError { code: "unreachable", message, hint: Some(hint.into()), details: None };
+        }
+        ApiError { code, message, hint: None, details: None }
     }
 
     pub fn not_found(message: impl Into<String>) -> ApiError {
@@ -427,7 +434,9 @@ pub struct MachineSummary {
     pub id: String,
     pub name: String,
     pub host: String,
-    /// "online" | "offline" (unreachable) | "unchecked" | "manual" (no host) | "disconnected" (on purpose: connect_machine)
+    /// "online" | "offline" (unreachable) | "asleep" (its agent said it
+    /// sleeps: Muxin leaves it alone until it wakes; wake_machine wakes it) |
+    /// "unchecked" | "manual" (no host) | "disconnected" (on purpose: connect_machine)
     pub status: String,
     pub checking: bool,
     /// e.g. "darwin-arm64", "linux-x64", "windows-x64"
@@ -455,7 +464,8 @@ pub struct MachineSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Why it can't be reached, in plain words: `kind` is "offline" (shut
-    /// down, asleep, off the network: nothing to fix), "refused", "auth",
+    /// down, off the network, or asleep without saying so: nothing to fix),
+    /// "asleep" (its agent said it sleeps: nothing to fix), "refused", "auth",
     /// "key-locked", "unknown-host", "host-key" or "error"; `hint` is a command to try.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unreachable: Option<crate::fleet::model::Unreachable>,
@@ -2494,6 +2504,17 @@ mod tests {
         Engine::new(Paths::resolve(Some(std::env::temp_dir().join("muxen-api-test")), None), true)
     }
 
+    /// Whatever was asked of a machine that's asleep, the answer says it's
+    /// out of reach and how to wake it.
+    #[test]
+    fn a_machine_asleep_is_unreachable_with_a_way_to_wake_it() {
+        for err in [ApiError::operation_failed("Book is asleep. Wake it first."), ApiError::invalid("Book is asleep. Wake it first."), ws_error("Book is asleep. Wake it first.".into(), Surface::Mcp)] {
+            assert_eq!(err.code, "unreachable");
+            assert!(err.hint.as_deref().unwrap().contains("wake_machine"), "{err:?}");
+        }
+        assert_eq!(ApiError::invalid("Book is disconnected. Connect to it first.").code, "invalid");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn status_reads_the_demo_machines() {
         let engine = demo();
@@ -2501,10 +2522,11 @@ mod tests {
         assert_eq!(s.counts.machines, 9);
         assert!(s.demo && s.github.live);
         assert!(s.summary.contains("9 machines"), "{}", s.summary);
+        // A laptop with its lid closed: asleep, which is nothing to fix.
         let harbor = s.machines.iter().find(|m| m.id == "harbor").unwrap();
-        assert_eq!(harbor.status, "offline");
-        assert!(harbor.error.is_some());
-        assert!(s.attention.iter().any(|a| a.machine_id.as_deref() == Some("harbor")));
+        assert_eq!(harbor.status, "asleep");
+        assert_eq!(harbor.unreachable.as_ref().map(|u| (u.kind.as_str(), u.title.as_str())), Some(("asleep", "Harbor is asleep")));
+        assert!(!s.attention.iter().any(|a| a.machine_id.as_deref() == Some("harbor")));
 
         let err = machine(&engine, MachineRequest { machine_id: "nope".into() }).await.unwrap_err();
         assert_eq!(err.code, "not_found");
@@ -4658,11 +4680,17 @@ pub struct WakeRequest {
     pub machine_id: String,
 }
 
-/// Wakes a machine that's asleep or off (Wake on LAN).
+/// Wakes a machine that's asleep (its agent wakes it for real when it
+/// answers) or off (Wake on LAN).
 pub async fn wake_machine(engine: &Arc<Engine>, req: WakeRequest) -> ApiResult<serde_json::Value> {
     let m = find_machine(&engine.current(), &req.machine_id)?.clone();
-    let from = engine.wake(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))?;
-    Ok(serde_json::json!({ "machine_id": m.id, "sent_from": from, "next": "Muxin checks it again in 20 and 40 seconds; call get_machine then." }))
+    let woke = engine.wake(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))?;
+    let next = match (woke.awake, &woke.sent_from) {
+        (true, _) => "It's awake: use it.",
+        (false, Some(_)) => "Muxin checks it again in 20 and 40 seconds; call get_machine then.",
+        (false, None) => "It's still asleep. Someone has to wake it at the machine (open its lid).",
+    };
+    Ok(serde_json::json!({ "machine_id": m.id, "awake": woke.awake, "sent_from": woke.sent_from, "message": woke.message, "next": next }))
 }
 
 #[derive(Debug, Deserialize)]

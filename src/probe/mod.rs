@@ -96,6 +96,22 @@ pub struct ProbeResult {
     /// passphrase, and no ssh agent ssh can reach holds it.
     #[serde(default)]
     pub locked_key: Option<String>,
+    /// It's asleep (its agent said so, or the check found it in a dark wake:
+    /// awake for a moment, its display off). Not `ok`: Muxin leaves it alone.
+    #[serde(default)]
+    pub asleep: bool,
+    /// Where its agent sends its notice when it wakes (the app that was
+    /// linked to it, as the machine saw it). None: nobody is told, so only a
+    /// check finds it awake.
+    #[serde(default)]
+    pub wake_notice: Option<String>,
+    /// Asleep with its lid closed (a laptop).
+    #[serde(default)]
+    pub lid_closed: bool,
+    /// Its agent couldn't get a wake notice through to this app (on a Mac:
+    /// it isn't allowed on the local network there).
+    #[serde(default)]
+    pub wake_notice_failed: bool,
 }
 
 /// A Docker container that publishes ports on its machine.
@@ -160,6 +176,17 @@ impl ProbeResult {
             if !self.ok {
                 self.desktop = self.desktop.or(p.desktop);
             }
+            // Asleep, and this look got no answer (it wakes more slowly than
+            // the look waits, or its name isn't answered in its sleep): it's
+            // still asleep, not gone, and what it promised stands. One that
+            // answered and turned this computer away is something else.
+            let turned_away = self.locked_key.is_some() || matches!(crate::fleet::build::unreachable_kind(self.error.as_deref().unwrap_or("")), "auth" | "host-key");
+            if p.asleep && !self.asleep && !turned_away {
+                self.asleep = true;
+                self.wake_notice = p.wake_notice.clone();
+                self.wake_notice_failed = p.wake_notice_failed;
+                self.lid_closed = p.lid_closed;
+            }
         }
         self
     }
@@ -207,6 +234,9 @@ pub fn container_dir(container: &str) -> String {
     format!("docker://{container}")
 }
 
+/// What a check of a machine that's asleep says, word for word.
+pub const ASLEEP: &str = "Asleep";
+
 impl ProbeResult {
     pub fn failed(started: Instant, error: impl Into<String>) -> ProbeResult {
         ProbeResult {
@@ -216,6 +246,11 @@ impl ProbeResult {
             error: Some(error.into()),
             ..Default::default()
         }
+    }
+
+    /// The machine is asleep, as its agent said (`told`) or now does.
+    pub fn asleep(started: Instant, told: &crate::fleet::asleep::Told) -> ProbeResult {
+        ProbeResult { asleep: true, wake_notice: told.notice.clone(), lid_closed: told.lid_closed, wake_notice_failed: told.notice_failed, ..ProbeResult::failed(started, ASLEEP) }
     }
 }
 
@@ -493,9 +528,17 @@ async fn check(spec: &MachineSpec, remembered: Option<Shell>) -> ProbeResult {
             r.duration_ms = started.elapsed().as_millis() as u64;
             if !r.ok {
                 r.error = Some("The machine answered, but the check printed nothing usable.".into());
+            } else if r.asleep && !spec.is_local() {
+                // The check itself woke it for a moment: it's asleep, and
+                // what it said about itself is kept.
+                r.ok = false;
+                r.error = Some(ASLEEP.into());
+            } else {
+                r.asleep = false;
             }
             r
         }
+        Err(RunError::Asleep(told)) => ProbeResult::asleep(started, &told),
         Err(e) => ProbeResult::failed(started, e.to_string()),
     }
 }
@@ -505,6 +548,8 @@ enum RunError {
     Spawn(String),
     Timeout,
     Output { code: Option<i32>, stderr: String },
+    /// Its agent said the machine is asleep.
+    Asleep(crate::fleet::asleep::Told),
 }
 
 impl std::fmt::Display for RunError {
@@ -512,6 +557,7 @@ impl std::fmt::Display for RunError {
         match self {
             RunError::Spawn(e) => write!(f, "{e}"),
             RunError::Timeout => write!(f, "Timed out after {}s", TIMEOUT.as_secs()),
+            RunError::Asleep(_) => write!(f, "{ASLEEP}"),
             RunError::Output { code, stderr } => {
                 let msg = last_lines(stderr, 3);
                 match (msg.is_empty(), code) {
@@ -530,6 +576,7 @@ async fn run(spec: &MachineSpec, shell: Shell) -> Result<String, RunError> {
     // doesn't make an ssh link (it's also how Muxin first reaches a machine),
     // only a direct one to a paired machine.
     if shell == Shell::Sh && !spec.is_local() {
+        let asked = Instant::now();
         if let Some(link) = crate::fleet::link::current_or_direct(spec).await {
             let req = serde_json::json!({ "op": "sh", "script": script, "login": false, "timeout": TIMEOUT.as_secs() });
             if let Ok(reply) = link.request(req, TIMEOUT).await {
@@ -538,6 +585,11 @@ async fn run(spec: &MachineSpec, shell: Shell) -> Result<String, RunError> {
                     return Ok(stdout);
                 }
             }
+        }
+        // Its agent answered that the machine is asleep: ssh would only
+        // keep it up, to hear the same.
+        if let Some(told) = crate::fleet::asleep::told_since(&spec.id, asked) {
+            return Err(RunError::Asleep(told));
         }
     }
     let mut child = if spec.is_local() {
@@ -749,6 +801,7 @@ pub fn parse(out: &str) -> ProbeResult {
             "failed_units" => r.failed_units = value.split_whitespace().map(str::to_string).collect(),
             "virt" => r.virt = text().filter(|v| v != "none"),
             "kvm" => r.kvm = value == "yes",
+            "asleep" => r.asleep = value == "1",
             "published" => r.published.extend(parse_published(value)),
             k if k.starts_with('c') && k.contains('.') => {
                 let (idx, field) = k[1..].split_once('.').unwrap();
@@ -891,6 +944,49 @@ mod tests {
         // Still down: still the last time it answered.
         let again = ProbeResult { ok: false, ..Default::default() }.after(Some(&failed));
         assert_eq!(again.last_seen_at, Some(ok.checked_at));
+    }
+
+    /// A machine that's asleep isn't `ok`, and keeps what was known of it:
+    /// what it is, when it was last up, how to wake it.
+    #[test]
+    fn a_check_that_finds_it_asleep_says_so() {
+        // In a dark wake (the check woke it): the Mac's own words for it.
+        let dark = parse("probe=1\nos=darwin\narch=arm64\nhostname=book\nasleep=1\nmac=3c:22:fb:9a:41:07\n");
+        assert!(dark.ok && dark.asleep, "parsed as it answered; the check then calls it asleep");
+        assert!(!parse("probe=1\nos=darwin\n").asleep);
+        assert!(!parse("probe=1\nos=linux\nasleep=0\n").asleep);
+
+        let up = ProbeResult { ok: true, checked_at: Utc::now() - chrono::Duration::minutes(9), shell: Some(Shell::Sh), os: Some("darwin".into()), hostname: Some("book".into()), mac: Some("3c:22:fb:9a:41:07".into()), ..Default::default() }.after(None);
+        // Its agent said so, and where its notice goes when it wakes.
+        let told = crate::fleet::asleep::Told { notice: Some("192.168.1.20:53312".into()), lid_closed: true, notice_failed: false };
+        let asleep = ProbeResult::asleep(Instant::now(), &told).after(Some(&up));
+        assert!(!asleep.ok && asleep.asleep && asleep.lid_closed);
+        assert_eq!((asleep.error.as_deref(), asleep.wake_notice.as_deref()), (Some(ASLEEP), Some("192.168.1.20:53312")));
+        assert_eq!((asleep.last_seen_at, asleep.os.as_deref(), asleep.mac.as_deref()), (Some(up.checked_at), Some("darwin"), Some("3c:22:fb:9a:41:07")));
+        // Not a kind of trouble a later check should chase.
+        assert!(!crate::fleet::build::comes_back_by_itself(crate::fleet::build::unreachable_kind(ASLEEP)));
+        // A look that gets no answer (it wakes too slowly for the look, or
+        // its name isn't answered while it sleeps) leaves it asleep, with
+        // what it promised: not offline, to be reached for every 30 seconds.
+        for silence in ["ssh: connect to host book.local port 22: Operation timed out", "ssh: Could not resolve hostname book.local: nodename nor servname provided, or not known", "192.168.1.9:47821: no answer (is UDP port 47821 open?)", "Timed out after 30s"] {
+            let still = ProbeResult::failed(Instant::now(), silence).after(Some(&asleep));
+            assert!(!still.ok && still.asleep && still.lid_closed, "{silence}");
+            assert_eq!((still.wake_notice.as_deref(), still.last_seen_at), (Some("192.168.1.20:53312"), Some(up.checked_at)), "{silence}");
+            assert!(still.checked_at >= asleep.checked_at);
+        }
+        // One that answered and turned this computer away isn't asleep.
+        let denied = ProbeResult::failed(Instant::now(), "ahanna@book.local: Permission denied (publickey).").after(Some(&asleep));
+        assert!(!denied.ok && !denied.asleep && denied.wake_notice.is_none());
+        // A machine that wasn't asleep and doesn't answer is offline, as ever.
+        assert!(!ProbeResult::failed(Instant::now(), "ssh: connect to host book.local port 22: Operation timed out").after(Some(&up)).asleep);
+        // Awake again: nothing of the sleep is left.
+        let back = ProbeResult { ok: true, checked_at: Utc::now(), ..Default::default() }.after(Some(&asleep));
+        assert!(back.ok && !back.asleep && back.wake_notice.is_none() && !back.lid_closed);
+        // A file from before this (or another Muxin's) reads as awake.
+        let old: ProbeResult = serde_json::from_str(r#"{"ok":true,"checkedAt":"2026-11-01T00:00:00Z"}"#).unwrap();
+        assert!(!old.asleep && old.wake_notice.is_none());
+        let kept: ProbeResult = serde_json::from_str(&serde_json::to_string(&asleep).unwrap()).unwrap();
+        assert!(kept.asleep && kept.wake_notice.is_some() && kept.lid_closed);
     }
 
     #[test]

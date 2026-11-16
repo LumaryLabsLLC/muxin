@@ -95,6 +95,11 @@ impl Engine {
             out.tailnet = m.tailnet.clone();
         }
         out.tailscale = self.current().tailscale.clone();
+        // Asleep: no connection is kept, or made to see how it would go.
+        if super::asleep::is(&spec.id) {
+            out.note = Some(format!("{} is asleep, so Muxin isn't connected to it.", spec.name));
+            return Ok(out);
+        }
         if let Some(l) = link::get(&spec).await {
             let started = Instant::now();
             if l.request(json!({ "op": "ping" }), Duration::from_secs(10)).await.is_ok() {

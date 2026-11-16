@@ -28,6 +28,9 @@ const MAX_OP_LOG_LINES: usize = 2000;
 const MAX_NOTICES: usize = 50;
 /// How often to look for an offline machine coming back.
 const OFFLINE_RECHECK: Duration = Duration::from_secs(30);
+/// How long a machine's promise to say when it wakes is taken at its word:
+/// past that, a check of every machine looks at it again, this often.
+const PROMISE_HOLDS: Duration = Duration::from_secs(2 * 3600);
 /// Operation output can be chatty; coalesce snapshot publishes to this rate.
 const OP_PUBLISH_INTERVAL: Duration = Duration::from_millis(120);
 
@@ -88,6 +91,11 @@ struct State {
     display_before: HashMap<(String, String), (u32, u32)>,
     /// Stop flags of the operations that can be cancelled.
     cancels: HashMap<u64, Arc<std::sync::atomic::AtomicBool>>,
+    /// Machines asleep whose agents tell this app when they wake (see
+    /// fleet::asleep): they aren't checked meanwhile.
+    wake_notices: HashSet<String>,
+    /// This app stays open and takes those notices (`start`).
+    takes_notices: bool,
 }
 
 pub struct Engine {
@@ -198,6 +206,8 @@ impl Engine {
             displays: HashMap::new(),
             display_before: HashMap::new(),
             cancels: HashMap::new(),
+            wake_notices: HashSet::new(),
+            takes_notices: false,
         };
         let (tx, _) = watch::channel(Arc::new(Snapshot::default()));
         super::direct::init(paths.dir.clone());
@@ -217,6 +227,13 @@ impl Engine {
             if let Some(engine) = weak.upgrade() {
                 let rt = engine.rt.clone();
                 rt.spawn(engine.follow_link(link));
+            }
+        });
+        // A machine that's asleep says so to whatever reaches for it.
+        let weak = Arc::downgrade(&engine);
+        super::asleep::set_on_told(move |machine_id, told| {
+            if let Some(engine) = weak.upgrade() {
+                let _ = engine.machine_slept(machine_id, told);
             }
         });
         let weak = Arc::downgrade(&engine);
@@ -263,6 +280,33 @@ impl Engine {
 
     /// Starts the background loops. Call once.
     pub fn start(self: &Arc<Self>) {
+        // An app that stays open can hear from machines that wake (their
+        // agents connect to it), so it needn't look at them while they
+        // sleep: when the user turned that on (Settings::wake_notices).
+        if self.demo.is_none() {
+            let weak = Arc::downgrade(self);
+            super::direct::take_notices(move |machine_id| {
+                if let Some(engine) = weak.upgrade() {
+                    let id = machine_id.to_string();
+                    let rt = engine.rt.clone();
+                    rt.spawn(async move { engine.machine_woke(&id).await });
+                }
+            });
+            {
+                let mut st = self.state.lock().unwrap();
+                st.takes_notices = st.settings.wake_notices;
+                super::direct::set_notices(st.takes_notices);
+            }
+            // Machines that were asleep when Muxin last ran don't know this
+            // app is back: one look at each (it tells them where to say so).
+            let me = self.clone();
+            self.rt.spawn(async move {
+                let asleep = me.asleep_machines();
+                if !asleep.is_empty() {
+                    me.run_check(Some(asleep)).await;
+                }
+            });
+        }
         let me = self.clone();
         self.rt.spawn(async move { me.github_loop().await });
         let me = self.clone();
@@ -320,6 +364,15 @@ impl Engine {
             let mut st = self.state.lock().unwrap();
             st.settings_mtime = mtime(&self.paths.settings);
             let scopes_changed = st.settings.github != new.github;
+            // Hearing from machines that wake, or not any more: asked of
+            // each as it links, so they link afresh.
+            if st.settings.wake_notices != new.wake_notices && self.demo.is_none() {
+                st.takes_notices = new.wake_notices;
+                super::direct::set_notices(new.wake_notices);
+                for m in st.inventory.machines.iter().filter(|m| !m.is_local()) {
+                    super::link::reset(&m.id);
+                }
+            }
             if st.settings.share_clipboard != new.share_clipboard {
                 if new.share_clipboard {
                     for m in st.inventory.machines.iter().filter(|m| !m.is_local()) {
@@ -353,6 +406,68 @@ impl Engine {
             Some(w) => w.test_scope(scope),
             None => self.github.test_scope(&settings.github, scope).await,
         }
+    }
+
+    /// A machine's agent said it's going to sleep (or, to something that
+    /// reached for it, that it's asleep): Muxin lets go of it, and leaves it
+    /// alone until it wakes. False for a machine it doesn't apply to (this
+    /// computer): nothing changed, and its link stays.
+    pub(crate) fn machine_slept(&self, machine_id: &str, told: &super::asleep::Told) -> bool {
+        {
+            let mut st = self.state.lock().unwrap();
+            // This computer runs Muxin: it isn't asleep.
+            if !st.inventory.machines.iter().any(|m| m.id == machine_id && !m.is_local()) {
+                return false;
+            }
+            let result = ProbeResult::asleep(Instant::now(), told).after(st.probes.get(machine_id));
+            self.keep_probe(&mut st, machine_id, result);
+            if self.demo.is_none() {
+                self.save_state(&mut st);
+            }
+            self.publish(&mut st);
+        }
+        // While it still hears: a goodbye later would wake it.
+        super::link::reset(machine_id);
+        true
+    }
+
+    /// A machine's agent said it has woken: look at it now. Only one that
+    /// was asleep (an agent can't have Muxin check its machine at will).
+    pub(crate) async fn machine_woke(self: &Arc<Self>, machine_id: &str) {
+        {
+            let mut st = self.state.lock().unwrap();
+            let Some(p) = st.probes.get_mut(machine_id).filter(|p| p.asleep) else { return };
+            // It said it's awake, and its promise to say so is kept: a look
+            // that gets no answer now finds it offline, not still asleep.
+            p.asleep = false;
+            p.wake_notice = None;
+            st.wake_notices.remove(machine_id);
+        }
+        tracing::debug!("{machine_id} woke; checking it");
+        self.run_check(Some(vec![machine_id.to_string()])).await;
+    }
+
+    /// Stores a machine's check, and whether its wake notice comes here.
+    fn keep_probe(&self, st: &mut State, machine_id: &str, result: ProbeResult) {
+        if result.asleep && result.wake_notice.is_some() && st.takes_notices {
+            st.wake_notices.insert(machine_id.to_string());
+        } else {
+            st.wake_notices.remove(machine_id);
+        }
+        st.probes.insert(machine_id.to_string(), result);
+    }
+
+    /// The machines asleep now.
+    pub(crate) fn asleep_machines(&self) -> Vec<String> {
+        let st = self.state.lock().unwrap();
+        st.inventory.machines.iter().filter(|m| m.is_connected() && st.probes.get(&m.id).is_some_and(|p| p.asleep)).map(|m| m.id.clone()).collect()
+    }
+
+    /// Those whose wake notice would no longer arrive (this computer moved to
+    /// another network): they have to be looked at.
+    pub(crate) fn asleep_out_of_reach(&self) -> Vec<String> {
+        let st = self.state.lock().unwrap();
+        st.wake_notices.iter().filter(|id| !st.probes.get(*id).and_then(|p| p.wake_notice.as_deref()).is_some_and(super::direct::notice_arrives)).cloned().collect()
     }
 
     /// Kicks off a machine check (all machines, or one) plus a GitHub refresh.
@@ -917,18 +1032,47 @@ impl Engine {
         }
         let mut events = link.subscribe();
         if link.request(serde_json::json!({ "op": "watch" }), Duration::from_secs(10)).await.is_ok() {
+            // What came in a burst of session changes and wasn't one (the
+            // word that it's going to sleep, or woke): each keeps its turn.
+            let mut kept: VecDeque<serde_json::Value> = VecDeque::new();
             loop {
-                tokio::select! {
-                    e = events.recv() => match e {
-                        Ok(e) if e["event"] == "sessions" => {
-                            // A burst of changes is one refresh.
-                            while events.try_recv().is_ok() {}
-                            let _ = self.refresh_sessions(&link.machine).await;
-                        }
-                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(_) => break,
+                let e = match kept.pop_front() {
+                    Some(e) => e,
+                    None => tokio::select! {
+                        e = events.recv() => match e {
+                            Ok(e) => e,
+                            // Some were lost on the way here, maybe the word
+                            // that it's going to sleep: its next answer says
+                            // (see `Link`'s reader), so ask for one.
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                let _ = link.request(serde_json::json!({ "op": "ping" }), Duration::from_secs(5)).await;
+                                continue;
+                            }
+                            Err(_) => break,
+                        },
+                        _ = link.closed() => break,
                     },
-                    _ = link.closed() => break,
+                };
+                match e["event"].as_str() {
+                    Some("sessions") => {
+                        // A burst of changes is one refresh.
+                        kept.extend(drain_sessions(&mut events));
+                        // Going to sleep: let go first, without one more look.
+                        if kept.iter().any(|k| k["event"] == "sleep") {
+                            continue;
+                        }
+                        let _ = self.refresh_sessions(&link.machine).await;
+                    }
+                    // Going to sleep: let go of it now, and leave it alone.
+                    // (This computer's own agent says so too when the Mac
+                    // sleeps; its link stays, and goes on being followed.)
+                    Some("sleep") => {
+                        if self.machine_slept(&link.machine, &super::asleep::Told::from(&e)) {
+                            break;
+                        }
+                    }
+                    Some("awake") => self.machine_woke(&link.machine).await,
+                    _ => {}
                 }
             }
         }
@@ -936,7 +1080,7 @@ impl Engine {
         // Lost, not dropped on purpose: the machine may have been shut down,
         // gone to sleep or left the network. Look now instead of at the next
         // scheduled check, so the app says so within seconds.
-        if !link.retired() {
+        if !link.retired() && !super::asleep::is(&link.machine) {
             tracing::debug!("lost the link to {}; checking it", link.machine);
             self.run_check(Some(vec![link.machine.clone()])).await;
         }
@@ -976,7 +1120,7 @@ impl Engine {
         while first.next().await.is_some() {}
         loop {
             tokio::time::sleep(sessions::REFRESH_EVERY).await;
-            let ids: Vec<String> = self.machines_with_sessions().into_iter().filter(|id| self.machine(id).is_some_and(|(spec, _)| !spec.disconnected)).collect();
+            let ids: Vec<String> = self.machines_with_sessions().into_iter().filter(|id| self.machine(id).is_some_and(|(spec, p)| !spec.disconnected && !p.is_some_and(|p| p.asleep))).collect();
             // A slow machine doesn't hold up the rest for long.
             let mut pending: FuturesUnordered<_> = ids.iter().map(|id| tokio::time::timeout(Duration::from_secs(15), self.refresh_sessions(id))).collect();
             while pending.next().await.is_some() {}
@@ -1007,6 +1151,8 @@ impl Engine {
                         let watched = st.tailscale.as_ref().is_some_and(|t| t.running) && st.tailnet.contains_key(&m.id);
                         st.probes.get(&m.id).is_some_and(|p| {
                             !p.ok
+                                // Asleep: looking would wake it.
+                                && !p.asleep
                                 && super::build::comes_back_by_itself(super::build::unreachable_kind(p.error.as_deref().unwrap_or("")))
                                 && (!watched || Utc::now() - p.checked_at > chrono::Duration::minutes(3))
                         })
@@ -1067,6 +1213,17 @@ impl Engine {
                 .iter()
                 .filter(|m| m.is_connected())
                 .filter(|m| only.as_ref().is_none_or(|ids| ids.contains(&m.id)))
+                // A check of every machine lets one sleep when an app is told
+                // of its waking (this one, or the one that's open): only a
+                // check of it by name looks. For a while: a notice can be
+                // lost (the machine woke somewhere else and gave up), so
+                // past that the check looks all the same, once in a while.
+                .filter(|m| {
+                    !full
+                        || !st.probes.get(&m.id).is_some_and(|p| {
+                            p.asleep && p.wake_notice.is_some() && (!st.takes_notices || st.wake_notices.contains(&m.id)) && Utc::now() - p.checked_at < chrono::Duration::from_std(PROMISE_HOLDS).unwrap_or_default()
+                        })
+                })
                 .cloned()
                 .partition(|m| st.checking.contains(&m.id));
             if full {
@@ -1083,6 +1240,8 @@ impl Engine {
             }).collect();
             (jobs, in_flight.into_iter().map(|m| m.id).collect())
         };
+        // These are looked at on purpose, asleep or not.
+        let _looking: Vec<super::asleep::Looking> = jobs.iter().map(|(s, _)| super::asleep::look(&s.id)).collect();
 
         let mut pending: FuturesUnordered<_> = jobs
             .into_iter()
@@ -1114,9 +1273,15 @@ impl Engine {
             // Its monitors are worth knowing when it has a desktop to show.
             let desktop = result.os.as_deref() == Some("darwin") || result.desktop == Some(true);
             crate::fleet::sessions::agent::note_os(&id, result.os.as_deref());
-            st.probes.insert(id.clone(), result);
+            let asleep = result.asleep;
+            self.keep_probe(&mut st, &id, result);
             self.publish(&mut st);
             drop(st);
+            // Found asleep over a link that was up (an agent from before it
+            // could say so): let go of it, so it can sleep.
+            if asleep {
+                super::link::reset(&id);
+            }
             // Sessions and installed agents come along with every machine check.
             if reachable && self.demo.is_none() {
                 let me = self.clone();
@@ -1261,6 +1426,8 @@ impl Engine {
     fn publish(&self, st: &mut State) {
         st.version += 1;
         st.last_publish = Some(Instant::now());
+        // The machines to leave alone, for everything that would reach for one.
+        super::asleep::sync(self as *const Engine as usize, st.probes.iter().filter(|(_, p)| p.asleep && !p.ok).map(|(id, _)| id));
         let interval = st.settings.check_interval_minutes;
         let next_at = match (interval, st.check_finished_at) {
             (0, _) => None,
@@ -1351,6 +1518,26 @@ impl Engine {
     }
 }
 
+impl Drop for Engine {
+    fn drop(&mut self) {
+        // Nothing is asleep on this engine's word any more.
+        super::asleep::sync(self as *const Engine as usize, std::iter::empty());
+    }
+}
+
+/// The rest of a burst of session changes, taken off the queue: one refresh
+/// answers them all. What else was in it is given back, in order: a sleep
+/// or a wake said in the same breath isn't one to lose.
+fn drain_sessions(events: &mut tokio::sync::broadcast::Receiver<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut kept = Vec::new();
+    while let Ok(next) = events.try_recv() {
+        if next["event"] != "sessions" {
+            kept.push(next);
+        }
+    }
+    kept
+}
+
 fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
@@ -1413,6 +1600,140 @@ mod tests {
         assert_eq!(window.current().machines[0].status, "online", "an older check must not win");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A machine whose agent says it's going to sleep is asleep, here and in
+    /// Muxin's other processes, and nothing reaches for it: not a check of
+    /// every machine, not a request. Its agent's word that it woke, or a
+    /// check of it by name, looks at it again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_machine_that_sleeps_is_left_alone_until_it_wakes() {
+        use super::super::asleep::{self, Told};
+        let dir = std::env::temp_dir().join(format!("muxen-asleep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid = std::process::id();
+        std::fs::write(
+            dir.join("config.toml"),
+            format!("[[machine]]\nname = \"Nap {pid}\"\nhost = \"nap-{pid}.invalid\"\n\n[[machine]]\nname = \"Doze {pid}\"\nhost = \"doze-{pid}.invalid\"\n\n[[machine]]\nname = \"Here {pid}\"\nhost = \"local\"\n"),
+        )
+        .unwrap();
+        let paths = Paths::resolve(Some(dir.clone()), None);
+        let engine = Engine::new(paths.clone(), false);
+        let (nap, doze, here) = (format!("nap-{pid}"), format!("doze-{pid}"), format!("here-{pid}"));
+        let status = |e: &Engine, id: &str| e.current().machines.iter().find(|m| m.id == id).map(|m| m.status.clone()).unwrap();
+        // They were up a minute ago.
+        {
+            let mut st = engine.state.lock().unwrap();
+            for id in [&nap, &doze, &here] {
+                let up = ProbeResult { ok: true, checked_at: Utc::now() - chrono::Duration::minutes(1), os: Some("darwin".into()), arch: Some("arm64".into()), ..Default::default() };
+                st.probes.insert(id.to_string(), up.after(None));
+            }
+            engine.publish(&mut st);
+        }
+        assert_eq!((status(&engine, &nap), asleep::is(&nap)), ("online".to_string(), false));
+
+        // Nap's agent will say when it wakes; Doze's can't (it's reached over ssh).
+        assert!(engine.machine_slept(&nap, &Told { notice: Some("192.168.1.20:53312".into()), lid_closed: true, notice_failed: false }));
+        assert!(engine.machine_slept(&doze, &Told::default()));
+        // This computer runs Muxin: it isn't asleep, whatever its agent says
+        // (it says so when this computer sleeps), and its link is kept.
+        assert!(!engine.machine_slept(&here, &Told::default()));
+        assert_eq!((status(&engine, &nap), status(&engine, &doze), status(&engine, &here)), ("asleep".to_string(), "asleep".to_string(), "online".to_string()));
+        let s = engine.current();
+        let m = s.machines.iter().find(|m| m.id == nap).unwrap();
+        let u = m.unreachable.as_ref().unwrap();
+        assert_eq!((u.kind.as_str(), u.detail.as_str()), ("asleep", "Its lid is closed. Muxin lets it sleep, and reconnects when it wakes."));
+        assert!(u.last_seen_at.is_some(), "when it was last up");
+        assert!(asleep::is(&nap) && asleep::is(&doze) && !asleep::is(&here));
+        let (spec, _) = engine.machine(&nap).unwrap();
+        assert_eq!(spec.refuse_if_disconnected().unwrap_err(), format!("Nap {pid} is asleep. Wake it first."));
+        // A copy says so too, to or from it (it used to fall back to plain
+        // ssh), and so does making a workspace there (it used to check it).
+        let (this, _) = engine.machine(&here).unwrap();
+        let still = std::sync::atomic::AtomicBool::new(false);
+        for (from, to) in [(&spec, &this), (&this, &spec)] {
+            let refused = engine.run_copy(0, from, "~", &["notes.txt".to_string()], to, "~", &still, false).await.unwrap_err();
+            assert_eq!(refused, format!("Nap {pid} is asleep. Wake it first."));
+        }
+        let before = engine.machine(&nap).unwrap().1.unwrap().checked_at;
+        let refused = engine.create_workspace(workspaces::CreateWorkspace { machine: Some(nap.clone()), ..Default::default() }).await.unwrap_err();
+        assert_eq!(refused, format!("Nap {pid} is asleep. Wake it first."));
+        assert_eq!(engine.machine(&nap).unwrap().1.unwrap().checked_at, before, "and it wasn't looked at for it");
+
+        // Muxin's other processes (the CLI, an agent's MCP server) read the same.
+        let other = Engine::new(paths.clone(), false);
+        assert_eq!((status(&other, &nap), status(&other, &doze)), ("asleep".to_string(), "asleep".to_string()));
+
+        // A check of every machine lets Nap sleep (its app is told when it
+        // wakes), and looks at Doze, the only way to find it awake. Here it
+        // gets no answer, as from a Mac that wakes too slowly for the look:
+        // Doze is still asleep, not offline (and not reached for again
+        // every 30 seconds, as an offline machine is).
+        let checked = |e: &Engine, id: &str| e.machine(id).unwrap().1.unwrap().checked_at;
+        let (before, doze_before) = (checked(&engine, &nap), checked(&engine, &doze));
+        other.run_check(None).await;
+        assert_eq!((status(&other, &nap), status(&other, &doze)), ("asleep".to_string(), "asleep".to_string()));
+        engine.run_check(None).await;
+        assert_eq!((status(&engine, &nap), checked(&engine, &nap)), ("asleep".to_string(), before));
+        assert_eq!((status(&engine, &doze), asleep::is(&doze)), ("asleep".to_string(), true));
+        assert!(checked(&engine, &doze) > doze_before, "it was looked at");
+
+        // A promise is taken at its word for a while only (a notice can be
+        // lost: the machine woke somewhere else and gave up). Past that, the
+        // check of every machine looks at Nap too, and it keeps its promise
+        // when it doesn't answer.
+        {
+            let mut st = engine.state.lock().unwrap();
+            st.probes.get_mut(&nap).unwrap().checked_at = Utc::now() - chrono::Duration::hours(3);
+        }
+        engine.run_check(None).await;
+        assert!(Utc::now() - checked(&engine, &nap) < chrono::Duration::minutes(1), "looked at after 3 hours");
+        let (_, p) = engine.machine(&nap).unwrap();
+        assert_eq!((status(&engine, &nap), p.unwrap().wake_notice.as_deref()), ("asleep".to_string(), Some("192.168.1.20:53312")));
+        let before = checked(&engine, &nap);
+        engine.run_check(None).await;
+        assert_eq!(checked(&engine, &nap), before, "and left alone again after");
+
+        // A machine that isn't asleep can't have itself checked by saying it woke.
+        engine.run_check(Some(vec![here.clone()])).await;
+        let before = checked(&engine, &here);
+        engine.machine_woke(&here).await;
+        assert_eq!(checked(&engine, &here), before);
+        // Nap says it woke: it's looked at. It said it's awake, so not
+        // finding it means offline, not still asleep. The other process
+        // reads that before it does anything next.
+        engine.machine_woke(&nap).await;
+        assert_eq!(status(&engine, &nap), "offline");
+        assert!(asleep::is(&nap), "as far as the other process knows");
+        other.refresh_from_disk();
+        assert_eq!((status(&other, &nap), asleep::is(&nap)), ("offline".to_string(), false));
+        assert!(spec.refuse_if_disconnected().is_ok());
+        drop(other);
+
+        // Asleep again, a check of it by name looks all the same.
+        engine.machine_slept(&nap, &Told { notice: Some("192.168.1.20:53312".into()), lid_closed: false, notice_failed: false });
+        assert_eq!(status(&engine, &nap), "asleep");
+        let before = checked(&engine, &nap);
+        engine.run_check(Some(vec![nap.clone()])).await;
+        assert!(checked(&engine, &nap) > before);
+        assert_eq!(status(&engine, &nap), "asleep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session changing as the machine goes to sleep: the word that it's
+    /// going to sleep comes in the same burst, and isn't thrown away with it.
+    #[tokio::test]
+    async fn a_sleep_said_among_session_changes_is_kept() {
+        let (tx, mut events) = tokio::sync::broadcast::channel::<serde_json::Value>(16);
+        let say = |event: &str| tx.send(serde_json::json!({ "event": event })).unwrap();
+        // The first of the burst is the one in hand; these came with it.
+        for e in ["sessions", "sleep", "sessions", "awake", "sessions"] {
+            say(e);
+        }
+        let kept = drain_sessions(&mut events);
+        assert_eq!(kept.iter().map(|k| k["event"].as_str().unwrap()).collect::<Vec<_>>(), vec!["sleep", "awake"]);
+        assert!(drain_sessions(&mut events).is_empty());
     }
 
     /// Adding a machine starts a check of it; checking it right after must

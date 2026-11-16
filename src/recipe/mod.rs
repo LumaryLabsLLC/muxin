@@ -8,10 +8,14 @@
 //! Muxin checks machines with them (every check of a recipe in one script,
 //! `recipe_check`, changing nothing) and applies them (`recipe_apply`, in
 //! apply.rs: installs what's missing and, when asked, updates what's behind),
-//! also to the cloud machines and VMs it makes (`recipe_setup`).
+//! also to the cloud machines and VMs it makes (`recipe_setup`). Recipes
+//! saved in the window are in saved.rs.
 
 mod apply;
 pub use apply::Applied;
+// Only the window saves and applies them.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub mod saved;
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;

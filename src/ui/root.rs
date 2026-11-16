@@ -377,6 +377,8 @@ pub enum Modal {
     Share(Entity<super::share::ShareDialog>),
     Join(Entity<super::share::JoinDialog>),
     Snippet(Entity<super::snippets::SnippetDialog>),
+    #[cfg(feature = "recipes")]
+    Recipe(Entity<super::saved_recipes::RecipeDialog>),
 }
 
 pub struct Notice {
@@ -2096,6 +2098,8 @@ impl Root {
             Modal::Share(d) => d.read(cx).first_focus(cx),
             Modal::Join(d) => d.read(cx).first_focus(cx),
             Modal::Snippet(d) => d.read(cx).first_focus(cx),
+            #[cfg(feature = "recipes")]
+            Modal::Recipe(d) => d.read(cx).first_focus(cx),
             Modal::Licenses(d) => d.focus_handle(cx),
         };
         window.focus(&focus);
@@ -3940,6 +3944,8 @@ impl Render for Root {
             Modal::Move(d) => d.clone().into_any_element(),
             Modal::Rename(d) => d.clone().into_any_element(),
             Modal::Snippet(d) => d.clone().into_any_element(),
+            #[cfg(feature = "recipes")]
+            Modal::Recipe(d) => d.clone().into_any_element(),
             Modal::AddDisplay(d) => d.clone().into_any_element(),
             Modal::MonitorPassword(d) => d.clone().into_any_element(),
             Modal::Power(d) => d.clone().into_any_element(),

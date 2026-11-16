@@ -38,6 +38,8 @@ mod tray;
 mod run;
 #[cfg(feature = "recipes")]
 mod recipes;
+#[cfg(feature = "recipes")]
+mod saved_recipes;
 mod schedule_dialog;
 mod schedules;
 mod snippets;

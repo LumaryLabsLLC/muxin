@@ -492,8 +492,17 @@ fn a_machine_that_sleeps_says_so_and_says_when_it_wakes() {
             return;
         }
         eprintln!("agent {}: says when its machine sleeps", l.version());
-        // It knows where this app's notice goes (the ping sent as the link came up).
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The agent tries the way to this app before it promises a notice: to
+        // a port nobody listens on, it says so (the app then looks for itself).
+        let nobody = l.request(json!({ "op": "ping", "wake_notice": 9 }), Duration::from_secs(10)).await.unwrap();
+        assert_eq!((nobody["ok"].as_bool(), nobody.get("wake_notice")), (Some(true), None), "{nobody}");
+        assert!(nobody["wake_notice_error"].is_string(), "{nobody}");
+        // To this app's own port (as the link said when it came up), it got
+        // through: that try wakes nobody.
+        let port = direct::notice_port().expect("this app takes wake notices");
+        let there = l.request(json!({ "op": "ping", "wake_notice": port }), Duration::from_secs(10)).await.unwrap();
+        assert_eq!(there["wake_notice"].as_str().and_then(|a| a.rsplit(':').next()), Some(port.to_string().as_str()), "{there}");
+        assert!(tokio::time::timeout(Duration::from_millis(500), woke.recv()).await.is_err(), "a try at the way isn't a wake");
 
         // Going to sleep: said on the link, with where the wake notice will go.
         std::fs::write(&power, "asleep").unwrap();

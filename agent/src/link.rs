@@ -29,7 +29,9 @@
 //! it has fully woken. An app whose ping names a port of its own
 //! (`"wake_notice": 53312`) over a direct link is told there when the
 //! machine wakes, with no link left (direct.rs); the reply's `wake_notice`
-//! is the address that goes to, and the `sleep` event says it again.
+//! is the address that goes to, and the `sleep` event says it again. When
+//! the agent can't reach that port (it tries when asked), both say
+//! `wake_notice_error` instead, and the app looks for itself.
 
 use std::collections::HashMap;
 use std::io::{self, BufWriter, Read, Write};
@@ -235,6 +237,9 @@ pub fn serve_for(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>,
     crate::sleep::start();
     let mut hello = json!({ "event": "hello", "version": crate::VERSION, "now": now() });
     crate::sleep::describe(&mut hello);
+    if hello["asleep"].as_bool() == Some(true) {
+        crate::sleep::reached_asleep();
+    }
     if send_json(&out, &hello).is_err() {
         return 1;
     }
@@ -250,6 +255,8 @@ pub fn serve_for(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>,
                     }
                     if let Some(to) = crate::direct::notice_for(&peer) {
                         e["wake_notice"] = json!(to.to_string());
+                    } else if let Some(why) = crate::direct::notice_refused(&peer) {
+                        e["wake_notice_error"] = json!(why);
                     }
                     e
                 }
@@ -348,11 +355,14 @@ fn handle(req: &Value, out: &Out, attached: &Attached, peer: &Peer) -> Value {
         "ping" => {
             let mut reply = json!({ "ok": true, "version": crate::VERSION, "now": now() });
             crate::sleep::describe(&mut reply);
-            // An app that wants to hear when this machine wakes, on that port.
-            if let Some(port) = req["wake_notice"].as_u64().and_then(|p| u16::try_from(p).ok())
-                && let Some(to) = crate::direct::wants_notice(peer, port)
-            {
-                reply["wake_notice"] = json!(to.to_string());
+            // An app that wants to hear when this machine wakes, on that port:
+            // where its notice goes, or why none can.
+            if let Some(port) = req["wake_notice"].as_u64().and_then(|p| u16::try_from(p).ok()) {
+                match crate::direct::wants_notice(peer, port) {
+                    Some(Ok(to)) => reply["wake_notice"] = json!(to.to_string()),
+                    Some(Err(why)) => reply["wake_notice_error"] = json!(why),
+                    None => {}
+                }
             }
             reply
         }

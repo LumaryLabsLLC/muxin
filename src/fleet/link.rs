@@ -368,9 +368,12 @@ async fn awake(spec: &MachineSpec, link: Arc<Link>) -> Option<Arc<Link>> {
         return Some(link);
     }
     let Some(mut told) = link.asleep() else { return Some(link) };
+    // The agent tries the way to this app before it says yes: a few seconds
+    // at most, while whatever woke the machine keeps it up.
     if let Some(port) = notice_port(&link) {
-        if let Ok(reply) = link.request(json!({ "op": "ping", "wake_notice": port }), Duration::from_secs(3)).await {
+        if let Ok(reply) = link.request(json!({ "op": "ping", "wake_notice": port }), Duration::from_secs(8)).await {
             told.notice = reply["wake_notice"].as_str().map(str::to_string);
+            told.notice_failed = told.notice.is_none() && reply["wake_notice_error"].is_string();
         }
     }
     tracing::debug!("{} is asleep; leaving it alone", spec.name);
@@ -664,12 +667,12 @@ mod tests {
     async fn a_machine_found_asleep_is_let_go() {
         let (link, _agent) = piped("link-asleep", r#"{"event":"hello","version":"0.7.0","now":1,"sleeps":true,"asleep":true,"lid_closed":true}"#).await;
         assert!(link.says_sleep());
-        assert_eq!(link.asleep(), Some(super::super::asleep::Told { notice: None, lid_closed: true }));
+        assert_eq!(link.asleep(), Some(super::super::asleep::Told { notice: None, lid_closed: true, notice_failed: false }));
         let spec: MachineSpec = toml::from_str("name = \"Book\"\nid = \"link-asleep\"\nhost = \"book.invalid\"").unwrap();
         let since = Instant::now();
         assert!(awake(&spec, link.clone()).await.is_none());
         assert!(!link.alive() && link.retired(), "hung up on purpose: losing it isn't a reason to check the machine");
-        assert_eq!(super::super::asleep::told_since(&spec.id, since), Some(super::super::asleep::Told { notice: None, lid_closed: true }));
+        assert_eq!(super::super::asleep::told_since(&spec.id, since), Some(super::super::asleep::Told { notice: None, lid_closed: true, notice_failed: false }));
         // This computer runs Muxin, whatever its own agent saw as it started.
         let (link, _agent) = piped("link-asleep-here", r#"{"event":"hello","version":"0.7.0","sleeps":true,"asleep":true}"#).await;
         let here: MachineSpec = toml::from_str("name = \"Here\"\nid = \"link-asleep-here\"\nhost = \"local\"").unwrap();

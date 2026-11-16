@@ -53,6 +53,13 @@ struct Watch {
     listeners: Mutex<Vec<(u64, Listener)>>,
     /// An app was told of this sleep (`told_an_app`).
     told: AtomicBool,
+    /// During this sleep: links made to the machine (each one woke it, or
+    /// found it in a dark wake), and notices from the system that it woke
+    /// which turned out to be for a dark wake. Said in the log when it wakes.
+    reached: AtomicU64,
+    dark_notices: AtomicU64,
+    /// When this sleep began (seconds since 1970).
+    since: AtomicU64,
 }
 
 fn watch() -> &'static Watch {
@@ -63,7 +70,15 @@ fn watch() -> &'static Watch {
         next: AtomicU64::new(1),
         listeners: Mutex::new(Vec::new()),
         told: AtomicBool::new(false),
+        reached: AtomicU64::new(0),
+        dark_notices: AtomicU64::new(0),
+        since: AtomicU64::new(0),
     })
+}
+
+/// A link was made to this machine while it's asleep (counted for the log).
+pub fn reached_asleep() {
+    watch().reached.fetch_add(1, Ordering::Relaxed);
 }
 
 /// A listener says it told an app the machine is going to sleep: the sleep
@@ -192,6 +207,18 @@ fn changed(to: Change) {
     if w.asleep.swap(asleep, Ordering::SeqCst) == asleep {
         return;
     }
+    // One line a sleep and one a wake, where `listen` keeps its log: what
+    // happened in between tells whether something kept waking the machine.
+    let now = crate::now().max(0) as u64;
+    if asleep {
+        w.since.store(now, Ordering::Relaxed);
+        w.reached.store(0, Ordering::Relaxed);
+        w.dark_notices.store(0, Ordering::Relaxed);
+        eprintln!("{now} muxen-agent: going to sleep");
+    } else {
+        let slept = now.saturating_sub(w.since.load(Ordering::Relaxed));
+        eprintln!("{now} muxen-agent: awake after {slept} s; reached {} times in its sleep; {} wake notices for a dark wake", w.reached.load(Ordering::Relaxed), w.dark_notices.load(Ordering::Relaxed));
+    }
     let listeners: Vec<Listener> = w.listeners.lock().unwrap().iter().map(|(_, f)| f.clone()).collect();
     if listeners.is_empty() {
         return;
@@ -298,7 +325,10 @@ mod mac {
         match event {
             1 => super::changed(Change::Sleep),
             // Awake, unless this is a dark wake after all: then once it's a full one.
-            2 if fully_awake() == Some(false) => super::until_fully_awake(),
+            2 if fully_awake() == Some(false) => {
+                super::watch().dark_notices.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                super::until_fully_awake()
+            }
             2 => super::changed(Change::Awake),
             _ => {}
         }

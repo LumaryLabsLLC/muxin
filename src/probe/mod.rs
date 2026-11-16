@@ -108,6 +108,10 @@ pub struct ProbeResult {
     /// Asleep with its lid closed (a laptop).
     #[serde(default)]
     pub lid_closed: bool,
+    /// Its agent couldn't get a wake notice through to this app (on a Mac:
+    /// it isn't allowed on the local network there).
+    #[serde(default)]
+    pub wake_notice_failed: bool,
 }
 
 /// A Docker container that publishes ports on its machine.
@@ -235,7 +239,7 @@ impl ProbeResult {
 
     /// The machine is asleep, as its agent said (`told`) or now does.
     pub fn asleep(started: Instant, told: &crate::fleet::asleep::Told) -> ProbeResult {
-        ProbeResult { asleep: true, wake_notice: told.notice.clone(), lid_closed: told.lid_closed, ..ProbeResult::failed(started, ASLEEP) }
+        ProbeResult { asleep: true, wake_notice: told.notice.clone(), lid_closed: told.lid_closed, wake_notice_failed: told.notice_failed, ..ProbeResult::failed(started, ASLEEP) }
     }
 }
 
@@ -943,7 +947,7 @@ mod tests {
 
         let up = ProbeResult { ok: true, checked_at: Utc::now() - chrono::Duration::minutes(9), shell: Some(Shell::Sh), os: Some("darwin".into()), hostname: Some("book".into()), mac: Some("3c:22:fb:9a:41:07".into()), ..Default::default() }.after(None);
         // Its agent said so, and where its notice goes when it wakes.
-        let told = crate::fleet::asleep::Told { notice: Some("192.168.1.20:53312".into()), lid_closed: true };
+        let told = crate::fleet::asleep::Told { notice: Some("192.168.1.20:53312".into()), lid_closed: true, notice_failed: false };
         let asleep = ProbeResult::asleep(Instant::now(), &told).after(Some(&up));
         assert!(!asleep.ok && asleep.asleep && asleep.lid_closed);
         assert_eq!((asleep.error.as_deref(), asleep.wake_notice.as_deref()), (Some(ASLEEP), Some("192.168.1.20:53312")));

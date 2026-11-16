@@ -26,6 +26,8 @@ pub mod procs;
 pub mod remote_desktop;
 pub mod report;
 pub mod sessions;
+#[cfg(test)]
+mod sleep_e2e;
 // Muxin's own ssh client, for an iPad (it can't run the `ssh` program).
 #[cfg(any(target_os = "ios", all(test, unix)))]
 pub mod ssh;

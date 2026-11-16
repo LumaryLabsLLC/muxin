@@ -28,12 +28,19 @@ pub struct Told {
     pub notice: Option<String>,
     /// A laptop with its lid closed.
     pub lid_closed: bool,
+    /// This app asked for a notice and the agent couldn't get one through
+    /// (on a Mac: it isn't allowed on the local network there).
+    pub notice_failed: bool,
 }
 
 impl Told {
     /// From a link's hello, a ping's reply or its `sleep` event.
     pub fn from(message: &serde_json::Value) -> Told {
-        Told { notice: message["wake_notice"].as_str().map(str::to_string), lid_closed: message["lid_closed"].as_bool() == Some(true) }
+        Told {
+            notice: message["wake_notice"].as_str().map(str::to_string),
+            lid_closed: message["lid_closed"].as_bool() == Some(true),
+            notice_failed: message["wake_notice"].is_null() && message["wake_notice_error"].is_string(),
+        }
     }
 }
 
@@ -159,7 +166,10 @@ mod tests {
         let before = Instant::now();
         assert_eq!(told_since("asleep-test-told", before), None);
         let said = Told::from(&serde_json::json!({ "event": "sleep", "wake_notice": "192.168.1.20:53312", "lid_closed": true }));
-        assert_eq!(said, Told { notice: Some("192.168.1.20:53312".into()), lid_closed: true });
+        assert_eq!(said, Told { notice: Some("192.168.1.20:53312".into()), lid_closed: true, notice_failed: false });
+        // The agent tried the way to this app and nothing came back.
+        let blocked = Told::from(&serde_json::json!({ "event": "sleep", "wake_notice_error": "no answer" }));
+        assert_eq!(blocked, Told { notice: None, lid_closed: false, notice_failed: true });
         told("asleep-test-told", said.clone());
         assert_eq!(told_since("asleep-test-told", before), Some(said));
         assert_eq!(told_since("asleep-test-told", Instant::now() + std::time::Duration::from_secs(1)), None);

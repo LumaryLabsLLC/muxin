@@ -574,10 +574,17 @@ fn asleep_reason(spec: &MachineSpec, p: &ProbeResult, checking: bool) -> Unreach
     } else {
         "Muxin lets it sleep. Check it when it's awake."
     };
+    // A Mac lets its agent start a connection on the local network (which
+    // the notice is) only once that's allowed there.
+    let allow = if p.wake_notice.is_none() && p.wake_notice_failed && p.os.as_deref() == Some("darwin") {
+        " To hear when it wakes, allow Muxin Agent there, under Privacy & Security › Local Network."
+    } else {
+        ""
+    };
     Unreachable {
         kind: "asleep".into(),
         title: format!("{} is asleep", spec.name),
-        detail: if p.lid_closed { format!("Its lid is closed. {back}") } else { back.to_string() },
+        detail: format!("{}{back}{allow}", if p.lid_closed { "Its lid is closed. " } else { "" }),
         hint: None,
         last_seen_at: p.last_seen_at,
         error: p.error.clone().unwrap_or_default(),
@@ -1539,7 +1546,7 @@ mod tests {
     fn a_machine_that_sleeps_is_asleep_not_offline() {
         let inv = inventory("[[machine]]\nname = \"Book\"\nhost = \"book\"\nrunners = [\"b-01\"]\n");
         let seen = Utc::now() - chrono::Duration::minutes(5);
-        let asleep = |notice: Option<&str>, lid_closed: bool| {
+        let asleep_with = |notice: Option<&str>, lid_closed: bool, failed: bool| {
             let mut probes = HashMap::new();
             probes.insert(
                 "book".to_string(),
@@ -1549,6 +1556,7 @@ mod tests {
                     asleep: true,
                     wake_notice: notice.map(str::to_string),
                     lid_closed,
+                    wake_notice_failed: failed,
                     os: Some("darwin".into()),
                     arch: Some("arm64".into()),
                     last_seen_at: Some(seen),
@@ -1557,6 +1565,7 @@ mod tests {
             );
             probes
         };
+        let asleep = |notice: Option<&str>, lid_closed: bool| asleep_with(notice, lid_closed, false);
         let snap = run(&inv, &Settings::default(), &asleep(Some("192.168.1.20:53312"), true), None);
         let m = &snap.machines[0];
         assert_eq!(m.status, "asleep");
@@ -1574,6 +1583,12 @@ mod tests {
         let no_checks = Settings { check_interval_minutes: 0, ..Settings::default() };
         let snap = run(&inv, &no_checks, &asleep(None, false), None);
         assert_eq!(snap.machines[0].unreachable.as_ref().unwrap().detail, "Muxin lets it sleep. Check it when it's awake.");
+        // Its agent tried to reach this app and couldn't: a Mac's own setting, which its owner changes.
+        let snap = run(&inv, &Settings::default(), &asleep_with(None, false, true), None);
+        assert_eq!(
+            snap.machines[0].unreachable.as_ref().unwrap().detail,
+            "Muxin lets it sleep, and looks again at each check. To hear when it wakes, allow Muxin Agent there, under Privacy & Security › Local Network."
+        );
         // Disconnected on purpose says that, asleep or not.
         let inv = inventory("[[machine]]\nname = \"Book\"\nhost = \"book\"\ndisconnected = true\n");
         let snap = run(&inv, &Settings::default(), &asleep(None, false), None);

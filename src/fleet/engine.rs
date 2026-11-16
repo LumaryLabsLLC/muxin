@@ -277,8 +277,9 @@ impl Engine {
 
     /// Starts the background loops. Call once.
     pub fn start(self: &Arc<Self>) {
-        // An app that stays open hears from machines that wake (their agents
-        // connect to it), so it needn't look at them while they sleep.
+        // An app that stays open can hear from machines that wake (their
+        // agents connect to it), so it needn't look at them while they
+        // sleep: when the user turned that on (Settings::wake_notices).
         if self.demo.is_none() {
             let weak = Arc::downgrade(self);
             super::direct::take_notices(move |machine_id| {
@@ -288,7 +289,11 @@ impl Engine {
                     rt.spawn(async move { engine.machine_woke(&id).await });
                 }
             });
-            self.state.lock().unwrap().takes_notices = true;
+            {
+                let mut st = self.state.lock().unwrap();
+                st.takes_notices = st.settings.wake_notices;
+                super::direct::set_notices(st.takes_notices);
+            }
             // Machines that were asleep when Muxin last ran don't know this
             // app is back: one look at each (it tells them where to say so).
             let me = self.clone();
@@ -356,6 +361,15 @@ impl Engine {
             let mut st = self.state.lock().unwrap();
             st.settings_mtime = mtime(&self.paths.settings);
             let scopes_changed = st.settings.github != new.github;
+            // Hearing from machines that wake, or not any more: asked of
+            // each as it links, so they link afresh.
+            if st.settings.wake_notices != new.wake_notices && self.demo.is_none() {
+                st.takes_notices = new.wake_notices;
+                super::direct::set_notices(new.wake_notices);
+                for m in st.inventory.machines.iter().filter(|m| !m.is_local()) {
+                    super::link::reset(&m.id);
+                }
+            }
             if st.settings.share_clipboard != new.share_clipboard {
                 if new.share_clipboard {
                     for m in st.inventory.machines.iter().filter(|m| !m.is_local()) {
@@ -1570,7 +1584,7 @@ mod tests {
         assert_eq!((status(&engine, &nap), asleep::is(&nap)), ("online".to_string(), false));
 
         // Nap's agent will say when it wakes; Doze's can't (it's reached over ssh).
-        engine.machine_slept(&nap, &Told { notice: Some("192.168.1.20:53312".into()), lid_closed: true });
+        engine.machine_slept(&nap, &Told { notice: Some("192.168.1.20:53312".into()), lid_closed: true, notice_failed: false });
         engine.machine_slept(&doze, &Told::default());
         // This computer runs Muxin: it isn't asleep, whatever its agent says.
         engine.machine_slept(&here, &Told::default());
@@ -1614,7 +1628,7 @@ mod tests {
         drop(other);
 
         // Asleep again, a check of it by name looks all the same.
-        engine.machine_slept(&nap, &Told { notice: Some("192.168.1.20:53312".into()), lid_closed: false });
+        engine.machine_slept(&nap, &Told { notice: Some("192.168.1.20:53312".into()), lid_closed: false, notice_failed: false });
         assert_eq!(status(&engine, &nap), "asleep");
         engine.run_check(Some(vec![nap.clone()])).await;
         assert_eq!(status(&engine, &nap), "offline");

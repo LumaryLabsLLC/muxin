@@ -15,6 +15,12 @@
 //! same pinned certificates the other way round (`WAKE_ALPN`). The
 //! connection is the whole message; the app then links again.
 //!
+//! It's the one connection this side starts, and a Mac lets a program start
+//! one on the local network only once its owner allowed it (Privacy &
+//! Security › Local Network; answering needs no leave). So the way is tried
+//! when the app asks (`WAKE_TEST_ALPN`, which wakes nobody), and an app
+//! whose notice wouldn't arrive is told so: it then looks for itself.
+//!
 //! Files, in ~/.muxen/direct: `cert.der` and `key.der` (this machine's
 //! identity), `trusted` (one app fingerprint per line), `port`, and while
 //! it's asleep `sleepers` (the apps to tell when it wakes).
@@ -40,6 +46,8 @@ pub const DEFAULT_PORT: u16 = 47821;
 const ALPN: &[u8] = b"muxen/1";
 /// A wake notice: a connection from this machine to an app (see the top).
 const WAKE_ALPN: &[u8] = b"muxen-wake/1";
+/// The same way, tried while the machine is up: it says nothing woke.
+const WAKE_TEST_ALPN: &[u8] = b"muxen-wake-test/1";
 const SERVICE: &str = "muxen-agent";
 const LAUNCHD_LABEL: &str = "com.lumarylabs.muxen-agent";
 
@@ -184,7 +192,7 @@ async fn accept_loop() -> Result<(), String> {
             runtime.spawn(tell_sleepers(waking.clone()));
         }
     });
-    listening().store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = listener().set((endpoint.clone(), tokio::runtime::Handle::current()));
     // Some may be left from before this started (the machine restarted
     // while they thought it asleep).
     if !crate::sleep::asleep() {
@@ -314,10 +322,17 @@ fn canonical(addr: SocketAddr) -> SocketAddr {
     SocketAddr::new(addr.ip().to_canonical(), addr.port())
 }
 
-/// Whether this process is `listen` (only it can tell an app later).
-fn listening() -> &'static std::sync::atomic::AtomicBool {
-    static LISTENING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    &LISTENING
+/// `listen`'s endpoint and where its work runs, in the process that is
+/// `listen` (only it can tell an app later).
+fn listener() -> &'static OnceLock<(quinn::Endpoint, tokio::runtime::Handle)> {
+    static LISTENER: OnceLock<(quinn::Endpoint, tokio::runtime::Handle)> = OnceLock::new();
+    &LISTENER
+}
+
+/// Apps whose notice couldn't be sent when they asked, and why.
+fn refused() -> &'static Mutex<HashMap<(String, SocketAddr), String>> {
+    static REFUSED: OnceLock<Mutex<HashMap<(String, SocketAddr), String>>> = OnceLock::new();
+    REFUSED.get_or_init(Default::default)
 }
 
 /// The apps connected now that asked to hear when this machine wakes, by
@@ -333,13 +348,52 @@ fn key(peer: &crate::link::Peer) -> Option<(String, SocketAddr)> {
 }
 
 /// An app asks to be told when this machine wakes, on `port` (its ping said
-/// `"wake_notice": <port>`). The address the notice will go to, or None when
-/// it can't be sent: over ssh, or to an app this machine doesn't know.
-pub fn wants_notice(peer: &crate::link::Peer, port: u16) -> Option<SocketAddr> {
-    let key = key(peer).filter(|_| port != 0 && listening().load(std::sync::atomic::Ordering::SeqCst))?;
+/// `"wake_notice": <port>`). None over ssh, where there's no telling it.
+/// Else the address the notice will go to, once a connection there got
+/// through; or why it didn't (the app then looks for itself). Called from a
+/// link's own thread: it waits for that try, a few seconds at most.
+pub fn wants_notice(peer: &crate::link::Peer, port: u16) -> Option<Result<SocketAddr, String>> {
+    let key = key(peer).filter(|_| port != 0)?;
+    let (endpoint, runtime) = listener().get()?;
     let to = SocketAddr::new(key.1.ip(), port);
-    notices().lock().unwrap().insert(key.clone(), to);
-    let sleeper = (key.0, to);
+    let tried = runtime.block_on(knock(endpoint, &key.0, to, WAKE_TEST_ALPN));
+    let sleeper = (key.0.clone(), to);
+    if let Err(why) = tried {
+        // Whatever it asked before is no good now.
+        notices().lock().unwrap().remove(&key);
+        forget_sleeper(&sleeper);
+        refused().lock().unwrap().insert(key.clone(), why.clone());
+        // It may get through in a moment (a network filter here holding up
+        // a new program's first connection, the owner allowing it just
+        // now): tried a few more times while the app stays linked. What
+        // stands when the machine sleeps is what the app is told then.
+        let endpoint = endpoint.clone();
+        runtime.spawn(async move {
+            for wait in [5, 15, 45] {
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                // The app left, or asked again.
+                if !refused().lock().unwrap().contains_key(&key) {
+                    return;
+                }
+                if knock(&endpoint, &key.0, to, WAKE_TEST_ALPN).await.is_ok() {
+                    if refused().lock().unwrap().remove(&key).is_some() {
+                        promise(key, to);
+                    }
+                    return;
+                }
+            }
+        });
+        return Some(Err(why));
+    }
+    refused().lock().unwrap().remove(&key);
+    promise(key, to);
+    Some(Ok(to))
+}
+
+/// The way to an app's notice port works: it's told there when this machine wakes.
+fn promise(key: (String, SocketAddr), to: SocketAddr) {
+    let sleeper = (key.0.clone(), to);
+    notices().lock().unwrap().insert(key, to);
     if crate::sleep::asleep() {
         // It reached this machine in its sleep: told when it wakes, too.
         let mut all = sleepers();
@@ -350,17 +404,39 @@ pub fn wants_notice(peer: &crate::link::Peer, port: u16) -> Option<SocketAddr> {
         // Back by itself: nothing left to tell it.
         forget_sleeper(&sleeper);
     }
-    Some(to)
 }
 
-/// Where this app's wake notice goes, when it asked for one.
+/// Where this app's wake notice goes, when it asked for one and the way works.
 pub fn notice_for(peer: &crate::link::Peer) -> Option<SocketAddr> {
     notices().lock().unwrap().get(&key(peer)?).copied()
+}
+
+/// Why this app's wake notice can't be sent, when it asked for one.
+pub fn notice_refused(peer: &crate::link::Peer) -> Option<String> {
+    refused().lock().unwrap().get(&key(peer)?).cloned()
 }
 
 fn forget_notice(peer: &crate::link::Peer) {
     if let Some(key) = key(peer) {
         notices().lock().unwrap().remove(&key);
+        refused().lock().unwrap().remove(&key);
+    }
+}
+
+/// One connection to an app's notice port: the whole of a wake notice
+/// (`WAKE_ALPN`), or of a try at the way there (`WAKE_TEST_ALPN`).
+async fn knock(endpoint: &quinn::Endpoint, app: &str, to: SocketAddr, alpn: &[u8]) -> Result<(), String> {
+    let config = notice_config(app, alpn)?;
+    let connecting = endpoint.connect_with(config, to, "muxen-app").map_err(|e| e.to_string())?;
+    match tokio::time::timeout(Duration::from_secs(4), connecting).await {
+        Ok(Ok(conn)) => {
+            conn.close(0u32.into(), b"awake");
+            let _ = tokio::time::timeout(Duration::from_millis(500), conn.closed()).await;
+            Ok(())
+        }
+        Ok(Err(e)) => Err(e.to_string()),
+        // Nothing came back: on a Mac, most often its Local Network setting.
+        Err(_) => Err("no answer".into()),
     }
 }
 
@@ -416,6 +492,8 @@ async fn tell_sleepers(endpoint: quinn::Endpoint) {
 /// now) never answers, and looks for itself when it's back.
 async fn tell(endpoint: quinn::Endpoint, key: (String, SocketAddr), known: HashSet<String>) {
     if known.contains(&key.0) {
+        let mut why = String::from("it was never tried");
+        let mut told = false;
         for wait in [0, 1, 2, 4, 8, 15, 30, 60] {
             tokio::time::sleep(Duration::from_secs(wait)).await;
             // Asleep again: it's told at the next wake.
@@ -426,13 +504,20 @@ async fn tell(endpoint: quinn::Endpoint, key: (String, SocketAddr), known: HashS
             if !sleepers().contains(&key) {
                 return;
             }
-            let Ok(config) = notice_config(&key.0) else { break };
-            let Ok(connecting) = endpoint.connect_with(config, key.1, "muxen-app") else { continue };
-            if let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_secs(3), connecting).await {
-                conn.close(0u32.into(), b"awake");
-                let _ = tokio::time::timeout(Duration::from_millis(500), conn.closed()).await;
-                break;
+            match knock(&endpoint, &key.0, key.1, WAKE_ALPN).await {
+                Ok(()) => {
+                    told = true;
+                    break;
+                }
+                Err(e) => why = e,
             }
+        }
+        // In `listen`'s log, beside the sleep and the wake: an app that
+        // wasn't told finds the machine awake only when it next looks.
+        let now = crate::now();
+        match told {
+            true => eprintln!("{now} muxen-agent: told the app at {} it woke", key.1),
+            false => eprintln!("{now} muxen-agent: couldn't tell the app at {} it woke: {why}", key.1),
         }
     }
     forget_sleeper(&key);
@@ -469,7 +554,7 @@ impl ServerCertVerifier for PinnedApp {
 
 /// How this machine connects to an app for a wake notice: as itself, to
 /// that app only.
-fn notice_config(app: &str) -> Result<quinn::ClientConfig, String> {
+fn notice_config(app: &str, alpn: &[u8]) -> Result<quinn::ClientConfig, String> {
     let (cert, key) = identity()?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier = PinnedApp { fingerprint: app.to_string(), algorithms: provider.signature_verification_algorithms };
@@ -480,7 +565,7 @@ fn notice_config(app: &str) -> Result<quinn::ClientConfig, String> {
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_client_auth_cert(vec![cert], key)
         .map_err(|e| e.to_string())?;
-    tls.alpn_protocols = vec![WAKE_ALPN.to_vec()];
+    tls.alpn_protocols = vec![alpn.to_vec()];
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|e| e.to_string())?;
     Ok(quinn::ClientConfig::new(Arc::new(crypto)))
 }

@@ -31,6 +31,10 @@ use crate::probe;
 const ALPN: &[u8] = b"muxen/1";
 /// A wake notice: a connection from a machine's agent to this app.
 const WAKE_ALPN: &[u8] = b"muxen-wake/1";
+/// The same way, tried by the agent while its machine is up (a Mac lets it
+/// start a connection on the local network only once that was allowed
+/// there): nothing woke.
+const WAKE_TEST_ALPN: &[u8] = b"muxen-wake-test/1";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// After a direct connection fails, use ssh for this long before trying again
 /// (sooner when the network or Tailscale changes: see `retry_all`).
@@ -251,6 +255,8 @@ type OnWake = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// What to do with a machine's wake notice, once this app takes them.
 static ON_WAKE: OnceLock<OnWake> = OnceLock::new();
+/// Whether it asks machines for them now (the user's choice: `set_notices`).
+static NOTICES_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Where they arrive: made when first needed, and kept (a machine that's
 /// asleep can't be told of a new port without waking it).
 static NOTICES: OnceLock<Option<quinn::Endpoint>> = OnceLock::new();
@@ -261,11 +267,21 @@ static NOTICES: OnceLock<Option<quinn::Endpoint>> = OnceLock::new();
 /// to tell.
 pub fn take_notices(woke: impl Fn(&str) + Send + Sync + 'static) {
     let _ = ON_WAKE.set(Arc::new(woke));
+    set_notices(true);
+}
+
+/// Asks machines for wake notices from now on, or stops asking (links made
+/// before go on as they were made).
+pub fn set_notices(on: bool) {
+    NOTICES_ON.store(on, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// The port wake notices arrive on, when this app takes them. Must be
 /// called from the runtime.
 pub fn notice_port() -> Option<u16> {
+    if !NOTICES_ON.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
     let woke = ON_WAKE.get()?.clone();
     NOTICES
         .get_or_init(|| match notice_endpoint(woke) {
@@ -290,7 +306,7 @@ fn notice_endpoint(woke: OnWake) -> Result<quinn::Endpoint, String> {
         .with_client_cert_verifier(Arc::new(verifier))
         .with_single_cert(vec![cert], key)
         .map_err(|e| e.to_string())?;
-    tls.alpn_protocols = vec![WAKE_ALPN.to_vec()];
+    tls.alpn_protocols = vec![WAKE_ALPN.to_vec(), WAKE_TEST_ALPN.to_vec()];
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).map_err(|e| e.to_string())?;
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
     // Nothing is said on it: no streams.
@@ -307,12 +323,28 @@ fn notice_endpoint(woke: OnWake) -> Result<quinn::Endpoint, String> {
         while let Some(incoming) = accepting.accept().await {
             let woke = woke.clone();
             tokio::spawn(async move {
-                let Ok(conn) = incoming.await else { return };
+                let from = incoming.remote_address();
+                let conn = match incoming.await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::debug!("a wake notice from {from} didn't get through: {e}");
+                        return;
+                    }
+                };
                 let agent = conn.peer_identity().and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok()).and_then(|certs| certs.first().map(|c| fingerprint(c.as_ref())));
+                let trying = conn
+                    .handshake_data()
+                    .and_then(|d| d.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
+                    .and_then(|d| d.protocol)
+                    .is_some_and(|p| p == WAKE_TEST_ALPN);
                 if let Some(agent) = agent {
                     for (id, _) in load().into_iter().filter(|(_, p)| p.fingerprint == agent) {
-                        tracing::debug!("{id} says it woke");
-                        woke(&id);
+                        if trying {
+                            tracing::debug!("{id} can tell this app when it wakes");
+                        } else {
+                            tracing::debug!("{id} says it woke");
+                            woke(&id);
+                        }
                     }
                 }
                 // The agent hangs up once it's through.

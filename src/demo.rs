@@ -410,6 +410,7 @@ impl World {
             asleep: false,
             wake_notice: None,
             lid_closed: false,
+            wake_notice_failed: false,
         }
     }
 

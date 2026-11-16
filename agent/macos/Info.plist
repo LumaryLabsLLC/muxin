@@ -38,6 +38,6 @@
   <key>NSDownloadsFolderUsageDescription</key><string>A program in a Muxin session wants to use files in your Downloads folder.</string>
   <key>NSRemovableVolumesUsageDescription</key><string>A program in a Muxin session wants to use files on a removable drive.</string>
   <key>NSNetworkVolumesUsageDescription</key><string>A program in a Muxin session wants to use files on a network drive.</string>
-  <key>NSLocalNetworkUsageDescription</key><string>Muxin's agent answers your other devices on the local network, and programs in Muxin sessions may reach it too.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Muxin's agent answers your other devices on the local network and tells them when this Mac wakes. Programs in Muxin sessions may reach the network too.</string>
 </dict>
 </plist>

@@ -1829,8 +1829,10 @@ mod mac {
         fn muxen_capture_stopped() -> i32;
         fn muxen_capture_stop();
         fn muxen_capture_idle();
-        fn muxen_mouse(kind: u32, x: f64, y: f64, button: u32, clicks: i64);
-        fn muxen_scroll(dy: i32, dx: i32);
+        fn muxen_mouse(kind: u32, x: f64, y: f64, button: u32, clicks: i64, held: u64);
+        #[cfg(test)]
+        fn muxen_mouse_flags(kind: u32, button: u32, held: u64) -> u64;
+        fn muxen_scroll(dy: i32, dx: i32, held: u64);
         fn muxen_key(keycode: u16, down: i32, flags: u64);
         fn muxen_text(utf16: *const u16, len: usize);
         fn muxen_key_layout(keys: *mut [u16; 4], count: usize) -> i32;
@@ -2139,7 +2141,7 @@ mod mac {
             let (x, y) = self.at;
             for (i, up) in [LEFT_UP, RIGHT_UP, OTHER_UP].into_iter().enumerate() {
                 if std::mem::take(&mut self.held[i]) {
-                    unsafe { muxen_mouse(up, x, y, i as u32, 1) };
+                    unsafe { muxen_mouse(up, x, y, i as u32, 1, 0) };
                 }
             }
         }
@@ -2338,7 +2340,7 @@ mod mac {
                     } else {
                         MOVED
                     };
-                    unsafe { muxen_mouse(kind, x, y, 0, 0) };
+                    unsafe { muxen_mouse(kind, x, y, 0, 0, self.flags) };
                 }
                 "button" => {
                     let (x, y) = self.point(e, frame);
@@ -2362,13 +2364,15 @@ mod mac {
                     };
                     self.held[index] = down;
                     self.at = (x, y);
-                    unsafe { muxen_mouse(if down { kinds.0 } else { kinds.1 }, x, y, button, clicks) };
+                    // With the modifiers the app holds, and no others: this Mac's own
+                    // (Control among them makes a click a right click) are not its.
+                    unsafe { muxen_mouse(if down { kinds.0 } else { kinds.1 }, x, y, button, clicks, self.flags) };
                 }
                 "scroll" => {
                     let (x, y) = self.point(e, frame);
-                    unsafe { muxen_mouse(MOVED, x, y, 0, 0) };
+                    unsafe { muxen_mouse(MOVED, x, y, 0, 0, self.flags) };
                     let (dy, dx) = (e["dy"].as_i64().unwrap_or(0).clamp(-20, 20) as i32, e["dx"].as_i64().unwrap_or(0).clamp(-20, 20) as i32);
-                    unsafe { muxen_scroll(dy, dx) };
+                    unsafe { muxen_scroll(dy, dx, self.flags) };
                 }
                 "text" => {
                     let utf16: Vec<u16> = e["s"].as_str().unwrap_or("").encode_utf16().collect();
@@ -2635,6 +2639,35 @@ mod mac {
             for sym in ['a' as u32, 0xff0d, 0xff09, 0x20, 0xff1b, 0xff08, 0xffe3, 0xffeb] {
                 assert_eq!(key_flags(keycode(sym).unwrap(), COMMAND), COMMAND, "{sym:#x}");
             }
+        }
+
+        #[test]
+        fn a_click_has_the_modifiers_the_app_holds_and_no_others() {
+            // A click used to go out with whatever this Mac had held when it was
+            // made. A Control the app had let go of just before (this Mac's
+            // session hears of a key a millisecond or so late), or one another
+            // program held (a Hyper key is ⌃⌥⇧⌘), made a left click a ⌃-click, a
+            // right click. And what the app did hold wasn't on it until this Mac
+            // had caught up.
+            const MODIFIERS: u64 = 0x1e0000;
+            // Which of the two keys each modifier is: none here, as with keys.
+            const SIDES: u64 = 0x207f;
+            let made = |kind: u32, button: u32, held: u64| unsafe { muxen_mouse_flags(kind, button, held) };
+            if made(LEFT_DOWN, 0, 0) == u64::MAX {
+                // No events can be made here (nobody signed in).
+                return;
+            }
+            for (kind, button) in [(LEFT_DOWN, 0), (LEFT_UP, 0), (RIGHT_DOWN, 1), (OTHER_DOWN, 2), (MOVED, 0), (LEFT_DRAGGED, 0)] {
+                // Nothing held by the app: a plain click, whatever is held here.
+                assert_eq!(made(kind, button, 0) & (MODIFIERS | SIDES), 0, "{kind}");
+                // ⌘ held by the app (a ⌘-click), then Shift and Option.
+                assert_eq!(made(kind, button, CMD) & (MODIFIERS | SIDES), CMD, "{kind}");
+                assert_eq!(made(kind, button, SHIFT | 0x80000) & (MODIFIERS | SIDES), SHIFT | 0x80000, "{kind}");
+            }
+            // Control held by the app is still a ⌃-click.
+            assert_eq!(made(LEFT_DOWN, 0, CTRL) & MODIFIERS, CTRL);
+            // Only the modifiers come from the app: an arrow's Fn doesn't ride on a click.
+            assert_eq!(made(LEFT_DOWN, 0, key_flags(123, CTRL)) & (MODIFIERS | FN | KEYPAD), CTRL);
         }
 
         #[test]

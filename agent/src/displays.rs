@@ -1506,6 +1506,7 @@ pub fn start_holder(args: &[String]) -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(exe);
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    crate::sys::before_fork();
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();

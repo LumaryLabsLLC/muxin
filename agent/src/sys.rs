@@ -90,12 +90,41 @@ pub fn no_window(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+/// Call before starting a program the way that forks: a session's shell in
+/// its terminal, or anything with a `pre_exec` (`own_group`). On a Mac,
+/// `fork` runs macOS's own cleanup in the new process before anything of
+/// ours, and the notifications part of it (libnotify's) ends that process on
+/// the spot ("os_once_t is corrupt") when another thread here was in the
+/// middle of that library's first-time setup, which the process's first log
+/// line, mouse event or name lookup starts. The start still looks like it
+/// worked, with a program that's already gone: a session that says "exited
+/// with code 1" and shows nothing. So the setup is done here first, once (a
+/// thread in the middle of it makes this wait until it's done): after that
+/// there's nothing for a fork to catch halfway.
+pub fn before_fork() {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn notify_register_check(name: *const libc::c_char, token: *mut libc::c_int) -> u32;
+            fn notify_cancel(token: libc::c_int) -> u32;
+        }
+        static DONE: std::sync::Once = std::sync::Once::new();
+        DONE.call_once(|| unsafe {
+            let mut token: libc::c_int = -1;
+            if notify_register_check(c"dev.muxin.agent.before-fork".as_ptr(), &mut token) == 0 {
+                notify_cancel(token);
+            }
+        });
+    }
+}
+
 /// Runs a child in its own process group (its own session on Unix), so it
 /// can be ended with everything it starts, and a hangup here doesn't reach it.
 pub fn own_group(cmd: &mut Command) -> &mut Command {
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
+        before_fork();
         cmd.pre_exec(|| {
             libc::setsid();
             Ok(())

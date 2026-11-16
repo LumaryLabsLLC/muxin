@@ -637,24 +637,60 @@ int muxen_input_allowed(int ask) {
     return ask ? (CGRequestPostEventAccess() ? 1 : 0) : 0;
 }
 
-/// A mouse event at (x, y) in points. `kind`: a CGEventType; `button`: 0 left,
-/// 1 right, 2 middle; `clicks`: 1, or 2 for the second click of a double click.
-void muxen_mouse(uint32_t kind, double x, double y, uint32_t button, int64_t clicks) {
+/// Gives a mouse event the modifiers the app holds (`held`: CGEventFlags), and
+/// no others. A new event starts with whatever this Mac has held at that
+/// moment: a key pressed here, one another program holds (a Hyper key is
+/// ⌃⌥⇧⌘), or one the app let go of just before, as this Mac's session hears
+/// of a key a millisecond or so late. With Control among them a left click is
+/// a ⌃-click, a right click.
+static void muxen_hold(CGEventRef e, uint64_t held) {
+    // Shift, Control, Option and ⌘, and which of the two keys each is.
+    const CGEventFlags modifiers = kCGEventFlagMaskShift | kCGEventFlagMaskControl | kCGEventFlagMaskAlternate | kCGEventFlagMaskCommand;
+    const CGEventFlags sides = 0x207f;
+    CGEventSetFlags(e, (CGEventGetFlags(e) & ~(modifiers | sides)) | ((CGEventFlags)held & modifiers));
+}
+
+static CGEventRef muxen_mouse_event(uint32_t kind, double x, double y, uint32_t button, int64_t clicks, uint64_t held) {
     CGEventRef e = CGEventCreateMouseEvent(NULL, (CGEventType)kind, CGPointMake(x, y), (CGMouseButton)button);
     if (!e) {
-        return;
+        return NULL;
     }
     if (clicks > 0) {
         CGEventSetIntegerValueField(e, kCGMouseEventClickState, clicks);
     }
-    CGEventPost(kCGHIDEventTap, e);
+    muxen_hold(e, held);
+    return e;
+}
+
+/// A mouse event at (x, y) in points. `kind`: a CGEventType; `button`: 0 left,
+/// 1 right, 2 middle; `clicks`: 1, or 2 for the second click of a double click;
+/// `held`: the modifiers it's made with (see `muxen_hold`).
+void muxen_mouse(uint32_t kind, double x, double y, uint32_t button, int64_t clicks, uint64_t held) {
+    CGEventRef e = muxen_mouse_event(kind, x, y, button, clicks, held);
+    if (e) {
+        CGEventPost(kCGHIDEventTap, e);
+        CFRelease(e);
+    }
+}
+
+/// The flags `muxen_mouse` would send such an event with, without sending it
+/// (for tests). All bits set when no event can be made here.
+uint64_t muxen_mouse_flags(uint32_t kind, uint32_t button, uint64_t held) {
+    CGEventRef e = muxen_mouse_event(kind, 0, 0, button, 1, held);
+    if (!e) {
+        return UINT64_MAX;
+    }
+    uint64_t flags = (uint64_t)CGEventGetFlags(e);
     CFRelease(e);
+    return flags;
 }
 
 /// Lines of scrolling: positive `dy` scrolls down (like X11's wheel), `dx` right.
-void muxen_scroll(int32_t dy, int32_t dx) {
+/// `held`: as for `muxen_mouse`.
+void muxen_scroll(int32_t dy, int32_t dx, uint64_t held) {
     CGEventRef e = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitLine, 2, -dy, -dx);
     if (e) {
+        muxen_hold(e, held);
         CGEventPost(kCGHIDEventTap, e);
         CFRelease(e);
     }

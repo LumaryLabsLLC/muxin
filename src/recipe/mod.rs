@@ -75,10 +75,11 @@ pub struct Component {
     /// run as the user, as Homebrew wants.) Steps never call sudo themselves.
     #[serde(default)]
     pub root: bool,
-    /// With root: a test, run as the user like `check`, that lets the steps run
-    /// as the user when it exits 0. For tools that live where whoever installed
-    /// them put them: npm's global folder is the user's own when their Node.js
-    /// is (mise, nvm, Homebrew), and only root's when it's the system's.
+    /// With root: a test, run as the user like `check` and after the prelude
+    /// like the steps, that lets the steps run as the user when it exits 0.
+    /// For tools that live where whoever installed them put them: npm's global
+    /// folder is the user's own when their Node.js is (mise, nvm, Homebrew),
+    /// and only root's when it's the system's.
     pub root_unless: Option<String>,
     /// Exits 0 when the component is there. Fast, no network, changes nothing.
     pub check: String,
@@ -394,7 +395,9 @@ mod tests {
                 assert_eq!(c.update.as_deref(), Some(format!("npm install -g {at} {package}@latest").as_str()), "{id}");
                 let name = package.rsplit(' ').next().unwrap();
                 assert_eq!(c.up_to_date.as_deref(), Some(format!("npm outdated -g {at} {name}").as_str()), "{id}");
-                assert_eq!((c.requires.as_slice(), c.root, c.root_unless.as_deref()), (&["node".to_string()][..], true, claude_root_unless()), "{id}");
+                // Root unless the user can write where the step writes: the copy on PATH, else npm's own folder.
+                let root_unless = format!("test -w \"$(npm_prefix {id})\"");
+                assert_eq!((c.requires.as_slice(), c.root, c.root_unless.as_deref()), (&["node".to_string()][..], true, Some(root_unless.as_str())), "{id}");
             }
         }
         // What the extras brought besides themselves.
@@ -402,10 +405,6 @@ mod tests {
         assert_eq!((catalog.get("bun").unwrap().requires.as_slice(), catalog.get("deno").unwrap().requires.as_slice()), (&["unzip".to_string()][..], &["unzip".to_string()][..]));
         // Pi's package is the one that isn't deprecated.
         assert!(catalog.get("pi").unwrap().install.ends_with(" @earendil-works/pi-coding-agent"));
-    }
-
-    fn claude_root_unless() -> Option<&'static str> {
-        catalog().unwrap().get("claude").unwrap().root_unless.as_deref()
     }
 
     #[test]

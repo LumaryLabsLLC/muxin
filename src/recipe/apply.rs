@@ -470,6 +470,10 @@ mod tests {
         let (out, exit) = run(true, "true", "echo ran");
         assert_eq!(exit, "0");
         assert!(out.contains("As ") && out.contains("ran") && !out.contains("sudo "), "{out}");
+        // It runs after the prelude, so it can test where npm_prefix says the step writes.
+        let (out, exit) = run(true, "command -v npm_prefix", "echo ran");
+        assert_eq!(exit, "0");
+        assert!(out.contains("ran") && !out.contains("sudo "), "{out}");
         // Root through sudo -n, the prelude with it.
         let (out, exit) = run(true, "false", "pkg_install git");
         assert_eq!(exit, "0", "{out}");

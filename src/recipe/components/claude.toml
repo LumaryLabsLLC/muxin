@@ -3,8 +3,9 @@ name = "Claude Code"
 requires = ["node"]
 root = true
 # npm installs into Node.js's own folder: the user's when their Node.js is
-# (mise, nvm, Homebrew), and then the step runs as the user.
-root_unless = 'test -w "$(npm prefix -g)"'
+# (mise, nvm, Homebrew), and then the step runs as the user. An update writes
+# where the copy on PATH is (npm_prefix), so that's the folder tested.
+root_unless = 'test -w "$(npm_prefix claude)"'
 check = "command -v claude"
 install = "npm install -g @anthropic-ai/claude-code"
 # Both look at the copy on PATH (npm_prefix), which may be outside npm's own

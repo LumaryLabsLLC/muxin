@@ -4,12 +4,13 @@
 #   OR_PRELUDE  what every step can use (prelude.sh)
 #   OR_STEP     its install or update step, run by sh -e after the prelude, with nothing on stdin
 #   OR_ROOT     1 when the step needs root here (root = true, on Linux)
-#   OR_UNLESS   its root_unless test: when it exits 0, the step runs as the user
+#   OR_UNLESS   its root_unless test, run after the prelude: when it exits 0, the step runs as the user
 # Ends with "$OR_MARK:exit=N" on stderr, N being the step's exit status, or 77
 # when it needs root and sudo would ask for a password (then nothing ran).
 or_install() {
   if [ "$OR_ROOT" = 1 ] && [ "$(id -u)" != 0 ]; then
-    if [ -n "$OR_UNLESS" ] && sh -c "$OR_UNLESS" </dev/null >/dev/null 2>&1; then
+    if [ -n "$OR_UNLESS" ] && sh -c "$OR_PRELUDE
+$OR_UNLESS" </dev/null >/dev/null 2>&1; then
       echo "As $(id -un): $OR_UNLESS"
     elif sudo -n true 2>/dev/null; then
       echo "As root (sudo -n)"

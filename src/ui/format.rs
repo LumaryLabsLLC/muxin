@@ -85,6 +85,9 @@ pub fn machine_subtitle_in(m: &Machine, nested: bool) -> (String, &'static str) 
     if m.checking && m.probe.is_none() {
         return ("Connecting…".into(), "muted");
     }
+    if m.is_asleep() {
+        return ("Asleep".into(), "muted");
+    }
     if m.status == "offline" {
         let seen = m.unreachable.as_ref().and_then(|u| u.last_seen_at);
         if is_powered_off(m) {
@@ -196,6 +199,8 @@ pub fn is_stopped(m: &Machine) -> bool {
 pub fn unreachable_word(m: &Machine) -> &'static str {
     if m.is_disconnected() {
         "Disconnected"
+    } else if m.is_asleep() {
+        "Asleep"
     } else if is_powered_off(m) {
         "Powered off"
     } else if is_stopped(m) {
@@ -220,6 +225,7 @@ pub fn unreachable_reason(m: &Machine) -> String {
     }
     match m.unreachable.as_ref().map(|u| u.kind.as_str()) {
         Some("offline") => "Offline",
+        Some("asleep") => "Asleep",
         Some("powered-off") => "Powered off",
         Some("refused") => "Not accepting ssh",
         Some("auth") => "ssh key not accepted",

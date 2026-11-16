@@ -839,9 +839,11 @@ impl Root {
     }
 
     fn unreachable_card(&self, theme: &Theme, m: &Machine, u: &Unreachable, cx: &mut Context<Self>) -> AnyElement {
-        let just_offline = u.kind == "offline";
+        let asleep = u.kind == "asleep";
+        let just_offline = u.kind == "offline" || asleep;
         let (glyph, color) = match u.kind.as_str() {
             "offline" => ("power", theme.text_muted),
+            "asleep" => ("moon", theme.asleep()),
             "refused" => ("unplug", theme.warning),
             "tailscale-off" => ("network", theme.warning),
             "auth" | "key-locked" | "host-key" => ("lock", theme.error),
@@ -895,29 +897,31 @@ impl Root {
                             .text_size(px(11.5))
                             .text_color(theme.text_placeholder)
                             .child(when)
-                            .child("·")
-                            .child(
-                                div()
-                                    .id("m-offline-details")
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(3.))
-                                    .cursor_pointer()
-                                    .hover(|st| st.text_color(theme.text_muted))
-                                    .child(icon(if open { "chevron-down" } else { "chevron-right" }, 11., theme.text_placeholder))
-                                    .child("What ssh said")
-                                    .on_click(cx.listener({
-                                        let mid = mid.clone();
-                                        move |this, _, _, cx| {
-                                            if !this.offline_details.remove(&mid) {
-                                                this.offline_details.insert(mid.clone());
+                            // Asleep: its agent said so, and ssh said nothing.
+                            .when(!asleep, |d| {
+                                d.child("·").child(
+                                    div()
+                                        .id("m-offline-details")
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(3.))
+                                        .cursor_pointer()
+                                        .hover(|st| st.text_color(theme.text_muted))
+                                        .child(icon(if open { "chevron-down" } else { "chevron-right" }, 11., theme.text_placeholder))
+                                        .child("What ssh said")
+                                        .on_click(cx.listener({
+                                            let mid = mid.clone();
+                                            move |this, _, _, cx| {
+                                                if !this.offline_details.remove(&mid) {
+                                                    this.offline_details.insert(mid.clone());
+                                                }
+                                                cx.notify();
                                             }
-                                            cx.notify();
-                                        }
-                                    })),
-                            ),
+                                        })),
+                                )
+                            }),
                     )
-                    .when(open, |d| {
+                    .when(open && !asleep, |d| {
                         d.child(
                             div()
                                 .p(px(8.))
@@ -942,13 +946,15 @@ impl Root {
             .when(u.kind == "tailscale-off" && super::can_open_tailscale(), |d| {
                 d.child(Button::new("m-offline-tailscale", "Open Tailscale").style(ButtonStyle::Primary).on_click(|_, _, _| super::open_tailscale()))
             })
-            // Asleep (or off): wake it over its network.
-            .when(u.kind == "offline" && self.engine.can_wake(&m.id), |d| {
+            // Asleep: its agent wakes it. Off, or asleep without saying so:
+            // the wake signal over its network.
+            .when(just_offline && self.engine.can_wake(&m.id), |d| {
                 let mid = m.id.clone();
-                d.child(Button::new("m-offline-wake", "Wake").icon("power").style(ButtonStyle::Primary).tooltip("Send it the Wake on LAN signal").on_click(cx.listener(move |this, _, _, cx| this.wake_machine(&mid, cx))))
+                let tip = if asleep { "Wake it up, as a key press there would" } else { "Send it the Wake on LAN signal" };
+                d.child(Button::new("m-offline-wake", "Wake").icon("power").style(ButtonStyle::Primary).tooltip(tip).on_click(cx.listener(move |this, _, _, cx| this.wake_machine(&mid, cx))))
             })
             .child(
-                Button::new("m-offline-check", "Try again")
+                Button::new("m-offline-check", if asleep { "Check now" } else { "Try again" })
                     .icon("refresh-cw")
                     .loading(m.checking)
                     .on_click(cx.listener(move |this, _, _, _| this.engine.trigger_check(Some(mid.clone())))),
@@ -968,7 +974,7 @@ fn status_dot_text(_theme: &Theme, text: &str, color: gpui::Hsla) -> impl IntoEl
 fn status_label(m: &Machine) -> &'static str {
     match m.status.as_str() {
         "online" => "Online",
-        "offline" => format::unreachable_word(m),
+        "offline" | "asleep" => format::unreachable_word(m),
         "manual" => "No host",
         _ => "Not checked",
     }

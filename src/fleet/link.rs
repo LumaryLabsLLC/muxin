@@ -12,6 +12,9 @@
 //! `Link::lane`), so a busy one doesn't queue in front of the one being
 //! typed into, and streams take priorities (`set_priority`). A terminal let
 //! go drops its stream, and with it what the agent still had queued for it.
+//!
+//! A machine that's asleep is left alone (see asleep.rs): its agent says so
+//! in its hello, and no link to it is kept or made until it wakes.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -62,6 +65,8 @@ pub const BACKGROUND: i32 = 0;
 pub struct Link {
     pub machine: String,
     version: OnceLock<String>,
+    /// What the agent said first: its version, and whether the machine is asleep.
+    hello: OnceLock<Value>,
     out: mpsc::UnboundedSender<Vec<u8>>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     channels: Mutex<HashMap<u32, mpsc::UnboundedSender<(u8, Vec<u8>)>>>,
@@ -86,6 +91,9 @@ pub struct Link {
     rt: tokio::runtime::Handle,
     /// A stream of its own for one terminal (`lane`), not the machine's link.
     lane: AtomicBool,
+    /// An answer of its agent's said the machine is asleep (said on to
+    /// whoever follows the link, once).
+    said_asleep: AtomicBool,
 }
 
 enum Holder {
@@ -124,6 +132,23 @@ impl Link {
     /// The agent's version.
     pub fn version(&self) -> &str {
         self.version.get().map(String::as_str).unwrap_or("")
+    }
+
+    /// Whether the agent says when its machine sleeps and wakes (older ones don't).
+    pub fn says_sleep(&self) -> bool {
+        self.hello.get().is_some_and(|h| h["sleeps"].as_bool() == Some(true))
+    }
+
+    /// The machine was asleep when this link was made (something woke it
+    /// for a moment): what its agent said about it.
+    pub fn asleep(&self) -> Option<super::asleep::Told> {
+        self.hello.get().filter(|h| h["asleep"].as_bool() == Some(true)).map(super::asleep::Told::from)
+    }
+
+    /// Lets go of the link on purpose (the machine isn't looked at for it).
+    pub fn hang_up(&self) {
+        self.retired.store(true, Ordering::Relaxed);
+        self.shut();
     }
 
     /// Sends a request and waits for its reply.
@@ -182,6 +207,9 @@ impl Link {
         let (lane, out_rx) = Link::new(&self.machine, Holder::Lane, self.transport, self.rt.clone());
         lane.lane.store(true, Ordering::Relaxed);
         let _ = lane.version.set(self.version().to_string());
+        if let Some(hello) = self.hello.get() {
+            let _ = lane.hello.set(hello.clone());
+        }
         if let Some(peer) = self.peer() {
             let _ = lane.peer.set(peer);
         }
@@ -309,6 +337,10 @@ pub async fn get(spec: &MachineSpec) -> Option<Arc<Link>> {
     if std::env::var_os("MUXEN_NO_LINK").is_some() {
         return None;
     }
+    // Asleep: reaching for it would wake it.
+    if super::asleep::is(&spec.id) {
+        return None;
+    }
     if let Some(l) = current(&spec.id) {
         return Some(l);
     }
@@ -321,13 +353,54 @@ pub async fn get(spec: &MachineSpec) -> Option<Arc<Link>> {
         return Some(l);
     }
     match connect(spec).await {
-        Ok(link) => Some(up(spec, link)),
+        Ok(link) => awake(spec, link).await.map(|link| up(spec, link)),
         Err(e) => {
             tracing::debug!("no link to {}: {e}", spec.name);
             slots().lock().unwrap().insert(spec.id.clone(), Slot::Down(Instant::now()));
             None
         }
     }
+}
+
+/// A new link, unless its machine turns out to be asleep (reaching it woke
+/// it for a moment): then what its agent said is noted, with where its
+/// notice goes when it wakes, and the link is let go so it can sleep on.
+async fn awake(spec: &MachineSpec, link: Arc<Link>) -> Option<Arc<Link>> {
+    // This computer runs Muxin, so it isn't asleep, whatever its agent saw as it started.
+    if spec.is_local() {
+        return Some(link);
+    }
+    let Some(mut told) = link.asleep() else { return Some(link) };
+    // The agent tries the way to this app before it says yes: a few seconds
+    // at most, while whatever woke the machine keeps it up.
+    if let Some(port) = notice_port(&link) {
+        if let Ok(reply) = link.request(json!({ "op": "ping", "wake_notice": port }), Duration::from_secs(8)).await {
+            told.notice = reply["wake_notice"].as_str().map(str::to_string);
+            told.notice_failed = told.notice.is_none() && reply["wake_notice_error"].is_string();
+        }
+    }
+    tracing::debug!("{} is asleep; leaving it alone", spec.name);
+    link.hang_up();
+    super::asleep::told(&spec.id, told);
+    None
+}
+
+/// The port this app takes a machine's wake notice on, for a direct link
+/// (over ssh there's no sending one).
+fn notice_port(link: &Link) -> Option<u16> {
+    if link.transport != "direct" || !link.says_sleep() {
+        return None;
+    }
+    super::direct::notice_port()
+}
+
+/// A link to the machine whether or not it's asleep, for waking it: not
+/// kept, and the caller hangs up.
+pub async fn reach(spec: &MachineSpec) -> Result<Arc<Link>, String> {
+    spec.refuse_if_disconnected()?;
+    let gate = gate(&spec.id);
+    let _turn = gate.lock().await;
+    connect(spec).await
 }
 
 /// The machine's live link, or a new direct one when it's paired; never a new
@@ -337,6 +410,9 @@ pub async fn get(spec: &MachineSpec) -> Option<Arc<Link>> {
 /// left to the direct connection's own wait, so `get` still tries ssh.
 pub async fn current_or_direct(spec: &MachineSpec) -> Option<Arc<Link>> {
     if spec.disconnected || spec.is_local() || std::env::var_os("MUXEN_NO_LINK").is_some() {
+        return None;
+    }
+    if super::asleep::is(&spec.id) {
         return None;
     }
     if let Some(l) = current(&spec.id) {
@@ -349,7 +425,7 @@ pub async fn current_or_direct(spec: &MachineSpec) -> Option<Arc<Link>> {
         return Some(l);
     }
     match connect_direct(spec, &paired).await {
-        Ok(link) => Some(up(spec, link)),
+        Ok(link) => awake(spec, link).await.map(|link| up(spec, link)),
         Err(e) => {
             tracing::debug!("no direct connection to {}: {e}", spec.name);
             None
@@ -360,6 +436,12 @@ pub async fn current_or_direct(spec: &MachineSpec) -> Option<Arc<Link>> {
 /// Keeps a new link as the machine's and tells the engine.
 fn up(spec: &MachineSpec, link: Arc<Link>) -> Arc<Link> {
     tracing::debug!("linked to {} (agent {})", spec.name, link.version());
+    // Where its notice goes when it wakes from a sleep: no reply waited for.
+    if let Some(port) = notice_port(&link) {
+        let id = link.next_id.fetch_add(1, Ordering::Relaxed);
+        let req = json!({ "id": id, "op": "ping", "wake_notice": port });
+        link.send(CONTROL, JSON, &serde_json::to_vec(&req).unwrap_or_default());
+    }
     slots().lock().unwrap().insert(spec.id.clone(), Slot::Up(link.clone()));
     if let Some(hook) = on_connect().lock().unwrap().as_ref() {
         hook(link.clone());
@@ -594,6 +676,105 @@ mod tests {
         assert_eq!(serde_json::from_slice::<Value>(&payload).unwrap()["op"], "ping");
     }
 
+    /// A link over a pipe to something that speaks as an agent does: its
+    /// hello, then whatever the test has it say.
+    async fn piped(id: &str, hello: &str) -> (Arc<Link>, tokio::io::DuplexStream) {
+        let (app, mut agent) = tokio::io::duplex(1 << 16);
+        let (from_agent, to_agent) = tokio::io::split(app);
+        let mut f = CONTROL.to_be_bytes().to_vec();
+        f.push(JSON);
+        f.extend((hello.len() as u32).to_be_bytes());
+        f.extend(hello.as_bytes());
+        agent.write_all(&f).await.unwrap();
+        let spec: MachineSpec = toml::from_str(&format!("name = \"{id}\"\nid = \"{id}\"\nhost = \"{id}.invalid\"")).unwrap();
+        (start(&spec, Box::pin(from_agent), Writer::Pipe(Box::pin(to_agent)), Holder::Lane, "ssh").await.unwrap(), agent)
+    }
+
+    /// An agent from before it could say its machine sleeps: its hello has
+    /// nothing about it, the link is kept as ever, and the machine is never
+    /// called asleep on its word.
+    #[tokio::test]
+    async fn an_older_agent_is_linked_as_before() {
+        let (link, _agent) = piped("link-old-agent", r#"{"event":"hello","version":"0.6.0","now":1}"#).await;
+        assert_eq!((link.version(), link.says_sleep(), link.asleep()), ("0.6.0", false, None));
+        let spec: MachineSpec = toml::from_str("name = \"Old\"\nid = \"link-old-agent\"\nhost = \"old.invalid\"").unwrap();
+        let since = Instant::now();
+        let kept = awake(&spec, link.clone()).await.expect("kept");
+        assert!(kept.alive() && !kept.retired());
+        assert_eq!(super::super::asleep::told_since(&spec.id, since), None);
+        // No wake notice is asked of it (and none over ssh, from any agent).
+        assert_eq!(notice_port(&link), None);
+    }
+
+    /// Reached in its sleep (the packet woke it for a moment), an agent
+    /// says so in its hello: the link is let go, and what it said is kept
+    /// for whoever asked.
+    #[tokio::test]
+    async fn a_machine_found_asleep_is_let_go() {
+        let (link, _agent) = piped("link-asleep", r#"{"event":"hello","version":"0.7.0","now":1,"sleeps":true,"asleep":true,"lid_closed":true}"#).await;
+        assert!(link.says_sleep());
+        assert_eq!(link.asleep(), Some(super::super::asleep::Told { notice: None, lid_closed: true, notice_failed: false }));
+        let spec: MachineSpec = toml::from_str("name = \"Book\"\nid = \"link-asleep\"\nhost = \"book.invalid\"").unwrap();
+        let since = Instant::now();
+        assert!(awake(&spec, link.clone()).await.is_none());
+        assert!(!link.alive() && link.retired(), "hung up on purpose: losing it isn't a reason to check the machine");
+        assert_eq!(super::super::asleep::told_since(&spec.id, since), Some(super::super::asleep::Told { notice: None, lid_closed: true, notice_failed: false }));
+        // This computer runs Muxin, whatever its own agent saw as it started.
+        let (link, _agent) = piped("link-asleep-here", r#"{"event":"hello","version":"0.7.0","sleeps":true,"asleep":true}"#).await;
+        let here: MachineSpec = toml::from_str("name = \"Here\"\nid = \"link-asleep-here\"\nhost = \"local\"").unwrap();
+        assert!(awake(&here, link).await.is_some());
+    }
+
+    /// The word that a machine is going to sleep can fail to arrive. Every
+    /// answer its agent gives in its sleep says so, and whoever follows the
+    /// link then hears it as the word itself, once. When the agent's own
+    /// word does come, that's the one heard (it says where its wake notice
+    /// goes).
+    #[tokio::test]
+    async fn an_answer_that_says_asleep_is_the_word_that_it_sleeps() {
+        let frame = |payload: &str| {
+            let mut f = CONTROL.to_be_bytes().to_vec();
+            f.push(JSON);
+            f.extend((payload.len() as u32).to_be_bytes());
+            f.extend(payload.as_bytes());
+            f
+        };
+        let (link, mut agent) = piped("link-asleep-answer", r#"{"event":"hello","version":"0.7.0","now":1,"sleeps":true}"#).await;
+        let mut events = link.subscribe();
+        // Two answers in its sleep, and no word from the agent before them.
+        agent.write_all(&frame(r#"{"id":41,"ok":true,"asleep":true}"#)).await.unwrap();
+        agent.write_all(&frame(r#"{"id":42,"ok":true,"asleep":true,"lid_closed":true}"#)).await.unwrap();
+        let heard = tokio::time::timeout(Duration::from_secs(3), events.recv()).await.expect("said on").unwrap();
+        assert_eq!((heard["event"].as_str(), heard["wake_notice"].as_str()), (Some("sleep"), None));
+        assert!(tokio::time::timeout(Duration::from_millis(900), events.recv()).await.is_err(), "once");
+
+        // The agent's own word, right behind an answer: only that is heard.
+        let (link, mut agent) = piped("link-asleep-word", r#"{"event":"hello","version":"0.7.0","now":1,"sleeps":true}"#).await;
+        let mut events = link.subscribe();
+        agent.write_all(&frame(r#"{"id":7,"ok":true,"asleep":true}"#)).await.unwrap();
+        agent.write_all(&frame(r#"{"event":"sleep","wake_notice":"192.168.1.20:53312"}"#)).await.unwrap();
+        let heard = tokio::time::timeout(Duration::from_secs(3), events.recv()).await.expect("the word").unwrap();
+        assert_eq!(heard["wake_notice"], "192.168.1.20:53312");
+        assert!(tokio::time::timeout(Duration::from_millis(900), events.recv()).await.is_err(), "and nothing made up after it");
+    }
+
+    /// Nothing reaches for a machine that's asleep: no link is made, and no
+    /// try at one is counted as a failure to wait out.
+    #[tokio::test]
+    async fn a_machine_asleep_is_not_dialed() {
+        let spec: MachineSpec = toml::from_str("name = \"Book\"\nid = \"link-not-dialed\"\nhost = \"book.invalid\"").unwrap();
+        super::super::asleep::sync(7001, [&spec.id].into_iter());
+        assert!(get(&spec).await.is_none() && current_or_direct(&spec).await.is_none());
+        assert!(!slots().lock().unwrap().contains_key(&spec.id));
+        assert_eq!(spec.refuse_if_disconnected().unwrap_err(), "Book is asleep. Wake it first.");
+        // A check of it by name, or Wake, looks all the same.
+        let looking = super::super::asleep::look(&spec.id);
+        assert!(spec.refuse_if_disconnected().is_ok());
+        drop(looking);
+        super::super::asleep::sync(7001, std::iter::empty());
+        assert!(spec.refuse_if_disconnected().is_ok());
+    }
+
     #[test]
     fn names_networks() {
         for (ip, want) in [
@@ -618,6 +799,7 @@ impl Link {
         let link = Arc::new(Link {
             machine: machine.to_string(),
             version: OnceLock::new(),
+            hello: OnceLock::new(),
             out: out_tx,
             pending: Mutex::new(HashMap::new()),
             channels: Mutex::new(HashMap::new()),
@@ -633,6 +815,7 @@ impl Link {
             priority: Arc::new(AtomicI32::new(BACKGROUND)),
             rt,
             lane: AtomicBool::new(false),
+            said_asleep: AtomicBool::new(false),
         });
         (link, out_rx)
     }
@@ -689,6 +872,21 @@ impl Link {
                 if channel == CONTROL {
                     let Ok(msg) = serde_json::from_slice::<Value>(&payload) else { continue };
                     if let Some(id) = msg["id"].as_u64() {
+                        // Asleep, says an answer: the word that it was going
+                        // to sleep didn't get here (or this link was made in
+                        // its sleep). Whoever follows the link hears it now,
+                        // unless the agent's own word comes in a moment (it
+                        // says more: where its wake notice goes).
+                        if msg["asleep"].as_bool() == Some(true) && !link.said_asleep.load(Ordering::Relaxed) {
+                            let (weak, said) = (weak.clone(), json!({ "event": "sleep", "lid_closed": msg["lid_closed"], "wake_notice": msg["wake_notice"], "wake_notice_error": msg["wake_notice_error"] }));
+                            link.rt.spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                                let Some(link) = weak.upgrade() else { return };
+                                if !link.said_asleep.swap(true, Ordering::Relaxed) {
+                                    let _ = link.events.send(said);
+                                }
+                            });
+                        }
                         if let Some(tx) = link.pending.lock().unwrap().remove(&id) {
                             let _ = tx.send(msg);
                         }
@@ -698,6 +896,11 @@ impl Link {
                             let _ = tx.send(msg);
                         }
                     } else {
+                        if msg["event"] == "sleep" {
+                            link.said_asleep.store(true, Ordering::Relaxed);
+                        } else if msg["event"] == "awake" {
+                            link.said_asleep.store(false, Ordering::Relaxed);
+                        }
                         let _ = link.events.send(msg);
                     }
                 } else if kind == CLOSE {
@@ -738,5 +941,6 @@ async fn start(spec: &MachineSpec, stdout: Pin<Box<dyn tokio::io::AsyncRead + Se
         return Err(format!("agent {version} is too old for the link"));
     }
     let _ = link.version.set(version);
+    let _ = link.hello.set(hello);
     Ok(link)
 }

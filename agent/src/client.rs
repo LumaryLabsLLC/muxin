@@ -117,6 +117,7 @@ pub fn handle(req: &Value) -> Value {
         "process_signal" => crate::procs::signal(&req),
         "machine_power" => crate::power::act(&req),
         "wake" => crate::wake::wake(&req),
+        "wake_self" => crate::sleep::wake_self(),
         "schedules" => crate::schedules::list(),
         "schedule_save" => crate::schedules::save(&req),
         "schedule_delete" => crate::schedules::delete(&req),

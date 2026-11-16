@@ -78,6 +78,12 @@ impl Theme {
         }
     }
 
+    /// A machine that's asleep: the moon's color (kit::icon_colors), the one
+    /// that reads on this theme.
+    pub fn asleep(&self) -> Hsla {
+        gpui::rgb(if self.canvas.l < 0.5 { 0xa9acff } else { 0x5a5ed8 }).into()
+    }
+
     /// Color for a diagnostic / attention level.
     pub fn level(&self, level: &str) -> Hsla {
         match level {
@@ -88,11 +94,13 @@ impl Theme {
         }
     }
 
-    /// A machine's status dot: green online; gray when it's just offline (shut
-    /// down, asleep) or unchecked; amber or red when something needs fixing.
+    /// A machine's status dot: green online; its own calm color asleep; gray
+    /// when it's just offline (shut down, off the network) or unchecked; amber
+    /// or red when something needs fixing.
     pub fn machine_status(&self, m: &crate::fleet::model::Machine) -> Hsla {
         match (m.status.as_str(), m.unreachable.as_ref().map(|u| u.kind.as_str())) {
             ("online", _) => self.success,
+            ("asleep", _) => self.asleep(),
             ("offline", Some("offline" | "powered-off" | "stopped" | "host-down" | "installing")) => self.text_placeholder,
             ("offline", Some("refused" | "tailscale-off")) => self.warning,
             ("offline", _) => self.error,

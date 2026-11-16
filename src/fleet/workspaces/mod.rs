@@ -253,6 +253,10 @@ impl Engine {
             None => pick_machine_for(&snap.machines, clean_opt(req.platform).as_deref(), docker)?.id.clone(),
         };
         let (spec, mut probe) = self.machine(&machine_id).ok_or("Machine not found in config.toml anymore.")?;
+        // Disconnected or asleep: said so, rather than checked (which would wake one that sleeps).
+        if self.demo_world().is_none() {
+            spec.refuse_if_disconnected()?;
+        }
         if self.demo_world().is_none() && !probe.as_ref().is_some_and(|p| p.ok) {
             self.run_check(Some(vec![spec.id.clone()])).await;
             probe = self.machine(&spec.id).and_then(|(_, p)| p);

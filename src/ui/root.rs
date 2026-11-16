@@ -30,7 +30,6 @@ actions!(
     [
         CheckNow,
         SyncGitHub,
-        ShowChat,
         ShowOverview,
         ShowJobs,
         ShowWorkspaces,
@@ -199,7 +198,6 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Go to…", QuickOpen),
                 MenuItem::action("Command Palette…", CommandPalette),
                 MenuItem::separator(),
-                MenuItem::action("Chat", ShowChat),
                 MenuItem::action("Overview", ShowOverview),
                 MenuItem::action("Jobs", ShowJobs),
                 MenuItem::action("Boxes", ShowBoxes),
@@ -281,8 +279,6 @@ impl Left {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Route {
-    /// The assistant: the first page.
-    Chat,
     Overview,
     Jobs,
     Workspaces,
@@ -476,8 +472,6 @@ pub struct Root {
     pub(super) logs: HashMap<String, Entity<super::logs::LogsView>>,
     /// Services pages open, by machine (each an item in the sidebar while open).
     pub(super) service_pages: HashMap<String, Entity<super::services::ServicesView>>,
-    /// The assistant's chat, once its page was opened.
-    pub(super) chat: Option<Entity<super::chat::ChatView>>,
     /// Terminals split into panes (see panes.rs); a session page shows the layout it's in.
     pub(super) panes: Vec<super::panes::Panes>,
     /// The pane of a split shown alone (⌘⇧↵), while it's the one on screen.
@@ -665,13 +659,11 @@ impl Root {
         }));
         // Recent commands, from before a restart (not in the demo).
         let run_history = if engine.is_demo() { Vec::new() } else { crate::config::read_recent(&engine.paths().recent_commands) };
-        // The chat is the first page once it's turned on; until then, the overview is.
-        let first = if engine.settings().chat.enabled { Route::Chat } else { Route::Overview };
         let mut ws = Root {
             engine,
             snapshot,
             focus: cx.focus_handle(),
-            route: first,
+            route: Route::Overview,
             back: Vec::new(),
             forward: Vec::new(),
             filter,
@@ -710,7 +702,6 @@ impl Root {
             split: Default::default(),
             logs: HashMap::new(),
             service_pages: HashMap::new(),
-            chat: None,
             panes: cx.global::<super::theme::Appearance>().panes.iter().filter_map(|t| super::panes::Panes::decode(t)).filter(|p| p.ids().len() > 1).collect(),
             zoomed: None,
             split_ratio: cx.global::<super::theme::Appearance>().split_ratio.clamp(0.2, 0.8),
@@ -869,11 +860,6 @@ impl Root {
             super::theme::remember(cx, |a| a.favorite_machines.retain(|f| ids.contains(f)));
         }
         self.snapshot = snapshot;
-        // The chat was turned off (a change of settings comes with a snapshot):
-        // its page goes, and what was being answered on it stops.
-        if self.chat.is_some() && !self.chat_on() {
-            self.chat = None;
-        }
         cx.notify();
     }
 
@@ -906,18 +892,8 @@ impl Root {
     // Navigation
 
     pub(super) fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
-        // The chat is off until it's turned on: asked for (its shortcut, the
-        // palette, the menu), the place to turn it on opens instead.
-        if route == Route::Chat && !self.chat_on() {
-            return self.open_settings_tab(super::settings::SettingsTab::Chat, window, cx);
-        }
         self.show(route, cx);
         self.on_route_changed(window, cx);
-    }
-
-    /// The user turned the chat on (Settings › Chat).
-    pub(super) fn chat_on(&self) -> bool {
-        self.engine.settings().chat.enabled
     }
 
     /// Navigation that doesn't need the window (the settings page is created on first render).
@@ -1022,12 +998,6 @@ impl Root {
                 let view = self.logs_view(&id, window, cx);
                 window.focus(&view.focus_handle(cx));
             }
-            Route::Chat => {
-                let view = self.chat_view(window, cx);
-                // What Settings changed meanwhile (a sign-in, how new chats start) shows.
-                view.update(cx, |view, cx| view.refresh(cx));
-                window.focus(&view.focus_handle(cx));
-            }
             Route::Services(id) => {
                 if !self.service_pages.contains_key(&id) {
                     let engine = self.engine.clone();
@@ -1073,183 +1043,10 @@ impl Root {
         cx.notify();
     }
 
-    /// Runs a `script:` view's steps in order (see `open_view`).
-    fn run_script(&mut self, script: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let steps: Vec<String> = script.split('|').map(|step| step.trim().to_string()).filter(|step| !step.is_empty()).collect();
-        cx.spawn_in(window, async move |this, cx| {
-            let executor = cx.background_executor().clone();
-            let wait = |ms: u64| executor.timer(std::time::Duration::from_millis(ms));
-            for step in steps {
-                let (verb, rest) = step.split_once(' ').map(|(verb, rest)| (verb, rest.trim())).unwrap_or((step.as_str(), ""));
-                // The chat has finished what it was doing, and nothing waits for an answer.
-                let idle = async |this: &gpui::WeakEntity<Root>, cx: &mut gpui::AsyncWindowContext| loop {
-                    match this.update(cx, |root, cx| root.chat.as_ref().is_none_or(|chat| chat.read(cx).is_idle())) {
-                        Ok(false) => wait(150).await,
-                        _ => break,
-                    }
-                };
-                match verb {
-                    "wait" => wait(rest.parse().unwrap_or(1000)).await,
-                    "idle" => idle(&this, cx).await,
-                    "type" => {
-                        idle(&this, cx).await;
-                        let letters: Vec<char> = rest.chars().collect();
-                        for end in 1..=letters.len() {
-                            let so_far: String = letters[..end].iter().collect();
-                            let typed = this.update_in(cx, |root, window, cx| {
-                                let chat = root.chat_view(window, cx);
-                                chat.update(cx, |chat, cx| chat.draft(&so_far, cx));
-                            });
-                            if typed.is_err() {
-                                return;
-                            }
-                            wait(if letters[end - 1] == ' ' { 70 } else { 38 }).await;
-                        }
-                        wait(450).await;
-                        let sent = this.update_in(cx, |root, window, cx| {
-                            let chat = root.chat_view(window, cx);
-                            chat.update(cx, |chat, cx| chat.send_draft(window, cx));
-                        });
-                        if sent.is_err() {
-                            return;
-                        }
-                        // The turn has to begin before it can be waited for.
-                        wait(600).await;
-                    }
-                    _ => {
-                        let view = match verb {
-                            "go" => rest.to_string(),
-                            "pick" => format!("chat-pick:{rest}"),
-                            "menu" => format!("chat-menu:{}", rest.replacen(' ', ":", 1)),
-                            other => format!("{other}:{rest}"),
-                        };
-                        if this.update_in(cx, |root, window, cx| root.open_view(&view, window, cx)).is_err() {
-                            return;
-                        }
-                    }
-                }
-            }
-        })
-        .detach();
-    }
-
     /// Opens a view by name; see `--view` in main.rs.
     pub fn open_view(&mut self, view: &str, window: &mut Window, cx: &mut Context<Self>) {
         let (kind, arg) = view.split_once(':').unwrap_or((view, ""));
-        // A view of the chat on the simulated machines turns the chat on for
-        // that run (nothing is kept there): what these views are for, showing it.
-        if (kind.starts_with("chat") || kind == "script") && self.engine.is_demo() && !self.chat_on() {
-            let mut settings = self.engine.settings();
-            settings.chat.enabled = true;
-            let _ = self.engine.update_settings(settings);
-        }
         match kind {
-            "chat" => self.navigate(Route::Chat, window, cx),
-            "chat-say" => {
-                self.navigate(Route::Chat, window, cx);
-                let view = self.chat_view(window, cx);
-                view.update(cx, |view, cx| view.say(arg.to_string(), window, cx));
-            }
-            // A script of steps, one after another, " | " between them, to
-            // film the app or check it without a click:
-            //   go <view> · wait <ms> · type <text> (into the chat, once it's
-            //   idle, then sent) · idle (until the chat is) · pick <brain>/<model>/<effort>
-            //   · menu model [Brain] · menu effort · menu close
-            "script" => self.run_script(arg, window, cx),
-            // "chat-brain:grok": what answers in the next new chat.
-            "chat-brain" => {
-                let view = self.chat_view(window, cx);
-                view.update(cx, |view, cx| view.choose_brain(arg, cx));
-            }
-            // "chat-pick:codex/gpt-6.1-sol/high": the brain, and its model and
-            // effort when given ("codex//high": its own model), as the pickers set them.
-            "chat-pick" => {
-                let mut parts = arg.splitn(3, '/');
-                let (brain, model, effort) = (parts.next().unwrap_or_default().to_string(), parts.next().filter(|m| !m.is_empty()).map(str::to_string), parts.next().filter(|e| !e.is_empty()).map(str::to_string));
-                let view = self.chat_view(window, cx);
-                view.update(cx, |view, cx| {
-                    view.pick(&brain, model, window, cx);
-                    if effort.is_some() {
-                        view.pick_effort(effort, cx);
-                    }
-                });
-            }
-            // "chat-attach:/path/to/file": a file that goes with the next message.
-            "chat-attach" => {
-                let view = self.chat_view(window, cx);
-                view.update(cx, |view, cx| view.attach(vec![arg.into()], cx));
-            }
-            // "chat-menu:model" opens the model picker, "chat-menu:model:Codex"
-            // with that brain's models showing, "chat-menu:effort" the effort
-            // picker, "chat-menu:close" closes it.
-            "chat-menu" => {
-                let (which, brain) = arg.split_once(':').unwrap_or((arg, ""));
-                if which == "close" {
-                    self.context_menu = None;
-                    cx.notify();
-                    return;
-                }
-                // "chat-menu:chat": the menu of the chat used last (rename, delete), where its row's button is.
-                if which == "chat" {
-                    if let Some(meta) = crate::chat::store(&self.engine).list().into_iter().find(|m| !m.title.is_empty()) {
-                        let size = window.viewport_size();
-                        self.open_menu(super::menu::MenuTarget::Chat { id: meta.id, above: false }, gpui::point(size.width - px(190.), size.height * 0.5), cx);
-                    }
-                    return;
-                }
-                // "chat-menu:mode": whether it asks first, under the box at its left.
-                if which == "mode" {
-                    let view = self.chat_view(window, cx);
-                    let at = view.read(cx).picker_anchor(false, window);
-                    let width = if view.read(cx).bypasses() { 178. } else { 158. };
-                    self.open_menu(super::menu::MenuTarget::ChatMode, gpui::point(at.x - px(width), at.y), cx);
-                    return;
-                }
-                let effort = which == "effort";
-                let view = self.chat_view(window, cx);
-                let position = view.read(cx).picker_anchor(effort, window);
-                let target = if effort { super::menu::MenuTarget::ChatEffort } else { super::menu::MenuTarget::ChatModel };
-                self.open_menu(target, position, cx);
-                self.open_submenu_named(brain, cx);
-            }
-            // "chat-rename:<id>" and "chat-delete:<id>" (or "last"): the dialog that names a chat, or asks before deleting it.
-            "chat-rename" | "chat-delete" => {
-                self.navigate(Route::Chat, window, cx);
-                let Ok(meta) = crate::chat::find(&crate::chat::store(&self.engine), arg) else { return };
-                if kind == "chat-rename" { self.show_rename(RenameTarget::Chat(meta.id), window, cx) } else { self.confirm_delete_chat(&meta.id, window, cx) }
-            }
-            // Typed a letter at a time, then sent: "chat-type:What needs me?",
-            // or "chat-type:4000:What needs me?" to start after that many milliseconds.
-            // "chat-type:First | Second": the second once the first is answered.
-            "chat-type" => {
-                self.navigate(Route::Chat, window, cx);
-                let (after, text) = match arg.split_once(':') {
-                    Some((ms, text)) if !ms.is_empty() && ms.chars().all(|c| c.is_ascii_digit()) => (ms.parse().unwrap_or(1500), text),
-                    _ => (1500, arg),
-                };
-                let view = self.chat_view(window, cx);
-                view.update(cx, |view, cx| view.type_and_send(text.to_string(), after, window, cx));
-            }
-            // "chat-answer:yes:1500": each question it asks is answered (yes,
-            // always or no) once it's been shown that many milliseconds.
-            "chat-answer" => {
-                let (what, shown) = arg.split_once(':').unwrap_or((arg, "1500"));
-                let answer = match what {
-                    "always" => crate::chat::gate::Answer::Always,
-                    "no" => crate::chat::gate::Answer::No(String::new()),
-                    _ => crate::chat::gate::Answer::Yes,
-                };
-                let shown = shown.parse().unwrap_or(1500);
-                let view = self.chat_view(window, cx);
-                view.update(cx, |view, cx| view.answer_each(answer, shown, window, cx));
-            }
-            // What's typed but not sent; "\n" in it is a new line.
-            "chat-draft" => {
-                self.navigate(Route::Chat, window, cx);
-                let view = self.chat_view(window, cx);
-                view.update(cx, |view, cx| view.draft(&arg.replace("\\n", "\n"), cx));
-            }
-            "overview" => self.navigate(Route::Overview, window, cx),
             "jobs" => self.navigate(Route::Jobs, window, cx),
             "usage" => self.navigate(Route::Usage, window, cx),
             // "schedules", or "schedules:<machine>/<id>" with that one's runs open.
@@ -1359,7 +1156,6 @@ impl Root {
                     "terminal" => SettingsTab::Terminal,
                     "github" => SettingsTab::GitHub,
                     "cloud" => SettingsTab::Cloud,
-                    "chat" | "assistant" => SettingsTab::Chat,
                     "prompts" => SettingsTab::Prompts,
                     "keyboard" => SettingsTab::Keyboard,
                     _ => SettingsTab::General,
@@ -2023,56 +1819,11 @@ impl Root {
                     None => return,
                 }
             }
-            RenameTarget::Chat(id) => match crate::chat::store(&self.engine).get(id) {
-                Some(meta) => (meta.title, String::new()),
-                None => return,
-            },
         };
         let engine = self.engine.clone();
         let dialog = cx.new(|cx| RenameDialog::new(engine, target, current, machine, window, cx));
         self.show_modal(Modal::Rename(dialog.clone()), window, cx);
-        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_chat_dialog_event));
-    }
-
-    /// A dialog that may have renamed or deleted a chat closed: the chat
-    /// page shows it as it is now.
-    fn on_chat_dialog_event<D>(&mut self, dialog: &Entity<D>, event: &DialogEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.on_dialog_event(dialog, event, window, cx);
-        if let Some(chat) = self.chat.clone() {
-            chat.update(cx, |view, cx| view.refresh_open(cx));
-        }
-    }
-
-    /// Asks before a chat is deleted: it can't be brought back.
-    pub(super) fn confirm_delete_chat(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(meta) = crate::chat::store(&self.engine).get(id) else { return };
-        let mut text = if meta.title.is_empty() {
-            "What was said in it and the files attached in it are deleted from this computer.".to_string()
-        } else {
-            format!("“{}”: what was said in it and the files attached in it are deleted from this computer.", meta.title)
-        };
-        // What isn't Muxin's to delete.
-        if let Some(kind) = crate::chat::brain::kind(&meta.brain) {
-            text.push_str(&format!(" {} keeps its own record of the conversation, which stays where it is.", kind.name));
-        }
-        let chat_id = id.to_string();
-        let dialog = cx.new(|cx| {
-            ConfirmDialog::new(
-                "Delete this chat?".to_string(),
-                text,
-                "Delete chat",
-                None,
-                move |_, engine| {
-                    crate::chat::store(engine).delete(&chat_id).map_err(|e| format!("Couldn't delete it: {e}"))?;
-                    Ok(None)
-                },
-                self.engine.clone(),
-                window,
-                cx,
-            )
-        });
-        self.show_modal(Modal::Confirm(dialog.clone()), window, cx);
-        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_chat_dialog_event));
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
     }
 
     pub(super) fn show_add_machine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2426,10 +2177,6 @@ impl Root {
 
     fn sync_github(&mut self, _: &SyncGitHub, _: &mut Window, _: &mut Context<Self>) {
         self.engine.trigger_sync();
-    }
-
-    fn show_chat(&mut self, _: &ShowChat, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(Route::Chat, window, cx);
     }
 
     fn show_overview(&mut self, _: &ShowOverview, window: &mut Window, cx: &mut Context<Self>) {
@@ -2856,7 +2603,6 @@ impl Root {
                     .gap(px(2.))
                     .px(px(10.))
                     .pt(px(6.))
-                    .when(self.chat_on(), |d| d.child(self.nav_item("nav-chat", "message-square", kit::tiles::CHAT, "Chat", None, Route::Chat, "chat", cx)))
                     .child(self.nav_item("nav-overview", "gauge", kit::tiles::OVERVIEW, "Overview", None, Route::Overview, "overview", cx))
                     .child(self.nav_item("nav-jobs", "workflow", kit::tiles::JOBS, "Jobs", Some(s.counts.queued + s.counts.running), Route::Jobs, "jobs", cx))
                     .child(self.nav_item("nav-boxes", "box", super::boxes::TILE, "Boxes", Some(s.boxes.iter().filter(|b| b.state != "paused").count()), Route::Boxes, "boxes", cx))
@@ -3656,13 +3402,7 @@ impl Root {
     fn render_toolbar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let s = self.snapshot.clone();
-        let (mut section, mut title) = route_title(&s, &self.route);
-        // An open chat goes by its own title.
-        if self.route == Route::Chat
-            && let Some(name) = self.chat.as_ref().and_then(|chat| chat.read(cx).title())
-        {
-            (section, title) = (Some("Chat"), name);
-        }
+        let (section, mut title) = route_title(&s, &self.route);
         // A shared machine goes by its name.
         if let Route::Shared(id) = &self.route
             && let Some(j) = self.joined.iter().find(|j| &j.id == id && j.info.whole_machine)
@@ -3984,30 +3724,6 @@ impl Root {
     }
 
     /// The machine's log viewer, opened if it isn't.
-    fn chat_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<super::chat::ChatView> {
-        if self.chat.is_none() {
-            let engine = self.engine.clone();
-            let view = cx.new(|cx| super::chat::ChatView::new(engine, window, cx));
-            // Its pickers are menus of this window's.
-            self._subscriptions.push(cx.subscribe_in(&view, window, |this, _, event: &super::chat::ChatEvent, window, cx| match event {
-                super::chat::ChatEvent::Menu { effort, position } => {
-                    let target = if *effort { super::menu::MenuTarget::ChatEffort } else { super::menu::MenuTarget::ChatModel };
-                    // Just above the button that was clicked.
-                    this.open_menu(target, gpui::point(position.x - px(14.), position.y - px(18.)), cx);
-                }
-                super::chat::ChatEvent::ModeMenu { position } => this.open_menu(super::menu::MenuTarget::ChatMode, gpui::point(position.x - px(14.), position.y - px(18.)), cx),
-                super::chat::ChatEvent::ChatMenu { id, position, above } => {
-                    let position = if *above { gpui::point(position.x - px(14.), position.y - px(18.)) } else { *position };
-                    this.open_menu(super::menu::MenuTarget::Chat { id: id.clone(), above: *above }, position, cx);
-                }
-                super::chat::ChatEvent::Rename(id) => this.show_rename(RenameTarget::Chat(id.clone()), window, cx),
-                super::chat::ChatEvent::Delete(id) => this.confirm_delete_chat(id, window, cx),
-            }));
-            self.chat = Some(view);
-        }
-        self.chat.clone().expect("just made")
-    }
-
     pub(super) fn logs_view(&mut self, machine: &str, window: &mut Window, cx: &mut Context<Self>) -> Entity<super::logs::LogsView> {
         let engine = self.engine.clone();
         self.logs.entry(machine.to_string()).or_insert_with(|| cx.new(|cx| super::logs::LogsView::new(engine, machine.to_string(), window, cx))).clone()
@@ -4129,18 +3845,6 @@ impl Root {
 
     fn render_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.route.clone() {
-            // Turned off while its page was showing (or gone back to): the overview shows.
-            Route::Chat if !self.chat_on() => {
-                self.route = Route::Overview;
-                self.render_overview(window, cx).into_any_element()
-            }
-            Route::Chat => {
-                let view = self.chat_view(window, cx);
-                // Text only wraps in a width it knows: the page's, less the sidebar.
-                let width = f32::from(window.viewport_size().width) - if self.sidebar_hidden { 0. } else { self.sidebar_width };
-                view.update(cx, |view, _| view.set_width(width));
-                view.into_any_element()
-            }
             Route::Overview => self.render_overview(window, cx).into_any_element(),
             Route::Jobs => self.render_jobs(cx).into_any_element(),
             Route::Workspaces => self.render_workspaces(cx).into_any_element(),
@@ -4253,7 +3957,6 @@ impl Render for Root {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::check_now))
             .on_action(cx.listener(Self::sync_github))
-            .on_action(cx.listener(Self::show_chat))
             .on_action(cx.listener(Self::show_overview))
             .on_action(cx.listener(Self::show_jobs))
             .on_action(cx.listener(|this, _: &ShowWorkspaces, window, cx| this.navigate(Route::Workspaces, window, cx)))
@@ -4402,7 +4105,6 @@ pub(super) fn github_status(theme: &Theme, s: &Snapshot) -> (gpui::Hsla, String)
 /// (section, title) for the toolbar.
 fn route_title(s: &Snapshot, route: &Route) -> (Option<&'static str>, String) {
     match route {
-        Route::Chat => (None, "Chat".into()),
         Route::Overview => (None, "Overview".into()),
         Route::Jobs => (None, "Jobs".into()),
         Route::Workspaces => (Some("Boxes"), "Agents' workspaces".into()),

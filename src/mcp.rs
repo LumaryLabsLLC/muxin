@@ -18,7 +18,7 @@ use crate::fleet::Engine;
 
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
-pub(crate) const INSTRUCTIONS: &str = "\
+const INSTRUCTIONS: &str = "\
 Muxin is one app for all of the user's machines (reached with the system ssh, or directly for \
 host \"local\"): agent sessions, desktops, files, GitHub, workspaces, cloud machines, and the \
 self-hosted GitHub Actions runners on them.
@@ -84,9 +84,9 @@ pub struct Session {
 }
 
 impl Session {
-    /// A session for a caller Muxin knows: an app calling the tools in-process
-    /// (Muxin for iPad: what it makes is the user's, "app", as the Mac app's
-    /// is), or the assistant's chat ("chat").
+    /// A session for an app calling the tools in-process (Muxin for iPad):
+    /// what it makes is the user's, "app", as the Mac app's is.
+    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
     pub fn named(client: &str) -> Session {
         Session { client: Mutex::new(Some(client.to_string())) }
     }
@@ -103,33 +103,12 @@ pub async fn serve_stdio(engine: Arc<Engine>) -> anyhow::Result<()> {
     serve(engine, stdin, tokio::io::stdout()).await
 }
 
-pub async fn serve<R, W>(engine: Arc<Engine>, reader: R, writer: W) -> anyhow::Result<()>
+pub async fn serve<R, W>(engine: Arc<Engine>, mut reader: R, mut writer: W) -> anyhow::Result<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    serve_as(engine, reader, writer, Session::default(), None).await
-}
-
-/// What stands between a client and the tools, for a client Muxin started
-/// itself (the assistant's chat, crate::chat::tools): which tools it's
-/// offered, in place of the whole catalog, and how a call of one runs (after
-/// asking the user, when it changes something).
-#[async_trait::async_trait]
-pub trait Front: Send + Sync {
-    fn tools(&self) -> Vec<Value>;
-    /// Runs a call; the outcome as a tool result (`tool_result`).
-    async fn call(&self, engine: &Arc<Engine>, session: &Session, name: &str, args: Value) -> Value;
-}
-
-/// `serve` for a client Muxin knows (`session`), with `front` between it and
-/// the tools when there is one.
-pub async fn serve_as<R, W>(engine: Arc<Engine>, mut reader: R, mut writer: W, session: Session, front: Option<Arc<dyn Front>>) -> anyhow::Result<()>
-where
-    R: AsyncBufRead + Unpin,
-    W: AsyncWrite + Unpin + Send + 'static,
-{
-    let session = Arc::new(session);
+    let session = Arc::new(Session::default());
     let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
     let writer_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
@@ -174,10 +153,9 @@ where
         }
         let engine = engine.clone();
         let session = session.clone();
-        let front = front.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
-            let reply = match handle(&engine, &session, front.as_deref(), &method, params).await {
+            let reply = match handle(&engine, &session, &method, params).await {
                 Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
                 Err((code, message)) => error_response(id, code, &message),
             };
@@ -193,12 +171,11 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-async fn handle(engine: &Arc<Engine>, session: &Session, front: Option<&dyn Front>, method: &str, params: Value) -> Result<Value, (i64, String)> {
+async fn handle(engine: &Arc<Engine>, session: &Session, method: &str, params: Value) -> Result<Value, (i64, String)> {
     match method {
         "initialize" => {
-            // A client Muxin started itself keeps the name Muxin gave it.
             let client = params.pointer("/clientInfo/name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty());
-            if let Some(name) = client.filter(|_| session.client.lock().unwrap().is_none()) {
+            if let Some(name) = client {
                 *session.client.lock().unwrap() = Some(name.chars().take(64).collect());
             }
             let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or_default();
@@ -211,19 +188,13 @@ async fn handle(engine: &Arc<Engine>, session: &Session, front: Option<&dyn Fron
             }))
         }
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": match front {
-            Some(front) => front.tools(),
-            None => tools(),
-        } })),
+        "tools/list" => Ok(json!({ "tools": tools() })),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).ok_or((-32602, "tools/call needs a tool name".to_string()))?;
-            let args = params.get("arguments").cloned().filter(|a| !a.is_null()).unwrap_or_else(|| json!({}));
-            if let Some(front) = front {
-                return Ok(front.call(engine, session, name, args).await);
-            }
             if !tools().iter().any(|t| t["name"] == name) {
                 return Err((-32602, format!("Unknown tool: {name}")));
             }
+            let args = params.get("arguments").cloned().filter(|a| !a.is_null()).unwrap_or_else(|| json!({}));
             Ok(call_tool(engine, session, name, args).await)
         }
         "resources/list" => Ok(json!({ "resources": [] })),
@@ -350,7 +321,7 @@ fn session_arg(mut args: Value) -> Value {
 
 /// A tool's result. `structuredContent` has to be an object (Claude's MCP client
 /// refuses anything else): a list goes under "result".
-pub(crate) fn tool_result(value: Value, text: Option<String>, is_error: bool) -> Value {
+fn tool_result(value: Value, text: Option<String>, is_error: bool) -> Value {
     let value = if value.is_object() { value } else { json!({ "result": value }) };
     let text = text.unwrap_or_else(|| serde_json::to_string_pretty(&value).unwrap_or_default());
     json!({
@@ -1541,7 +1512,7 @@ mod tests {
         let engine = demo();
         let session = Session::default();
         assert_eq!(session.owner(), "mcp");
-        handle(&engine, &session, None, "initialize", json!({"protocolVersion":"2025-06-18","clientInfo":{"name":"claude-code","version":"2"}})).await.unwrap();
+        handle(&engine, &session, "initialize", json!({"protocolVersion":"2025-06-18","clientInfo":{"name":"claude-code","version":"2"}})).await.unwrap();
         assert_eq!(session.owner(), "claude-code");
     }
 
@@ -1552,7 +1523,7 @@ mod tests {
         let engine = demo();
         engine.run_check(None).await;
         let session = Session::default();
-        handle(&engine, &session, None, "initialize", json!({"clientInfo":{"name":"codex"}})).await.unwrap();
+        handle(&engine, &session, "initialize", json!({"clientInfo":{"name":"codex"}})).await.unwrap();
         let created = call_tool(&engine, &session, "workspace_create", json!({"platform":"linux","repo":"acme/api"})).await;
         assert_eq!(created["isError"], false, "{created}");
         let id = created["structuredContent"]["workspace"]["id"].as_str().unwrap().to_string();

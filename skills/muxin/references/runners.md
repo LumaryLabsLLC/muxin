@@ -19,7 +19,7 @@ muxin jobs --json                      # queued and running jobs
 4. `muxin install mac-studio --count 2 --json`. Add `--scope acme` when more than one org or repo is watched. The default `--mode auto` picks a service where it can, else Docker containers (Linux without passwordless sudo), else a background `run.sh`; the log says which. Use `--mode docker` when the user wants isolated runners, and only add `--docker-socket` if they explicitly want jobs to use Docker and trust the workflows (it's root-equivalent on the host).
 5. Report the new runner ids and their states from the result.
 
-More `install` flags: `--name` (repeat for several, instead of `--count`), `--label` (repeat), `--group` (an org runner group), `--image` (with `--mode docker`), `--timeout` (seconds).
+More `install` flags: `--name` (repeat for several, instead of `--count`), `--label` (repeat), `--group` (an org runner group), `--image` (with `--mode docker`), `--timeout` (seconds: give up then, leaving the install unfinished, and exit 1; without it the command waits until it's done). `muxin runner` takes `--timeout` the same way.
 
 ## "Why is runner X offline?"
 

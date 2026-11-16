@@ -12,7 +12,7 @@
 //! saved in the window are in saved.rs.
 
 mod apply;
-pub use apply::{Applied, longest};
+pub use apply::Applied;
 // Only the window saves and applies them.
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub mod saved;

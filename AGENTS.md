@@ -2,6 +2,14 @@
 
 The canonical repository is `domenicomassafra/plancia`. The shared contract at `~/.dstack/contracts/shared-root/AGENTS.md` and project issues also apply. The former local checkout name (`muxin`) does not establish ownership. This public repository contains the `web/` UI. The FastAPI backend and FleetProbe live in private `domenicomassafra/controlcenter:dashboard/`. The Muxin donor was retired in #60; its history and Apache-2.0 attributions remain.
 
+## Mappa
+
+- `web/` — la UI React/Vite servita con API same-origin; ci scrive chi cambia una schermata; aprilo dopo `PRODUCT.md`, `DESIGN.md` e `web/PROVENANCE.md`.
+- `docs/` — dominio, tracker delle issue, etichette di triage e ricerche; ci scrive chi chiude una issue; `docs/agents/issue-tracker.md` dice come si legge una issue.
+- `evidence/` — le prove raccolte per un ticket, una cartella per issue; ci scrive chi deve dimostrare qualcosa.
+- `scripts/donors/` — gli script dei donor; si leggono, il codice Rust ritirato non si ripristina.
+- `DESIGN.md`, `PRODUCT.md`, `SECURITY.md`, `RELEASING.md` — design, prodotto, sicurezza e rilascio: si leggono prima di una modifica grande.
+
 ## Architecture boundaries
 
 - `web/` is the React/Vite UI, with traceable provenance from `domenicomassafra/controlcenter:dashboard/web/`. Read `PRODUCT.md`, `DESIGN.md`, and `web/PROVENANCE.md` before making changes. `web/src/lib/api.ts` uses the existing *same-origin* API with authenticated sessions, CSRF cookies, WebSockets, and governed receipts. Never add browser tokens or credentials to localStorage or Vite environment variables.

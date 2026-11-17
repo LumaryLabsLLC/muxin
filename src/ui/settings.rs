@@ -1337,7 +1337,7 @@ impl SettingsPage {
                             .text_color(if on { theme.text } else { theme.text_placeholder })
                             .when(on, |d| d.bg(theme.element_selected))
                             .when(!on, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-                            .child(if id.is_empty() { tr(name) } else { name })
+                            .child(if id.is_empty() { tr("System") } else { name })
                             .on_click(move |_, _, cx| {
                                 let mut s = engine.settings();
                                 s.language = id.to_string();

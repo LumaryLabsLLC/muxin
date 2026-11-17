@@ -108,7 +108,15 @@ mod tests {
                 } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("i18n.rs") {
                     let src = std::fs::read_to_string(&p).unwrap();
                     for call in ["tr(\"", "trf(\""] {
-                        for piece in src.split(call).skip(1) {
+                        let mut pieces = src.split(call);
+                        let mut before = pieces.next().unwrap_or_default();
+                        for piece in pieces {
+                            // `tr(` itself, not the end of `nsstr(` or `self.tr(`'s cousins.
+                            let word = before.chars().last().is_some_and(|c| c.is_alphanumeric() || c == '_');
+                            before = piece;
+                            if word {
+                                continue;
+                            }
                             // The literal up to its closing quote, escapes kept as written.
                             let mut lit = String::new();
                             let mut chars = piece.chars();

@@ -1213,6 +1213,9 @@ impl Root {
             "favorite" => self.set_favorite_machine(arg, true, cx),
             // The palette with this text typed: "palette:" (places), "palette:>set" (commands).
             "palette" => self.open_palette_with(arg, window, cx),
+            // A saved recipe: "save-recipe:Agent CLIs=claude+codex".
+            #[cfg(feature = "recipes")]
+            "save-recipe" => self.save_recipe_view(arg, cx),
             "themes" => {
                 self.open_palette(true, window, cx);
                 self.choose_theme(cx);

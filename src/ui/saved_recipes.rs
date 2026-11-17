@@ -16,7 +16,7 @@ use crate::fleet::model::Machine;
 use crate::recipe::saved::{self, SavedRecipe};
 
 /// Component names for ids, as the card shows them; an id Muxin doesn't know, as it is.
-fn names(ids: &[String]) -> String {
+pub(super) fn names(ids: &[String]) -> String {
     let catalog = crate::recipe::catalog().ok();
     ids.iter().map(|id| catalog.and_then(|c| c.get(id)).map_or(id.as_str(), |c| c.name.as_str())).collect::<Vec<_>>().join(", ")
 }
@@ -152,8 +152,18 @@ impl Root {
         Some(div().flex().flex_col().pb(px(6.)).border_t_1().border_color(theme.border_variant).child(title).children(rows).into_any_element())
     }
 
+    /// Saves a recipe from a test view: "Agent CLIs=claude+codex".
+    pub(super) fn save_recipe_view(&mut self, arg: &str, cx: &mut Context<Self>) {
+        let (name, ids) = arg.split_once('=').unwrap_or((arg, ""));
+        let recipe = SavedRecipe { name: name.to_string(), components: ids.split('+').filter(|id| !id.is_empty()).map(str::to_string).collect() };
+        if let Err(e) = self.engine.edit_saved_recipes(|list| saved::save(list, None, recipe)) {
+            self.notify_user(e, true, cx);
+        }
+        self.recipes.saved = None;
+    }
+
     /// Applies a saved recipe here, shown on the Activity page as Install is.
-    fn apply_saved_recipe(&mut self, machine_id: &str, recipe: &SavedRecipe, cx: &mut Context<Self>) {
+    pub(super) fn apply_saved_recipe(&mut self, machine_id: &str, recipe: &SavedRecipe, cx: &mut Context<Self>) {
         match self.engine.apply_saved_recipe(machine_id, recipe) {
             Ok(op) => {
                 self.recipes.watch(machine_id, op);

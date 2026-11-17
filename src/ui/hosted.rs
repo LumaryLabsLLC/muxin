@@ -44,11 +44,12 @@ impl Root {
                 .on_click(cx.listener(move |this, _, _, cx| this.open_port(&pid, port, None, true, cx)))
                 .into_any_element()
         });
+        // A narrow page: the quieter buttons show only their icons, so the title keeps room.
+        let narrow = self.content_width < 760.;
         let password = made.filter(|v| v.os == "windows").map(|_| {
             let mid = m.id.clone();
-            Button::new("m-vm-password", "Copy password")
+            if narrow { Button::icon_only("m-vm-password", "lock") } else { Button::new("m-vm-password", "Copy password").icon("copy") }
                 .style(ButtonStyle::Ghost)
-                .icon("copy")
                 .tooltip("Its Windows account's password (Muxin made it; it's kept in your Keychain)")
                 .on_click(cx.listener(move |this, _, _, cx| match this.engine.vm_password(&mid) {
                     Some(p) => {
@@ -85,17 +86,18 @@ impl Root {
                             .flex_col()
                             .flex_1()
                             .min_w(px(0.))
+                            .overflow_hidden()
                             .gap(px(2.))
-                            .child(div().truncate().text_size(px(13.)).child(title))
-                            .child(div().text_size(px(11.5)).text_color(color).child(state)),
+                            // Wrapped when it's long: cut, it lost the host's name.
+                            .child(div().min_w(px(0.)).text_size(px(13.)).child(title))
+                            .child(div().min_w(px(0.)).text_size(px(11.5)).text_color(color).child(state)),
                     )
                     .children(watch)
                     .children(power)
                     .children(password)
                     .child(
-                        Button::new("m-vm-host", format!("Open {}", parent.name))
+                        if narrow { Button::icon_only("m-vm-host", "external-link").tooltip(format!("Open {}", parent.name)) } else { Button::new("m-vm-host", format!("Open {}", parent.name)).icon("external-link") }
                             .style(ButtonStyle::Ghost)
-                            .icon("external-link")
                             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(pid.clone()), window, cx))),
                     )
                     .children(destroy),

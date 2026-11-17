@@ -2334,12 +2334,16 @@ impl Render for NewSessionDialog {
             _ => String::new(),
         };
         let folder_chips = div().flex().flex_wrap().gap(px(6.)).children(folders.into_iter().enumerate().map(|(i, path)| {
-            let path = super::files::tilde(&path, &home);
-            let value = path.clone();
+            let value = super::files::tilde(&path, &home);
+            // A long folder is cut in the middle on the chip; picking it fills in all of it.
+            let path = super::format::short_folder(&value);
             div()
                 .id(("ns-folder", i))
                 .h(px(22.))
                 .px(px(8.))
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
                 .flex()
                 .items_center()
                 .gap(px(5.))

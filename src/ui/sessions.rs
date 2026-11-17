@@ -688,15 +688,14 @@ impl Root {
         let attach = info.attach_command.clone();
         let sid = info.id.clone();
         let sid2 = info.id.clone();
+        // A narrow page: the buttons show only their icons (their tooltips
+        // still say what they do), so the title keeps room.
+        let narrow = self.content_width < 880.;
         let header = div()
             .flex()
             .flex_none()
             .items_center()
             .gap(px(12.))
-            .px(px(20.))
-            .py(px(12.))
-            .border_b_1()
-            .border_color(theme.border_variant)
             .child(kit::tile(icon_name, from, to, 32.))
             .child(
                 div()
@@ -704,13 +703,30 @@ impl Root {
                     .flex_col()
                     .flex_1()
                     .min_w(px(0.))
+                    .overflow_hidden()
                     .gap(px(2.))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(info.title.clone()))
+                            .min_w(px(0.))
+                            // Sized by the room it has, not by its text: GPUI keeps a text's first
+                            // measure, and a squeezed one left it a letter wide.
+                            .child(div().flex_1().min_w(px(0.)).text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(info.title.clone())),
+                    )
+                    // A folder too long to fit goes onto its own line (and wraps at
+                    // its slashes) instead of running under the buttons.
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_x(px(6.))
+                            .gap_y(px(2.))
+                            .text_size(px(12.))
+                            .text_color(theme.text_placeholder)
+                            // A box's session: the way to its box, first on the line under the title.
                             .when(in_box, |d| {
                                 d.child(
                                     div()
@@ -730,19 +746,7 @@ impl Root {
                                         .child("Box")
                                         .on_click(cx.listener(|this, _, window, cx| this.navigate(Route::Boxes, window, cx))),
                                 )
-                            }),
-                    )
-                    // A folder too long to fit goes onto its own line (and wraps at
-                    // its slashes) instead of running under the buttons.
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_x(px(6.))
-                            .gap_y(px(2.))
-                            .text_size(px(12.))
-                            .text_color(theme.text_placeholder)
+                            })
                             .child(info.agent_name.clone())
                             .child("·")
                             .child(if in_box { format!("in a container on {machine}") } else { machine })
@@ -754,7 +758,7 @@ impl Root {
                                         .gap(px(4.))
                                         .min_w(px(0.))
                                         .child(kit::icon("folder", 12., theme.text_placeholder).flex_none().mt(px(2.)))
-                                        .child(div().flex_1().min_w(px(0.)).font_family(mono_font()).text_size(px(11.5)).child(info.cwd.clone())),
+                                        .child(div().flex_1().min_w(px(0.)).font_family(mono_font()).text_size(px(11.5)).child(format::short_folder(&info.cwd))),
                                 )
                             }),
                     )
@@ -771,16 +775,14 @@ impl Root {
                             .child(format!("{text}{at}"))
                     }))
                     // A helper: who started it. Helpers it started: each, to go to.
-                    .children(self.helpers_line(&theme, &info, cx))
-                    .children(info.git.as_ref().map(|g| git_line(&theme, &info.id, g, true).mt(px(2.)))),
+                    .children(self.helpers_line(&theme, &info, cx)),
             )
             .when(!info.persistent, |d| d.child(kit::pill("Ends when you close Muxin", theme.warning)))
             .child(status)
             .when(info.agent != "shell" && !info.agent.is_empty() && !exited && offline.is_none(), |d| {
                 let sid = info.id.clone();
                 d.child(
-                    Button::new("session-actions", "Actions")
-                        .icon("zap")
+                    labelled("session-actions", "Actions", "zap", narrow)
                         .tooltip("Ask the agent to commit, open a pull request, review its work…")
                         .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.open_menu(super::menu::MenuTarget::SessionActions(sid.clone()), e.position(), cx))),
                 )
@@ -790,8 +792,7 @@ impl Root {
                 let sid = info.id.clone();
                 let handing = self.handing_off.contains(&info.id);
                 d.child(
-                    Button::new("session-handoff", "Hand off")
-                        .icon("arrow-right-left")
+                    labelled("session-handoff", "Hand off", "arrow-right-left", narrow)
                         .loading(handing)
                         .tooltip("Another agent takes over, with a note of the conversation so far and where the code stands")
                         .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.open_menu(super::menu::MenuTarget::Handoff(sid.clone()), e.position(), cx))),
@@ -801,8 +802,7 @@ impl Root {
             .when(!exited && offline.is_none() && self.terminals.contains_key(&info.id), |d| {
                 let sid = info.id.clone();
                 d.child(
-                    Button::new("session-snippets", "Snippets")
-                        .icon("code")
+                    labelled("session-snippets", "Snippets", "square-terminal", narrow)
                         .tooltip("Type a saved command into this terminal and run it")
                         .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.open_menu(super::menu::MenuTarget::Snippets(sid.clone()), e.position(), cx))),
                 )
@@ -851,8 +851,7 @@ impl Root {
             .when(desktop_capable, |d| {
                 let sid = info.id.clone();
                 d.child(
-                    Button::new("session-desktop", "Desktop")
-                        .icon("panel-right")
+                    labelled("session-desktop", "Desktop", "panel-right", narrow)
                         .style(if split { ButtonStyle::Outlined } else { ButtonStyle::Ghost })
                         .tooltip(if split { "Hide the desktop" } else { "Show the machine's desktop beside the terminal" })
                         .on_click(cx.listener(move |this, _, window, cx| this.toggle_split(&sid, window, cx))),
@@ -872,6 +871,19 @@ impl Root {
                         }
                     })),
             );
+        // Its git line under it all, at the page's width: beside the buttons,
+        // the branch had no room left and the pull request was cut off.
+        let header = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .gap(px(4.))
+            .px(px(20.))
+            .py(px(12.))
+            .border_b_1()
+            .border_color(theme.border_variant)
+            .child(header)
+            .children(info.git.as_ref().map(|g| div().flex().pl(px(44.)).min_w(px(0.)).child(git_line(&theme, &info.id, g, true))));
 
         // The terminal, or the panes of its split.
         let body = match self.pane_layout(id).cloned() {
@@ -1216,15 +1228,19 @@ impl Root {
             .when(selected, |d| d.bg(theme.element_selected))
             .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
             .child(kit::tile(icon_name, from, to, 16.))
+            // In a column that can shrink, as in the Agents list: straight in
+            // the row, GPUI measured the title wider than its box, and cut it
+            // with no "…".
             .child(
-                div()
-                    .w(px(text_w))
-                    .truncate()
-                    .text_size(px(12.5))
-                    .text_color(if exited || offline { theme.text_placeholder } else if selected { theme.text } else { theme.text_muted })
-                    .child(s.title.clone()),
+                div().flex().flex_col().flex_1().min_w(px(0.)).overflow_hidden().child(
+                    div()
+                        .w(px(text_w))
+                        .truncate()
+                        .text_size(px(12.5))
+                        .text_color(if exited || offline { theme.text_placeholder } else if selected { theme.text } else { theme.text_muted })
+                        .child(s.title.clone()),
+                ),
             )
-            .child(div().flex_1())
             // Shared: someone's asking to join, or watching.
             .when(watched && !knocking, |d| d.child(kit::icon("eye", 12., theme.text_accent)))
             .when(knocking, |d| d.child(div().size(px(8.)).rounded_full().bg(theme.accent)))
@@ -1253,10 +1269,11 @@ impl Root {
         let title = div()
             .flex()
             .items_center()
-            .child(section_title(theme, "Agent sessions", Some(all.len())))
+            .gap(px(12.))
+            .child(div().flex_none().child(section_title(theme, "Agent sessions", Some(all.len()))))
             .child(div().flex_1())
             .when(!installed.is_empty(), |d| {
-                d.child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("Installed: {}", installed.join(", "))))
+                d.child(div().min_w(px(0.)).text_right().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("Installed: {}", installed.join(", "))))
             });
 
 
@@ -1387,22 +1404,40 @@ impl Root {
                     .overflow_hidden()
                     .gap(px(1.))
                     .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child(x.title.clone()))
-                    .child(
+                    // What doesn't fit goes onto the next line, each part with
+                    // the "·" before it (cut, it ran into the state on the right).
+                    .child({
+                        // The folder gives way first (cut in its middle) to keep it all
+                        // on one line: about what's left of the row after the rest.
+                        let started = format!("started {}", format::ago(x.created_at));
+                        let others = machine.as_ref().map_or(0, |m| m.chars().count() + 3)
+                            + x.agent_name.chars().count()
+                            + 3
+                            + started.chars().count()
+                            + helper_of.as_ref().map_or(0, |p| p.chars().count() + 13)
+                            + x.restored_text().map_or(0, |t| t.chars().count() + 3);
+                        let room = self.content_width - 240. - (depth as f32 * 22.) - others as f32 * 6.4 - 12.;
+                        let folder = format::short_folder_in(&x.cwd, ((room / 7.1) as usize).min(48));
+                        let parts: Vec<gpui::Div> = machine
+                            .map(|m| div().text_color(theme.text_muted).child(m))
+                            .into_iter()
+                            .chain([
+                                div().child(x.agent_name.clone()),
+                                div().font_family(mono_font()).child(folder),
+                                div().child(started),
+                            ])
+                            .chain(helper_of.map(|p| div().child(format!("helper of {p}"))))
+                            .chain(x.restored_text().map(|t| div().child(t.to_string())))
+                            .collect();
                         div()
                             .flex()
-                            .gap(px(6.))
+                            .flex_wrap()
+                            .gap_x(px(6.))
+                            .gap_y(px(1.))
                             .text_size(px(11.5))
                             .text_color(theme.text_placeholder)
-                            .children(machine.map(|m| div().text_color(theme.text_muted).child(m)))
-                            .when(with_machine, |d| d.child("·"))
-                            .child(x.agent_name.clone())
-                            .child("·")
-                            .child(div().font_family(mono_font()).child(format::short_folder(&x.cwd)))
-                            .child("·")
-                            .child(format!("started {}", format::ago(x.created_at)))
-                            .children(helper_of.map(|p| div().child("·").child(format!("helper of {p}")).flex().gap(px(6.))))
-                            .children(x.restored_text().map(|t| div().child("·").child(t.to_string()).flex().gap(px(6.)))),
-                    )
+                            .children(parts.into_iter().enumerate().map(|(i, part)| if i == 0 { part } else { div().flex().gap(px(6.)).child("·").child(part) }))
+                    })
                     .children(x.git.as_ref().map(|g| git_line(theme, &format!("row-{}", x.id), g, false).mt(px(3.)))),
             )
             .child(div().flex_none().child(state))
@@ -1588,7 +1623,8 @@ impl Root {
                         .flex_1()
                         .min_w(px(0.))
                         .gap(px(2.))
-                        .child(div().flex().items_center().gap(px(6.)).child(icon(mark, 13., color)).child(div().text_size(px(13.)).text_color(theme.text).child(value)))
+                        .overflow_hidden()
+                        .child(div().flex().items_start().gap(px(6.)).min_w(px(0.)).child(icon(mark, 13., color).flex_none().mt(px(2.))).child(div().flex_1().min_w(px(0.)).text_size(px(13.)).text_color(theme.text).child(value)))
                         .children(detail.map(|d| div().text_size(px(11.5)).text_color(theme.text_placeholder).child(d))),
                 )
         };
@@ -2463,6 +2499,22 @@ impl Root {
 /// What a session's (or a workspace's) work changed, in a line: its branch,
 /// lines added and removed, and its pull request with its checks (a click
 /// opens it on GitHub). `full` adds files, commits and uncommitted files.
+/// A button with its label, or (`narrow`) its icon alone; its tooltip says
+/// what it does either way.
+fn labelled(id: &'static str, label: &'static str, icon: &'static str, narrow: bool) -> Button {
+    if narrow { Button::icon_only(id, icon).style(ButtonStyle::Outlined) } else { Button::new(id, label).icon(icon) }
+}
+
+/// The first `n` characters of `text`, and "…" when there were more.
+fn cut(text: &str, n: usize) -> String {
+    if text.chars().count() <= n {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(n.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 pub(super) fn git_line(theme: &Theme, key: &str, g: &GitStatus, full: bool) -> gpui::Stateful<gpui::Div> {
     let muted = theme.text_placeholder;
     let small = |text: String, color| div().flex_none().text_size(px(11.5)).text_color(color).child(text);
@@ -2475,7 +2527,7 @@ pub(super) fn git_line(theme: &Theme, key: &str, g: &GitStatus, full: bool) -> g
             .gap(px(4.))
             .min_w(px(0.))
             .child(icon("git-branch", 12., muted).flex_none())
-            .child(div().min_w(px(0.)).truncate().font_family(mono_font()).text_size(px(11.5)).text_color(theme.text_muted).child(if g.branch.is_empty() { "no branch".to_string() } else { g.branch.clone() })),
+            .child(div().min_w(px(0.)).overflow_hidden().whitespace_nowrap().font_family(mono_font()).text_size(px(11.5)).text_color(theme.text_muted).child(if g.branch.is_empty() { "no branch".to_string() } else { cut(&g.branch, if full { 60 } else { 40 }) })),
     );
     if g.worktree {
         row = row.child(kit::pill("worktree", theme.info));

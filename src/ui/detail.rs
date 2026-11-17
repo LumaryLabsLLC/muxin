@@ -45,7 +45,8 @@ impl Root {
             None => "Not updated yet".into(),
         };
 
-        // Narrow: the buttons go under the name (and wrap), never off the edge.
+        // Narrow: the buttons go under the name (and wrap), never off the edge;
+        // narrower still, the name and the line under it wrap.
         let header = div()
             .flex()
             .flex_wrap()
@@ -54,7 +55,7 @@ impl Root {
             .gap(px(12.))
             .child(
                 div()
-                    .flex_none()
+                    .min_w(px(0.))
                     .flex()
                     .items_start()
                     .gap(px(12.))
@@ -64,6 +65,7 @@ impl Root {
                     })
                     .child(
                         div()
+                            .min_w(px(0.))
                             .flex()
                             .flex_col()
                             .gap(px(4.))
@@ -72,7 +74,7 @@ impl Root {
                                     .flex()
                                     .items_center()
                                     .gap(px(10.))
-                                    .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(m.name.clone()))
+                                    .child(div().min_w(px(0.)).text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(m.name.clone()))
                                     .child(pill(status_label(&m), theme.machine_status(&m)))
                                     .child({
                                         let (mid, favorite) = (m.id.clone(), Root::is_favorite(cx, &m.id));
@@ -386,7 +388,8 @@ impl Root {
                 .gap(px(2.))
                 .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(label))
                 .child(div().font_family(mono_font()).text_size(px(15.)).child(value))
-                .child(div().truncate().text_size(px(11.5)).text_color(theme.text_muted).child(sub))
+                // Wraps when narrow: a cut here had no "…" and lost the end.
+                .child(div().text_size(px(11.5)).text_color(theme.text_muted).child(sub))
         };
         let note = if off {
             ("triangle-alert", theme.warning, "Powering off doesn't stop the charges: DigitalOcean bills a droplet until it's destroyed.".to_string())
@@ -441,7 +444,7 @@ impl Root {
                     .border_t_1()
                     .border_color(theme.border_variant)
                     .child(icon(note.0, 13., note.1))
-                    .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(12.)).text_color(if off { theme.warning } else { theme.text_muted }).child(note.2)),
+                    .child(div().flex_1().min_w(px(0.)).text_size(px(12.)).text_color(if off { theme.warning } else { theme.text_muted }).child(note.2)),
             )
     }
 
@@ -544,6 +547,8 @@ impl Root {
             _ => "no data yet",
         };
 
+        // The buttons keep their place at the right; the name, its line and
+        // the labels wrap in what's left.
         let header = div()
             .flex()
             .items_start()
@@ -553,6 +558,8 @@ impl Root {
                 div()
                     .flex()
                     .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
                     .gap(px(6.))
                     .child(
                         div()
@@ -560,12 +567,13 @@ impl Root {
                             .items_center()
                             .gap(px(10.))
                             .child(kit::runner_glyph(&theme, &r.state, 14.))
-                            .child(div().font_family(mono_font()).text_size(px(20.)).font_weight(FontWeight::MEDIUM).child(r.name.clone()))
+                            .child(div().min_w(px(0.)).font_family(mono_font()).text_size(px(20.)).font_weight(FontWeight::MEDIUM).child(r.name.clone()))
                             .child(pill(state_label(&r), theme.state(&r.state))),
                     )
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(6.))
                             .text_size(px(12.))
@@ -697,8 +705,8 @@ impl Root {
                     .hover(|st| st.bg(theme.ghost_hover))
                     .when(i > 0, |d| d.border_t_1().border_color(theme.border_variant))
                     .child(op_status_icon(theme, o))
-                    .child(div().flex_1().truncate().text_size(px(12.5)).child(o.title.clone()))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format::ago(Some(o.started_at))))
+                    .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(12.5)).child(o.title.clone()))
+                    .child(div().flex_none().text_size(px(11.5)).text_color(theme.text_placeholder).child(format::ago(Some(o.started_at))))
                     .on_click(cx.listener(move |this, _, _, cx| this.show_operation(id, cx)))
                     .into_any_element()
             })
@@ -797,7 +805,9 @@ fn copyable(theme: &Theme, i: usize, text: String) -> impl IntoElement {
         .items_center()
         .gap(px(6.))
         .child(
+            // Wraps, rather than running over the buttons beside its card's text.
             div()
+                .min_w(px(0.))
                 .text_size(px(12.))
                 .text_color(theme.text_muted)
                 .when(looks_like_command, |d| d.font_family(mono_font()).px(px(6.)).py(px(2.)).rounded(crate::ui::kit::corner(4.)).bg(theme.element))
@@ -819,8 +829,13 @@ fn metric_card(theme: &Theme, title: &'static str, value: Option<String>, sub: O
         .gap(px(6.))
         .child(div().text_size(px(12.)).text_color(theme.text_muted).child(title))
         .child(div().font_family(mono_font()).text_size(px(20.)).child(value.unwrap_or_else(|| "—".into())))
-        .children(fraction.map(|f| meter(theme, f, color)))
-        .children(sub.map(|s| div().truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(s)))
+        // No meter: its room all the same, so the captions line up across the cards.
+        .child(match fraction {
+            Some(f) => meter(theme, f, color),
+            None => div().h(px(3.)),
+        })
+        // All of it, on a second line when the card is narrow (a cut had no "…").
+        .children(sub.map(|s| div().text_size(px(11.5)).text_color(theme.text_placeholder).child(s)))
 }
 
 impl Root {

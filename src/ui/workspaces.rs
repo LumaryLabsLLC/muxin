@@ -12,6 +12,9 @@ use super::root::{Root, Route};
 use super::theme::{ActiveTheme, mono_font, Theme};
 use crate::fleet::model::{WorkspaceCommand, WorkspaceInfo};
 
+/// How many workspaces a machine's page and the Boxes page list before Show more.
+const WORKSPACES_SHOWN: usize = 5;
+
 /// Per-view state for the workspace pages, kept on the root view.
 #[derive(Default)]
 pub struct WorkspaceUi {
@@ -72,6 +75,12 @@ impl Root {
         let id = w.id.clone();
         let shell = w.shell.clone();
         let last = w.history.last();
+        let stats = [
+            format!("{} command{}", w.commands, if w.commands == 1 { "" } else { "s" }),
+            format!("used {}", format::ago(Some(w.last_used_at))),
+            format!("created {}", format::ago(Some(w.created_at))),
+        ];
+        let room = self.content_width - 34. - stats.iter().map(|t| about(t, 11.5) + 14.).sum::<f32>();
         div()
             .id(SharedString::from(format!("wscard-{}", w.id)))
             .flex()
@@ -104,7 +113,7 @@ impl Root {
                                     .child(div().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(w.name.clone()))
                                     .child(div().font_family(mono_font()).text_size(px(11.)).text_color(theme.text_placeholder).child(w.id.clone())),
                             )
-                            .child(div().truncate().text_size(px(12.)).text_color(theme.text_muted).child(workspace_subtitle(w))),
+                            .child(div().text_size(px(12.)).text_color(theme.text_muted).child(workspace_subtitle(w, false))),
                     )
                     .when(w.isolation == "docker", |d| d.child(docker_pill(theme, w)))
                     .children(w.owner.clone().map(|o| kit::pill(o, theme.info)))
@@ -176,11 +185,8 @@ impl Root {
                     .gap(px(14.))
                     .text_size(px(11.5))
                     .text_color(theme.text_placeholder)
-                    .child(format!("{} command{}", w.commands, if w.commands == 1 { "" } else { "s" }))
-                    .child(format!("used {}", format::ago(Some(w.last_used_at))))
-                    .child(format!("created {}", format::ago(Some(w.created_at))))
-                    .child(div().flex_1())
-                    .child(div().truncate().font_family(mono_font()).child(w.path.clone())),
+                    .children(stats.map(|t| div().flex_none().child(t)))
+                    .child(folder_at_end(&w.path, room)),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Workspace(id.clone()), window, cx)))
             .on_mouse_down(gpui::MouseButton::Right, {
@@ -207,69 +213,69 @@ impl Root {
         let path = w.path.clone();
         let machine_id = w.machine_id.clone();
 
-        let header = div()
+        // The buttons go beside the name when there's room, else under it:
+        // they take ~530, and the page is ~650 wide at the smallest window.
+        let wide = self.content_width >= 900.;
+        let buttons = div()
             .flex()
-            .items_start()
-            .justify_between()
-            .gap(px(16.))
+            .gap(px(6.))
+            .when(!wide, |d| d.flex_wrap().pt(px(4.)))
+            .child({
+                let ws = w.clone();
+                Button::new("ws-new-session", "New session")
+                    .icon("square-terminal")
+                    .style(ButtonStyle::Primary)
+                    .disabled(w.status != "ready")
+                    .on_click(cx.listener(move |this, _, window, cx| this.new_workspace_session(&ws, window, cx)))
+            })
+            .child({
+                let (mid, path) = (w.machine_id.clone(), w.path.clone());
+                Button::new("ws-editor", "Open in editor")
+                    .icon("code")
+                    .disabled(w.status != "ready")
+                    .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.pick_editor(&mid, &path, e.position(), cx)))
+            })
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(w.name.clone()))
-                            .child(div().font_family(mono_font()).text_size(px(12.)).text_color(theme.text_placeholder).child(w.id.clone()))
-                            .when(w.isolation == "docker", |d| d.child(docker_pill(&theme, &w)))
-                            .child(status_pill(&theme, &w)),
-                    )
-                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(workspace_subtitle(&w))),
+                Button::new("ws-copy-shell", "Copy shell command")
+                    .icon("terminal")
+                    .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(shell.clone()))),
             )
+            .child({
+                let wid = w.id.clone();
+                Button::new("ws-changes", "Changes")
+                    .icon("git-branch")
+                    .loading(self.ws_ui.loading_changes.contains(&w.id))
+                    .on_click(cx.listener(move |this, _, _, cx| this.load_workspace_changes(&wid, cx)))
+            })
+            .child({
+                let wid = w.id.clone();
+                let name = w.name.clone();
+                Button::icon_only("ws-destroy", "trash-2")
+                    .style(ButtonStyle::Danger)
+                    .tooltip("Destroy workspace")
+                    .disabled(w.status == "destroying")
+                    .on_click(cx.listener(move |this, _, window, cx| this.confirm_destroy_workspace(&wid, &name, window, cx)))
+            });
+        let title = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(0.))
+            .gap(px(6.))
             .child(
                 div()
                     .flex()
-                    .gap(px(6.))
-                    .child({
-                        let ws = w.clone();
-                        Button::new("ws-new-session", "New session")
-                            .icon("square-terminal")
-                            .style(ButtonStyle::Primary)
-                            .disabled(w.status != "ready")
-                            .on_click(cx.listener(move |this, _, window, cx| this.new_workspace_session(&ws, window, cx)))
-                    })
-                    .child({
-                        let (mid, path) = (w.machine_id.clone(), w.path.clone());
-                        Button::new("ws-editor", "Open in editor")
-                            .icon("code")
-                            .disabled(w.status != "ready")
-                            .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.pick_editor(&mid, &path, e.position(), cx)))
-                    })
-                    .child(
-                        Button::new("ws-copy-shell", "Copy shell command")
-                            .icon("terminal")
-                            .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(shell.clone()))),
-                    )
-                    .child({
-                        let wid = w.id.clone();
-                        Button::new("ws-changes", "Changes")
-                            .icon("git-branch")
-                            .loading(self.ws_ui.loading_changes.contains(&w.id))
-                            .on_click(cx.listener(move |this, _, _, cx| this.load_workspace_changes(&wid, cx)))
-                    })
-                    .child({
-                        let wid = w.id.clone();
-                        let name = w.name.clone();
-                        Button::icon_only("ws-destroy", "trash-2")
-                            .style(ButtonStyle::Danger)
-                            .tooltip("Destroy workspace")
-                            .disabled(w.status == "destroying")
-                            .on_click(cx.listener(move |this, _, window, cx| this.confirm_destroy_workspace(&wid, &name, window, cx)))
-                    }),
-            );
+                    .items_center()
+                    .gap(px(10.))
+                    .child(div().min_w(px(0.)).text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(w.name.clone()))
+                    .child(div().flex_none().font_family(mono_font()).text_size(px(12.)).text_color(theme.text_placeholder).child(w.id.clone()))
+                    .when(w.isolation == "docker", |d| d.child(docker_pill(&theme, &w)))
+                    .child(status_pill(&theme, &w)),
+            )
+            // "machine · owner/repo @ branch · worktree of /path" wraps in what's left.
+            .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(workspace_subtitle(&w, true)));
+        let header = div().flex().items_start().justify_between().gap(px(16.));
+        let header = if wide { header.child(title).child(buttons) } else { header.child(title.child(buttons)) };
 
         let details = card(&theme)
             .px(px(14.))
@@ -284,8 +290,8 @@ impl Root {
                     .gap(px(6.))
                     .cursor_pointer()
                     .text_color(theme.text_accent)
-                    .child(w.machine_name.clone())
-                    .child(div().font_family(mono_font()).text_color(theme.text_placeholder).child(format!("{} · {}", w.host, w.platform)))
+                    .child(div().flex_none().child(w.machine_name.clone()))
+                    .child(div().min_w(px(0.)).font_family(mono_font()).text_color(theme.text_placeholder).child(format!("{} · {}", w.host, w.platform)))
                     .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(machine_id.clone()), window, cx))),
             ))
             .child(kv(
@@ -295,7 +301,8 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .child(kit::mono(w.path.clone()))
+                    // A long folder wraps; the copy button stays beside it.
+                    .child(kit::mono(w.path.clone()).min_w(px(0.)))
                     .child(Button::icon_only("ws-copy-path", "copy").tooltip("Copy path").on_click(move |_, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(path.clone()))
                     })),
@@ -438,7 +445,8 @@ impl Root {
     /// Agents' workspaces on all machines, small, below the boxes: the other
     /// way agents work on your machines (an agent you use elsewhere, there).
     pub(super) fn boxes_page_workspaces(&self, theme: &Theme, s: &crate::fleet::model::Snapshot, cx: &mut Context<Self>) -> AnyElement {
-        let rows: Vec<AnyElement> = s.workspaces.iter().enumerate().map(|(i, w)| self.workspace_row(theme, i, w, true, cx)).collect();
+        let all: Vec<&WorkspaceInfo> = s.workspaces.iter().collect();
+        let rows = self.workspace_rows(theme, "", &all, true, cx);
         div()
             .flex()
             .flex_col()
@@ -474,10 +482,53 @@ impl Root {
             .into_any_element()
     }
 
+    /// A list of workspaces: the first few, the rest behind Show more. `key`
+    /// says which list is open in full (`Root::workspaces_more`).
+    fn workspace_rows(&self, theme: &Theme, key: &str, list: &[&WorkspaceInfo], machine: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let more = self.workspaces_more.contains(key);
+        let folded = list.len().saturating_sub(WORKSPACES_SHOWN);
+        let mut rows: Vec<AnyElement> =
+            list.iter().take(if more { list.len() } else { WORKSPACES_SHOWN }).enumerate().map(|(i, w)| self.workspace_row(theme, i, w, machine, cx)).collect();
+        if folded > 0 {
+            let key = key.to_string();
+            rows.push(
+                div()
+                    .id(SharedString::from(format!("ws-more-{key}")))
+                    .px(px(14.))
+                    .py(px(9.))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .border_t_1()
+                    .border_color(theme.border_variant)
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(theme.text_placeholder)
+                    .hover(|st| st.text_color(theme.text_muted))
+                    .child(icon(if more { "chevron-down" } else { "chevron-right" }, 11., theme.text_placeholder))
+                    .child(if more { "Show fewer".to_string() } else { format!("Show {folded} more") })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.workspaces_more.remove(&key) {
+                            this.workspaces_more.insert(key.clone());
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+        rows
+    }
+
     /// One workspace in a list: on a machine's page, or with its machine on the Boxes page.
     fn workspace_row(&self, theme: &Theme, i: usize, w: &WorkspaceInfo, machine: bool, cx: &mut Context<Self>) -> AnyElement {
         let id = w.id.clone();
-        let place = machine.then(|| workspace_subtitle(w));
+        let place = machine.then(|| workspace_subtitle(w, false));
+        let name = super::root::ellipsize(&w.name, 32);
+        let used = format!("used {}", format::ago(Some(w.last_used_at)));
+        // About what the rest of the row takes: GPUI 0.2 only puts "…" on
+        // text whose width it knows.
+        let taken = 30. + 18. + about(&name, 13.).min(240.) + about_mono(&w.id, 11.) + w.owner.as_deref().map_or(0., |o| about(o, 11.5) + 10.) + about(&used, 11.5) + about(&w.status, 11.) + 12. + 10. * 5.;
+        let place_width = (self.content_width - taken).max(40.);
         div()
             .id(SharedString::from(format!("mws-{}", w.id)))
             .flex()
@@ -489,11 +540,20 @@ impl Root {
             .hover(|st| st.bg(theme.ghost_hover))
             .when(i > 0, |d| d.border_t_1().border_color(theme.border_variant))
             .child(kit::tile("terminal", kit::tiles::WORKSPACES.0, kit::tiles::WORKSPACES.1, 18.))
-            .child(div().flex_none().text_size(px(13.)).child(w.name.clone()))
+            // A long name is cut, so what's after it still shows.
+            .child(div().min_w(px(0.)).max_w(px(240.)).truncate().text_size(px(13.)).child(name))
             .child(div().flex_none().font_family(mono_font()).text_size(px(11.)).text_color(theme.text_placeholder).child(w.id.clone()))
-            .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).children(place))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .children(place.map(|p| div().w(px(place_width)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(p))),
+            )
             .children(w.owner.clone().map(|o| div().flex_none().text_size(px(11.5)).text_color(theme.text_placeholder).child(o)))
-            .child(div().flex_none().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("used {}", format::ago(Some(w.last_used_at)))))
+            .child(div().flex_none().text_size(px(11.5)).text_color(theme.text_placeholder).child(used))
             .child(status_pill(theme, w))
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Workspace(id.clone()), window, cx)))
             .on_mouse_down(gpui::MouseButton::Right, {
@@ -505,7 +565,7 @@ impl Root {
 
     pub(super) fn machine_workspaces(&self, theme: &Theme, s: &crate::fleet::model::Snapshot, m: &crate::fleet::model::Machine, cx: &mut Context<Self>) -> AnyElement {
         let mine: Vec<&WorkspaceInfo> = s.workspaces.iter().filter(|w| w.machine_id == m.id).collect();
-        let rows: Vec<AnyElement> = mine.iter().enumerate().map(|(i, w)| self.workspace_row(theme, i, w, false, cx)).collect();
+        let rows = self.workspace_rows(theme, &m.id, &mine, false, cx);
         let machine_id = m.id.clone();
         let new_on = m.id.clone();
         let allowed = m.workspaces_allowed;
@@ -575,16 +635,39 @@ impl Root {
     }
 }
 
-fn workspace_subtitle(w: &WorkspaceInfo) -> String {
+/// "machine · owner/repo @ branch · worktree of ~/code/app". `full`: the
+/// worktree's checkout as it is (the workspace's own page), else cut short.
+fn workspace_subtitle(w: &WorkspaceInfo, full: bool) -> String {
     let mut parts = vec![w.machine_name.clone()];
     if let Some(repo) = &w.repo {
         let at = w.branch.as_ref().or(w.git_ref.as_ref()).map(|r| format!(" @ {r}")).unwrap_or_default();
         parts.push(format!("{repo}{at}"));
     }
     if let Some(src) = &w.worktree_of {
-        parts.push(format!("worktree of {src}"));
+        parts.push(format!("worktree of {}", if full { src.clone() } else { format::short_folder(src) }));
     }
     parts.join("  ·  ")
+}
+
+/// About how wide `text` is at `size`, a little over (for a width to give
+/// text that has to end in "…").
+pub(super) fn about(text: &str, size: f32) -> f32 {
+    text.chars().count() as f32 * size * 0.52 + 4.
+}
+
+/// `about` for monospace text (folders, ids), whose characters are wider.
+pub(super) fn about_mono(text: &str, size: f32) -> f32 {
+    text.chars().count() as f32 * size * 0.62 + 4.
+}
+
+/// A card's folder at the end of its last line: cut in the middle, then
+/// with "…" when that still doesn't fit `room`. It sits at the line's end.
+/// The width is explicit and in a column: GPUI 0.2 only ellipsizes text
+/// whose width it knows, and not straight in a row.
+pub(super) fn folder_at_end(path: &str, room: f32) -> gpui::Div {
+    let shown = format::short_folder(path);
+    let width = about_mono(&shown, 11.5).min(room).max(40.);
+    div().flex().flex_col().items_end().flex_1().min_w(px(0.)).overflow_hidden().child(div().w(px(width)).truncate().text_right().font_family(mono_font()).child(shown))
 }
 
 /// A worktree whose pull request is merged: its work is done, so it can go.
@@ -648,6 +731,9 @@ fn diff_line(theme: &Theme, line: &str, failed: bool) -> AnyElement {
     div().text_color(color).child(line.to_string()).into_any_element()
 }
 
+/// "docker · universal:2": the image's own name, not where it's from
+/// (mcr.microsoft.com/devcontainers/…), which the Environment row has.
 fn docker_pill(theme: &Theme, w: &WorkspaceInfo) -> AnyElement {
-    kit::pill(format!("docker · {}", w.image.clone().unwrap_or_else(|| "container".into())), theme.info).into_any_element()
+    let image = w.image.as_deref().and_then(|i| i.rsplit('/').next()).filter(|i| !i.is_empty()).unwrap_or("container");
+    kit::pill(format!("docker · {image}"), theme.info).into_any_element()
 }

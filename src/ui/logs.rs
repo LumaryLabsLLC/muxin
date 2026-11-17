@@ -91,6 +91,8 @@ pub struct LogsView {
     /// Where the lines were drawn, and a character's width (the font is monospace).
     list_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     char_w: f32,
+    /// The toolbar's width, measured as it's drawn (narrow: its buttons as icons).
+    width: Rc<Cell<f32>>,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
     /// Part of another page: one log, no list of logs to pick from.
@@ -189,6 +191,7 @@ impl LogsView {
             selecting: false,
             list_bounds: Rc::new(Cell::new(None)),
             char_w: 7.2,
+            width: Rc::new(Cell::new(0.)),
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
             embedded: false,
@@ -582,7 +585,8 @@ impl Render for LogsView {
             let mut all: Vec<(Option<String>, String)> = vec![(None, "All".to_string())];
             all.extend(self.services.iter().map(|s| (Some(s.clone()), s.clone())));
             let services = self.services.clone();
-            div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(all.into_iter().map(|(svc, label)| {
+            // Many services: the chips wrap onto more lines, never past the edge.
+            div().min_w(px(0.)).flex().flex_wrap().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(all.into_iter().map(|(svc, label)| {
                 let on = self.only == svc;
                 let color = svc.as_deref().map(|s| service_color(s, &services));
                 div()
@@ -603,31 +607,24 @@ impl Render for LogsView {
                     .on_click(cx.listener(move |this, _, _, cx| this.set_only(svc.clone(), cx)))
             }))
         });
-        let toolbar = div()
+        // Narrow (a small window): Pause and Follow as icons and a shorter
+        // filter, so the tabs and the controls share one line.
+        let narrow = self.width.get() > 0. && self.width.get() < 800.;
+        let pause_word = if self.paused { "Resume" } else { "Pause" };
+        let pause = if narrow { Button::icon_only("logs-pause", if self.paused { "play" } else { "pause" }).tooltip(pause_word) } else { Button::new("logs-pause", pause_word).icon(if self.paused { "play" } else { "pause" }) };
+        let follow = if narrow { Button::icon_only("logs-follow", "arrow-down") } else { Button::new("logs-follow", "Follow").icon("arrow-down") };
+        // The controls are one group: when they don't fit beside the tabs, they
+        // go to the next line together (copy and clear never alone).
+        let controls = div()
             .flex_none()
+            .ml_auto()
             .flex()
-            .flex_wrap()
             .items_center()
             .gap(px(8.))
-            .min_h(px(44.))
-            .py(px(6.))
-            .px(px(14.))
-            .border_b_1()
-            .border_color(theme.border_variant)
-            .when(!self.embedded, |d| d.child(tabs))
-            .children(chips)
-            .when(self.embedded, |d| d.child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(status.clone())))
-            .child(div().flex_1())
-            .child(div().flex_none().w(px(200.)).child(self.filter.clone()))
+            .child(div().flex_none().w(px(if narrow { 160. } else { 200. })).child(self.filter.clone()))
+            .child(pause.style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, _, cx| this.toggle_pause(cx))))
             .child(
-                Button::new("logs-pause", if self.paused { "Resume" } else { "Pause" })
-                    .icon(if self.paused { "play" } else { "pause" })
-                    .style(ButtonStyle::Ghost)
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_pause(cx))),
-            )
-            .child(
-                Button::new("logs-follow", "Follow")
-                    .icon("arrow-down")
+                follow
                     .style(if self.follow { ButtonStyle::Outlined } else { ButtonStyle::Ghost })
                     .tooltip("Keep the newest line in view")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -647,6 +644,24 @@ impl Render for LogsView {
                     cx.notify();
                 })),
             );
+        let toolbar = div()
+            .flex_none()
+            .relative()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.))
+            .min_h(px(44.))
+            .py(px(6.))
+            .px(px(14.))
+            .border_b_1()
+            .border_color(theme.border_variant)
+            .child(super::compose::measure(self.width.clone()))
+            .when(!self.embedded, |d| d.child(tabs))
+            .children(chips)
+            // A long why (the log ended) wraps on its own line.
+            .when(self.embedded, |d| d.child(div().min_w(px(0.)).text_size(px(12.)).text_color(theme.text_placeholder).child(status.clone())))
+            .child(controls);
 
         // What there is to open, for the tab.
         let (list, note): (Vec<LogSource>, Option<String>) = match self.tab {
@@ -785,10 +800,12 @@ impl Render for LogsView {
             .cursor_text();
             // Where it's drawn, for picking text; mouse to select.
             let bounds = self.list_bounds.clone();
+            // A gutter at the right, so a long line stops short of the window's edge.
             div()
                 .relative()
                 .flex_1()
                 .min_h(px(0.))
+                .pr(px(LINE_PAD_X))
                 .child(gpui::canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {}).absolute().size_full())
                 .child(uniform)
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
@@ -796,21 +813,24 @@ impl Render for LogsView {
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.selecting = false))
                 .into_any_element()
         };
+        // The log's name (a long path cut in the middle), how it's going (a
+        // long why wraps, the line growing), and how many lines.
         let source_line = self.source.as_ref().map(|s| {
+            let name = if s.kind == "file" { super::format::short_folder(&s.name) } else { s.name.clone() };
             div()
                 .flex_none()
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .h(px(30.))
+                .min_h(px(30.))
+                .py(px(5.))
                 .px(px(14.))
                 .border_b_1()
                 .border_color(theme.border_variant)
                 .text_size(px(12.))
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.text).child(s.name.clone()))
-                .child(div().text_color(theme.text_placeholder).child(status.clone()))
-                .child(div().flex_1())
-                .child(div().text_color(theme.text_placeholder).child(if self.shown.len() == self.lines.len() { format!("{} lines", self.lines.len()) } else { format!("{} of {} lines", self.shown.len(), self.lines.len()) }))
+                .child(div().min_w(px(0.)).truncate().font_weight(FontWeight::MEDIUM).text_color(theme.text).child(name))
+                .child(div().flex_1().min_w(px(120.)).text_color(theme.text_placeholder).child(status.clone()))
+                .child(div().flex_none().text_color(theme.text_placeholder).child(if self.shown.len() == self.lines.len() { format!("{} lines", self.lines.len()) } else { format!("{} of {} lines", self.shown.len(), self.lines.len()) }))
         });
         div()
             .id("logs-view")

@@ -69,7 +69,7 @@ impl Root {
         let saved = if has_some { self.saved_recipe_rows(theme, m, busy, cx) } else { None };
         let body = match self.recipes.checks.get(&m.id) {
             Some(Load::Ready(found)) => self.components_found(theme, m, found, busy, cx),
-            Some(Load::Failed(e)) => row().child(icon("circle-alert", 13., theme.warning)).child(e.clone()).into_any_element(),
+            Some(Load::Failed(e)) => row().child(icon("circle-alert", 13., theme.warning)).child(div().flex_1().min_w(px(0.)).child(e.clone())).into_any_element(),
             _ => row().child(kit::spinner("m-rc-spin", 13., theme.text_muted)).child("Checking components…").into_any_element(),
         };
         div().flex().flex_col().gap(px(10.)).child(title).child(card(theme).child(body).children(saved)).into_any_element()

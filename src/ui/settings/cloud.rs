@@ -301,7 +301,8 @@ impl SettingsPage {
                     .gap(px(8.))
                     .text_size(px(12.5))
                     .child(kit::icon("circle-check", 14., theme.success))
-                    .child(div().flex_1().child(match &a.team {
+                    // A long email or team name wraps, not over Sign out.
+                    .child(div().flex_1().min_w(px(0.)).child(match &a.team {
                         Some(t) => format!("Connected as {} · {t}", a.email),
                         None => format!("Connected as {}", a.email),
                     }))
@@ -362,8 +363,9 @@ impl SettingsPage {
                     .gap(px(12.))
                     .child(row(theme, "Sign in with", methods.into_any_element()))
                     .child(status)
-                    .children(error.map(|e| div().text_size(px(12.)).text_color(theme.error).child(e)))
-                    .children(self.cloud.message.clone().map(|(bad, m)| div().text_size(px(12.)).text_color(if bad { theme.error } else { theme.success }).child(m))),
+                    // What DigitalOcean said can be long: it wraps.
+                    .children(error.map(|e| div().w_full().min_w(px(0.)).text_size(px(12.)).text_color(theme.error).child(e)))
+                    .children(self.cloud.message.clone().map(|(bad, m)| div().w_full().min_w(px(0.)).text_size(px(12.)).text_color(if bad { theme.error } else { theme.success }).child(m))),
             );
 
         // New machines: only with a working sign-in.

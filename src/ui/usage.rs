@@ -176,6 +176,15 @@ impl Root {
                 _ => usage::tool_name(tool).to_string(),
             })
             .unwrap_or_default();
+        // The model's name can't wrap, and GPUI's "…" needs a width it's told:
+        // it's cut by hand to the last card's width (180 or more, 12 apart).
+        let per_line = (((self.content_width + 12.) / 192.).floor() as usize).clamp(1, 4);
+        let on_last = match 4 % per_line {
+            0 => per_line,
+            m => m,
+        };
+        let last_w = (self.content_width - 12. * (on_last as f32 - 1.)) / on_last as f32;
+        let most_used = super::run::cut(&models.first().map(|m| m.1.clone()).unwrap_or_default(), (((last_w - 32.) / (17. * 0.6)).floor() as usize).max(6));
         let stat = |label: &str, value: String, sub: String| {
             card(&theme)
                 .flex_1()
@@ -183,9 +192,20 @@ impl Root {
                 .p(px(16.))
                 .gap(px(6.))
                 .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(label.to_string()))
-                // A long value (a model's name) smaller, on one line.
-                .child(div().text_size(px(if value.chars().count() > 10 { 17. } else { 24. })).font_family(mono_font()).text_color(theme.text).overflow_hidden().whitespace_nowrap().child(value))
-                .child(div().text_size(px(12.)).text_color(theme.text_placeholder).overflow_hidden().whitespace_nowrap().child(sub))
+                // A long value (a model's name) smaller, on one line. Its line as
+                // tall as a big value's, so every card's caption starts level.
+                .child(
+                    div()
+                        .text_size(px(if value.chars().count() > 10 { 17. } else { 24. }))
+                        .line_height(px(39.))
+                        .font_family(mono_font())
+                        .text_color(theme.text)
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(value),
+                )
+                // The caption wraps when the card is narrow (a cut had no "…").
+                .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(sub))
         };
         body = body.child(
             div()
@@ -195,7 +215,7 @@ impl Root {
                 .child(stat("At API prices", dollars(cost), if unpriced.is_empty() { "what the same work costs on the API".into() } else { format!("{} model(s) without a price", unpriced.len()) }))
                 .child(stat("Tokens", tokens(all.total()), format!("{} out · {} read from cache", tokens(all.output), tokens(all.cache_read))))
                 .child(stat("Requests", all.requests.to_string(), format!("across {} machine{}", machines.iter().filter(|m| m.hours.iter().any(|h| h.tokens.requests > 0)).count(), if machines.len() == 1 { "" } else { "s" })))
-                .child(stat("Most used", models.first().map(|m| m.1.clone()).unwrap_or_default(), top)),
+                .child(stat("Most used", most_used, top)),
         );
 
         // By day: cost (or tokens when nothing's priced), Claude Code and Codex stacked.
@@ -264,6 +284,7 @@ impl Root {
                 .when(!head, |d| d.text_size(px(12.5)).text_color(theme.text_muted))
                 .children(cells)
         };
+        // A column of text on the left is cut with "…" at its width.
         let cell = |text: String, w: Option<f32>, right: bool, color: gpui::Hsla| {
             div()
                 .when_some(w, |d, w| d.flex_none().w(px(w)))
@@ -271,32 +292,40 @@ impl Root {
                 .when(right, |d| d.flex().justify_end())
                 .overflow_hidden()
                 .whitespace_nowrap()
+                .when(!right, |d| d.text_ellipsis())
                 .text_color(color)
                 .child(text)
                 .into_any_element()
         };
+        // The name column takes what's left: GPUI only puts the "…" at a width
+        // it's told, so `w` is that width, worked out from the page's.
+        let fill = |text: String, w: f32, color: gpui::Hsla| div().flex_1().min_w(px(0.)).overflow_hidden().child(cell(text, Some(w.max(40.)), false, color)).into_any_element();
         let head = |cols: &[(&str, Option<f32>, bool)]| row(cols.iter().map(|(t, w, r)| cell(t.to_string(), *w, *r, theme.text_placeholder)).collect(), true);
+        let page_w = self.content_width;
+        // Narrow: Output and Cache reads go, so the model's name keeps room.
+        let all_cols = page_w >= 790.;
+        // The card's border and padding, the other columns, the gaps.
+        let model_w = page_w - 34. - if all_cols { 530. + 60. } else { 360. + 40. } - 2.;
         let model_rows = models.iter().map(|(tool, model, t, c)| {
-            row(
-                vec![
-                    cell(model.clone(), None, false, theme.text),
-                    cell(usage::tool_name(tool).to_string(), Some(110.), false, theme.text_muted),
-                    cell(t.requests.to_string(), Some(80.), true, theme.text_muted),
-                    cell(tokens(t.output), Some(80.), true, theme.text_muted),
-                    cell(tokens(t.cache_read), Some(90.), true, theme.text_muted),
-                    cell(tokens(t.total()), Some(80.), true, theme.text_muted),
-                    cell(c.map(dollars).unwrap_or_else(|| "no price".into()), Some(90.), true, if c.is_some() { theme.text } else { theme.text_placeholder }),
-                ],
-                false,
-            )
+            let mut cells = vec![
+                fill(model.clone(), model_w, theme.text),
+                cell(usage::tool_name(tool).to_string(), Some(110.), false, theme.text_muted),
+                cell(t.requests.to_string(), Some(80.), true, theme.text_muted),
+            ];
+            if all_cols {
+                cells.push(cell(tokens(t.output), Some(80.), true, theme.text_muted));
+                cells.push(cell(tokens(t.cache_read), Some(90.), true, theme.text_muted));
+            }
+            cells.push(cell(tokens(t.total()), Some(80.), true, theme.text_muted));
+            cells.push(cell(c.map(dollars).unwrap_or_else(|| "no price".into()), Some(90.), true, if c.is_some() { theme.text } else { theme.text_placeholder }));
+            row(cells, false)
         });
-        body = body.child(
-            div().flex().flex_col().gap(px(10.)).child(section_title(&theme, "By model", Some(models.len()))).child(
-                card(&theme)
-                    .child(head(&[("Model", None, false), ("Agent", Some(110.), false), ("Requests", Some(80.), true), ("Output", Some(80.), true), ("Cache reads", Some(90.), true), ("All tokens", Some(80.), true), ("At API prices", Some(90.), true)]))
-                    .children(model_rows),
-            ),
-        );
+        let model_head: Vec<(&str, Option<f32>, bool)> = [("Model", None, false), ("Agent", Some(110.), false), ("Requests", Some(80.), true)]
+            .into_iter()
+            .chain(all_cols.then_some([("Output", Some(80.), true), ("Cache reads", Some(90.), true)]).into_iter().flatten())
+            .chain([("All tokens", Some(80.), true), ("At API prices", Some(90.), true)])
+            .collect();
+        body = body.child(div().flex().flex_col().gap(px(10.)).child(section_title(&theme, "By model", Some(models.len()))).child(card(&theme).child(head(&model_head)).children(model_rows)));
 
         // By machine.
         let mut per_machine: Vec<(String, Tokens, f64)> = machines
@@ -313,7 +342,17 @@ impl Root {
             .filter(|(_, t, _)| t.requests > 0)
             .collect();
         per_machine.sort_by(|a, b| b.2.total_cmp(&a.2));
-        let machine_rows = per_machine.iter().map(|(id, t, c)| row(vec![cell(name(id), None, false, theme.text), cell(t.requests.to_string(), Some(80.), true, theme.text_muted), cell(tokens(t.total()), Some(90.), true, theme.text_muted), cell(dollars(*c), Some(90.), true, theme.text)], false));
+        // The two cards side by side when both have room (each at least this
+        // wide, so the name keeps some), else one above the other.
+        const MACHINES_MIN: f32 = 400.;
+        const FOLDERS_MIN: f32 = 540.;
+        let (machines_w, folders_w) = if page_w >= MACHINES_MIN + FOLDERS_MIN + 16. {
+            let folders = ((page_w - 16.) / 2.).max(FOLDERS_MIN);
+            (page_w - 16. - folders, folders)
+        } else {
+            (page_w, page_w)
+        };
+        let machine_rows = per_machine.iter().map(|(id, t, c)| row(vec![fill(name(id), machines_w - 34. - 260. - 30. - 2., theme.text), cell(t.requests.to_string(), Some(80.), true, theme.text_muted), cell(tokens(t.total()), Some(90.), true, theme.text_muted), cell(dollars(*c), Some(90.), true, theme.text)], false));
         // By folder: the most recent first (folders don't split by period: their whole window).
         let mut folders: Vec<(String, usage::UsageFolder, f64)> = machines
             .iter()
@@ -332,9 +371,9 @@ impl Root {
             let short = parts.into_iter().rev().collect::<Vec<_>>().join("/");
             row(
                 vec![
-                    cell(short, None, false, theme.text),
-                    cell(name(id), Some(140.), false, theme.text_muted),
-                    cell(usage::tool_name(&f.tool).to_string(), Some(100.), false, theme.text_muted),
+                    fill(short, folders_w - 34. - 356. - 40. - 2., theme.text),
+                    cell(name(id), Some(96.), false, theme.text_muted),
+                    cell(usage::tool_name(&f.tool).to_string(), Some(90.), false, theme.text_muted),
                     cell(tokens(f.tokens.total()), Some(80.), true, theme.text_muted),
                     cell(dollars(*c), Some(90.), true, theme.text),
                 ],
@@ -349,7 +388,7 @@ impl Root {
                 .child(
                     div()
                         .flex_1()
-                        .min_w(px(320.))
+                        .min_w(px(MACHINES_MIN.min(page_w)))
                         .flex()
                         .flex_col()
                         .gap(px(10.))
@@ -359,12 +398,12 @@ impl Root {
                 .child(
                     div()
                         .flex_1()
-                        .min_w(px(420.))
+                        .min_w(px(FOLDERS_MIN.min(page_w)))
                         .flex()
                         .flex_col()
                         .gap(px(10.))
                         .child(section_title(&theme, "Busiest folders", Some(folders.len())))
-                        .child(card(&theme).child(head(&[("Folder", None, false), ("Machine", Some(140.), false), ("Agent", Some(100.), false), ("Tokens", Some(80.), true), ("At API prices", Some(90.), true)])).children(folder_rows)),
+                        .child(card(&theme).child(head(&[("Folder", None, false), ("Machine", Some(96.), false), ("Agent", Some(90.), false), ("Tokens", Some(80.), true), ("At API prices", Some(90.), true)])).children(folder_rows)),
                 ),
         );
         let mut notes = vec![format!(

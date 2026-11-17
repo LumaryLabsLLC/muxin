@@ -172,7 +172,13 @@ pub fn machine_icon(m: &Machine) -> &'static str {
 /// ("~/Library/…/scratch-2026-11-14-992bc9"), so it doesn't run over what's
 /// beside it.
 pub fn short_folder(path: &str) -> String {
-    const LONG: usize = 48;
+    short_folder_in(path, 48)
+}
+
+/// `short_folder` within `long` characters (at least 12), for a row with less room.
+pub fn short_folder_in(path: &str, long: usize) -> String {
+    #[allow(non_snake_case)]
+    let LONG = long.max(12);
     let path = if path.len() > 1 { path.trim_end_matches('/') } else { path };
     // /Users/<name> and /home/<name> are home on a Mac and on Linux.
     let path = ["/Users/", "/home/"]
@@ -204,7 +210,7 @@ pub fn short_folder(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{short_folder, short_os};
+    use super::{short_folder, short_folder_in, short_os};
 
     #[test]
     fn long_folders_are_cut_in_the_middle() {
@@ -224,6 +230,10 @@ mod tests {
         let short = short_folder(&long);
         assert!(short.starts_with("…/") && short.ends_with("x-end") && short.chars().count() <= 48, "{short}");
         assert!(short_folder("/Users/adib/Developer/opensource/zennotescli/.claude/worktrees/recursing-tesla-bca620").chars().count() <= 48);
+        // Less room: cut sooner, the same way.
+        assert_eq!(short_folder_in("/home/ci/muxen/boxes/box-7k2m9q/repo", 24), "~/muxen/…/repo");
+        assert_eq!(short_folder_in("/home/ci/api", 24), "~/api");
+        assert!(short_folder_in("/Users/adib/a-folder-with-a-really-long-name-indeed", 20).chars().count() <= 20);
     }
 
     #[test]

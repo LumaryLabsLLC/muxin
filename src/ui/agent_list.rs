@@ -160,8 +160,9 @@ impl Root {
             row.gap(px(8.))
                 .pl(px(helper_pad(l.depth)))
                 .child(kit::tile(icon_name, from, to, HELPER_TILE))
-                .child(div().w(px(text_w)).truncate().text_size(px(12.5)).text_color(if dim { theme.text_placeholder } else if selected { theme.text } else { theme.text_muted }).child(x.title.clone()))
-                .child(div().flex_1())
+                // In a column that can shrink, as the top rows' text is: straight in
+                // the row, GPUI measured the title wider than its box, and cut it with no "…".
+                .child(div().flex().flex_col().flex_1().min_w(px(0.)).overflow_hidden().child(div().w(px(text_w)).truncate().text_size(px(12.5)).text_color(if dim { theme.text_placeholder } else if selected { theme.text } else { theme.text_muted }).child(x.title.clone())))
                 .children(words.map(|w| div().flex_none().text_size(px(11.)).text_color(theme.text_placeholder).child(w)))
         };
         row

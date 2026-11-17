@@ -343,23 +343,32 @@ impl Root {
                     .items_center()
                     .gap(px(12.))
                     .child(div().when(offline, |d| d.opacity(0.55)).child(kit::tile(format::machine_icon(m), from, to, 36.)))
+                    // Its state beside its name; the line under them has the card's
+                    // width (beside the state too, it hid what matters: "VM on Beac…").
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .flex_1()
                             .min_w(px(0.))
-                            .child(div().w(px(inner - 48. - 90.)).truncate().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(m.name.clone()))
                             .child(
                                 div()
-                                    .w(px(inner - 48. - 90.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    // In a column: GPUI's "…" needs it (straight in a row, it was cut without).
+                                    .child(div().flex().flex_col().flex_1().min_w(px(0.)).overflow_hidden().child(div().w(px(inner - 48. - 90.)).truncate().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(m.name.clone())))
+                                    .child(div().flex_none().child(status)),
+                            )
+                            .child(
+                                div()
+                                    .w(px(inner - 48.))
                                     .truncate()
                                     .text_size(px(11.5))
                                     .text_color(if tone == "error" { theme.error } else { theme.text_placeholder })
                                     .child(subtitle),
                             ),
-                    )
-                    .child(status),
+                    ),
             )
             .child(
                 div()

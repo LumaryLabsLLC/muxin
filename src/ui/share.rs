@@ -826,7 +826,8 @@ impl Root {
         let what = match (inside.len(), waiting) {
             (_, w) if w > 0 => format!("{w} waiting"),
             (0, _) => "no one yet".to_string(),
-            (1, _) => format!("{} {}", inside[0].name, if inside[0].can_control { "in control" } else if typing { "typing" } else { "watching" }),
+            // The name is the guest's own choice: cut short, as a button never shrinks.
+            (1, _) => format!("{} {}", super::root::ellipsize(&inside[0].name, 16), if inside[0].can_control { "in control" } else if typing { "typing" } else { "watching" }),
             (n, _) => format!("{n} watching"),
         };
         Button::new(SharedString::from(format!("{id}-on")), format!("Shared · {what}"))
@@ -1471,8 +1472,16 @@ impl Root {
             if !j.info.whole_machine || !open || j.ended.is_some() {
                 continue;
             }
-            for s in &j.sessions {
+            // A long list shows the first few and the one on screen, like your
+            // own machines'; the rest behind "N more".
+            let all = self.sidebar_more.contains(&key);
+            let mut folded_away = 0;
+            for (i, s) in j.sessions.iter().enumerate() {
                 let selected = here && j.showing == Showing::Session(s.name.clone());
+                if !all && i >= super::root::SIDEBAR_SESSIONS && !selected {
+                    folded_away += 1;
+                    continue;
+                }
                 let (icon_name, (from, to)) = kit::agent_look(&s.agent);
                 let title = if s.title.is_empty() { agent_name(&s.agent).to_string() } else { s.title.clone() };
                 let exited = s.status == "exited";
@@ -1487,6 +1496,21 @@ impl Root {
                         .when(exited, |d| d.child(div().text_size(px(11.)).text_color(theme.text_placeholder).child("exited")))
                         .on_mouse_down(gpui::MouseButton::Right, super::menu::on_right_click(move || super::menu::MenuTarget::JoinedSession(msid.clone(), mname.clone()), cx))
                         .on_click(cx.listener(move |this, _, window, cx| this.show_shared(&sid, Showing::Session(name.clone()), window, cx)))
+                        .into_any_element(),
+                );
+            }
+            if folded_away > 0 || all && j.sessions.len() > super::root::SIDEBAR_SESSIONS {
+                let toggle = key.clone();
+                rows.push(
+                    nested_row(theme, SharedString::from(format!("side-js-more-{}", j.id)), false)
+                        .child(div().size(px(16.)).flex().items_center().justify_center().child(icon("ellipsis", 13., theme.text_placeholder)))
+                        .child(div().flex_1().text_size(px(12.)).text_color(theme.text_placeholder).child(if folded_away > 0 { format!("{folded_away} more") } else { "Show fewer".to_string() }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.sidebar_more.remove(&toggle) {
+                                this.sidebar_more.insert(toggle.clone());
+                            }
+                            cx.notify()
+                        }))
                         .into_any_element(),
                 );
             }

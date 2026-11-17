@@ -1,0 +1,5 @@
+# The engine's messages, translated as the window shows them (see tr_msg in
+# src/ui/i18n.rs). The key is the English the engine writes, with each value
+# that changes as {name}; keep each {name} in the translation.
+
+"{name} is asleep. Wake it first." = "{name} está dormindo. Acorde-a primeiro."

@@ -23,6 +23,17 @@ const PT_BR: &[&str] = &[
     include_str!("../../locales/pt-BR/e.toml"),
 ];
 
+/// The engine's messages (errors, hints, diagnostics) as templates: they come
+/// from src/fleet, src/ops, src/api.rs... in English, for the CLI and MCP too,
+/// and are translated here as they're shown (see `tr_msg`).
+const PT_BR_ENGINE: &[&str] = &[
+    include_str!("../../locales/pt-BR/engine.toml"),
+    include_str!("../../locales/pt-BR/engine-a.toml"),
+    include_str!("../../locales/pt-BR/engine-b.toml"),
+    include_str!("../../locales/pt-BR/engine-c.toml"),
+    include_str!("../../locales/pt-BR/engine-d.toml"),
+];
+
 const EN: u8 = 0;
 const PT: u8 = 1;
 static CURRENT: AtomicU8 = AtomicU8::new(EN);
@@ -75,6 +86,83 @@ pub(crate) fn tr(english: &'static str) -> &'static str {
         }
     }
     english
+}
+
+fn pt_br_engine() -> &'static Vec<(Vec<String>, Vec<String>, &'static str)> {
+    static TEMPLATES: OnceLock<Vec<(Vec<String>, Vec<String>, &'static str)>> = OnceLock::new();
+    TEMPLATES.get_or_init(|| {
+        let mut v: Vec<_> = parse(PT_BR_ENGINE)
+            .expect("locales/pt-BR/engine")
+            .into_iter()
+            .map(|(k, t)| {
+                let (pieces, names) = split_template(&k);
+                (pieces, names, t)
+            })
+            .collect();
+        // The most specific first: the most fixed text.
+        v.sort_by_key(|(p, _, _)| std::cmp::Reverse(p.iter().map(String::len).sum::<usize>()));
+        v
+    })
+}
+
+/// "a {x} b {y}" → (["a ", " b ", ""], ["x", "y"]).
+fn split_template(t: &str) -> (Vec<String>, Vec<String>) {
+    let (mut pieces, mut names, mut rest) = (Vec::new(), Vec::new(), t);
+    while let Some((lit, after)) = rest.split_once('{').and_then(|(l, a)| a.split_once('}').map(|(n, r)| ((l, n), r))) {
+        pieces.push(lit.0.to_string());
+        names.push(lit.1.to_string());
+        rest = after;
+    }
+    pieces.push(rest.to_string());
+    (pieces, names)
+}
+
+/// The values a message gives a template's placeholders, if it's that template.
+fn capture<'a>(msg: &'a str, pieces: &[String]) -> Option<Vec<&'a str>> {
+    let mut rest = msg.strip_prefix(pieces[0].as_str())?;
+    let mut out = Vec::new();
+    for (i, lit) in pieces[1..].iter().enumerate() {
+        let last = i == pieces.len() - 2;
+        let at = if last {
+            if lit.is_empty() { rest.len() } else { rest.strip_suffix(lit.as_str()).map(str::len)? }
+        } else {
+            rest.find(lit.as_str())?
+        };
+        if at == 0 {
+            return None;
+        }
+        out.push(&rest[..at]);
+        rest = &rest[at + lit.len()..];
+    }
+    rest.is_empty().then_some(out)
+}
+
+fn engine_one(msg: &str) -> Option<String> {
+    pt_br_engine().iter().find_map(|(pieces, names, t)| {
+        let values = capture(msg, pieces)?;
+        let mut s = t.to_string();
+        for (n, v) in names.iter().zip(values) {
+            s = s.replace(&format!("{{{n}}}"), v);
+        }
+        Some(s)
+    })
+}
+
+/// A message from the engine (an error, a hint, a diagnostic) in the
+/// window's language: the whole of it, else each part of an error's chain
+/// ("outer: inner"), else as it came.
+pub(crate) fn tr_msg(msg: &str) -> String {
+    if CURRENT.load(Ordering::Relaxed) != PT || msg.is_empty() {
+        return msg.to_string();
+    }
+    if let Some(t) = engine_one(msg) {
+        return t;
+    }
+    if msg.contains(": ") {
+        let parts: Vec<String> = msg.split(": ").map(|p| engine_one(p).unwrap_or_else(|| p.to_string())).collect();
+        return parts.join(": ");
+    }
+    msg.to_string()
 }
 
 /// `english|context` in the window's language: the same English that means
@@ -172,6 +260,24 @@ mod tests {
         let used: std::collections::HashSet<String> = keys_in_code().into_iter().map(|(_, k)| k).collect();
         let unused: Vec<_> = pt_br().keys().filter(|k| !used.contains(*k)).collect();
         assert!(unused.is_empty(), "{unused:#?}");
+    }
+
+    #[test]
+    fn engine_templates() {
+        fn one(t: &str, m: &'static str) -> Option<Vec<&'static str>> {
+            capture(m, &split_template(t).0)
+        }
+        assert_eq!(one("{name} is asleep. Wake it first.", "beelink is asleep. Wake it first."), Some(vec!["beelink"]));
+        assert_eq!(one("{a} to {b}", "x to y to z"), Some(vec!["x", "y to z"]));
+        assert_eq!(one("{name} is asleep.", "beelink is awake."), None);
+        assert_eq!(one("Exact.", "Exact."), Some(vec![]));
+        assert_eq!(one("Exact.", "Exact. More"), None);
+    }
+
+    #[test]
+    fn engine_translations_keep_their_placeholders() {
+        let bad: Vec<_> = parse(PT_BR_ENGINE).unwrap().into_iter().filter(|(k, v)| placeholders(k) != placeholders(v)).collect();
+        assert!(bad.is_empty(), "{bad:#?}");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! from each machine's Claude Code and Codex logs (see fleet/usage.rs).
 
 use std::collections::HashMap;
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use std::time::Instant;
 
 use chrono::{Duration as Ago, Local, NaiveDate};
@@ -127,7 +127,7 @@ impl Root {
         let mut body = page("usage-page", &self.page_scroll).child(header);
         let data = match &self.usage_data {
             Some(Load::Ready(d)) => d.clone(),
-            Some(Load::Failed(e)) => return body.child(card(&theme).p(px(16.)).text_size(px(13.)).text_color(theme.error).child(e.clone())).into_any_element(),
+            Some(Load::Failed(e)) => return body.child(card(&theme).p(px(16.)).text_size(px(13.)).text_color(theme.error).child(tr_msg(e))).into_any_element(),
             _ => {
                 return body
                     .child(card(&theme).p(px(18.)).flex_row().items_center().gap(px(10.)).text_size(px(13.)).text_color(theme.text_muted).child(spinner("usage-loading", 14., theme.text_muted)).child(tr("Reading each machine’s agent logs…")))
@@ -419,7 +419,7 @@ impl Root {
             notes.push(trf("No price known for {models}: counted in tokens only.", &[("models", &unpriced.join(", "))]));
         }
         for (id, e) in &failed {
-            notes.push(format!("{}: {e}", name(id)));
+            notes.push(format!("{}: {}", name(id), tr_msg(e)));
         }
         body.child(div().flex().flex_col().gap(px(4.)).text_size(px(12.)).text_color(theme.text_placeholder).children(notes)).into_any_element()
     }

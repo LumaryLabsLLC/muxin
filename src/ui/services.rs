@@ -14,7 +14,7 @@ use std::time::Duration;
 use gpui::{AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list};
 
 use super::input::{InputEvent, TextInput};
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use super::kit::{self, Button, ButtonStyle, icon, spinner};
 use super::theme::{ActiveTheme, Theme};
 use crate::fleet::Engine;
@@ -789,7 +789,7 @@ impl Render for ServicesView {
                             })),
                         ),
                 )
-                .children(self.password_error.clone().map(|e| div().min_w(px(0.)).text_size(px(12.)).text_color(theme.error).child(e)))
+                .children(self.password_error.clone().map(|e| div().min_w(px(0.)).text_size(px(12.)).text_color(theme.error).child(tr_msg(&e))))
                 .child(div().flex_none().ml_auto().text_size(px(11.)).text_color(theme.text_placeholder).child(tr("Kept in memory until you quit.")))
         });
         let ops = (!self.ops.is_empty()).then(|| {
@@ -823,7 +823,7 @@ impl Render for ServicesView {
                 .text_size(px(12.5))
                 .text_color(theme.error)
                 .child(icon("circle-alert", 14., theme.error))
-                .child(div().flex_1().min_w(px(0.)).child(e))
+                .child(div().flex_1().min_w(px(0.)).child(tr_msg(&e)))
                 .child(Button::icon_only("svc-error-x", "x").on_click(cx.listener(|this, _, _, cx| {
                     this.error = None;
                     cx.notify();
@@ -927,7 +927,7 @@ impl Render for ServicesView {
                 .child(spinner("svc-loading", 14., theme.text_muted))
                 .child(trf("Asking {machine}…", &[("machine", &machine_name)]))
                 .into_any_element(),
-            Some(Err(e)) => div().flex_1().flex().items_center().justify_center().text_size(px(13.)).text_color(theme.error).child(e.clone()).into_any_element(),
+            Some(Err(e)) => div().flex_1().flex().items_center().justify_center().text_size(px(13.)).text_color(theme.error).child(tr_msg(e)).into_any_element(),
             Some(Ok(_)) => match self.tab {
                 Tab::Services | Tab::Containers => {
                     let (items, note) = if self.tab == Tab::Services {
@@ -960,7 +960,7 @@ impl Render for ServicesView {
                 }
                 Tab::Processes => match &self.procs {
                     None => div().flex_1().flex().items_center().justify_center().gap(px(8.)).text_size(px(13.)).text_color(theme.text_muted).child(spinner("procs-loading", 14., theme.text_muted)).child(trf("Asking {machine}…", &[("machine", &machine_name)])).into_any_element(),
-                    Some(Err(e)) => div().flex_1().flex().items_center().justify_center().text_size(px(13.)).text_color(theme.error).child(e.clone()).into_any_element(),
+                    Some(Err(e)) => div().flex_1().flex().items_center().justify_center().text_size(px(13.)).text_color(theme.error).child(tr_msg(e)).into_any_element(),
                     Some(Ok(list)) => {
                         let mut items: Vec<Process> = list.processes.iter().filter(|p| matches(&p.name, &format!("{} {} {}", p.command, p.user, p.pid))).cloned().collect();
                         if self.sort == Sort::Memory {
@@ -1519,7 +1519,7 @@ impl ServicesView {
                 .child(spinner("cmp-loading", 14., theme.text_muted))
                 .child(trf("Reading {name}'s compose file…", &[("name", &name)]))
                 .into_any_element(),
-            Some(Err(e)) => div().flex_1().flex().items_center().justify_center().px(px(40.)).text_size(px(13.)).text_color(theme.error).child(e.clone()).into_any_element(),
+            Some(Err(e)) => div().flex_1().flex().items_center().justify_center().px(px(40.)).text_size(px(13.)).text_color(theme.error).child(tr_msg(e)).into_any_element(),
             _ if self.project_mode == ProjectMode::Logs && self.project_logs.is_some() => div().flex_1().min_h(px(0.)).flex().flex_col().children(self.project_logs.clone()).into_any_element(),
             Some(Ok(g)) if g.services.is_empty() => empty(&theme, tr("It has no services yet: Edit adds them.").into()),
             Some(Ok(g)) if self.project_mode == ProjectMode::List => self.project_list(g, data, &project, cx),

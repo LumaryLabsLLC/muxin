@@ -3,7 +3,7 @@
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 use super::format;
-use super::i18n::{tr, trf};
+use super::i18n::{tr, trf, tr_msg};
 use super::kit::{self, Button, ButtonStyle, card, chip, icon, kv, meter, pill, section_title};
 use super::overview::page;
 use super::theme::{ActiveTheme, mono_font, Theme};
@@ -761,7 +761,7 @@ fn diagnostics_section(theme: &Theme, diags: &[Diagnostic], ignored: &[String], 
                         .flex_1()
                         .min_w(px(0.))
                         .gap(px(4.))
-                        .child(div().text_size(px(12.5)).child(d.message.clone()))
+                        .child(div().text_size(px(12.5)).child(tr_msg(&d.message)))
                         // The hint says how to do it by hand: a button does it (Ignore doesn't).
                         .children(d.hint.clone().filter(|_| d.actions.iter().all(|a| a.kind == "ignore_warning")).map(|h| copyable(theme, i, h))),
                 )
@@ -913,8 +913,8 @@ impl Root {
                     .flex_1()
                     .min_w(px(0.))
                     .gap(px(6.))
-                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(u.title.clone()))
-                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(u.detail.clone()))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(tr_msg(&u.title)))
+                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(tr_msg(&u.detail)))
                     .children(u.hint.clone().map(|h| copyable(theme, 1000, h)))
                     .child(
                         div()

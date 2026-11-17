@@ -14,7 +14,7 @@ use super::panes::Panes;
 use super::root::{Modal, Root, Route};
 use super::terminal::{TerminalEvent, TerminalView};
 use super::theme::{ActiveTheme, Theme, mono_font};
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use crate::fleet::model::{Machine, Snapshot};
 use crate::fleet::model::Machine as FleetMachine;
 use crate::fleet::sessions::git::GitStatus;
@@ -1283,7 +1283,7 @@ impl Root {
                 _ if m.is_disconnected() => trf("Connect to {name} to start Claude Code, Codex or a shell there.", &[("name", &m.name)]),
                 _ if m.is_asleep() => trf("{name} is asleep. Wake it to start Claude Code, Codex or a shell there.", &[("name", &m.name)]),
                 _ if m.is_down() => trf("Start Claude Code, Codex or a shell here once {name} is back.", &[("name", &m.name)]),
-                true => trf("Run Claude Code, Codex or a shell here. {error} so sessions run while Muxin is open.", &[("error", &m.sessions_error.clone().unwrap_or_default().trim_end_matches('.'))]),
+                true => trf("Run Claude Code, Codex or a shell here. {error} so sessions run while Muxin is open.", &[("error", &tr_msg(&m.sessions_error.clone().unwrap_or_default()).trim_end_matches('.'))]),
                 false => tr("Run Claude Code, Codex, OpenCode or a shell here. Sessions keep working on the machine after you close Muxin.").to_string(),
             };
             card(theme)
@@ -1683,7 +1683,7 @@ impl Root {
                 };
                 vec![identity, push]
             }
-            Some(Load::Failed(e)) => vec![row("git-branch", "git", None, e.clone(), None).into_any_element()],
+            Some(Load::Failed(e)) => vec![row("git-branch", "git", None, tr_msg(e), None).into_any_element()],
             _ => vec![div().flex().items_center().gap(px(10.)).px(px(14.)).py(px(10.)).child(spinner("m-git-spin", 13., theme.text_muted)).child(div().text_size(px(12.5)).text_color(theme.text_muted).child(tr("Checking git…"))).into_any_element()],
         };
         let all: Vec<AnyElement> = std::iter::once(gh_row).chain(rows).collect();
@@ -1747,7 +1747,7 @@ impl Root {
                     _ => ("unplug", tr("Not connected").into(), c.note.clone().unwrap_or_else(|| tr("The agent there didn't answer.").into()), c.direct),
                 }
             }
-            Some(Load::Failed(e)) => ("unplug", tr("Not connected").into(), e.clone(), false),
+            Some(Load::Failed(e)) => ("unplug", tr("Not connected").into(), tr_msg(e), false),
             _ => ("network", tr("Checking…").into(), String::new(), false),
         };
         // Not on the tailnet (while this computer is): offer to set it up there.

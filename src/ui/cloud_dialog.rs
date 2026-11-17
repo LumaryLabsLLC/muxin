@@ -1,7 +1,7 @@
 //! New cloud machine: a DigitalOcean droplet, set up and added to your machines.
 
 use std::sync::Arc;
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 
 use gpui::{AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, SharedString, Subscription, Window, div, prelude::*, px};
 
@@ -126,7 +126,7 @@ impl Render for CloudDialog {
         };
         // Not connected yet: that comes first.
         if options.account.is_none() {
-            let why = options.error.clone().unwrap_or_else(|| tr("Connect your DigitalOcean account first.").into());
+            let why = options.error.as_deref().map(tr_msg).unwrap_or_else(|| tr("Connect your DigitalOcean account first.").into());
             return frame(&theme, tr("New cloud machine"), None)
                 .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(why))
                 .child(footer(vec![

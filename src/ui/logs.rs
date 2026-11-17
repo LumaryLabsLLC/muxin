@@ -16,7 +16,7 @@ use gpui::{
 use serde_json::json;
 
 use super::input::{InputEvent, TextInput};
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use super::kit::{self, Button, ButtonStyle, icon, spinner};
 use super::theme::{ActiveTheme, mono_font};
 use crate::fleet::Engine;
@@ -289,7 +289,7 @@ impl LogsView {
                     let _ = tx.unbounded_send(Msg::Live);
                 }
                 Ok(r) => {
-                    let _ = tx.unbounded_send(Msg::Ended(r["error"].as_str().unwrap_or(tr("The machine couldn't open that log.")).to_string()));
+                    let _ = tx.unbounded_send(Msg::Ended(r["error"].as_str().map(tr_msg).unwrap_or_else(|| tr("The machine couldn't open that log.").to_string())));
                     return;
                 }
                 Err(e) => {
@@ -579,7 +579,7 @@ impl Render for LogsView {
             State::Connecting => tr("Opening…").to_string(),
             State::Live if self.paused => trf("Paused · {n} new", &[("n", &self.held.len())]),
             State::Live => tr("Live").to_string(),
-            State::Ended(why) => why.clone(),
+            State::Ended(why) => tr_msg(why),
         };
         // Embedded: a chip for each service (All, web, api, ...) and how it's going.
         let chips = self.embedded.then(|| {

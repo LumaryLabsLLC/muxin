@@ -12,7 +12,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::desktop::DesktopView;
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use super::dialogs::{DialogEvent, error_line, field, footer, frame};
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, card, icon, section_title};
@@ -1279,7 +1279,7 @@ impl Root {
                 .justify_center()
                 .text_size(px(13.))
                 .text_color(theme.text_muted)
-                .child(o.error.clone().unwrap_or_default())
+                .child(tr_msg(&o.error.clone().unwrap_or_default()))
                 .into_any_element(),
             Some(o) => div().relative().flex_1().min_h(px(0.)).flex().child(o.terminal.clone()).into_any_element(),
             None => div().flex_1().into_any_element(),

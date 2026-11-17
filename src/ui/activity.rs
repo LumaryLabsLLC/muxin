@@ -3,7 +3,7 @@
 //! commands agents ran in workspaces — with the selected item's output.
 
 use chrono::{DateTime, Utc};
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use gpui::{AnyElement, ClipboardItem, Context, FontWeight, SharedString, div, prelude::*, px};
 
 use super::detail::op_status_icon;
@@ -429,7 +429,7 @@ impl Root {
             .line_height(px(19.))
             .children(lines)
             .when_some(op.error.clone().filter(|e| !op.log.iter().any(|l| l.contains(e.as_str()))), |d, e| {
-                d.child(div().mt(px(6.)).flex().gap(px(6.)).text_color(theme.error).child(icon("circle-x", 13., theme.error)).child(div().flex_1().min_w(px(0.)).child(e)))
+                d.child(div().mt(px(6.)).flex().gap(px(6.)).text_color(theme.error).child(icon("circle-x", 13., theme.error)).child(div().flex_1().min_w(px(0.)).child(tr_msg(&e))))
             })
             .when(op.log.is_empty() && op.status == "running", |d| d.child(div().text_color(theme.text_placeholder).child(tr("Waiting for output…"))));
         let body = div().flex_1().min_h(px(0.)).flex().flex_col().children(progress).child(log).into_any_element();

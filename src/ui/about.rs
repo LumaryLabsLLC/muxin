@@ -3,7 +3,7 @@
 use gpui::{AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, Window, div, prelude::*, px, svg};
 
 use super::dialogs::DialogEvent;
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use super::kit::{Button, ButtonStyle, card};
 use super::root::{Modal, Root};
 use super::theme::{ActiveTheme, Theme};
@@ -54,7 +54,7 @@ fn update_card(theme: &Theme, updates: &super::updates::Updates) -> Option<AnyEl
                 )
                 .into_any_element()
         }
-        (None, Some(e)) => line(e.clone(), theme.text_muted).into_any_element(),
+        (None, Some(e)) => line(tr_msg(e), theme.text_muted).into_any_element(),
         (None, None) if updates.checked => line(trf("You have the latest version, {version}.", &[("version", &env!("CARGO_PKG_VERSION"))]), theme.text_muted).into_any_element(),
         (None, None) => return None,
     };

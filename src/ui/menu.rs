@@ -3,7 +3,7 @@
 use gpui::{AnyElement, ClipboardItem, Context, Corner, FontWeight, MouseButton, Pixels, Point, Window, anchored, deferred, div, prelude::*, px};
 
 use super::kit::{self, icon};
-use crate::ui::i18n::{tr, trf, trc};
+use crate::ui::i18n::{tr, trf, trc, tr_msg};
 use super::root::{Root, Route};
 use super::theme::Theme;
 use crate::fleet::order::Move;
@@ -771,7 +771,7 @@ impl Root {
                             items.push(Item::Action { label, glyph, action: Action::UseAccount(m.login.clone(), Some(m.machine_id.clone())), danger: false });
                         }
                     }
-                    Some(Load::Failed(e)) => items.push(Item::Note(e.clone())),
+                    Some(Load::Failed(e)) => items.push(Item::Note(tr_msg(e).into())),
                     _ => items.push(Item::Note(tr("Loading accounts…").into())),
                 }
                 items.push(Item::Separator);

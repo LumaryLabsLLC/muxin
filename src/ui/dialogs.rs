@@ -8,7 +8,7 @@ use gpui::{
 };
 
 use super::github::Load;
-use super::i18n::{tr, trf};
+use super::i18n::{tr, trf, tr_msg};
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, checkbox, icon, label};
 use super::theme::{ActiveTheme, mono_font, Theme};
@@ -90,7 +90,7 @@ pub(super) fn error_line(theme: &Theme, error: &Option<String>) -> Option<impl I
             .text_size(px(12.5))
             .text_color(theme.text)
             .child(icon("circle-alert", 14., theme.error))
-            .child(div().flex_1().min_w(px(0.)).child(e.clone()))
+            .child(div().flex_1().min_w(px(0.)).child(tr_msg(e)))
     })
 }
 
@@ -1871,7 +1871,7 @@ impl NewSessionDialog {
             Load::Loading => {
                 return Some(div().flex().items_center().gap(px(6.)).child(kit::spinner("ns-folders", 11., theme.text_placeholder)).child(quiet(tr("Looking…").into())).into_any_element());
             }
-            Load::Failed(e) => return Some(quiet(e.clone())),
+            Load::Failed(e) => return Some(quiet(tr_msg(e))),
         };
         let needle = typed.to_lowercase();
         let mut found: Vec<&str> = listing

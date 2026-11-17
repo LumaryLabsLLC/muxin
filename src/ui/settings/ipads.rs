@@ -8,7 +8,7 @@ use gpui::{AnyElement, ClipboardItem, Context, RenderImage, SharedString, div, p
 
 use super::SettingsPage;
 use crate::fleet::ipads::Ipad;
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use crate::share::pair::{self, View};
 use crate::ui::kit::{Button, ButtonStyle, card, checkbox, icon, section_title};
 use crate::ui::theme::{Theme, mono_font};
@@ -219,7 +219,7 @@ impl SettingsPage {
             let (glyph, color, line) = match v.state.as_str() {
                 "done" => ("circle-check", theme.success, trf("Paired {device} with {machines}.", &[("device", &device_name(v)), ("machines", &super::some_names(&v.paired))])),
                 "denied" => ("circle-x", theme.text_muted, tr("Not paired: you didn't allow it.").to_string()),
-                _ => ("triangle-alert", theme.warning, v.error.clone().unwrap_or_else(|| tr("The pairing ended.").into())),
+                _ => ("triangle-alert", theme.warning, v.error.as_deref().map(tr_msg).unwrap_or_else(|| tr("The pairing ended.").into())),
             };
             div()
                 .flex()
@@ -227,7 +227,7 @@ impl SettingsPage {
                 .gap(px(4.))
                 // What went wrong can be long: it wraps.
                 .child(div().flex().items_center().gap(px(8.)).w_full().min_w(px(0.)).text_size(px(12.5)).child(icon(glyph, 14., color)).child(div().flex_1().min_w(px(0.)).child(line)))
-                .children(v.failed.iter().map(|f| div().w_full().min_w(px(0.)).pl(px(22.)).text_size(px(12.)).text_color(theme.text_muted).child(format!("{}: {}", f.name, f.error))))
+                .children(v.failed.iter().map(|f| div().w_full().min_w(px(0.)).pl(px(22.)).text_size(px(12.)).text_color(theme.text_muted).child(format!("{}: {}", f.name, tr_msg(&f.error)))))
         });
         div()
             .flex()
@@ -245,7 +245,7 @@ impl SettingsPage {
                         .on_click(cx.listener(|this, _, _, cx| this.start_ipad_pairing(cx))),
                 ),
             )
-            .children(self.ipad.error.clone().map(|e| div().w_full().min_w(px(0.)).text_size(px(12.)).text_color(theme.error).child(e)))
+            .children(self.ipad.error.clone().map(|e| div().w_full().min_w(px(0.)).text_size(px(12.)).text_color(theme.error).child(tr_msg(&e))))
             .children(outcome)
             .into_any_element()
     }

@@ -8,7 +8,7 @@ use crate::cloud::usage::CloudUsage;
 use crate::cloud::{CloudOptions, TAILSCALE_KEY, secrets};
 use crate::config::CloudSettings;
 use crate::ui::github::Load;
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use crate::ui::input::{InputEvent, TextInput};
 use crate::ui::kit::{self, Button, ButtonStyle, card, section_title};
 use crate::ui::theme::{Theme, mono_font};
@@ -365,7 +365,7 @@ impl SettingsPage {
                     .child(row(theme, tr("Sign in with"), methods.into_any_element()))
                     .child(status)
                     // What DigitalOcean said can be long: it wraps.
-                    .children(error.map(|e| div().w_full().min_w(px(0.)).text_size(px(12.)).text_color(theme.error).child(e)))
+                    .children(error.map(|e| div().w_full().min_w(px(0.)).text_size(px(12.)).text_color(theme.error).child(tr_msg(&e))))
                     .children(self.cloud.message.clone().map(|(bad, m)| div().w_full().min_w(px(0.)).text_size(px(12.)).text_color(if bad { theme.error } else { theme.success }).child(m))),
             );
 

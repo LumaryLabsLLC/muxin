@@ -5,7 +5,7 @@
 //! The palette has them too (palette/recipes.rs).
 
 use std::collections::HashMap;
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use std::time::{Duration, Instant};
 
 use gpui::{App, AnyElement, Context, ScrollHandle, SharedString, Window, canvas, div, point, prelude::*, px};
@@ -118,7 +118,7 @@ impl Root {
         let saved = if has_some { self.saved_recipe_rows(theme, m, busy, cx) } else { None };
         let body = match self.recipes.checks.get(&m.id) {
             Some(Load::Ready(found)) => self.components_found(theme, m, found, busy, cx),
-            Some(Load::Failed(e)) => row().child(icon("circle-alert", 13., theme.warning)).child(div().flex_1().min_w(px(0.)).child(e.clone())).into_any_element(),
+            Some(Load::Failed(e)) => row().child(icon("circle-alert", 13., theme.warning)).child(div().flex_1().min_w(px(0.)).child(tr_msg(e))).into_any_element(),
             _ => row().child(kit::spinner("m-rc-spin", 13., theme.text_muted)).child(tr("Checking components…")).into_any_element(),
         };
         // Asked for in the palette: the page scrolls here for a moment.

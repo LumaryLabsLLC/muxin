@@ -2,7 +2,7 @@
 //! work environment. Lists them, shows what agents ran, and lets you step in.
 
 use std::collections::HashSet;
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 
 use gpui::{AnyElement, ClipboardItem, Context, FontWeight, SharedString, div, prelude::*, px};
 
@@ -329,7 +329,7 @@ impl Root {
 
         let mut body = page("workspace-page", &self.page_scroll).child(header);
         if let Some(err) = &w.error {
-            body = body.child(callout(&theme, "error", tr("Workspace error"), err.clone(), None));
+            body = body.child(callout(&theme, "error", tr("Workspace error"), tr_msg(err), None));
         }
         body = body.child(details);
         // Sessions working in this folder.

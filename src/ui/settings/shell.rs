@@ -4,7 +4,7 @@
 use gpui::{AnyElement, Context, div, prelude::*, px};
 
 use super::SettingsPage;
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use crate::shell_command::{self, Status};
 use crate::ui::kit::{Button, ButtonStyle, card, icon, section_title};
 use crate::ui::theme::{Theme, mono_font};
@@ -95,7 +95,7 @@ impl SettingsPage {
                             .children(button),
                     )
                     .children(note.map(|n| div().text_size(px(12.)).text_color(theme.text_placeholder).child(n)))
-                    .children(st.error.clone().map(|e| div().text_size(px(12.)).text_color(theme.error).child(e))),
+                    .children(st.error.clone().map(|e| div().text_size(px(12.)).text_color(theme.error).child(tr_msg(&e)))),
             )
             .into_any_element()
     }

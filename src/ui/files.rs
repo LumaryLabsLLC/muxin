@@ -11,7 +11,7 @@ use gpui::{
 
 use super::dialogs::DialogEvent;
 use super::format;
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use super::github::Load;
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, icon};
@@ -263,7 +263,7 @@ impl CopyDialog {
         }).collect();
         let body: AnyElement = match &pane.listing {
             Load::Loading => div().p(px(14.)).flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(kit::spinner(SharedString::from(format!("cp-{tag}-spin")), 12., theme.text_muted)).child(tr("Opening…")).into_any_element(),
-            Load::Failed(e) => div().p(px(14.)).flex().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(icon("circle-alert", 14., theme.warning)).child(div().flex_1().min_w(px(0.)).child(e.clone())).into_any_element(),
+            Load::Failed(e) => div().p(px(14.)).flex().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(icon("circle-alert", 14., theme.warning)).child(div().flex_1().min_w(px(0.)).child(tr_msg(e))).into_any_element(),
             Load::Ready(l) => {
                 let shown: Vec<&crate::fleet::files::FileEntry> = l.entries.iter().filter(|e| self.show_hidden || !e.name.starts_with('.')).collect();
                 if shown.is_empty() {
@@ -444,7 +444,7 @@ impl Render for CopyDialog {
                 }))
             }))
             .children(same_place.then(|| div().text_size(px(12.)).text_color(theme.text_muted).child(tr("That's the same folder; pick another one to copy into."))))
-            .children(self.error.clone().map(|e| div().flex().gap(px(8.)).text_size(px(12.5)).text_color(theme.error).child(icon("circle-x", 13., theme.error)).child(div().flex_1().min_w(px(0.)).child(e))))
+            .children(self.error.clone().map(|e| div().flex().gap(px(8.)).text_size(px(12.5)).text_color(theme.error).child(icon("circle-x", 13., theme.error)).child(div().flex_1().min_w(px(0.)).child(tr_msg(&e)))))
             .child(
                 div()
                     .flex()

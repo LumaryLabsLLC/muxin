@@ -3,7 +3,7 @@
 //! runs and their output.
 
 use gpui::{AnyElement, Context, FontWeight, SharedString, Window, div, prelude::*, px};
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 
 use super::github::Load;
 use super::kit::{self, Button, ButtonStyle, card, icon, section_title, spinner};
@@ -168,7 +168,7 @@ impl Root {
                     .child(div().flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(spinner("sch-load", 13., theme.text_muted)).child(tr("Asking your machines…")))
                     .into_any_element();
             }
-            Load::Failed(e) => return body.child(div().text_size(px(12.5)).text_color(theme.error).child(e.clone())).into_any_element(),
+            Load::Failed(e) => return body.child(div().text_size(px(12.5)).text_color(theme.error).child(tr_msg(e))).into_any_element(),
         };
         let any = list.iter().any(|m| !m.schedules.is_empty());
         if !any {
@@ -312,7 +312,7 @@ impl Root {
         };
         let content: AnyElement = match state {
             None => div().flex().items_center().gap(px(8.)).text_size(px(12.)).text_color(theme.text_muted).child(spinner("sch-log", 12., theme.text_muted)).child(tr("Reading its runs…")).into_any_element(),
-            Some(Err(e)) => div().text_size(px(12.)).text_color(theme.error).child(e).into_any_element(),
+            Some(Err(e)) => div().text_size(px(12.)).text_color(theme.error).child(tr_msg(&e)).into_any_element(),
             Some(Ok(l)) => self.runs_view(theme, key, &l, cx),
         };
         div().px(px(14.)).pb(px(12.)).pl(px(54.)).child(content).into_any_element()
@@ -384,7 +384,7 @@ impl Root {
                 _ if r.session.is_some() => String::new(),
                 (true, _, Some(s)) => trf("Finished in {took}", &[("took", &crate::util::short_duration(s))]),
                 (false, Some(c), _) => trf("Exited with {code}", &[("code", &c)]),
-                (false, None, _) => r.error.clone().unwrap_or_else(|| tr("Ended without an exit status (stopped after 6 hours?)").into()),
+                (false, None, _) => r.error.as_deref().map(tr_msg).unwrap_or_else(|| tr("Ended without an exit status (stopped after 6 hours?)").into()),
                 _ => String::new(),
             };
             div().text_size(px(11.5)).text_color(theme.text_placeholder).child(what)

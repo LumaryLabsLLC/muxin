@@ -3,7 +3,7 @@
 //! operation, so the Activity page has the whole output too.
 
 use std::collections::HashSet;
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 
 use gpui::{AnyElement, Context, Focusable, FontWeight, SharedString, Window, div, prelude::*, px};
 
@@ -288,7 +288,7 @@ impl Root {
             }
         };
         let (state, color): (AnyElement, _) = match (r, op) {
-            (Err(e), _) => (div().child(short(e.clone(), tr("Didn't start"))).into_any_element(), theme.error),
+            (Err(e), _) => (div().child(short(tr_msg(e), tr("Didn't start"))).into_any_element(), theme.error),
             (Ok(_), None) => (div().child(tr("Gone")).into_any_element(), theme.text_muted),
             (Ok(id), Some(o)) if o.status == "running" => (
                 div().flex().items_center().gap(px(5.)).child(spinner(("run-spin", *id as usize), 11., theme.text_muted)).child(format::elapsed(o.started_at)).into_any_element(),
@@ -301,7 +301,7 @@ impl Root {
                     (div().flex().items_center().gap(px(4.)).child(kit::icon("check", 12., theme.success)).child(took).into_any_element(), theme.success)
                 } else {
                     let why = o.error.clone().unwrap_or_else(|| tr("Failed").into());
-                    let why = why.strip_prefix("Exited with status ").map(|c| trf("Exit {code}", &[("code", &c.trim_end_matches('.'))])).unwrap_or(why);
+                    let why = why.strip_prefix("Exited with status ").map(|c| trf("Exit {code}", &[("code", &c.trim_end_matches('.'))])).unwrap_or_else(|| tr_msg(&why));
                     (div().flex().items_center().gap(px(4.)).child(kit::icon("x", 12., theme.error)).child(short(why, tr("Failed"))).into_any_element(), theme.error)
                 }
             }

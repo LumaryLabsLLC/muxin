@@ -4,7 +4,7 @@
 use gpui::{AnyElement, Context, Div, FontWeight, Hsla, ScrollHandle, SharedString, Stateful, Window, div, prelude::*, px, relative};
 
 use super::format;
-use super::i18n::{tr, trf};
+use super::i18n::{tr, trf, tr_msg};
 use super::kit::{self, Button, ButtonStyle, card, chip, icon, meter, section_title};
 use super::theme::{ActiveTheme, mono_font, Theme};
 use super::root::{Route, Root};
@@ -45,7 +45,7 @@ impl Root {
 
         let mut body = page("overview-page", &self.page_scroll).child(self.overview_header(&theme, &s, cx));
         if let Some(err) = &s.inventory.error {
-            body = body.child(callout(&theme, "error", tr("config.toml has an error"), err.clone(), None));
+            body = body.child(callout(&theme, "error", tr("config.toml has an error"), tr_msg(err), None));
         }
         if s.attention.iter().any(|a| !on_cards(a)) {
             body = body.child(self.heads_up(&theme, &s, content_width, cx));
@@ -167,8 +167,8 @@ impl Root {
                             .flex_col()
                             .flex_1()
                             .min_w(px(0.))
-                            .child(div().w(px(text_w)).truncate().text_size(px(13.)).text_color(theme.text).child(a.title.clone()))
-                            .when(!a.detail.is_empty(), |d| d.child(div().w(px(text_w)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(a.detail.clone()))),
+                            .child(div().w(px(text_w)).truncate().text_size(px(13.)).text_color(theme.text).child(tr_msg(&a.title)))
+                            .when(!a.detail.is_empty(), |d| d.child(div().w(px(text_w)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr_msg(&a.detail)))),
                     )
                     .children(button)
                     .into_any_element()
@@ -276,8 +276,8 @@ impl Root {
                     Some(t) => trf("Asleep or off the network. Last seen {ago}.", &[("ago", &format::ago(Some(t)))]),
                     None => tr("Asleep or off the network.").into(),
                 },
-                Some(u) if !u.detail.is_empty() => u.detail.clone(),
-                Some(u) => u.title.clone(),
+                Some(u) if !u.detail.is_empty() => tr_msg(&u.detail),
+                Some(u) => tr_msg(&u.title),
                 None => tr("Can't connect.").into(),
             })
         } else if now.is_empty() {

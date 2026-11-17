@@ -13,7 +13,7 @@ use gpui::{
 use super::dialogs::{AddDisplayDialog, MonitorPasswordDialog, PowerDialog, AddMachineDialog, ConfirmDialog, DialogEvent, InstallDialog, NewSessionDialog, NewWorkspaceDialog, RenameDialog, RenameTarget};
 use super::terminal::TerminalView;
 use super::format;
-use super::i18n::{tr, trf};
+use super::i18n::{tr, trf, tr_msg};
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, icon, spinner};
 use super::settings::SettingsPage;
@@ -1392,7 +1392,7 @@ impl Root {
     }
 
     pub(super) fn notify_user(&mut self, text: impl Into<SharedString>, error: bool, cx: &mut Context<Self>) {
-        self.notice = Some(Notice { text: text.into(), error, at: Instant::now() });
+        self.notice = Some(Notice { text: tr_msg(&text.into()).into(), error, at: Instant::now() });
         cx.notify();
     }
 
@@ -1983,7 +1983,7 @@ impl Root {
             let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(ws) => this.start_session(StartSession { cwd: ws.path, ..session }, window, cx),
-                Err(e) => this.notify_user(trf("Couldn't set up the workspace: {error}", &[("error", &e)]), true, cx),
+                Err(e) => this.notify_user(trf("Couldn't set up the workspace: {error}", &[("error", &tr_msg(&e))]), true, cx),
             });
         });
         self.track(task);
@@ -2015,7 +2015,7 @@ impl Root {
                     Some(ws) => this.start_in_workspace(ws, session, window, cx),
                     None => this.start_session(session, window, cx),
                 },
-                (_, e) => this.notify_user(trf("Couldn't make {name}: {error}", &[("name", &name), ("error", &e.unwrap_or_default())]), true, cx),
+                (_, e) => this.notify_user(trf("Couldn't make {name}: {error}", &[("name", &name), ("error", &tr_msg(&e.unwrap_or_default()))]), true, cx),
             });
         });
         self.track(task);

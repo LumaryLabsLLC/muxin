@@ -275,6 +275,12 @@ mod tests {
     }
 
     #[test]
+    fn engine_messages_in_pt_br() {
+        assert_eq!(engine_one("beelink is asleep. Wake it first.").as_deref(), Some("beelink está dormindo. Acorde-a primeiro."));
+        assert_eq!(engine_one("Something no template knows."), None);
+    }
+
+    #[test]
     fn engine_translations_keep_their_placeholders() {
         let bad: Vec<_> = parse(PT_BR_ENGINE).unwrap().into_iter().filter(|(k, v)| placeholders(k) != placeholders(v)).collect();
         assert!(bad.is_empty(), "{bad:#?}");

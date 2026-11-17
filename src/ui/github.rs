@@ -9,7 +9,7 @@ use gpui::{AnyElement, ClipboardItem, Context, Entity, FontWeight, Hsla, MouseBu
 use super::box_dialog::BoxPrefill;
 use super::dialogs::{Prefill, WorkspacePlan};
 use super::format;
-use crate::ui::i18n::{tr, trf, trc};
+use crate::ui::i18n::{tr, trf, trc, tr_msg};
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, card, icon, section_title, spinner};
 use super::menu::{self, MenuTarget};
@@ -245,8 +245,8 @@ impl Root {
                 store(&mut this.gh, match result {
                     Ok(v) => Load::Ready(v),
                     Err(e) => Load::Failed(match e.hint {
-                        Some(h) => format!("{} {h}", e.message),
-                        None => e.message,
+                        Some(h) => format!("{} {}", tr_msg(&e.message), tr_msg(&h)),
+                        None => tr_msg(&e.message),
                     }),
                 });
                 cx.notify();
@@ -381,7 +381,7 @@ impl Root {
                         let line = out.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or(tr("Done")).trim().to_string();
                         this.notify_user(format!("git {action}: {line}"), false, cx)
                     }
-                    Err(e) => this.notify_user(trf("git {action} failed: {error}", &[("action", &action), ("error", &e)]), true, cx),
+                    Err(e) => this.notify_user(trf("git {action} failed: {error}", &[("action", &action), ("error", &tr_msg(&e))]), true, cx),
                 }
             });
         });
@@ -644,7 +644,7 @@ impl Root {
             }
             Some(Load::Failed(e)) => {
                 body.push(list_heading(theme, tr("Repositories"), None));
-                body.push(div().px(px(18.)).text_size(px(12.)).text_color(theme.error).child(e.clone()).into_any_element());
+                body.push(div().px(px(18.)).text_size(px(12.)).text_color(theme.error).child(tr_msg(e)).into_any_element());
             }
             _ => {
                 body.push(list_heading(theme, tr("Repositories"), None));

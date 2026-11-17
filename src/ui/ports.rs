@@ -6,7 +6,7 @@
 use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
 
 use super::github::Load;
-use crate::ui::i18n::{tr, trf, trc};
+use crate::ui::i18n::{tr, trf, trc, tr_msg};
 use super::kit::{self, Button, ButtonStyle, icon, spinner};
 use super::root::Root;
 use super::theme::Theme;
@@ -59,7 +59,7 @@ impl Root {
                 .child(spinner("m-ports-loading", 13., theme.text_muted))
                 .child(trf("Looking at what's listening on {name}…", &[("name", &m.name)]))
                 .into_any_element(),
-            Some(Load::Failed(e)) => kit::card(theme).p(px(16.)).text_size(px(12.5)).text_color(theme.error).child(e.clone()).into_any_element(),
+            Some(Load::Failed(e)) => kit::card(theme).p(px(16.)).text_size(px(12.5)).text_color(theme.error).child(tr_msg(e)).into_any_element(),
             Some(Load::Ready(_)) => {
                 let mut rows: Vec<AnyElement> = Vec::new();
                 // The first few sites; the rest wait behind Show more, unless open here.

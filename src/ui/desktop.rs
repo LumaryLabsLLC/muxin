@@ -20,7 +20,7 @@ use super::desktop_keys::{self, Mods, Os, ReleaseKey};
 use super::kit::{self, Button, ButtonStyle, spinner};
 use super::terminal::{ime::Composition, keys};
 use super::theme::ActiveTheme;
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use crate::fleet::Engine;
 use crate::fleet::desktop::{FRAME, INPUT, META, TILES, keysym};
 use crate::fleet::model::DisplayInfo;
@@ -781,7 +781,7 @@ impl DesktopView {
                     }
                     Ok(r) => {
                         link.close_channel(channel);
-                        let why = r["error"].as_str().unwrap_or(tr("The machine can't show its desktop.")).to_string();
+                        let why = r["error"].as_str().map(tr_msg).unwrap_or_else(|| tr("The machine can't show its desktop.").to_string());
                         let _ = tx.unbounded_send(match (r["no_session"].as_bool(), r["gone"].as_bool()) {
                             (Some(true), _) => Msg::NoScreen(why),
                             (_, Some(true)) => Msg::Closed(why),

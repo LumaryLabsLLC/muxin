@@ -1,6 +1,6 @@
 //! Settings: which GitHub orgs/repos to watch, polling intervals, the inventory file.
 
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -645,7 +645,7 @@ impl SettingsPage {
                     .flex()
                     .flex_col()
                     .gap(px(4.))
-                    .child(note(theme, if *ok { "circle-check" } else { "circle-alert" }, if *ok { theme.success } else { theme.error }, msg.clone()))
+                    .child(note(theme, if *ok { "circle-check" } else { "circle-alert" }, if *ok { theme.success } else { theme.error }, tr_msg(msg)))
                     .children(hint.clone().map(|h| hint_line(theme, 99, h)))
             }))
             .when(!my_orgs.is_empty(), |d| {
@@ -717,7 +717,7 @@ impl SettingsPage {
                             .on_click(cx.listener(|this, _, _, cx| this.save_intervals(cx))),
                     )
                     .when(self.saved_at.is_some(), |d| d.child(div().text_size(px(12.)).text_color(theme.success).child(tr("Saved"))))
-                    .children(self.save_error.clone().map(|e| div().text_size(px(12.)).text_color(theme.error).child(e))),
+                    .children(self.save_error.clone().map(|e| div().text_size(px(12.)).text_color(theme.error).child(tr_msg(&e)))),
             )
     }
 
@@ -1110,7 +1110,7 @@ impl SettingsPage {
                 with.push(m.name.clone());
             }
             if let Some(e) = h.values().filter_map(|v| v.as_str()).find(|v| !matches!(*v, "on" | "off" | "none")) {
-                trouble.push(format!("{}: {e}", m.name));
+                trouble.push(format!("{}: {}", m.name, tr_msg(e)));
             }
         }
         let status = match (on, with.as_slice()) {

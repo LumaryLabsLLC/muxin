@@ -47,7 +47,12 @@ pub struct ProbeResult {
     pub mem_total: Option<u64>,
     pub mem_used: Option<u64>,
     pub disk_total: Option<u64>,
+    /// Free right now (`df`).
     pub disk_free: Option<u64>,
+    /// On a Mac, what Finder calls available: `disk_free` plus what macOS
+    /// clears by itself when the space is needed (caches, local snapshots,
+    /// purgeable files). None elsewhere.
+    pub disk_available: Option<u64>,
     pub disk_path: Option<String>,
     pub uptime_sec: Option<u64>,
     pub load: Vec<f64>,
@@ -780,6 +785,7 @@ pub fn parse(out: &str) -> ProbeResult {
             "mem_used" => r.mem_used = value.parse().ok(),
             "disk_total" => r.disk_total = value.parse().ok().filter(|v| *v > 0),
             "disk_free" => r.disk_free = value.parse().ok(),
+            "disk_available" => r.disk_available = value.parse().ok(),
             "disk_path" => r.disk_path = text(),
             "uptime_s" => r.uptime_sec = value.parse().ok(),
             "load" => r.load = value.split_whitespace().filter_map(|v| v.parse().ok()).take(3).collect(),
@@ -1001,6 +1007,7 @@ mem_used=40000000000
 cpu_pct=43.0
 disk_total=994662584320
 disk_free=106000000000
+disk_available=412000000000
 disk_path=/System/Volumes/Data
 r0.dir=/Users/ci/actions-runner-01
 r0.config=\u{feff}{  \"agentId\": 12,  \"agentName\": \"mac-studio-01\",  \"gitHubUrl\": \"https://github.com/acme\",  \"workFolder\": \"_work\"}
@@ -1020,6 +1027,8 @@ r1.listener=
         assert_eq!(r.load, vec![1.2, 1.05, 0.98]);
         assert_eq!(r.cpu_pct, Some(43.0));
         assert_eq!(r.disk_free, Some(106_000_000_000));
+        // And what Finder calls available, with what macOS can clear.
+        assert_eq!(r.disk_available, Some(412_000_000_000));
         assert_eq!(r.runners.len(), 2);
         assert_eq!(r.runners[0].name, "mac-studio-01");
         assert_eq!(r.runners[0].url.as_deref(), Some("https://github.com/acme"));

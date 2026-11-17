@@ -120,6 +120,15 @@ linux)
 esac
 
 df -kP "$disk" 2>/dev/null | awk 'NR == 2 { printf "disk_total=%.0f\ndisk_free=%.0f\ndisk_path=%s\n", $2 * 1024, $4 * 1024, $6 }'
+# On a Mac, what Finder calls available: free now, plus what macOS clears by
+# itself when the space is needed (caches, local snapshots, purgeable files).
+if [ "$os" = darwin ]; then
+  avail=$(osascript -l JavaScript -e "ObjC.import('Foundation'); var k = 'NSURLVolumeAvailableCapacityForImportantUsageKey'; var v = \$.NSURL.fileURLWithPath('$disk').resourceValuesForKeysError(\$([k]), null); v.objectForKey(k).longLongValue" 2>/dev/null)
+  case "$avail" in
+  '' | *[!0-9]*) ;;
+  *) kv disk_available "$avail" ;;
+  esac
+fi
 
 # --- Runners -----------------------------------------------------------------
 # A runner is a folder with a .runner config. Find them from running

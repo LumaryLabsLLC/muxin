@@ -448,8 +448,14 @@ pub struct MachineSummary {
     pub runner_counts: RunnerCounts,
     pub cpu_pct: Option<f64>,
     pub mem_pct: Option<f64>,
+    /// Free right now.
     pub disk_free: Option<String>,
     pub disk_free_bytes: Option<u64>,
+    /// On a Mac, what Finder calls available: free right now, and what macOS
+    /// clears by itself when the space is needed (caches, local snapshots,
+    /// purgeable files). Low-disk warnings go by this one. Null elsewhere.
+    pub disk_available: Option<String>,
+    pub disk_available_bytes: Option<u64>,
     pub uptime: Option<String>,
     /// Docker's version, when the machine's user can use it (boxes and
     /// Docker workspaces need it).
@@ -757,6 +763,8 @@ pub fn machine_summary(m: &Machine) -> MachineSummary {
         mem_pct: p.and_then(|p| Some(round1(p.mem_used? as f64 * 100.0 / p.mem_total?.max(1) as f64))),
         disk_free: p.and_then(|p| p.disk_free).map(util::bytes),
         disk_free_bytes: p.and_then(|p| p.disk_free),
+        disk_available: p.and_then(|p| p.disk_available).map(util::bytes),
+        disk_available_bytes: p.and_then(|p| p.disk_available),
         uptime: p.and_then(|p| p.uptime_sec).map(util::uptime),
         docker: p.and_then(|p| p.docker.clone()),
         problems,

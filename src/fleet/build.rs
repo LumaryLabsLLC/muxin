@@ -390,6 +390,7 @@ fn to_probe(p: &ProbeResult) -> Probe {
         mem_used: p.mem_used,
         disk_total: p.disk_total,
         disk_free: p.disk_free,
+        disk_available: p.disk_available,
         disk_path: p.disk_path.clone(),
         uptime_sec: p.uptime_sec,
         load: p.load.clone(),
@@ -912,11 +913,21 @@ fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Opt
         return;
     }
     if let (Some(total), Some(free)) = (p.disk_total, p.disk_free) {
-        if free < LOW_DISK_BYTES || (free as f64) < total as f64 * LOW_DISK_FRACTION {
+        // On a Mac, by what Finder calls available: macOS clears caches,
+        // local snapshots and purgeable files by itself when space is needed,
+        // so free right now can be far less without anything to act on.
+        let available = p.disk_available.map_or(free, |a| a.max(free));
+        if available < LOW_DISK_BYTES || (available as f64) < total as f64 * LOW_DISK_FRACTION {
+            let on = p.disk_path.as_deref().filter(|d| !d.is_empty()).map(|d| format!(" on {d}")).unwrap_or_default();
+            let room = if available > free {
+                format!("{} available of {} ({} free right now, the rest macOS clears when it's needed)", util::bytes(available), util::bytes(total), util::bytes(free))
+            } else {
+                format!("{} free of {}", util::bytes(free), util::bytes(total))
+            };
             out.push(diag(
                 "warning",
                 "low-disk",
-                format!("Low disk space: {} free of {}. Runner _work folders and toolcaches grow over time.", util::bytes(free), util::bytes(total)),
+                format!("Low disk space{on}: {room}. Runner _work folders and toolcaches grow over time."),
                 None,
                 None,
             )
@@ -1525,6 +1536,42 @@ mod tests {
         assert!(machine("box").diagnostics.iter().any(|d| d.code == "low-disk" && d.actions.iter().any(|a| a.kind == "ignore_warning")));
         assert!(!s.attention.iter().any(|a| a.id == "low-disk-nas"));
         assert!(s.attention.iter().any(|a| a.id == "low-disk-box"));
+    }
+
+    /// A Mac's disk is low by what Finder calls available: free right now,
+    /// and what macOS clears by itself when the space is needed. The warning
+    /// says which disk, and both figures.
+    #[test]
+    fn a_mac_is_low_on_disk_by_what_finder_says_is_available() {
+        let inv = inventory("[[machine]]\nname = \"Mac\"\nhost = \"mac\"\n");
+        let low = |p: ProbeResult| {
+            let s = run(&inv, &Settings::default(), &[("mac".to_string(), p)].into(), None);
+            s.machines[0].diagnostics.iter().find(|d| d.code == "low-disk").map(|d| d.message.clone())
+        };
+        let mac = |free: u64, available: Option<u64>| ProbeResult {
+            os: Some("darwin".into()),
+            disk_total: Some(494_400_000_000),
+            disk_free: Some(free),
+            disk_available: available,
+            disk_path: Some("/System/Volumes/Data".into()),
+            ..probe_with(Vec::new())
+        };
+        // 28 GB free right now is under a tenth of the disk, and Finder says 182 GB: nothing to act on.
+        assert_eq!(low(mac(28_000_000_000, Some(181_700_000_000))), None);
+        // Without Finder's figure (an older check, or not a Mac), as before, with the disk named.
+        assert_eq!(
+            low(mac(28_000_000_000, None)).as_deref(),
+            Some("Low disk space on /System/Volumes/Data: 28 GB free of 494 GB. Runner _work folders and toolcaches grow over time.")
+        );
+        // Low by Finder's figure too: both are said.
+        assert_eq!(
+            low(mac(12_000_000_000, Some(30_000_000_000))).as_deref(),
+            Some(
+                "Low disk space on /System/Volumes/Data: 30 GB available of 494 GB (12 GB free right now, the rest macOS clears when it's needed). Runner _work folders and toolcaches grow over time."
+            )
+        );
+        // A figure under free right now (taken a moment apart) isn't taken for less room.
+        assert_eq!(low(mac(60_000_000_000, Some(50_000_000_000))), None);
     }
 
     #[test]

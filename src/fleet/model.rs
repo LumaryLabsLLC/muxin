@@ -406,7 +406,11 @@ pub struct Probe {
     pub mem_total: Option<u64>,
     pub mem_used: Option<u64>,
     pub disk_total: Option<u64>,
+    /// Free right now.
     pub disk_free: Option<u64>,
+    /// On a Mac, what Finder calls available (free now, and what macOS clears
+    /// by itself when the space is needed). None elsewhere.
+    pub disk_available: Option<u64>,
     pub disk_path: Option<String>,
     pub uptime_sec: Option<u64>,
     pub load: Vec<f64>,

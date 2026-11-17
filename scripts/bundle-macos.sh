@@ -85,11 +85,13 @@ PLIST
 # agents inside are already signed with their own identifier, which the
 # permissions on the user's Macs (Screen Recording, Accessibility) belong to.
 # By fingerprint: a keychain can hold several certificates of the same name,
-# and codesign refuses an ambiguous one.
+# and codesign refuses an ambiguous one. A release's secure timestamp asks
+# Apple's timestamp server, which can be down for a few minutes:
+# scripts/codesign-retry.sh signs again when it doesn't answer.
 identity=${MUXEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/^ *[0-9][0-9]*) \([0-9A-F]\{40\}\) "Developer ID Application: .*/\1/p' | head -n1)}
 if [ -n "$release" ]; then
     [ -n "$identity" ] || { echo "error: a release needs a Developer ID Application certificate in the keychain" >&2; exit 1; }
-    codesign --force --options runtime --timestamp --identifier com.lumarylabs.muxen -s "$identity" "$app"
+    scripts/codesign-retry.sh --force --options runtime --timestamp --identifier com.lumarylabs.muxen -s "$identity" "$app"
     codesign --verify --strict --verbose=2 "$app"
 elif [ -n "$identity" ]; then
     codesign --force --timestamp=none --identifier com.lumarylabs.muxen -s "$identity" "$app" >/dev/null 2>&1 || echo "warning: signing with $identity failed" >&2

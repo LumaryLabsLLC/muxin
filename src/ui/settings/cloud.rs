@@ -403,7 +403,7 @@ impl SettingsPage {
                         .bg(if selected { theme.accent.opacity(0.08) } else { theme.element })
                         .text_size(px(12.5))
                         .child(div().flex_1().child(trf("{cpus} vCPU · {mem} GB · {disk} GB disk", &[("cpus", &s.vcpus), ("mem", &(s.memory_mb / 1024)), ("disk", &s.disk_gb)])))
-                        .child(div().font_family(mono_font()).text_size(px(12.)).text_color(theme.text_muted).child(format!("${:.0}/mo", s.price_monthly)))
+                        .child(div().font_family(mono_font()).text_size(px(12.)).text_color(theme.text_muted).child(trf("${price}/mo", &[("price", &format!("{:.0}", s.price_monthly))])))
                         .on_click(cx.listener(move |this, _, _, cx| this.save_cloud(|c| c.size = slug.clone(), cx)))
                         .into_any_element()
                 })

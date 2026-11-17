@@ -323,7 +323,7 @@ impl ShareDialog {
                     .bg(theme.surface)
                     .child(div().w(px(380.)).truncate().font_family(mono_font()).text_size(px(12.5)).child(link.clone()))
                     .child(div().flex_1())
-                    .child(Button::new("share-copy", if self.copied { "Copied" } else { "Copy" }).icon(if self.copied { "check" } else { "copy" }).style(ButtonStyle::Primary).on_click(cx.listener(
+                    .child(Button::new("share-copy", if self.copied { tr("Copied") } else { tr("Copy") }).icon(if self.copied { "check" } else { "copy" }).style(ButtonStyle::Primary).on_click(cx.listener(
                         move |this, _, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
                             this.copied = true;
@@ -1459,9 +1459,9 @@ impl Root {
 
         super::overview::page("shared-page", &self.page_scroll)
             .child(header)
-            .child(div().flex().flex_col().gap(px(10.)).child(section_title(&theme, "What you can do", None)).child(card(&theme).child(allowed)))
-            .child(div().flex().flex_col().gap(px(10.)).child(section_title(&theme, "Agent sessions", Some(j.sessions.len()))).child(sessions))
-            .when(!servers.is_empty(), |d| d.child(div().flex().flex_col().gap(px(10.)).child(section_title(&theme, "Servers", Some(servers.len()))).child(card(&theme).children(servers))))
+            .child(div().flex().flex_col().gap(px(10.)).child(section_title(&theme, tr("What you can do"), None)).child(card(&theme).child(allowed)))
+            .child(div().flex().flex_col().gap(px(10.)).child(section_title(&theme, tr("Agent sessions"), Some(j.sessions.len()))).child(sessions))
+            .when(!servers.is_empty(), |d| d.child(div().flex().flex_col().gap(px(10.)).child(section_title(&theme, tr("Servers"), Some(servers.len()))).child(card(&theme).children(servers))))
             .into_any_element()
     }
 

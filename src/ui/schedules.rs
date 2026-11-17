@@ -267,7 +267,7 @@ impl Root {
                             .gap_x(px(8.))
                             .child(div().min_w(px(0.)).text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(s.name.clone()))
                             .child(div().text_size(px(12.)).text_color(theme.text_muted).child(s.when_text.clone()))
-                            .when(!s.enabled, |d| d.child(kit::pill("off", theme.text_placeholder))),
+                            .when(!s.enabled, |d| d.child(kit::pill(tr("off"), theme.text_placeholder))),
                     )
                     .child(div().line_clamp(2).text_ellipsis().when(s.what.kind == "command", |d| d.font_family(mono_font())).text_size(px(12.)).text_color(theme.text_placeholder).child(format!("{what}{folder}"))),
             )

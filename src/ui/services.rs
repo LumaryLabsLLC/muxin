@@ -841,7 +841,7 @@ impl Render for ServicesView {
                 "trash-2",
                 move |window, cx| {
                     let _ = yes.update(cx, |v, cx| {
-                        let s = Service { kind: "image".into(), target: "unused".into(), name: "unused images".into(), ..Default::default() };
+                        let s = Service { kind: "image".into(), target: "unused".into(), name: tr("unused images").into(), ..Default::default() };
                         v.act(s, "prune", true, window, cx);
                     });
                 },

@@ -222,7 +222,7 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action(tr("Muxin Docs"), OpenDocs),
                 MenuItem::action(tr("Keyboard Shortcuts"), ShowShortcuts),
                 MenuItem::separator(),
-                MenuItem::action("What’s New", ShowReleaseNotes),
+                MenuItem::action(tr("What’s New"), ShowReleaseNotes),
                 MenuItem::action(tr("Report a Problem…"), ReportProblem),
                 MenuItem::action(tr("Ask a Question…"), AskQuestion),
                 MenuItem::separator(),
@@ -2007,7 +2007,7 @@ impl Root {
                 match s {
                     Some((st, _)) if st == "running" => continue,
                     Some((st, e)) => break (st, e),
-                    None => break ("failed".to_string(), Some("The operation went missing.".into())),
+                    None => break ("failed".to_string(), Some(tr("The operation went missing.").into())),
                 }
             };
             let _ = this.update_in(cx, |this, window, cx| match status {
@@ -2702,7 +2702,7 @@ impl Root {
                     .min_w(px(0.))
                     .child(div().w(px(text_w)).truncate().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Muxin")),
             )
-            .when(s.demo && self.demo_badge, |d| d.child(div().flex_1()).child(kit::pill("demo", theme.warning)))
+            .when(s.demo && self.demo_badge, |d| d.child(div().flex_1()).child(kit::pill(tr("demo"), theme.warning)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3816,7 +3816,7 @@ impl Root {
             .child(div().w(px((self.row_width() - 20. - 30. - 16. - 16. - 74. - 52.).max(40.))).truncate().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child(d.name.clone()))
             .child(div().flex_1())
             // Which ones Muxin added (and the × takes away).
-            .child(kit::pill("virtual", theme.accent))
+            .child(kit::pill(tr("virtual"), theme.accent))
             .child(div().flex_none().font_family(mono_font()).text_size(px(10.5)).text_color(theme.text_placeholder).group_hover("monitor-row", |st| st.invisible()).child(format!("{}×{}", d.width as u32, d.height as u32)))
             // On hover, in place of the size: unplug it.
             .child(

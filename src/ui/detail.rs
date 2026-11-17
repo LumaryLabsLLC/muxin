@@ -662,7 +662,7 @@ impl Root {
                 })))
                 .child(kv(&theme, tr("Listener"), kit::mono(l.listener_pid.map(|p| trf("running · pid {pid}", &[("pid", &p)])).unwrap_or_else(|| tr("stopped").into()))))
                 .child(kv(&theme, tr("Worker"), kit::mono(l.worker_pid.map(|p| trf("running a job · pid {pid}", &[("pid", &p)])).unwrap_or_else(|| tr("idle").into()))))
-                .children(l.url.clone().map(|u| kv(&theme, "Config URL", kit::mono(u)))),
+                .children(l.url.clone().map(|u| kv(&theme, tr("Config URL"), kit::mono(u)))),
             None => card(&theme).p(px(14.)).child(div().text_size(px(12.5)).text_color(theme.text_placeholder).child(
                 if machine.is_some() { tr("Not found on the machine at the last check.") } else { tr("No machine in config.toml runs this runner.") },
             )),
@@ -785,7 +785,7 @@ fn diagnostics_section(theme: &Theme, diags: &[Diagnostic], ignored: &[String], 
         .child(section_title(theme, tr("Diagnostics"), Some(diags.len())))
         .child(card(theme).when(rows.is_empty(), |d| d.child(kit::empty_state(theme, "circle-check", tr("No warnings.")))).children(rows))
         .children((!ignored.is_empty()).then(|| {
-            div().flex().flex_wrap().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child("Ignored:").children(ignored.iter().enumerate().map(|(n, code)| {
+            div().flex().flex_wrap().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child(tr("Ignored:")).children(ignored.iter().enumerate().map(|(n, code)| {
                 let (code, machine) = (code.clone(), machine.to_string());
                 Button::new(SharedString::from(format!("diag-ignored-{n}")), crate::fleet::build::warning_name(&code))
                     .style(ButtonStyle::Ghost)

@@ -750,7 +750,7 @@ impl Root {
                             })
                             .child(info.agent_name.clone())
                             .child("·")
-                            .child(if in_box { format!("in a container on {machine}") } else { machine })
+                            .child(if in_box { trf("in a container on {machine}", &[("machine", &machine)]) } else { machine })
                             .when(!info.cwd.is_empty(), |d| {
                                 d.child(
                                     div()
@@ -1427,7 +1427,7 @@ impl Root {
                                 div().font_family(mono_font()).child(folder),
                                 div().child(started),
                             ])
-                            .chain(helper_of.map(|p| div().child(format!("helper of {p}"))))
+                            .chain(helper_of.map(|p| div().child(trf("helper of {p}", &[("p", &p)]))))
                             .chain(x.restored_text().map(|t| div().child(t.to_string())))
                             .collect();
                         div()
@@ -2469,7 +2469,7 @@ impl Root {
                         };
                         this.navigate(Route::Session(h.session.id.clone()), window, cx);
                         let warn = h.warnings.first().map(|w| format!(" {w}")).unwrap_or_default();
-                        this.notify_user(format!("{name} took over, with a note of {from}: {}{warn}", crate::fleet::sessions::handoff::NOTE), !h.warnings.is_empty(), cx);
+                        this.notify_user(trf("{name} took over, with a note of {from}: {note}{warn}", &[("name", &name), ("from", &from), ("note", &crate::fleet::sessions::handoff::NOTE), ("warn", &tr_msg(&warn))]), !h.warnings.is_empty(), cx);
                     }
                     Err(e) => this.notify_user(e, true, cx),
                 }
@@ -2528,43 +2528,43 @@ pub(super) fn git_line(theme: &Theme, key: &str, g: &GitStatus, full: bool) -> g
             .gap(px(4.))
             .min_w(px(0.))
             .child(icon("git-branch", 12., muted).flex_none())
-            .child(div().min_w(px(0.)).overflow_hidden().whitespace_nowrap().font_family(mono_font()).text_size(px(11.5)).text_color(theme.text_muted).child(if g.branch.is_empty() { "no branch".to_string() } else { cut(&g.branch, if full { 60 } else { 40 }) })),
+            .child(div().min_w(px(0.)).overflow_hidden().whitespace_nowrap().font_family(mono_font()).text_size(px(11.5)).text_color(theme.text_muted).child(if g.branch.is_empty() { tr("no branch").to_string() } else { cut(&g.branch, if full { 60 } else { 40 }) })),
     );
     if g.worktree {
-        row = row.child(kit::pill("worktree", theme.info));
+        row = row.child(kit::pill(tr("worktree"), theme.info));
     }
     let changed = g.added > 0 || g.removed > 0;
     if changed {
         row = row.child(div().flex().flex_none().gap(px(4.)).font_family(mono_font()).text_size(px(11.5)).child(div().text_color(theme.success).child(format!("+{}", g.added))).child(div().text_color(theme.error).child(format!("−{}", g.removed))));
     } else if g.files > 0 {
-        row = row.child(small(format!("{} new file{}", g.files, if g.files == 1 { "" } else { "s" }), muted));
+        row = row.child(small(if g.files == 1 { tr("1 new file").to_string() } else { trf("{n} new files", &[("n", &g.files)]) }, muted));
     } else if !g.on_base() {
-        row = row.child(small("no changes yet".into(), muted));
+        row = row.child(small(tr("no changes yet").into(), muted));
     }
     if full {
         if changed && g.files > 0 {
-            row = row.child(small(format!("in {} file{}", g.files, if g.files == 1 { "" } else { "s" }), muted));
+            row = row.child(small(if g.files == 1 { tr("in 1 file").to_string() } else { trf("in {n} files", &[("n", &g.files)]) }, muted));
         }
         if g.commits > 0 {
-            row = row.child(small(format!("{} commit{}", g.commits, if g.commits == 1 { "" } else { "s" }), muted));
+            row = row.child(small(if g.commits == 1 { tr("1 commit").to_string() } else { trf("{n} commits", &[("n", &g.commits)]) }, muted));
         }
         if g.uncommitted > 0 {
-            row = row.child(small(format!("{} uncommitted", g.uncommitted), theme.warning));
+            row = row.child(small(trf("{n} uncommitted", &[("n", &g.uncommitted)]), theme.warning));
         }
     }
     if let Some(p) = &g.pull {
         let (color, state) = match p.state.as_str() {
-            "merged" => (theme.accent2, " merged"),
-            "closed" => (theme.error, " closed"),
-            "draft" => (muted, " draft"),
+            "merged" => (theme.accent2, tr(" merged")),
+            "closed" => (theme.error, tr(" closed")),
+            "draft" => (muted, tr(" draft")),
             _ => (theme.success, ""),
         };
         let c = &p.checks;
         let checks = match (c.failed, c.pending, c.total) {
             (0, 0, 0) => None,
-            (f, _, _) if f > 0 => Some(("circle-x", theme.error, if full { format!("{f} failing") } else { f.to_string() })),
-            (_, p, _) if p > 0 => Some(("clock", theme.warning, if full { "checks running".to_string() } else { String::new() })),
-            _ => Some(("circle-check", theme.success, if full { "checks pass".to_string() } else { String::new() })),
+            (f, _, _) if f > 0 => Some(("circle-x", theme.error, if full { trf("{f} failing", &[("f", &f)]) } else { f.to_string() })),
+            (_, p, _) if p > 0 => Some(("clock", theme.warning, if full { tr("checks running").to_string() } else { String::new() })),
+            _ => Some(("circle-check", theme.success, if full { tr("checks pass").to_string() } else { String::new() })),
         };
         let url = p.url.clone();
         row = row.child(

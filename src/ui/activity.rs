@@ -174,7 +174,7 @@ impl Root {
                                 .text_size(px(12.))
                                 .text_color(theme.text_muted)
                                 .child(kit::spinner("activity-running", 12., theme.accent))
-                                .child(format!("{running} running")),
+                                .child(trf("{running} running", &[("running", &running)])),
                         )
                     })
                     .child(
@@ -462,7 +462,7 @@ fn command_detail(theme: &Theme, w: &WorkspaceInfo, c: &WorkspaceCommand, title_
                 .id("cmd-workspace")
                 .cursor_pointer()
                 .text_color(theme.text_accent)
-                .child(format!("{} on {}", w.name, w.machine_name))
+                .child(trf("{name} on {machine}", &[("name", &w.name), ("machine", &w.machine_name)]))
                 .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Workspace(ws.clone()), window, cx))),
         )
         .into_any_element();

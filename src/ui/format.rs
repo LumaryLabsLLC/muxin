@@ -1,14 +1,15 @@
 use chrono::{DateTime, Utc};
+use crate::ui::i18n::{tr, trf};
 
 use crate::fleet::model::Machine;
 use crate::util;
 
 pub fn ago(t: Option<DateTime<Utc>>) -> String {
     match t {
-        None => "never".into(),
+        None => tr("never").into(),
         Some(t) => {
             let secs = (Utc::now() - t).num_seconds().max(0) as u64;
-            if secs < 10 { "just now".into() } else { format!("{} ago", util::short_duration(secs)) }
+            if secs < 10 { tr("just now").into() } else { trf("{duration} ago", &[("duration", &util::short_duration(secs))]) }
         }
     }
 }
@@ -82,31 +83,31 @@ pub fn machine_subtitle(m: &Machine) -> (String, &'static str) {
 /// again ("Windows 11 · VM").
 pub fn machine_subtitle_in(m: &Machine, nested: bool) -> (String, &'static str) {
     if m.is_disconnected() {
-        return ("Disconnected".into(), "muted");
+        return (tr("Disconnected").into(), "muted");
     }
     if m.checking && m.probe.is_none() {
-        return ("Connecting…".into(), "muted");
+        return (tr("Connecting…").into(), "muted");
     }
     if m.is_asleep() {
-        return ("Asleep".into(), "muted");
+        return (tr("Asleep").into(), "muted");
     }
     if m.status == "offline" {
         let seen = m.unreachable.as_ref().and_then(|u| u.last_seen_at);
         if is_powered_off(m) {
-            return ("Powered off".into(), "muted");
+            return (tr("Powered off").into(), "muted");
         }
         return match (m.unreachable.as_ref().map(|u| u.kind.as_str()), is_just_offline(m), seen) {
-            (Some("installing"), _, _) => ("Installing…".into(), "muted"),
+            (Some("installing"), _, _) => (tr("Installing…").into(), "muted"),
             (Some("stopped" | "host-down"), _, _) => (unreachable_reason(m), "muted"),
-            (_, true, Some(t)) => (format!("Offline · seen {}", ago(Some(t))), "muted"),
-            (_, true, None) => ("Offline".into(), "muted"),
+            (_, true, Some(t)) => (trf("Offline · seen {ago}", &[("ago", &ago(Some(t)))]), "muted"),
+            (_, true, None) => (tr("Offline").into(), "muted"),
             (_, false, _) => (unreachable_reason(m), "error"),
         };
     }
     // Where it runs takes the place of its architecture.
     let place = m.parent.as_ref().map(|p| match (nested, p.relation.as_str()) {
         (true, "vm") => "VM".to_string(),
-        (true, "container") => "Container".to_string(),
+        (true, "container") => tr("Container").to_string(),
         (true, _) => String::new(),
         (false, _) => p.label(),
     });
@@ -116,7 +117,7 @@ pub fn machine_subtitle_in(m: &Machine, nested: bool) -> (String, &'static str) 
         (false, false) => format!("{os} · {arch}"),
         (false, true) => os,
         (true, false) => arch,
-        (true, true) if m.host.is_empty() || m.local => "Not checked".into(),
+        (true, true) if m.host.is_empty() || m.local => tr("Not checked").into(),
         (true, true) => m.host.clone(),
     };
     (line, "muted")
@@ -262,45 +263,45 @@ pub fn is_stopped(m: &Machine) -> bool {
     m.status == "offline" && m.unreachable.as_ref().is_some_and(|u| u.kind == "stopped")
 }
 
-/// A machine that can't be reached, in a word or two: "Offline", "Can't connect".
+/// A machine that can't be reached, in a word or two: tr("Offline"), tr("Can't connect").
 pub fn unreachable_word(m: &Machine) -> &'static str {
     if m.is_disconnected() {
-        "Disconnected"
+        tr("Disconnected")
     } else if m.is_asleep() {
-        "Asleep"
+        tr("Asleep")
     } else if is_powered_off(m) {
-        "Powered off"
+        tr("Powered off")
     } else if is_stopped(m) {
-        "Stopped"
+        tr("Stopped")
     } else if m.unreachable.as_ref().is_some_and(|u| u.kind == "installing") {
-        "Installing"
+        tr("Installing")
     } else if is_just_offline(m) {
-        "Offline"
+        tr("Offline")
     } else {
-        "Can't connect"
+        tr("Can't connect")
     }
 }
 
 /// Why it can't be reached, short enough for the sidebar.
 pub fn unreachable_reason(m: &Machine) -> String {
-    let parent = m.parent.as_ref().map(|p| p.name.as_str()).unwrap_or("Its host");
+    let parent = m.parent.as_ref().map(|p| p.name.as_str()).unwrap_or(tr("Its host"));
     match m.unreachable.as_ref().map(|u| u.kind.as_str()) {
-        Some("stopped") => return "Stopped".into(),
-        Some("installing") => return "Installing…".into(),
-        Some("host-down") => return m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("{parent} is offline")),
+        Some("stopped") => return tr("Stopped").into(),
+        Some("installing") => return tr("Installing…").into(),
+        Some("host-down") => return m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| trf("{parent} is offline", &[("parent", &parent)])),
         _ => {}
     }
     match m.unreachable.as_ref().map(|u| u.kind.as_str()) {
-        Some("offline") => "Offline",
-        Some("asleep") => "Asleep",
-        Some("powered-off") => "Powered off",
-        Some("refused") => "Not accepting ssh",
-        Some("auth") => "ssh key not accepted",
-        Some("key-locked") => "ssh key is locked",
-        Some("unknown-host") => "Host not found",
-        Some("host-key") => "Host key changed",
-        Some("tailscale-off") => "Tailscale is off here",
-        _ => "Can't connect",
+        Some("offline") => tr("Offline"),
+        Some("asleep") => tr("Asleep"),
+        Some("powered-off") => tr("Powered off"),
+        Some("refused") => tr("Not accepting ssh"),
+        Some("auth") => tr("ssh key not accepted"),
+        Some("key-locked") => tr("ssh key is locked"),
+        Some("unknown-host") => tr("Host not found"),
+        Some("host-key") => tr("Host key changed"),
+        Some("tailscale-off") => tr("Tailscale is off here"),
+        _ => tr("Can't connect"),
     }
     .into()
 }

@@ -39,15 +39,15 @@ impl SettingsTab {
 
     fn label(self) -> &'static str {
         match self {
-            SettingsTab::General => "General",
-            SettingsTab::Appearance => "Appearance",
-            SettingsTab::Terminal => "Terminal",
+            SettingsTab::General => tr("General"),
+            SettingsTab::Appearance => tr("Appearance"),
+            SettingsTab::Terminal => tr("Terminal"),
             SettingsTab::GitHub => "GitHub",
-            SettingsTab::Cloud => "Cloud",
+            SettingsTab::Cloud => tr("Cloud"),
             // Muxin for iPhone and Muxin for iPad: "iPhone & iPad" doesn't fit the row.
-            SettingsTab::Ipads => "Mobile",
-            SettingsTab::Prompts => "Prompts",
-            SettingsTab::Keyboard => "Keyboard",
+            SettingsTab::Ipads => tr("Mobile"),
+            SettingsTab::Prompts => tr("Prompts"),
+            SettingsTab::Keyboard => tr("Keyboard"),
         }
     }
 
@@ -103,7 +103,7 @@ pub struct SettingsPage {
 impl SettingsPage {
     pub fn new(engine: Arc<Engine>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let s = engine.settings();
-        let add = cx.new(|cx| TextInput::new(cx, "acme  or  acme/api").mono());
+        let add = cx.new(|cx| TextInput::new(cx, tr("acme  or  acme/api")).mono());
         let code_add = cx.new(|cx| TextInput::new(cx, "~/app").mono());
         let poll = cx.new(|cx| TextInput::new(cx, "20").mono().with_text(s.github_poll_seconds.to_string()));
         let scan = cx.new(|cx| TextInput::new(cx, "10").mono().with_text(s.github.scan_repos.to_string()));
@@ -260,7 +260,7 @@ impl SettingsPage {
                             Ok(_) => {
                                 this.add_result = Some((
                                     true,
-                                    format!("Watching {} · {} runner{} found", t.name, t.runners, if t.runners == 1 { "" } else { "s" }),
+                                    if t.runners == 1 { trf("Watching {name} · 1 runner found", &[("name", &t.name)]) } else { trf("Watching {name} · {n} runners found", &[("name", &t.name), ("n", &t.runners)]) },
                                     None,
                                 ));
                                 this.add.update(cx, |a, cx| a.set_text("", cx));
@@ -273,7 +273,7 @@ impl SettingsPage {
                         // A missing permission may have just been granted elsewhere: look again.
                         this.load_access(cx);
                     }
-                    Err(e) => this.add_result = Some((false, format!("The check failed: {e}"), None)),
+                    Err(e) => this.add_result = Some((false, trf("The check failed: {e}", &[("e", &e)]), None)),
                 }
                 cx.notify();
             });
@@ -302,12 +302,12 @@ impl SettingsPage {
         let folder = code_folder_path(&entry).to_string();
         let mut s = self.engine.settings();
         if s.code_folders.iter().any(|f| code_folder_path(f) == folder) {
-            self.code_note = Some((false, format!("{folder} is on the list already.")));
+            self.code_note = Some((false, trf("{folder} is on the list already.", &[("folder", &folder)])));
         } else {
             s.code_folders.push(entry);
             match self.engine.update_settings(s) {
                 Ok(_) => {
-                    self.code_note = Some((true, format!("Looking for checkouts in {folder} on your machines.")));
+                    self.code_note = Some((true, trf("Looking for checkouts in {folder} on your machines.", &[("folder", &folder)])));
                     self.code_add.update(cx, |i, cx| i.set_text("", cx));
                     self.rescan_checkouts();
                 }
@@ -362,7 +362,7 @@ impl SettingsPage {
                 let remove = entry.clone();
                 // "~:1": checkouts right in the home folder.
                 let label = match code_folder_path(entry) {
-                    "~" => "~ (its own folders)".to_string(),
+                    "~" => tr("~ (its own folders)").to_string(),
                     folder => folder.to_string(),
                 };
                 div()
@@ -382,7 +382,7 @@ impl SettingsPage {
                     .child(label)
                     .child(
                         Button::icon_only(("code-folder-remove", i), "x")
-                            .tooltip("Stop looking here")
+                            .tooltip(tr("Stop looking here"))
                             .on_click(cx.listener(move |this, _, _, cx| this.remove_code_folder(&remove, cx))),
                     )
                     .into_any_element()
@@ -397,7 +397,7 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Code folders", None))
+            .child(section_title(theme, tr("Code folders"), None))
             .child(
                 card(theme)
                     .w_full()
@@ -412,32 +412,32 @@ impl SettingsPage {
                             .items_center()
                             .gap(px(8.))
                             .child(div().flex().flex_col().flex_1().min_w(px(0.)).child(self.code_add.clone()))
-                            .child(Button::new("code-folder-add", "Add").icon("plus").on_click(cx.listener(|this, _, _, cx| this.add_code_folder(cx))))
+                            .child(Button::new("code-folder-add", tr("Add")).icon("plus").on_click(cx.listener(|this, _, _, cx| this.add_code_folder(cx))))
                             .when(!usual, |d| {
                                 d.child(
-                                    Button::new("code-folder-reset", "Usual folders")
+                                    Button::new("code-folder-reset", tr("Usual folders"))
                                         .style(ButtonStyle::Ghost)
-                                        .tooltip("Back to Muxin's own list: ~/Developer, ~/code, ~/src and the like")
+                                        .tooltip(tr("Back to Muxin's own list: ~/Developer, ~/code, ~/src and the like"))
                                         .on_click(cx.listener(|this, _, _, cx| this.reset_code_folders(cx))),
                                 )
                             }),
                     )
                     .children(self.code_note.as_ref().map(|(ok, text)| note(theme, if *ok { "circle-check" } else { "circle-alert" }, if *ok { theme.success } else { theme.error }, text.clone())))
                     .child(div().w_full().min_w(px(0.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(
-                        "Muxin's agent on each machine looks for git checkouts in these folders, a few levels deep. Work on it with an agent and Review with agent then work in a new worktree of a checkout found there, on its own branch, instead of a fresh clone.",
+                        tr("Muxin's agent on each machine looks for git checkouts in these folders, a few levels deep. Work on it with an agent and Review with agent then work in a new worktree of a checkout found there, on its own branch, instead of a fresh clone."),
                     )),
             )
     }
 
     fn save_intervals(&mut self, cx: &mut Context<Self>) {
         let num = |input: &Entity<TextInput>, what: &str| -> Result<u32, String> {
-            input.read(cx).text().trim().parse::<u32>().map_err(|_| format!("{what} must be a whole number."))
+            input.read(cx).text().trim().parse::<u32>().map_err(|_| trf("{what} must be a whole number.", &[("what", &what)]))
         };
         let parsed = (|| -> Result<Settings, String> {
             let mut s = self.engine.settings();
-            s.github_poll_seconds = num(&self.poll, "The GitHub poll interval")?;
-            s.github.scan_repos = num(&self.scan, "Repos to scan")?;
-            s.check_interval_minutes = num(&self.interval, "The check interval")?;
+            s.github_poll_seconds = num(&self.poll, tr("The GitHub poll interval"))?;
+            s.github.scan_repos = num(&self.scan, tr("Repos to scan"))?;
+            s.check_interval_minutes = num(&self.interval, tr("The check interval"))?;
             Ok(s)
         })();
         match parsed.and_then(|s| self.engine.update_settings(s)) {
@@ -470,13 +470,13 @@ impl SettingsPage {
                 .flex()
                 .items_center()
                 .gap(px(12.))
-                .child(note(theme, "triangle-alert", theme.warning, "Not signed in to GitHub.").w_auto().flex_none())
+                .child(note(theme, "triangle-alert", theme.warning, tr("Not signed in to GitHub.")).w_auto().flex_none())
                 .child(
-                    Button::new("gh-sign-in", "Sign in with GitHub")
+                    Button::new("gh-sign-in", tr("Sign in with GitHub"))
                         .style(ButtonStyle::Primary)
                         .on_click(|_, window, cx| window.dispatch_action(Box::new(super::root::SignInGitHub), cx)),
                 )
-                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Uses the GitHub CLI, or set GITHUB_TOKEN."))
+                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("Uses the GitHub CLI, or set GITHUB_TOKEN.")))
                 .into_any_element()
         } else {
             let who = s
@@ -484,12 +484,12 @@ impl SettingsPage {
                 .login
                 .clone()
                 .or_else(|| self.access.as_ref().and_then(|a| a.using.clone()))
-                .map(|l| format!("Signed in as {l}"))
-                .unwrap_or_else(|| "Token found".into());
+                .map(|l| trf("Signed in as {l}", &[("l", &l)]))
+                .unwrap_or_else(|| tr("Token found").into());
             let via = match s.github.token_source.as_str() {
-                "gh" => "using your gh login".to_string(),
+                "gh" => tr("using your gh login").to_string(),
                 "" => String::new(),
-                var => format!("from ${var}"),
+                var => trf("from ${var}", &[("var", &var)]),
             };
             note(theme, "circle-check", theme.success, format!("{who} {via}")).into_any_element()
         };
@@ -509,9 +509,9 @@ impl SettingsPage {
                 let (color, text) = match status {
                     Some(sc) if sc.error.is_some() => (theme.error, sc.error.clone().unwrap_or_default()),
                     Some(sc) if sc.synced_at.is_some() => {
-                        (theme.text_muted, format!("{} runner{}", sc.runners, if sc.runners == 1 { "" } else { "s" }))
+                        (theme.text_muted, if sc.runners == 1 { tr("1 runner").to_string() } else { trf("{n} runners", &[("n", &sc.runners)]) })
                     }
-                    _ => (theme.text_placeholder, "syncing…".to_string()),
+                    _ => (theme.text_placeholder, tr("syncing…").to_string()),
                 };
                 let hint = status.and_then(|sc| sc.hint.clone());
                 let remove = name.clone();
@@ -532,7 +532,7 @@ impl SettingsPage {
                             .child(div().flex_1().truncate().text_size(px(12.)).text_color(color).child(text))
                             .child(
                                 Button::icon_only(("scope-remove", i), "x")
-                                    .tooltip("Stop watching")
+                                    .tooltip(tr("Stop watching"))
                                     .on_click(cx.listener(move |this, _, _, cx| this.remove_scope(&remove, cx))),
                             ),
                     )
@@ -561,17 +561,17 @@ impl SettingsPage {
                         .flex_1()
                         .min_w(px(0.))
                         .gap(px(2.))
-                        .child(div().text_size(px(13.)).text_color(theme.text).child("Watching an organization's runners needs one more permission"))
-                        .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!(
-                            "Your GitHub login doesn't have admin:org yet. Granting it runs `{cmd}` in a terminal and finishes in your browser."
+                        .child(div().text_size(px(13.)).text_color(theme.text).child(tr("Watching an organization's runners needs one more permission")))
+                        .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(trf("Your GitHub login doesn't have admin:org yet. Granting it runs `{cmd}` in a terminal and finishes in your browser.",
+                            &[("cmd", &cmd)],
                         ))),
                 )
                 .child(
-                    Button::new("gh-grant", "Grant access")
+                    Button::new("gh-grant", tr("Grant access"))
                         .style(ButtonStyle::Primary)
                         .on_click(|_, window, cx| window.dispatch_action(Box::new(super::root::GrantGitHubAccess), cx)),
                 )
-                .child(Button::icon_only("gh-recheck", "refresh-cw").tooltip("Refresh").on_click(cx.listener(|this, _, _, cx| this.load_access(cx))))
+                .child(Button::icon_only("gh-recheck", "refresh-cw").tooltip(tr("Refresh")).on_click(cx.listener(|this, _, _, cx| this.load_access(cx))))
         });
         let chip = |id: (&'static str, usize), name: &str, cx: &mut Context<Self>| {
             let scope = name.to_string();
@@ -606,20 +606,20 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Watching", None))
+            .child(section_title(theme, tr("Watching"), None))
             .child(
                 div()
                     .w_full()
                     .text_size(px(12.5))
                     .text_color(theme.text_muted)
-                    .child("Live runner status and jobs come from the organizations and repositories you watch."),
+                    .child(tr("Live runner status and jobs come from the organizations and repositories you watch.")),
             )
             .child(account)
             .children(grant)
             .child(
                 card(theme)
                     .children(rows)
-                    .when(watched.is_empty(), |d| d.child(kit::empty_state(theme, "layers", "Not watching anything yet.")))
+                    .when(watched.is_empty(), |d| d.child(kit::empty_state(theme, "layers", tr("Not watching anything yet."))))
                     .child(
                         div()
                             .flex()
@@ -632,7 +632,7 @@ impl SettingsPage {
                             // row instead of overflowing it.
                             .child(div().flex().flex_col().flex_1().min_w(px(0.)).child(self.add.clone()))
                             .child(
-                                Button::new("scope-add", "Add")
+                                Button::new("scope-add", tr("Add"))
                                     .style(ButtonStyle::Primary)
                                     .icon("plus")
                                     .loading(self.testing)
@@ -655,7 +655,7 @@ impl SettingsPage {
                         .flex_wrap()
                         .items_center()
                         .gap(px(8.))
-                        .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child("Your organizations:"))
+                        .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(tr("Your organizations:")))
                         .children(my_orgs),
                 )
             })
@@ -665,7 +665,7 @@ impl SettingsPage {
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child("Found in runner configs:"))
+                        .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(tr("Found in runner configs:")))
                         .children(detected),
                 )
             })
@@ -695,16 +695,16 @@ impl SettingsPage {
         };
         let rows = if github {
             card(theme)
-                .child(row("Sync GitHub every", self.poll.clone(), "seconds", "Asks GitHub for runner and job status. Unchanged answers are free.", true))
-                .child(row("Scan recent repos for jobs", self.scan.clone(), "per org", "The most recently pushed repositories are checked for jobs.", false))
+                .child(row(tr("Sync GitHub every"), self.poll.clone(), tr("seconds"), tr("Asks GitHub for runner and job status. Unchanged answers are free."), true))
+                .child(row(tr("Scan recent repos for jobs"), self.scan.clone(), tr("per org"), tr("The most recently pushed repositories are checked for jobs."), false))
         } else {
-            card(theme).child(row("Check machines every", self.interval.clone(), "minutes", "A read-only check over ssh. 0: only when you ask.", true))
+            card(theme).child(row(tr("Check machines every"), self.interval.clone(), tr("minutes"), tr("A read-only check over ssh. 0: only when you ask."), true))
         };
         div()
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, if github { "Syncing" } else { "Machine checks" }, None))
+            .child(section_title(theme, if github { tr("Syncing") } else { tr("Machine checks") }, None))
             .child(rows)
             .child(
                 div()
@@ -712,11 +712,11 @@ impl SettingsPage {
                     .items_center()
                     .gap(px(10.))
                     .child(
-                        Button::new(if github { "save-sync" } else { "save-checks" }, "Save")
+                        Button::new(if github { "save-sync" } else { "save-checks" }, tr("Save"))
                             .style(ButtonStyle::Primary)
                             .on_click(cx.listener(|this, _, _, cx| this.save_intervals(cx))),
                     )
-                    .when(self.saved_at.is_some(), |d| d.child(div().text_size(px(12.)).text_color(theme.success).child("Saved")))
+                    .when(self.saved_at.is_some(), |d| d.child(div().text_size(px(12.)).text_color(theme.success).child(tr("Saved"))))
                     .children(self.save_error.clone().map(|e| div().text_size(px(12.)).text_color(theme.error).child(e))),
             )
     }
@@ -795,9 +795,9 @@ impl SettingsPage {
             .flex()
             .items_center()
             .gap(px(4.))
-            .child(preset("Compact", 1.15, cx))
-            .child(preset("Normal", 1.3, cx))
-            .child(preset("Relaxed", 1.5, cx))
+            .child(preset(tr("Compact"), 1.15, cx))
+            .child(preset(tr("Normal"), 1.3, cx))
+            .child(preset(tr("Relaxed"), 1.5, cx))
             .child(div().w(px(8.)))
             .child(stepper("term-line", format!("{line_height:.2}"), |a, d| a.terminal_line_height += d * 0.05, cx))
             .into_any_element();
@@ -805,7 +805,7 @@ impl SettingsPage {
             || (line_height - theme_mod::TERMINAL_LINE_HEIGHT).abs() > 0.01
             || a.terminal_font != super::terminal::DEFAULT_FONT;
         let reset = changed.then(|| {
-            Button::new("term-reset", "Reset").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| {
+            Button::new("term-reset", tr("Reset")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| {
                 theme_mod::update_terminal(cx, |a| {
                     a.terminal_font = super::terminal::DEFAULT_FONT.into();
                     a.terminal_font_size = theme_mod::TERMINAL_FONT_SIZE;
@@ -833,7 +833,7 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(12.))
-            .child(div().flex().items_center().child(section_title(theme, "Text and cursor", None)).child(div().flex_1()).children(reset))
+            .child(div().flex().items_center().child(section_title(theme, tr("Text and cursor"), None)).child(div().flex_1()).children(reset))
             .child(
                 card(theme)
                     .px(px(14.))
@@ -844,19 +844,19 @@ impl SettingsPage {
                             .items_start()
                             .gap(px(12.))
                             .py(px(8.))
-                            .child(div().w(px(110.)).flex_none().pt(px(6.)).text_size(px(12.5)).text_color(theme.text_muted).child("Font"))
+                            .child(div().w(px(110.)).flex_none().pt(px(6.)).text_size(px(12.5)).text_color(theme.text_muted).child(tr("Font")))
                             .child(div().flex_1().min_w(px(0.)).flex().flex_wrap().gap(px(6.)).children(font_chips)),
                     )
-                    .child(row("Text size", size_control, Some("⌘+ / ⌘− in a terminal")))
-                    .child(row("Line height", presets, None))
+                    .child(row(tr("Text size"), size_control, Some(tr("⌘+ / ⌘− in a terminal"))))
+                    .child(row(tr("Line height"), presets, None))
                     .child(row(
-                        "Cursor",
-                        kit::checkbox(theme, "term-blink", a.terminal_cursor_blink, "Blink", |on, _, cx| {
+                        tr("Cursor"),
+                        kit::checkbox(theme, "term-blink", a.terminal_cursor_blink, tr("Blink"), |on, _, cx| {
                             let on = *on;
                             theme_mod::update_terminal(cx, |a| a.terminal_cursor_blink = on)
                         })
                         .into_any_element(),
-                        Some("While the terminal has focus"),
+                        Some(tr("While the terminal has focus")),
                     )),
             )
             .child(preview)
@@ -895,9 +895,9 @@ impl SettingsPage {
             swatch_rows(swatches)
         };
         let modes = [
-            mode_button(Mode::System, "System", "monitor").into_any_element(),
-            mode_button(Mode::Light, "Light", "circle").into_any_element(),
-            mode_button(Mode::Dark, "Dark", "radio").into_any_element(),
+            mode_button(Mode::System, tr("System"), "monitor").into_any_element(),
+            mode_button(Mode::Light, tr("Light"), "circle").into_any_element(),
+            mode_button(Mode::Dark, tr("Dark"), "radio").into_any_element(),
         ];
         let dark_grid = grid(true, cx);
         let light_grid = grid(false, cx);
@@ -905,13 +905,13 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(12.))
-            .child(section_title(theme, "Theme", None))
+            .child(section_title(theme, tr("Theme"), None))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().flex_1().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child("Follow the system, or pin light or dark. Each has its own theme."))
+                    .child(div().flex_1().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(tr("Follow the system, or pin light or dark. Each has its own theme.")))
                     .child(
                         div()
                             .flex()
@@ -924,11 +924,11 @@ impl SettingsPage {
                             .children(modes),
                     ),
             )
-            .child(kit::label(theme, "Dark themes").text_size(px(12.)).text_color(theme.text_muted))
+            .child(kit::label(theme, tr("Dark themes")).text_size(px(12.)).text_color(theme.text_muted))
             .child(dark_grid)
-            .child(kit::label(theme, "Light themes").text_size(px(12.)).text_color(theme.text_muted))
+            .child(kit::label(theme, tr("Light themes")).text_size(px(12.)).text_color(theme.text_muted))
             .child(light_grid)
-            .child(kit::label(theme, "Icons").text_size(px(12.)).text_color(theme.text_muted))
+            .child(kit::label(theme, tr("Icons")).text_size(px(12.)).text_color(theme.text_muted))
             .child(self.icon_styles(theme, &appearance, cx))
     }
 
@@ -975,26 +975,26 @@ impl SettingsPage {
     /// Tailscale on this computer: whether it's on, and what Muxin uses it for.
     fn tailscale_section(&self, theme: &Theme) -> Option<impl IntoElement> {
         let t = self.snapshot.tailscale.clone()?;
-        let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
+        let here = if cfg!(target_os = "macos") { tr("this Mac") } else { tr("this computer") };
         let on_it = self.snapshot.machines.iter().filter(|m| m.tailnet.is_some()).count();
         let (glyph, color, title, detail) = if t.running {
             (
                 "circle-check",
                 theme.success,
                 match &t.tailnet {
-                    Some(n) => format!("Connected to {n}'s tailnet"),
-                    None => "Connected to your tailnet".into(),
+                    Some(n) => trf("Connected to {n}'s tailnet", &[("n", &n)]),
+                    None => tr("Connected to your tailnet").into(),
                 },
                 match on_it {
-                    0 => "None of your machines are on it yet.".to_string(),
-                    1 => "1 machine on it, reachable from anywhere.".to_string(),
-                    n => format!("{n} machines on it, reachable from anywhere."),
+                    0 => tr("None of your machines are on it yet.").to_string(),
+                    1 => tr("1 machine on it, reachable from anywhere.").to_string(),
+                    n => trf("{n} machines on it, reachable from anywhere.", &[("n", &n)]),
                 },
             )
         } else if t.state == "NeedsLogin" {
-            ("circle-alert", theme.warning, format!("Tailscale is signed out on {here}"), "Sign in to reach machines away from home.".to_string())
+            ("circle-alert", theme.warning, trf("Tailscale is signed out on {here}", &[("here", &here)]), tr("Sign in to reach machines away from home.").to_string())
         } else {
-            ("circle-alert", theme.warning, format!("Tailscale is off on {here}"), "Turn it on to reach machines away from home.".to_string())
+            ("circle-alert", theme.warning, trf("Tailscale is off on {here}", &[("here", &here)]), tr("Turn it on to reach machines away from home.").to_string())
         };
         Some(
             div()
@@ -1021,7 +1021,7 @@ impl SettingsPage {
                                 .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(detail)),
                         )
                         .when(!t.running && super::can_open_tailscale(), |d| {
-                            d.child(Button::new("ts-open", "Open Tailscale").on_click(|_, _, _| super::open_tailscale()))
+                            d.child(Button::new("ts-open", tr("Open Tailscale")).on_click(|_, _, _| super::open_tailscale()))
                         }),
                 ),
         )
@@ -1031,32 +1031,32 @@ impl SettingsPage {
     fn clipboard_section(&self, theme: &Theme) -> impl IntoElement {
         let on = self.engine.settings().share_clipboard;
         let sharing: Vec<String> = self.snapshot.machines.iter().filter(|m| crate::fleet::clipboard::sharing(&m.id)).map(|m| m.name.clone()).collect();
-        let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
+        let here = if cfg!(target_os = "macos") { tr("this Mac") } else { tr("this computer") };
         // Linux doesn't say which copies are a password manager's (see pasteboard_state).
-        let passwords = if cfg!(target_os = "linux") { "Passwords copied here are shared too." } else { "Passwords from a password manager aren't shared." };
+        let passwords = if cfg!(target_os = "linux") { tr("Passwords copied here are shared too.") } else { tr("Passwords from a password manager aren't shared.") };
         let status = match (on, sharing.as_slice()) {
-            (false, _) => "Off.".to_string(),
-            (true, []) => "No machine with a desktop is connected right now.".to_string(),
-            (true, names) => format!("Shared with {} now.", some_names(names)),
+            (false, _) => tr("Off.").to_string(),
+            (true, []) => tr("No machine with a desktop is connected right now.").to_string(),
+            (true, names) => trf("Shared with {machines} now.", &[("machines", &some_names(names))]),
         };
         let engine = self.engine.clone();
         div()
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Clipboard", None))
+            .child(section_title(theme, tr("Clipboard"), None))
             .child(
                 card(theme)
                     .px(px(14.))
                     .py(px(12.))
                     .gap(px(6.))
-                    .child(kit::checkbox(theme, "share-clipboard", on, "Share the clipboard with your machines", move |on, _, cx| {
+                    .child(kit::checkbox(theme, "share-clipboard", on, tr("Share the clipboard with your machines"), move |on, _, cx| {
                         let mut s = engine.settings();
                         s.share_clipboard = *on;
                         let _ = engine.update_settings(s);
                         cx.refresh_windows();
                     }))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("Copy on {here}, paste on your machines, and back. {passwords}")))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(trf("Copy on {here}, paste on your machines, and back. {passwords}", &[("here", &here), ("passwords", &passwords)])))
                     .child(div().text_size(px(11.5)).text_color(theme.text_muted).child(status)),
             )
     }
@@ -1069,7 +1069,7 @@ impl SettingsPage {
         let examples = super::desktop_keys::examples();
         // (Short lines: text here doesn't wrap.)
         let permission = match crate::capture::ready() {
-            crate::capture::Ready::NeedsPermission => Some("macOS asks to allow Muxin under Accessibility: click the desktop's toolbar."),
+            crate::capture::Ready::NeedsPermission => Some(tr("macOS asks to allow Muxin under Accessibility: click the desktop's toolbar.")),
             _ => None,
         };
         let engine = self.engine.clone();
@@ -1077,20 +1077,20 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Desktops", None))
+            .child(section_title(theme, tr("Desktops"), None))
             .child(
                 card(theme)
                     .px(px(14.))
                     .py(px(12.))
                     .gap(px(6.))
-                    .child(kit::checkbox(theme, "desktop-shortcuts", on, "Send this computer's shortcuts to the machine", move |on, _, cx| {
+                    .child(kit::checkbox(theme, "desktop-shortcuts", on, tr("Send this computer's shortcuts to the machine"), move |on, _, cx| {
                         let mut s = engine.settings();
                         s.desktop_shortcuts = *on;
                         let _ = engine.update_settings(s);
                         cx.refresh_windows();
                     }))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("While a desktop has the keyboard, {examples} go to it.")))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("{release} by themselves gives them back, and takes them again.")))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(trf("While a desktop has the keyboard, {examples} go to it.", &[("examples", &examples)])))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(trf("{release} by themselves gives them back, and takes them again.", &[("release", &release)])))
                     .children(permission.map(|p| div().text_size(px(11.5)).text_color(theme.text_muted).child(p))),
             )
     }
@@ -1114,10 +1114,10 @@ impl SettingsPage {
             }
         }
         let status = match (on, with.as_slice()) {
-            (false, []) => "Off.".to_string(),
-            (false, names) => format!("Taking them out on {}…", some_names(names)),
-            (true, []) => "On. None of your machines has one of these agents yet.".to_string(),
-            (true, names) => format!("On for {}.", some_names(names)),
+            (false, []) => tr("Off.").to_string(),
+            (false, names) => trf("Taking them out on {machines}…", &[("machines", &some_names(names))]),
+            (true, []) => tr("On. None of your machines has one of these agents yet.").to_string(),
+            (true, names) => trf("On for {machines}.", &[("machines", &some_names(names))]),
         };
         let resume = self.engine.settings().agents.resume;
         let helpers = self.engine.settings().agents.helpers;
@@ -1129,13 +1129,13 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Agents", None))
+            .child(section_title(theme, tr("Agents"), None))
             .child(
                 card(theme)
                     .px(px(14.))
                     .py(px(12.))
                     .gap(px(6.))
-                    .child(kit::checkbox(theme, "agent-hooks", on, "Let agents say when they need you", move |on, _, cx| {
+                    .child(kit::checkbox(theme, "agent-hooks", on, tr("Let agents say when they need you"), move |on, _, cx| {
                         let mut s = engine.settings();
                         s.agents.hooks = *on;
                         let _ = engine.update_settings(s);
@@ -1143,35 +1143,35 @@ impl SettingsPage {
                     }))
                     // Short lines: text in Settings doesn't wrap (GPUI measures it before the card has a width).
                     .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Claude Code, Codex, Copilot CLI, Qwen Code and Kimi Code."))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Muxin adds a small hook to their settings on your machines. Turning this off takes it out."))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("Muxin adds a small hook to their settings on your machines. Turning this off takes it out.")))
                     .child(div().text_size(px(11.5)).text_color(theme.text_muted).child(status))
                     .children(trouble.into_iter().take(3).map(|t| div().w_full().min_w(px(0.)).text_size(px(11.5)).text_color(theme.warning).child(t)))
                     .child(div().h(px(6.)))
-                    .child(kit::checkbox(theme, "agent-resume", resume, "Continue agents' conversations after a restart", move |on, _, cx| {
+                    .child(kit::checkbox(theme, "agent-resume", resume, tr("Continue agents' conversations after a restart"), move |on, _, cx| {
                         let mut s = engine2.settings();
                         s.agents.resume = *on;
                         let _ = engine2.update_settings(s);
                         cx.refresh_windows();
                     }))
                     .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(
-                        "Sessions come back after a machine restarts. With this on, those agents continue their conversation. Off, they start a new one.",
+                        tr("Sessions come back after a machine restarts. With this on, those agents continue their conversation. Off, they start a new one."),
                     ))
                     .child(div().h(px(6.)))
-                    .child(kit::checkbox(theme, "agent-helpers", helpers, "Agents may start helper sessions", move |on, _, cx| {
+                    .child(kit::checkbox(theme, "agent-helpers", helpers, tr("Agents may start helper sessions"), move |on, _, cx| {
                         let mut s = engine3.settings();
                         s.agents.helpers = *on;
                         let _ = engine3.update_settings(s);
                         cx.refresh_windows();
                     }))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("An agent in a session can start another one to help with its task, and wait for its answer."))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Helpers show under it and end when it does. Off, Muxin says no when an agent asks."))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("An agent in a session can start another one to help with its task, and wait for its answer.")))
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("Helpers show under it and end when it does. Off, Muxin says no when an agent asks.")))
                     .child(div().h(px(6.)))
-                    .child(kit::checkbox(theme, "sidebar-agents", in_sidebar, "Show agents in the sidebar", move |on, _, cx| {
+                    .child(kit::checkbox(theme, "sidebar-agents", in_sidebar, tr("Show agents in the sidebar"), move |on, _, cx| {
                         let on = *on;
                         theme_mod::remember(cx, |a| a.sidebar_agents = on);
                         cx.refresh_windows();
                     }))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Every agent session on your machines in one list, the ones that need you first.")),
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("Every agent session on your machines in one list, the ones that need you first."))),
             )
     }
 
@@ -1180,19 +1180,19 @@ impl SettingsPage {
     fn tray_section(&self, theme: &Theme, cx: &App) -> impl IntoElement {
         let on = cx.global::<Appearance>().tray;
         let notifications = cx.global::<Appearance>().notifications;
-        let (title, label) = if cfg!(target_os = "macos") { ("Menu bar", "Show Muxin in the menu bar") } else { ("Tray", "Keep running in the tray when the window closes") };
+        let (title, label) = if cfg!(target_os = "macos") { (tr("Menu bar"), tr("Show Muxin in the menu bar")) } else { (tr("Tray"), tr("Keep running in the tray when the window closes")) };
         let hint = if cfg!(target_os = "macos") {
-            "A dot shows when a session needs you or is done. Its menu opens that session or brings the window back."
+            tr("A dot shows when a session needs you or is done. Its menu opens that session or brings the window back.")
         } else if !on {
-            "Closing the window quits Muxin."
+            tr("Closing the window quits Muxin.")
         } else if !super::tray::available() {
             if cfg!(target_os = "linux") {
-                "This desktop has no tray, so closing the window quits Muxin. On GNOME, the AppIndicator extension adds one."
+                tr("This desktop has no tray, so closing the window quits Muxin. On GNOME, the AppIndicator extension adds one.")
             } else {
-                "The icon couldn't be added, so closing the window quits Muxin."
+                tr("The icon couldn't be added, so closing the window quits Muxin.")
             }
         } else {
-            "Machine checks, connections and port forwards carry on. The icon brings the window back, with a dot when a session needs you or is done."
+            tr("Machine checks, connections and port forwards carry on. The icon brings the window back, with a dot when a session needs you or is done.")
         };
         let engine = self.engine.clone();
         div()
@@ -1223,16 +1223,16 @@ impl SettingsPage {
                     }))
                     .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(hint))
                     .child(div().h(px(6.)))
-                    .child(kit::checkbox(theme, "notifications", notifications, "Notify me when a session needs me or is done", move |on, _, cx| {
+                    .child(kit::checkbox(theme, "notifications", notifications, tr("Notify me when a session needs me or is done"), move |on, _, cx| {
                         let on = *on;
                         theme_mod::remember(cx, |a| a.notifications = on);
                         super::notify::set_enabled(on);
                         cx.refresh_windows();
                     }))
                     .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(if cfg!(target_os = "macos") {
-                        "Click one to open that session. System Settings › Notifications › Muxin sets how they show."
+                        tr("Click one to open that session. System Settings › Notifications › Muxin sets how they show.")
                     } else {
-                        "Click one to open that session."
+                        tr("Click one to open that session.")
                     })),
             )
     }
@@ -1246,20 +1246,20 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Connections", None))
+            .child(section_title(theme, tr("Connections"), None))
             .child(
                 card(theme)
                     .px(px(14.))
                     .py(px(12.))
                     .gap(px(6.))
-                    .child(kit::checkbox(theme, "connect-directly", on, "Connect to new machines directly", move |on, _, cx| {
+                    .child(kit::checkbox(theme, "connect-directly", on, tr("Connect to new machines directly"), move |on, _, cx| {
                         let mut s = engine.settings();
                         s.connect_directly = *on;
                         let _ = engine.update_settings(s);
                         cx.refresh_windows();
                     }))
                     // Short lines: Settings text doesn't wrap.
-                    .children(["Without ssh in between, terminals and the desktop respond faster.", "Muxin's agent runs there as a service of yours, listening on UDP.", "Machines you already have are asked about once."].map(|line| {
+                    .children([tr("Without ssh in between, terminals and the desktop respond faster."), tr("Muxin's agent runs there as a service of yours, listening on UDP."), tr("Machines you already have are asked about once.")].map(|line| {
                         div().text_size(px(11.5)).text_color(theme.text_placeholder).child(line)
                     })),
             )
@@ -1268,7 +1268,7 @@ impl SettingsPage {
                     .px(px(14.))
                     .py(px(12.))
                     .gap(px(6.))
-                    .child(kit::checkbox(theme, "wake-notices", wakes, "Let sleeping Macs tell Muxin when they wake", move |on, _, cx| {
+                    .child(kit::checkbox(theme, "wake-notices", wakes, tr("Let sleeping Macs tell Muxin when they wake"), move |on, _, cx| {
                         let mut s = engine2.settings();
                         s.wake_notices = *on;
                         let _ = engine2.update_settings(s);
@@ -1276,9 +1276,9 @@ impl SettingsPage {
                     }))
                     // Short lines: Settings text doesn't wrap.
                     .children([
-                        "Muxin leaves a Mac that's asleep alone, so nothing it sends wakes it.",
-                        "On: its agent tells Muxin when it wakes, and Muxin doesn't look meanwhile.",
-                        "Off: Muxin looks at each check, which wakes the Mac for a moment.",
+                        tr("Muxin leaves a Mac that's asleep alone, so nothing it sends wakes it."),
+                        tr("On: its agent tells Muxin when it wakes, and Muxin doesn't look meanwhile."),
+                        tr("Off: Muxin looks at each check, which wakes the Mac for a moment."),
                     ]
                     .map(|line| div().text_size(px(11.5)).text_color(theme.text_placeholder).child(line))),
             )
@@ -1291,19 +1291,19 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Updates", None))
+            .child(section_title(theme, tr("Updates"), None))
             .child(
                 card(theme)
                     .px(px(14.))
                     .py(px(12.))
                     .gap(px(6.))
-                    .child(kit::checkbox(theme, "check-updates", on, "Tell me when a new version is out", move |on, _, cx| {
+                    .child(kit::checkbox(theme, "check-updates", on, tr("Tell me when a new version is out"), move |on, _, cx| {
                         let mut s = engine.settings();
                         s.check_updates = *on;
                         let _ = engine.update_settings(s);
                         cx.refresh_windows();
                     }))
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Muxin asks GitHub for its latest release when it opens and twice a day. Nothing about you is sent.")),
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("Muxin asks GitHub for its latest release when it opens and twice a day. Nothing about you is sent."))),
             )
     }
 
@@ -1354,12 +1354,12 @@ impl SettingsPage {
     fn editor_section(&self, theme: &Theme) -> impl IntoElement {
         let chosen = self.engine.settings().editor;
         let installed = crate::fleet::editor::installed();
-        let mut options: Vec<(String, String)> = vec![(String::new(), "First installed".into())];
+        let mut options: Vec<(String, String)> = vec![(String::new(), tr("First installed").into())];
         options.extend(installed.iter().map(|e| (e.id.to_string(), e.name.to_string())));
         let detail = if installed.is_empty() {
-            "No editor found: Muxin opens folders in Zed, Cursor or VS Code (with Remote - SSH).".to_string()
+            tr("No editor found: Muxin opens folders in Zed, Cursor or VS Code (with Remote - SSH).").to_string()
         } else {
-            "Open in editor opens a machine’s folder over ssh in the editor you pick from its list. The one chosen here comes first, and `muxin edit` uses it.".to_string()
+            tr("Open in editor opens a machine’s folder over ssh in the editor you pick from its list. The one chosen here comes first, and `muxin edit` uses it.").to_string()
         };
         // Full width, so its wrapped text is measured at that width (else the
         // section below starts a line too early).
@@ -1368,7 +1368,7 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Editor", None))
+            .child(section_title(theme, tr("Editor"), None))
             .child(
                 card(theme)
                     .w_full()
@@ -1413,13 +1413,13 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Machines file", None))
+            .child(section_title(theme, tr("Machines file"), None))
             .child(
                 card(theme)
                     .p(px(14.))
                     .gap(px(10.))
                     .child(div().w_full().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(
-                        "Machines and the runners they should host live in config.toml. Muxin edits it when you add machines or install runners, and keeps your comments.",
+                        tr("Machines and the runners they should host live in config.toml. Muxin edits it when you add machines or install runners, and keeps your comments."),
                     ))
                     .child(
                         div()
@@ -1428,8 +1428,8 @@ impl SettingsPage {
                             .gap(px(8.))
                             .child(div().flex_1().truncate().font_family(mono_font()).text_size(px(12.5)).child(shown))
                             .when(!self.snapshot.demo, |d| {
-                                d.child(Button::new("inv-open", "Open").icon("external-link").on_click(move |_, _, cx| cx.open_with_system(&path)))
-                                    .child(Button::new("inv-reveal", "Reveal").icon("folder-open").on_click(move |_, _, cx| cx.reveal_path(&reveal)))
+                                d.child(Button::new("inv-open", tr("Open")).icon("external-link").on_click(move |_, _, cx| cx.open_with_system(&path)))
+                                    .child(Button::new("inv-reveal", tr("Reveal")).icon("folder-open").on_click(move |_, _, cx| cx.reveal_path(&reveal)))
                             }),
                     ),
             )
@@ -1549,7 +1549,7 @@ impl SettingsPage {
             .enumerate()
             .map(|(i, p)| chip(SharedString::from(format!("sc-preset-{}", p.name)), p.name, in_use == Some(p.name)).on_click(cx.listener(move |this, _, _, cx| this.use_preset(i, cx))).into_any_element())
             .collect();
-        let preset_row = row("Keys like".into()).child(div().flex().gap(px(4.)).children(presets));
+        let preset_row = row(tr("Keys like").into()).child(div().flex().gap(px(4.)).children(presets));
 
         // ⌘1…⌘9: one modifier for all nine; the sessions' likewise.
         let group_row = |group: &'static str, label: String, cx: &mut Context<Self>| {
@@ -1566,13 +1566,13 @@ impl SettingsPage {
             row(label.into()).child(div().flex().gap(px(4.)).children(options))
         };
         let machines_label = match shortcuts::machine_keys(cx, 1) {
-            Some(k) => format!("Go to machine 1–9 ({} …)", shortcuts::label(&k)),
-            None => "Go to machine 1–9".to_string(),
+            Some(k) => trf("Go to machine 1–9 ({keys} …)", &[("keys", &shortcuts::label(&k))]),
+            None => tr("Go to machine 1–9").to_string(),
         };
         let machines = group_row(shortcuts::MACHINES, machines_label, cx);
         let sessions_label = match shortcuts::group_keys(cx, shortcuts::SESSIONS, 1) {
-            Some(k) => format!("Go to session 1–9 of the machine on screen ({} …)", shortcuts::label(&k)),
-            None => "Go to session 1–9 of the machine on screen".to_string(),
+            Some(k) => trf("Go to session 1–9 of the machine on screen ({keys} …)", &[("keys", &shortcuts::label(&k))]),
+            None => tr("Go to session 1–9 of the machine on screen").to_string(),
         };
         let sessions = group_row(shortcuts::SESSIONS, sessions_label, cx);
 
@@ -1597,22 +1597,22 @@ impl SettingsPage {
                     .font_family(mono_font())
                     .text_size(px(12.))
                     .map(|d| match (recording, keys.is_empty()) {
-                        (true, _) => d.border_color(theme.accent).bg(theme.accent.opacity(0.12)).text_color(theme.text_accent).child("Press keys…"),
-                        (false, true) => d.border_color(theme.border_variant).bg(theme.element).text_color(theme.text_placeholder).child("None"),
+                        (true, _) => d.border_color(theme.accent).bg(theme.accent.opacity(0.12)).text_color(theme.text_accent).child(tr("Press keys…")),
+                        (false, true) => d.border_color(theme.border_variant).bg(theme.element).text_color(theme.text_placeholder).child(tr("None")),
                         (false, false) => d.border_color(theme.border_variant).bg(theme.element).text_color(theme.text).child(keys.clone()),
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.record(id, cx)));
                 let reset = if shortcuts::changed(cx, sc.id) {
-                    Button::icon_only(("sc-reset", i), "rotate-ccw").tooltip("Back to the default").on_click(cx.listener(move |this, _, _, cx| this.reset_shortcut(id, cx))).into_any_element()
+                    Button::icon_only(("sc-reset", i), "rotate-ccw").tooltip(tr("Back to the default")).on_click(cx.listener(move |this, _, _, cx| this.reset_shortcut(id, cx))).into_any_element()
                 } else {
                     div().w(px(26.)).into_any_element()
                 };
                 // The reset button (or its room) before the keys, so they end
                 // at the right edge like the chips above.
-                row(sc.label.into()).child(reset).child(chip).into_any_element()
+                row(tr(sc.label).into()).child(reset).child(chip).into_any_element()
             })
             .collect();
-        let fixed = row("Terminal text size".into()).child(kit::kbd(theme, "⌘+  ⌘−  ⌘0"));
+        let fixed = row(tr("Terminal text size").into()).child(kit::kbd(theme, "⌘+  ⌘−  ⌘0"));
 
         div()
             .flex()
@@ -1622,13 +1622,13 @@ impl SettingsPage {
                 div()
                     .flex()
                     .items_center()
-                    .child(section_title(theme, "Shortcuts", None))
+                    .child(section_title(theme, tr("Shortcuts"), None))
                     .child(div().flex_1())
                     .when(any_changed, |d| {
-                        d.child(Button::new("sc-reset-all", "Reset all").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, _, cx| this.reset_all_shortcuts(cx))))
+                        d.child(Button::new("sc-reset-all", tr("Reset all")).style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, _, cx| this.reset_all_shortcuts(cx))))
                     }),
             )
-            .child(div().text_size(px(12.5)).text_color(theme.text_placeholder).child(if cfg!(target_os = "macos") { "Hold ⌘ or ⌃ to see them anywhere." } else { "Hold Ctrl to see them anywhere." }))
+            .child(div().text_size(px(12.5)).text_color(theme.text_placeholder).child(if cfg!(target_os = "macos") { tr("Hold ⌘ or ⌃ to see them anywhere.") } else { tr("Hold Ctrl to see them anywhere.") }))
             .children(self.shortcut_note.clone().map(|n| note(theme, "info", theme.info, n)))
             .child(
                 card(theme)
@@ -1640,7 +1640,7 @@ impl SettingsPage {
                             .pb(px(6.))
                             .text_size(px(12.))
                             .text_color(theme.text_placeholder)
-                            .child("herdr's keys where Muxin does the same: a space is a machine here, a tab a session.")
+                            .child(tr("herdr's keys where Muxin does the same: a space is a machine here, a tab a session."))
                     }))
                     .child(div().h(px(1.)).my(px(4.)).bg(theme.border_variant))
                     .child(machines)
@@ -1696,13 +1696,13 @@ impl SettingsPage {
                 self.recording = None;
             }
             _ => match shortcuts::from_press(k) {
-                None => self.shortcut_note = Some(if cfg!(target_os = "macos") { "Add ⌘, ⌃ or ⌥." } else { "Add Ctrl or Alt." }.into()),
+                None => self.shortcut_note = Some(if cfg!(target_os = "macos") { tr("Add ⌘, ⌃ or ⌥.") } else { tr("Add Ctrl or Alt.") }.into()),
                 Some(keys) => match shortcuts::used_by(cx, &keys, id) {
-                    Some((group, what)) if shortcuts::is_group(group) => self.shortcut_note = Some(format!("{} goes to {what}.", shortcuts::label(&keys))),
+                    Some((group, what)) if shortcuts::is_group(group) => self.shortcut_note = Some(trf("{keys} goes to {what}.", &[("keys", &shortcuts::label(&keys)), ("what", &what)])),
                     taken => {
                         if let Some((other, what)) = taken {
                             shortcuts::set(cx, other, "");
-                            self.shortcut_note = Some(format!("Taken from {what}."));
+                            self.shortcut_note = Some(trf("Taken from {what}.", &[("what", &what)]));
                         }
                         shortcuts::set(cx, id, &keys);
                         shortcuts::apply(cx);
@@ -1720,13 +1720,13 @@ impl SettingsPage {
         self.shortcut_note = None;
         match shortcuts::used_by(cx, default, id) {
             Some((group, what)) if shortcuts::is_group(group) => {
-                self.shortcut_note = Some(format!("{} goes to {what}.", shortcuts::label(default)));
+                self.shortcut_note = Some(trf("{keys} goes to {what}.", &[("keys", &shortcuts::label(default)), ("what", &what)]));
                 cx.notify();
                 return;
             }
             Some((other, what)) => {
                 shortcuts::set(cx, other, "");
-                self.shortcut_note = Some(format!("Taken from {what}."));
+                self.shortcut_note = Some(trf("Taken from {what}.", &[("what", &what)]));
             }
             None => {}
         }
@@ -1767,7 +1767,7 @@ impl SettingsPage {
             }
         }
         shortcuts::apply(cx);
-        self.shortcut_note = (!freed.is_empty()).then(|| format!("Removed from {}.", freed.join(", ")));
+        self.shortcut_note = (!freed.is_empty()).then(|| trf("Removed from {list}.", &[("list", &freed.join(", "))]));
         cx.notify();
     }
 }
@@ -1811,7 +1811,7 @@ pub(super) fn some_names(names: &[String]) -> String {
     const SHOWN: usize = 3;
     match names.len() {
         n if n <= SHOWN => names.join(", "),
-        n => format!("{} and {} more", names[..SHOWN].join(", "), n - SHOWN),
+        n => trf("{names} and {n} more", &[("names", &names[..SHOWN].join(", ")), ("n", &(n - SHOWN))]),
     }
 }
 
@@ -1825,12 +1825,12 @@ fn hint_line(theme: &Theme, i: usize, hint: String) -> impl IntoElement {
         .gap(px(6.))
         .pl(px(24.))
         .child(mono(hint).text_size(px(12.)).px(px(6.)).py(px(2.)).rounded(crate::ui::kit::corner(4.)).bg(theme.element).text_color(theme.text_muted))
-        .child(Button::icon_only(("hint-copy", i), "copy").tooltip("Copy").on_click(move |_, _, cx| {
+        .child(Button::icon_only(("hint-copy", i), "copy").tooltip(tr("Copy")).on_click(move |_, _, cx| {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))
         }))
         .when(grant, |d| {
             d.child(
-                Button::new(("hint-grant", i), "Grant access")
+                Button::new(("hint-grant", i), tr("Grant access"))
                     .style(ButtonStyle::Primary)
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(super::root::GrantGitHubAccess), cx)),
             )

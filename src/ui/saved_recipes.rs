@@ -3,6 +3,7 @@
 //! machine: pick one to apply once the new machine answers.
 
 use std::sync::Arc;
+use crate::ui::i18n::{tr, trf};
 
 use gpui::{AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, SharedString, Subscription, Window, div, prelude::*, px};
 
@@ -37,7 +38,7 @@ impl RecipeDialog {
     /// Save `components` as a new recipe, or rename the one called `renaming` (its components).
     pub fn new(engine: Arc<Engine>, renaming: Option<String>, components: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let current = renaming.clone().unwrap_or_default();
-        let name = cx.new(|cx| TextInput::new(cx, "e.g. Agent CLIs").with_text(current).selected());
+        let name = cx.new(|cx| TextInput::new(cx, tr("e.g. Agent CLIs")).with_text(current).selected());
         let sub = cx.subscribe_in(&name, window, |this: &mut Self, _, e: &InputEvent, _, cx| match e {
             InputEvent::Submit => this.submit(cx),
             InputEvent::Cancel => cx.emit(DialogEvent::Dismissed),
@@ -69,14 +70,14 @@ impl Render for RecipeDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (title, intro, save) = match &self.renaming {
-            Some(_) => ("Rename recipe", format!("Only its name changes. It still installs {}.", names(&self.components)), "Rename"),
-            None => ("Save as recipe", format!("{}, and what they need. Apply it to another machine from its page, or as you add one.", names(&self.components)), "Save recipe"),
+            Some(_) => (tr("Rename recipe"), trf("Only its name changes. It still installs {components}.", &[("components", &names(&self.components))]), tr("Rename")),
+            None => (tr("Save as recipe"), trf("{components}, and what they need. Apply it to another machine from its page, or as you add one.", &[("components", &names(&self.components))]), tr("Save recipe")),
         };
         frame(&theme, title, Some(intro.into()))
-            .child(field(&theme, "Name", self.name.clone(), None))
+            .child(field(&theme, tr("Name"), self.name.clone(), None))
             .children(error_line(&theme, &self.error))
             .child(footer(vec![
-                Button::new("rc-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                Button::new("rc-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
                 Button::new("rc-save", save).style(ButtonStyle::Primary).key_hint("↵").on_click(cx.listener(|this, _, _, cx| this.submit(cx))).into_any_element(),
             ]))
     }
@@ -101,9 +102,9 @@ impl Root {
     fn confirm_delete_recipe(&mut self, recipe: SavedRecipe, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = cx.new(|cx| {
             ConfirmDialog::new(
-                format!("Delete {}?", recipe.name),
-                format!("It's taken out of your saved recipes: {}. Nothing changes on any machine.", names(&recipe.components)),
-                "Delete recipe",
+                trf("Delete {name}?", &[("name", &recipe.name)]),
+                trf("It's taken out of your saved recipes: {components}. Nothing changes on any machine.", &[("components", &names(&recipe.components))]),
+                tr("Delete recipe"),
                 None,
                 move |_, engine| engine.edit_saved_recipes(|list| saved::remove(list, &recipe.name)).map(|_| None),
                 self.engine.clone(),
@@ -130,7 +131,7 @@ impl Root {
                 let (known, unknown) = r.split(catalog);
                 let mut what = names(&known);
                 if !unknown.is_empty() {
-                    what.push_str(&format!(" (and {}, which this Muxin doesn't have)", unknown.join(", ")));
+                    what.push_str(&trf(" (and {unknown}, which this Muxin doesn't have)", &[("unknown", &unknown.join(", "))]));
                 }
                 let (mid, apply, rename, delete) = (m.id.clone(), r.clone(), r.clone(), r.clone());
                 div()
@@ -142,13 +143,13 @@ impl Root {
                     .py(px(3.))
                     .child(div().flex_none().max_w(px(180.)).truncate().text_size(px(12.5)).child(r.name.clone()))
                     .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(11.5)).text_color(theme.text_muted).child(what))
-                    .child(Button::new(("m-rs-apply", i), "Apply").disabled(busy || known.is_empty()).on_click(cx.listener(move |this, _, _, cx| this.apply_saved_recipe(&mid, &apply, cx))))
-                    .child(Button::icon_only(("m-rs-rename", i), "pencil").tooltip("Rename").on_click(cx.listener(move |this, _, window, cx| this.show_recipe_dialog(Some(rename.name.clone()), rename.components.clone(), window, cx))))
-                    .child(Button::icon_only(("m-rs-delete", i), "trash-2").tooltip("Delete").on_click(cx.listener(move |this, _, window, cx| this.confirm_delete_recipe(delete.clone(), window, cx))))
+                    .child(Button::new(("m-rs-apply", i), tr("Apply")).disabled(busy || known.is_empty()).on_click(cx.listener(move |this, _, _, cx| this.apply_saved_recipe(&mid, &apply, cx))))
+                    .child(Button::icon_only(("m-rs-rename", i), "pencil").tooltip(tr("Rename")).on_click(cx.listener(move |this, _, window, cx| this.show_recipe_dialog(Some(rename.name.clone()), rename.components.clone(), window, cx))))
+                    .child(Button::icon_only(("m-rs-delete", i), "trash-2").tooltip(tr("Delete")).on_click(cx.listener(move |this, _, window, cx| this.confirm_delete_recipe(delete.clone(), window, cx))))
                     .into_any_element()
             })
             .collect();
-        let title = div().px(px(14.)).pt(px(8.)).pb(px(2.)).text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(theme.text_muted).child("Saved recipes");
+        let title = div().px(px(14.)).pt(px(8.)).pb(px(2.)).text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(theme.text_muted).child(tr("Saved recipes"));
         Some(div().flex().flex_col().pb(px(6.)).border_t_1().border_color(theme.border_variant).child(title).children(rows).into_any_element())
     }
 
@@ -213,7 +214,7 @@ impl RecipePick {
                 .hover(|st| st.bg(theme.element_hover))
                 .child(text)
         };
-        let mut choices: Vec<AnyElement> = vec![choice(("am-recipe", 0), "None".into(), self.picked.is_none()).on_click(cx.listener(|this, _, _, cx| {
+        let mut choices: Vec<AnyElement> = vec![choice(("am-recipe", 0), tr("None").into(), self.picked.is_none()).on_click(cx.listener(|this, _, _, cx| {
             this.recipe.picked = None;
             cx.notify()
         }))
@@ -229,8 +230,8 @@ impl RecipePick {
             );
         }
         let help = match self.picked.and_then(|i| self.saved.get(i)) {
-            Some(r) => format!("Once it answers: {}, and what they need.", names(&r.components)),
-            None => "A recipe you saved, installed once it answers.".into(),
+            Some(r) => trf("Once it answers: {components}, and what they need.", &[("components", &names(&r.components))]),
+            None => tr("A recipe you saved, installed once it answers.").into(),
         };
         Some(
             div()
@@ -242,7 +243,7 @@ impl RecipePick {
                         .flex()
                         .items_center()
                         .gap(px(10.))
-                        .child(kit::label(theme, "Recipe").flex_none().text_size(px(12.)).text_color(theme.text_muted))
+                        .child(kit::label(theme, tr("Recipe")).flex_none().text_size(px(12.)).text_color(theme.text_muted))
                         .child(div().flex_1().min_w(px(0.)).flex().flex_wrap().gap(px(6.)).children(choices)),
                 )
                 .child(div().truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(SharedString::from(help)))

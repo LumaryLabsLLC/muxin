@@ -4,6 +4,7 @@
 //! menu sends. No window in any of it (ui/desktop.rs does the sending).
 
 use gpui::Modifiers;
+use crate::ui::i18n::{tr, trf};
 
 /// A keyboard's kind: a Mac's (⌘, Option), or a PC's (Windows and Linux:
 /// Ctrl, Alt, the Windows key).
@@ -282,29 +283,29 @@ pub fn menu(platform: &str, mac: bool) -> Vec<Combo> {
     let combo = |label, keys| Combo { label, keys };
     if mac || platform.starts_with("darwin") {
         vec![
-            combo("Previous Space", "ctrl+left"),
-            combo("Next Space", "ctrl+right"),
+            combo(tr("Previous Space"), "ctrl+left"),
+            combo(tr("Next Space"), "ctrl+right"),
             combo("Mission Control", "ctrl+up"),
-            combo("App windows", "ctrl+down"),
-            combo("Switch app", "cmd+tab"),
+            combo(tr("App windows"), "ctrl+down"),
+            combo(tr("Switch app"), "cmd+tab"),
             combo("Spotlight", "cmd+space"),
-            combo("Force Quit", "cmd+alt+escape"),
+            combo(tr("Force Quit"), "cmd+alt+escape"),
         ]
     } else if platform.starts_with("windows") {
         // Not Ctrl+Alt+Del or Win+L: Windows only takes those from its own keyboard.
         vec![
-            combo("Start", "super"),
-            combo("Switch window", "alt+tab"),
-            combo("Task view", "super+tab"),
-            combo("Show desktop", "super+d"),
-            combo("Task Manager", "ctrl+shift+escape"),
-            combo("Close window", "alt+f4"),
+            combo(tr("Start"), "super"),
+            combo(tr("Switch window"), "alt+tab"),
+            combo(tr("Task view"), "super+tab"),
+            combo(tr("Show desktop"), "super+d"),
+            combo(tr("Task Manager"), "ctrl+shift+escape"),
+            combo(tr("Close window"), "alt+f4"),
         ]
     } else {
         vec![
             combo("Super", "super"),
-            combo("Switch window", "alt+tab"),
-            combo("Close window", "alt+f4"),
+            combo(tr("Switch window"), "alt+tab"),
+            combo(tr("Close window"), "alt+f4"),
             combo("Ctrl+Alt+Del", "ctrl+alt+delete"),
         ]
     }
@@ -346,11 +347,11 @@ pub fn combo_label(keys: &str, platform: &str, mac: bool) -> String {
 /// goes where.
 pub fn examples() -> &'static str {
     if cfg!(target_os = "macos") {
-        "⌘Tab, Mission Control and the like"
+        tr("⌘Tab, Mission Control and the like")
     } else if cfg!(windows) {
-        "Alt+Tab, the Windows key and the like"
+        tr("Alt+Tab, the Windows key and the like")
     } else {
-        "Alt+Tab, Super and the like"
+        tr("Alt+Tab, Super and the like")
     }
 }
 
@@ -366,12 +367,12 @@ pub fn example_key() -> &'static str {
 /// the way back while they go to the machine.
 pub fn switch_label(there: bool, machine: &str) -> String {
     let machine = match machine.trim() {
-        "" => "the machine".to_string(),
+        "" => tr("the machine").to_string(),
         name if name.chars().count() > 22 => format!("{}…", name.chars().take(21).collect::<String>().trim_end()),
         name => name.to_string(),
     };
     let key = example_key();
-    if there { format!("{key} goes to {machine} · {} to stop", release_key_label()) } else { format!("Send {key} to {machine}") }
+    if there { trf("{key} goes to {machine} · {release} to stop", &[("key", &key), ("machine", &machine), ("release", &release_key_label())]) } else { trf("Send {key} to {machine}", &[("key", &key), ("machine", &machine)]) }
 }
 
 /// A combination's keysyms, in the order to press them.

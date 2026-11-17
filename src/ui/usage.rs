@@ -3,6 +3,7 @@
 //! from each machine's Claude Code and Codex logs (see fleet/usage.rs).
 
 use std::collections::HashMap;
+use crate::ui::i18n::{tr, trf};
 use std::time::Instant;
 
 use chrono::{Duration as Ago, Local, NaiveDate};
@@ -19,7 +20,9 @@ use crate::fleet::usage::{self, MachineUsage, Tokens};
 pub type UsageData = Vec<(String, Result<MachineUsage, String>)>;
 
 /// The periods offered: label and days.
-const PERIODS: &[(&str, u32)] = &[("Today", 1), ("7 days", 7), ("30 days", 30), ("90 days", 90)];
+fn periods() -> [(&'static str, u32); 4] {
+    [(tr("Today"), 1), (tr("7 days"), 7), (tr("30 days"), 30), (tr("90 days"), 90)]
+}
 
 /// "1.2M", "34K".
 fn tokens(n: u64) -> String {
@@ -89,15 +92,15 @@ impl Root {
                     .flex()
                     .flex_col()
                     .gap(px(4.))
-                    .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child("Usage"))
-                    .child(div().text_size(px(13.)).text_color(theme.text_muted).child("What your agents used, from Claude Code’s and Codex’s own logs on each machine.")),
+                    .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(tr("Usage")))
+                    .child(div().text_size(px(13.)).text_color(theme.text_muted).child(tr("What your agents used, from Claude Code’s and Codex’s own logs on each machine."))),
             )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(div().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(PERIODS.iter().map(|&(label, days)| {
+                    .child(div().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(periods().into_iter().map(|(label, days)| {
                         let on = self.usage_days == days;
                         div()
                             .id(SharedString::from(format!("usage-{days}")))
@@ -119,7 +122,7 @@ impl Root {
                                 }
                             }))
                     })))
-                    .child(Button::icon_only("usage-refresh", "refresh-cw").tooltip("Read the logs again").on_click(cx.listener(|this, _, _, cx| this.load_usage(cx)))),
+                    .child(Button::icon_only("usage-refresh", "refresh-cw").tooltip(tr("Read the logs again")).on_click(cx.listener(|this, _, _, cx| this.load_usage(cx)))),
             );
         let mut body = page("usage-page", &self.page_scroll).child(header);
         let data = match &self.usage_data {
@@ -127,7 +130,7 @@ impl Root {
             Some(Load::Failed(e)) => return body.child(card(&theme).p(px(16.)).text_size(px(13.)).text_color(theme.error).child(e.clone())).into_any_element(),
             _ => {
                 return body
-                    .child(card(&theme).p(px(18.)).flex_row().items_center().gap(px(10.)).text_size(px(13.)).text_color(theme.text_muted).child(spinner("usage-loading", 14., theme.text_muted)).child("Reading each machine’s agent logs…"))
+                    .child(card(&theme).p(px(18.)).flex_row().items_center().gap(px(10.)).text_size(px(13.)).text_color(theme.text_muted).child(spinner("usage-loading", 14., theme.text_muted)).child(tr("Reading each machine’s agent logs…")))
                     .into_any_element();
             }
         };
@@ -163,16 +166,16 @@ impl Root {
         }
         if all.requests == 0 {
             let none = if machines.iter().all(|m| m.tools.is_empty()) {
-                "No Claude Code or Codex logs on your machines yet."
+                tr("No Claude Code or Codex logs on your machines yet.")
             } else {
-                "No agent use in this period."
+                tr("No agent use in this period.")
             };
             return body.child(card(&theme).child(kit::empty_state(&theme, "gauge", none))).into_any_element();
         }
         let top = models
             .first()
             .map(|(tool, _, _, c)| match c {
-                Some(c) if cost > 0. => format!("{} · {:.0}% of the cost", usage::tool_name(tool), c / cost * 100.),
+                Some(c) if cost > 0. => trf("{tool} · {pct}% of the cost", &[("tool", &usage::tool_name(tool)), ("pct", &format!("{:.0}", c / cost * 100.))]),
                 _ => usage::tool_name(tool).to_string(),
             })
             .unwrap_or_default();
@@ -212,10 +215,13 @@ impl Root {
                 .flex()
                 .flex_wrap()
                 .gap(px(12.))
-                .child(stat("At API prices", dollars(cost), if unpriced.is_empty() { "what the same work costs on the API".into() } else { format!("{} model(s) without a price", unpriced.len()) }))
-                .child(stat("Tokens", tokens(all.total()), format!("{} out · {} read from cache", tokens(all.output), tokens(all.cache_read))))
-                .child(stat("Requests", all.requests.to_string(), format!("across {} machine{}", machines.iter().filter(|m| m.hours.iter().any(|h| h.tokens.requests > 0)).count(), if machines.len() == 1 { "" } else { "s" })))
-                .child(stat("Most used", most_used, top)),
+                .child(stat(tr("At API prices"), dollars(cost), if unpriced.is_empty() { tr("what the same work costs on the API").into() } else { trf("{n} model(s) without a price", &[("n", &unpriced.len())]) }))
+                .child(stat(tr("Tokens"), tokens(all.total()), trf("{out} out · {cache} read from cache", &[("out", &tokens(all.output)), ("cache", &tokens(all.cache_read))])))
+                .child(stat(tr("Requests"), all.requests.to_string(), {
+                    let n = machines.iter().filter(|m| m.hours.iter().any(|h| h.tokens.requests > 0)).count();
+                    if machines.len() == 1 { trf("across {n} machine", &[("n", &n)]) } else { trf("across {n} machines", &[("n", &n)]) }
+                }))
+                .child(stat(tr("Most used"), most_used, top)),
         );
 
         // By day: cost (or tokens when nothing's priced), Claude Code and Codex stacked.
@@ -262,7 +268,7 @@ impl Root {
                         .gap(px(16.))
                         .text_size(px(12.))
                         .text_color(theme.text_muted)
-                        .child(div().flex_1().text_color(theme.text).font_weight(FontWeight::MEDIUM).child("Each day, at API prices"))
+                        .child(div().flex_1().text_color(theme.text).font_weight(FontWeight::MEDIUM).child(tr("Each day, at API prices")))
                         .child(legend(claude_color, "Claude Code"))
                         .child(legend(codex_color, "Codex")),
                 )
@@ -317,15 +323,15 @@ impl Root {
                 cells.push(cell(tokens(t.cache_read), Some(90.), true, theme.text_muted));
             }
             cells.push(cell(tokens(t.total()), Some(80.), true, theme.text_muted));
-            cells.push(cell(c.map(dollars).unwrap_or_else(|| "no price".into()), Some(90.), true, if c.is_some() { theme.text } else { theme.text_placeholder }));
+            cells.push(cell(c.map(dollars).unwrap_or_else(|| tr("no price").into()), Some(90.), true, if c.is_some() { theme.text } else { theme.text_placeholder }));
             row(cells, false)
         });
-        let model_head: Vec<(&str, Option<f32>, bool)> = [("Model", None, false), ("Agent", Some(110.), false), ("Requests", Some(80.), true)]
+        let model_head: Vec<(&str, Option<f32>, bool)> = [(tr("Model"), None, false), (tr("Agent"), Some(110.), false), (tr("Requests"), Some(80.), true)]
             .into_iter()
-            .chain(all_cols.then_some([("Output", Some(80.), true), ("Cache reads", Some(90.), true)]).into_iter().flatten())
-            .chain([("All tokens", Some(80.), true), ("At API prices", Some(90.), true)])
+            .chain(all_cols.then_some([(tr("Output"), Some(80.), true), (tr("Cache reads"), Some(90.), true)]).into_iter().flatten())
+            .chain([(tr("All tokens"), Some(80.), true), (tr("At API prices"), Some(90.), true)])
             .collect();
-        body = body.child(div().flex().flex_col().gap(px(10.)).child(section_title(&theme, "By model", Some(models.len()))).child(card(&theme).child(head(&model_head)).children(model_rows)));
+        body = body.child(div().flex().flex_col().gap(px(10.)).child(section_title(&theme, tr("By model"), Some(models.len()))).child(card(&theme).child(head(&model_head)).children(model_rows)));
 
         // By machine.
         let mut per_machine: Vec<(String, Tokens, f64)> = machines
@@ -392,8 +398,8 @@ impl Root {
                         .flex()
                         .flex_col()
                         .gap(px(10.))
-                        .child(section_title(&theme, "By machine", Some(per_machine.len())))
-                        .child(card(&theme).child(head(&[("Machine", None, false), ("Requests", Some(80.), true), ("Tokens", Some(90.), true), ("At API prices", Some(90.), true)])).children(machine_rows)),
+                        .child(section_title(&theme, tr("By machine"), Some(per_machine.len())))
+                        .child(card(&theme).child(head(&[(tr("Machine"), None, false), (tr("Requests"), Some(80.), true), (tr("Tokens"), Some(90.), true), (tr("At API prices"), Some(90.), true)])).children(machine_rows)),
                 )
                 .child(
                     div()
@@ -402,16 +408,15 @@ impl Root {
                         .flex()
                         .flex_col()
                         .gap(px(10.))
-                        .child(section_title(&theme, "Busiest folders", Some(folders.len())))
-                        .child(card(&theme).child(head(&[("Folder", None, false), ("Machine", Some(96.), false), ("Agent", Some(90.), false), ("Tokens", Some(80.), true), ("At API prices", Some(90.), true)])).children(folder_rows)),
+                        .child(section_title(&theme, tr("Busiest folders"), Some(folders.len())))
+                        .child(card(&theme).child(head(&[(tr("Folder"), None, false), (tr("Machine"), Some(96.), false), (tr("Agent"), Some(90.), false), (tr("Tokens"), Some(80.), true), (tr("At API prices"), Some(90.), true)])).children(folder_rows)),
                 ),
         );
-        let mut notes = vec![format!(
-            "At Anthropic’s and OpenAI’s list prices ({}). With a Claude or ChatGPT plan you don’t pay per token: this is what the same work would cost on the API.",
-            usage::PRICES_AS_OF
+        let mut notes = vec![trf("At Anthropic’s and OpenAI’s list prices ({date}). With a Claude or ChatGPT plan you don’t pay per token: this is what the same work would cost on the API.",
+            &[("date", &usage::PRICES_AS_OF)],
         )];
         if !unpriced.is_empty() {
-            notes.push(format!("No price known for {}: counted in tokens only.", unpriced.join(", ")));
+            notes.push(trf("No price known for {models}: counted in tokens only.", &[("models", &unpriced.join(", "))]));
         }
         for (id, e) in &failed {
             notes.push(format!("{}: {e}", name(id)));

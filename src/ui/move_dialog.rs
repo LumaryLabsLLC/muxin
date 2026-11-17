@@ -3,6 +3,7 @@
 //! with a note of the conversation so far (see fleet::sessions::handoff).
 
 use std::sync::Arc;
+use crate::ui::i18n::{tr, trf};
 
 use gpui::{AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, SharedString, Window, div, prelude::*, px};
 
@@ -97,45 +98,45 @@ impl Render for MoveDialog {
             .flex_col()
             .gap(px(8.))
             .child(div().flex().flex_wrap().gap(px(6.)).children(agents))
-            .when(none, |d| d.child(quiet(format!("Muxin hasn't found an agent CLI on {there} yet: install one there (Claude Code, Codex, …).")))) ;
+            .when(none, |d| d.child(quiet(trf("Muxin hasn't found an agent CLI on {there} yet: install one there (Claude Code, Codex, …).", &[("there", &there)])))) ;
 
         // What goes along, and where it lands: the session as it is now (its git may come in after the dialog opens).
         let current = s.sessions.iter().find(|x| x.id == self.session.id);
         let git = current.and_then(|x| x.git.as_ref()).or(self.session.git.as_ref());
         let what = match git {
             Some(g) => {
-                let mut parts = vec![if g.branch.is_empty() { "its commits".to_string() } else { format!("branch {}", g.branch) }];
+                let mut parts = vec![if g.branch.is_empty() { tr("its commits").to_string() } else { trf("branch {branch}", &[("branch", &g.branch)]) }];
                 if g.uncommitted > 0 {
-                    parts.push(format!("{} uncommitted file{}", g.uncommitted, if g.uncommitted == 1 { "" } else { "s" }));
+                    parts.push(if g.uncommitted == 1 { tr("1 uncommitted file").to_string() } else { trf("{n} uncommitted files", &[("n", &g.uncommitted)]) });
                 }
-                format!("{}, with its commits that aren't on GitHub yet and its new files.", parts.join(", "))
+                trf("{parts}, with its commits that aren't on GitHub yet and its new files.", &[("parts", &parts.join(", "))])
             }
-            None => "Its commits that aren't on its remote yet, uncommitted changes and new files (a git checkout's).".to_string(),
+            None => tr("Its commits that aren't on its remote yet, uncommitted changes and new files (a git checkout's).").to_string(),
         };
         let checkout = git.and_then(|g| g.repo.as_ref()).and_then(|r| s.checkouts.iter().find(|c| c.machine_id == self.machine && c.repo.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(r))));
         let lands = match (checkout, git.and_then(|g| g.repo.as_ref())) {
-            (Some(c), _) => format!("A new worktree of {} on {there}, a folder of its own on the same branch.", c.path),
-            (None, Some(r)) => format!("A fresh clone of {r} on {there} (with your GitHub login), on the same branch."),
-            (None, None) => format!("A copy of this repository on {there}: from its remote, or its whole history when it has none."),
+            (Some(c), _) => trf("A new worktree of {path} on {there}, a folder of its own on the same branch.", &[("path", &c.path), ("there", &there)]),
+            (None, Some(r)) => trf("A fresh clone of {r} on {there} (with your GitHub login), on the same branch.", &[("r", &r), ("there", &there)]),
+            (None, None) => trf("A copy of this repository on {there}: from its remote, or its whole history when it has none.", &[("there", &there)]),
         };
-        let name = crate::fleet::sessions::agent(&self.agent).map(|k| k.name).unwrap_or("The agent");
+        let name = crate::fleet::sessions::agent(&self.agent).map(|k| k.name).unwrap_or(tr("The agent"));
         let keep = self.keep;
 
         frame(
             &theme,
-            format!("Move to {there}"),
-            Some(format!("{name} takes over on {there}, with a note of the conversation so far. The folder on {here} stays as it is.").into()),
+            trf("Move to {there}", &[("there", &there)]),
+            Some(trf("{name} takes over on {there}, with a note of the conversation so far. The folder on {here} stays as it is.", &[("name", &name), ("there", &there), ("here", &here)]).into()),
         )
-        .child(field(&theme, "Agent", agent, None))
-        .child(field(&theme, "What goes along", quiet(what), None))
-        .child(field(&theme, "Where it lands", quiet(lands), Some("It shows under Boxes › Agents' workspaces, to clean up when the work's done.")))
-        .child(kit::checkbox(&theme, "mv-keep", keep, format!("Keep this session running on {here} too"), cx.listener(|this, value: &bool, _, cx| {
+        .child(field(&theme, tr("Agent"), agent, None))
+        .child(field(&theme, tr("What goes along"), quiet(what), None))
+        .child(field(&theme, tr("Where it lands"), quiet(lands), Some(tr("It shows under Boxes › Agents' workspaces, to clean up when the work's done."))))
+        .child(kit::checkbox(&theme, "mv-keep", keep, trf("Keep this session running on {here} too", &[("here", &here)]), cx.listener(|this, value: &bool, _, cx| {
             this.keep = *value;
             cx.notify()
         })))
         .child(footer(vec![
-            Button::new("mv-cancel", "Cancel").on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
-            Button::new("mv-go", "Move")
+            Button::new("mv-cancel", tr("Cancel")).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+            Button::new("mv-go", tr("Move"))
                 .icon("arrow-right-left")
                 .style(ButtonStyle::Primary)
                 .disabled(none)

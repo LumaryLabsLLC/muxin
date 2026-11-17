@@ -14,6 +14,7 @@ use super::panes::Panes;
 use super::root::{Modal, Root, Route};
 use super::terminal::{TerminalEvent, TerminalView};
 use super::theme::{ActiveTheme, Theme, mono_font};
+use crate::ui::i18n::{tr, trf};
 use crate::fleet::model::{Machine, Snapshot};
 use crate::fleet::model::Machine as FleetMachine;
 use crate::fleet::sessions::git::GitStatus;
@@ -57,7 +58,7 @@ impl Root {
                     format!(
                         "docker start {c} >/dev/null 2>&1; exec docker exec -it -w /workspace {c} sh -c 'if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi'"
                     ),
-                    format!("A shell inside the workspace's container ({}).", w.image.clone().unwrap_or_else(|| "Docker".into())),
+                    trf("A shell inside the workspace's container ({image}).", &[("image", &w.image.clone().unwrap_or_else(|| "Docker".into()))]),
                 )),
                 ..Default::default()
             },
@@ -125,9 +126,9 @@ impl Root {
         let (cols, rows) = TerminalView::fit(f32::from(viewport.width) - self.sidebar_width, f32::from(viewport.height) - CHROME_HEIGHT, window, cx);
         req.cols = cols;
         req.rows = rows;
-        let agent = crate::fleet::sessions::agent(&req.agent).map(|a| a.name).unwrap_or("Session");
+        let agent = crate::fleet::sessions::agent(&req.agent).map(|a| a.name).unwrap_or(tr("Session"));
         let machine = self.snapshot.machines.iter().find(|m| m.id == req.machine_id).map(|m| m.name.clone()).unwrap_or_default();
-        self.notify_user(format!("Starting {agent} on {machine}…"), false, cx);
+        self.notify_user(trf("Starting {agent} on {machine}…", &[("agent", &agent), ("machine", &machine)]), false, cx);
         let engine = self.engine.clone();
         let job = engine.runtime().spawn({
             let engine = engine.clone();
@@ -283,7 +284,7 @@ impl Root {
         let Route::Session(id) = self.route.clone() else { return };
         let Some(info) = self.snapshot.sessions.iter().find(|s| s.id == id).cloned() else { return };
         if !info.persistent || self.engine.is_demo() {
-            self.notify_user("This session can't be split.", true, cx);
+            self.notify_user(tr("This session can't be split."), true, cx);
             return;
         }
         // Exactly the size its pane will have (half of this one), so the shell
@@ -596,15 +597,15 @@ impl Root {
         }
         let sid = s.id.clone();
         let detail = if s.agent == "shell" || s.agent.is_empty() {
-            "The shell and anything still running in it stop.".to_string()
+            tr("The shell and anything still running in it stop.").to_string()
         } else {
-            format!("{} and anything it started in this terminal stop. Its conversation ends.", s.agent_name)
+            trf("{agent} and anything it started in this terminal stop. Its conversation ends.", &[("agent", &s.agent_name)])
         };
         let dialog = cx.new(|cx| {
             ConfirmDialog::new(
-                format!("End {}?", s.title),
+                trf("End {title}?", &[("title", &s.title)]),
                 detail,
-                "End session",
+                tr("End session"),
                 None,
                 move |_, engine| {
                     let engine = engine.clone();
@@ -671,7 +672,7 @@ impl Root {
         let box_agent = info.box_id.as_deref() == Some(info.name.as_str());
 
         let status = if exited {
-            kit::pill(format!("Exited{}", info.exit_code.map(|c| format!(" ({c})")).unwrap_or_default()), theme.text_placeholder).into_any_element()
+            kit::pill(format!("{}{}", tr("Exited"), info.exit_code.map(|c| format!(" ({c})")).unwrap_or_default()), theme.text_placeholder).into_any_element()
         } else if let Some(m) = &offline {
             kit::pill(format::unreachable_word(m), theme.machine_status(m)).into_any_element()
         } else {
@@ -743,7 +744,7 @@ impl Root {
                                         .cursor_pointer()
                                         .hover(|st| st.bg(theme.accent.opacity(0.2)))
                                         .child(kit::icon("box", 11., theme.text_accent))
-                                        .child("Box")
+                                        .child(tr("Box"))
                                         .on_click(cx.listener(|this, _, window, cx| this.navigate(Route::Boxes, window, cx))),
                                 )
                             })
@@ -777,13 +778,13 @@ impl Root {
                     // A helper: who started it. Helpers it started: each, to go to.
                     .children(self.helpers_line(&theme, &info, cx)),
             )
-            .when(!info.persistent, |d| d.child(kit::pill("Ends when you close Muxin", theme.warning)))
+            .when(!info.persistent, |d| d.child(kit::pill(tr("Ends when you close Muxin"), theme.warning)))
             .child(status)
             .when(info.agent != "shell" && !info.agent.is_empty() && !exited && offline.is_none(), |d| {
                 let sid = info.id.clone();
                 d.child(
-                    labelled("session-actions", "Actions", "zap", narrow)
-                        .tooltip("Ask the agent to commit, open a pull request, review its work…")
+                    labelled("session-actions", tr("Actions"), "zap", narrow)
+                        .tooltip(tr("Ask the agent to commit, open a pull request, review its work…"))
                         .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.open_menu(super::menu::MenuTarget::SessionActions(sid.clone()), e.position(), cx))),
                 )
             })
@@ -792,9 +793,9 @@ impl Root {
                 let sid = info.id.clone();
                 let handing = self.handing_off.contains(&info.id);
                 d.child(
-                    labelled("session-handoff", "Hand off", "arrow-right-left", narrow)
+                    labelled("session-handoff", tr("Hand off"), "arrow-right-left", narrow)
                         .loading(handing)
-                        .tooltip("Another agent takes over, with a note of the conversation so far and where the code stands")
+                        .tooltip(tr("Another agent takes over, with a note of the conversation so far and where the code stands"))
                         .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.open_menu(super::menu::MenuTarget::Handoff(sid.clone()), e.position(), cx))),
                 )
             })
@@ -802,18 +803,18 @@ impl Root {
             .when(!exited && offline.is_none() && self.terminals.contains_key(&info.id), |d| {
                 let sid = info.id.clone();
                 d.child(
-                    labelled("session-snippets", "Snippets", "square-terminal", narrow)
-                        .tooltip("Type a saved command into this terminal and run it")
+                    labelled("session-snippets", tr("Snippets"), "square-terminal", narrow)
+                        .tooltip(tr("Type a saved command into this terminal and run it"))
                         .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.open_menu(super::menu::MenuTarget::Snippets(sid.clone()), e.position(), cx))),
                 )
             })
             .when(info.persistent, |d| {
                 d.child(
                     Button::icon_only("session-copy-attach", "copy")
-                        .tooltip("Copy the command to open it in your own terminal")
+                        .tooltip(tr("Copy the command to open it in your own terminal"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(attach.clone()));
-                            this.notify_user("Copied. Paste it into any terminal to attach.", false, cx);
+                            this.notify_user(tr("Copied. Paste it into any terminal to attach."), false, cx);
                         })),
                 )
             })
@@ -822,13 +823,13 @@ impl Root {
                 let (mid, cwd) = (info.machine_id.clone(), info.cwd.clone());
                 d.child(
                     Button::icon_only("session-editor", "code")
-                        .tooltip(format!("Open {} in an editor", info.cwd))
+                        .tooltip(trf("Open {folder} in an editor", &[("folder", &info.cwd)]))
                         .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.pick_editor(&mid, &cwd, e.position(), cx))),
                 )
             })
             // Another shell beside it or below it, like splitting a terminal.
             .when(info.persistent && offline.is_none() && !self.engine.is_demo(), |d| {
-                let (right, down) = if in_box { ("Split right (⌘D): a shell in the box", "Split down (⇧⌘D): a shell in the box") } else { ("Split right (⌘D)", "Split down (⇧⌘D)") };
+                let (right, down) = if in_box { (tr("Split right (⌘D): a shell in the box"), tr("Split down (⇧⌘D): a shell in the box")) } else { (tr("Split right (⌘D)"), tr("Split down (⇧⌘D)")) };
                 d.child(
                     Button::icon_only("session-split-right", "columns-2")
                         .tooltip(right)
@@ -842,7 +843,7 @@ impl Root {
             })
             .when(exited, |d| {
                 d.child(
-                    Button::new("session-restart", "Restart")
+                    Button::new("session-restart", tr("Restart"))
                         .icon("rotate-ccw")
                         .on_click(cx.listener(move |this, _, window, cx| this.restart_session(&sid, window, cx))),
                 )
@@ -851,20 +852,20 @@ impl Root {
             .when(desktop_capable, |d| {
                 let sid = info.id.clone();
                 d.child(
-                    labelled("session-desktop", "Desktop", "panel-right", narrow)
+                    labelled("session-desktop", tr("Desktop"), "panel-right", narrow)
                         .style(if split { ButtonStyle::Outlined } else { ButtonStyle::Ghost })
-                        .tooltip(if split { "Hide the desktop" } else { "Show the machine's desktop beside the terminal" })
+                        .tooltip(if split { tr("Hide the desktop") } else { tr("Show the machine's desktop beside the terminal") })
                         .on_click(cx.listener(move |this, _, window, cx| this.toggle_split(&sid, window, cx))),
                 )
             })
             // Others watching (or typing) by link, peer to peer.
             .when(info.persistent && !exited && offline.is_none() && !self.engine.is_demo(), |d| d.child(self.share_button(&info, cx)))
             .child(
-                Button::new("session-end", if box_agent { "Pause" } else { "End" })
+                Button::new("session-end", if box_agent { tr("Pause") } else { tr("End") })
                     .icon(if box_agent { "pause" } else { "power" })
                     .style(ButtonStyle::Ghost)
                     .disabled(offline.is_some())
-                    .when(box_agent, |b| b.tooltip("Pause the box: its agent and container stop, its files and conversation stay. Resume picks it up again."))
+                    .when(box_agent, |b| b.tooltip(tr("Pause the box: its agent and container stop, its files and conversation stay. Resume picks it up again.")))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(s) = this.snapshot.sessions.iter().find(|x| x.id == sid2).cloned() {
                             this.confirm_end_session(&s, window, cx);
@@ -898,15 +899,15 @@ impl Root {
             let to_sidebar = info.id.clone();
             let extra = vec![
                 Button::icon_only("split-sidebar", "panel-left")
-                    .tooltip("Move to the sidebar")
+                    .tooltip(tr("Move to the sidebar"))
                     .on_click(cx.listener(move |this, _, window, cx| this.desktop_to_sidebar(&to_sidebar, window, cx)))
                     .into_any_element(),
                 Button::icon_only("split-window", "external-link")
-                    .tooltip("Open in a window")
+                    .tooltip(tr("Open in a window"))
                     .on_click(cx.listener(move |this, _, window, cx| this.pop_out_desktop(&pop, window, cx)))
                     .into_any_element(),
                 Button::icon_only("split-close", "x")
-                    .tooltip("Hide the desktop")
+                    .tooltip(tr("Hide the desktop"))
                     .on_click(cx.listener(move |this, _, window, cx| this.toggle_split(&close, window, cx)))
                     .into_any_element(),
             ];
@@ -996,7 +997,7 @@ impl Root {
             .children(terminal.map(|t| t.into_any_element()))
             .when_some(offline.clone().filter(|_| !exited && info.persistent), |d, m| {
                 let disconnected = m.is_disconnected();
-                let title = if disconnected { format!("Disconnected from {}", m.name) } else { m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("Can't reach {}", m.name)) };
+                let title = if disconnected { trf("Disconnected from {name}", &[("name", &m.name)]) } else { m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| trf("Can't reach {name}", &[("name", &m.name)])) };
                 let mid = m.id.clone();
                 d.child(
                     div().absolute().inset_0().bg(theme.scrim).flex().items_center().justify_center().child(
@@ -1009,18 +1010,18 @@ impl Root {
                             .child(kit::color_tile(if m.is_asleep() { "moon" } else if format::is_just_offline(&m) { "power" } else { "unplug" }, 36.))
                             .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(title))
                             .child(div().text_size(px(12.5)).text_color(theme.text_muted).text_center().child(if disconnected {
-                                "This session keeps running there. Connect to see it again."
+                                tr("This session keeps running there. Connect to see it again.")
                             } else if m.is_asleep() {
-                                "This session is still there. It goes on when the machine wakes."
+                                tr("This session is still there. It goes on when the machine wakes.")
                             } else {
-                                "Shut down: this session ended. Asleep: it's still there."
+                                tr("Shut down: this session ended. Asleep: it's still there.")
                             }))
                             .child(if disconnected {
-                                Button::new("session-connect", "Connect").icon("plug").on_click(cx.listener(move |this, _, _, cx| this.set_machine_connected(&mid, true, cx)))
+                                Button::new("session-connect", tr("Connect")).icon("plug").on_click(cx.listener(move |this, _, _, cx| this.set_machine_connected(&mid, true, cx)))
                             } else if m.is_asleep() && self.engine.can_wake(&m.id) {
-                                Button::new("session-wake", "Wake").icon("power").on_click(cx.listener(move |this, _, _, cx| this.wake_machine(&mid, cx)))
+                                Button::new("session-wake", tr("Wake")).icon("power").on_click(cx.listener(move |this, _, _, cx| this.wake_machine(&mid, cx)))
                             } else {
-                                Button::new("session-offline-check", "Try again")
+                                Button::new("session-offline-check", tr("Try again"))
                                     .icon("refresh-cw")
                                     .loading(m.checking)
                                     .on_click(cx.listener(move |this, _, _, _| this.engine.trigger_check(Some(mid.clone()))))
@@ -1044,7 +1045,7 @@ impl Root {
                             .text_size(px(12.5))
                             .text_color(theme.text_muted)
                             .child(spinner("session-resume", 13., theme.text_muted))
-                            .child("Reconnecting…"),
+                            .child(tr("Reconnecting…")),
                     ),
                 )
             })
@@ -1057,15 +1058,15 @@ impl Root {
                             .p(px(20.))
                             .bg(theme.elevated)
                             .child(kit::color_tile("unplug", 36.))
-                            .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Disconnected"))
+                            .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(tr("Disconnected")))
                             .child(
                                 div()
                                     .text_size(px(12.5))
                                     .text_color(theme.text_muted)
-                                    .child("The session is still running on the machine."),
+                                    .child(tr("The session is still running on the machine.")),
                             )
                             .child(
-                                Button::new("session-reconnect", "Reconnect")
+                                Button::new("session-reconnect", tr("Reconnect"))
                                     .icon("plug")
                                     .style(ButtonStyle::Primary)
                                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1093,8 +1094,8 @@ impl Root {
                 let zoomed = self.zoomed.as_deref() == Some(id.as_str());
                 let zoom_id = id.clone();
                 let zoom_tip: SharedString = match super::shortcuts::label_for(cx, "zoom-pane") {
-                    k if k.is_empty() => if zoomed { "Show the whole split".into() } else { "Show this pane alone".into() },
-                    k => format!("{} ({k})", if zoomed { "Show the whole split" } else { "Show this pane alone" }).into(),
+                    k if k.is_empty() => if zoomed { tr("Show the whole split").into() } else { tr("Show this pane alone").into() },
+                    k => format!("{} ({k})", if zoomed { tr("Show the whole split") } else { tr("Show this pane alone") }).into(),
                 };
                 let bar = div()
                     .flex_none()
@@ -1134,7 +1135,7 @@ impl Root {
                             .rounded(crate::ui::kit::corner(4.))
                             .cursor_pointer()
                             .hover(|st| st.bg(theme.ghost_hover))
-                            .tooltip(|window, cx| kit::Tooltip::view("Close the pane (the session keeps running)".into(), window, cx))
+                            .tooltip(|window, cx| kit::Tooltip::view(tr("Close the pane (the session keeps running)").into(), window, cx))
                             .child(icon("x", 11., theme.text_placeholder))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
@@ -1246,7 +1247,7 @@ impl Root {
             .when(knocking, |d| d.child(div().size(px(8.)).rounded_full().bg(theme.accent)))
             // Working, needs you, done (until it's opened), exited with an error.
             .children(mark_view(theme, format!("side-s-spin-{}", s.id), shown, 8.))
-            .when(exited, |d| d.child(div().text_size(px(11.)).text_color(theme.text_placeholder).child("exited")))
+            .when(exited, |d| d.child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(tr("exited"))))
             .on_mouse_down(gpui::MouseButton::Right, {
                 let sid = s.id.clone();
                 super::menu::on_right_click(move || super::menu::MenuTarget::Session(sid.clone()), cx)
@@ -1270,20 +1271,20 @@ impl Root {
             .flex()
             .items_center()
             .gap(px(12.))
-            .child(div().flex_none().child(section_title(theme, "Agent sessions", Some(all.len()))))
+            .child(div().flex_none().child(section_title(theme, tr("Agent sessions"), Some(all.len()))))
             .child(div().flex_1())
             .when(!installed.is_empty(), |d| {
-                d.child(div().min_w(px(0.)).text_right().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("Installed: {}", installed.join(", "))))
+                d.child(div().min_w(px(0.)).text_right().text_size(px(11.5)).text_color(theme.text_placeholder).child(trf("Installed: {list}", &[("list", &installed.join(", "))])))
             });
 
 
         let content = if all.is_empty() {
             let text = match runs_in_app(m) {
-                _ if m.is_disconnected() => format!("Connect to {} to start Claude Code, Codex or a shell there.", m.name),
-                _ if m.is_asleep() => format!("{} is asleep. Wake it to start Claude Code, Codex or a shell there.", m.name),
-                _ if m.is_down() => format!("Start Claude Code, Codex or a shell here once {} is back.", m.name),
-                true => format!("Run Claude Code, Codex or a shell here. {} so sessions run while Muxin is open.", m.sessions_error.clone().unwrap_or_default().trim_end_matches('.')),
-                false => "Run Claude Code, Codex, OpenCode or a shell here. Sessions keep working on the machine after you close Muxin.".to_string(),
+                _ if m.is_disconnected() => trf("Connect to {name} to start Claude Code, Codex or a shell there.", &[("name", &m.name)]),
+                _ if m.is_asleep() => trf("{name} is asleep. Wake it to start Claude Code, Codex or a shell there.", &[("name", &m.name)]),
+                _ if m.is_down() => trf("Start Claude Code, Codex or a shell here once {name} is back.", &[("name", &m.name)]),
+                true => trf("Run Claude Code, Codex or a shell here. {error} so sessions run while Muxin is open.", &[("error", &m.sessions_error.clone().unwrap_or_default().trim_end_matches('.'))]),
+                false => tr("Run Claude Code, Codex, OpenCode or a shell here. Sessions keep working on the machine after you close Muxin.").to_string(),
             };
             card(theme)
                 .p(px(16.))
@@ -1293,7 +1294,7 @@ impl Root {
                 .child(kit::color_tile("square-terminal", 28.))
                 .child(div().flex_1().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(text))
                 .child(
-                    Button::new("m-session-empty", "New session")
+                    Button::new("m-session-empty", tr("New session"))
                         .icon("plus")
                         .disabled(m.is_down())
                         .on_click(cx.listener(move |this, _, window, cx| this.show_new_session(Some(mid.clone()), window, cx))),
@@ -1324,7 +1325,7 @@ impl Root {
             };
             let more_link = folds.then(|| {
                 let mid = m.id.clone();
-                link("m-sessions-more", more, if more { "Show fewer".to_string() } else { format!("Show {hidden} more") }).on_click(cx.listener(move |this, _, _, cx| {
+                link("m-sessions-more", more, if more { tr("Show fewer").to_string() } else { trf("Show {hidden} more", &[("hidden", &hidden)]) }).on_click(cx.listener(move |this, _, _, cx| {
                     if !this.sessions_more.remove(&mid) {
                         this.sessions_more.insert(mid.clone());
                     }
@@ -1333,7 +1334,7 @@ impl Root {
             });
             let hidden_link = (n_hidden > 0).then(|| {
                 let mid = m.id.clone();
-                link("m-sessions-hidden", with_hidden, if with_hidden { format!("Hide the {n_hidden} hidden") } else { format!("{n_hidden} hidden") }).on_click(cx.listener(move |this, _, _, cx| {
+                link("m-sessions-hidden", with_hidden, if with_hidden { trf("Hide the {n} hidden", &[("n", &n_hidden)]) } else { trf("{n} hidden", &[("n", &n_hidden)]) }).on_click(cx.listener(move |this, _, _, cx| {
                     if !this.hidden_open.remove(&mid) {
                         this.hidden_open.insert(mid.clone());
                     }
@@ -1369,12 +1370,12 @@ impl Root {
         let (icon_name, (from, to)) = kit::agent_look(&x.agent);
         let offline = self.snapshot.machines.iter().any(|m| m.id == x.machine_id && m.is_down());
         let state = if x.status == "exited" {
-            div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!("Exited{}", x.exit_code.map(|c| format!(" ({c})")).unwrap_or_default())).into_any_element()
+            div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!("{}{}", tr("Exited"), x.exit_code.map(|c| format!(" ({c})")).unwrap_or_default())).into_any_element()
         } else if offline {
             div().text_size(px(12.)).text_color(theme.text_placeholder).child(match self.snapshot.machines.iter().find(|m| m.id == x.machine_id) {
-                Some(m) if m.is_disconnected() => "Disconnected",
-                Some(m) if m.is_asleep() => "Machine asleep",
-                _ => "Machine offline",
+                Some(m) if m.is_disconnected() => tr("Disconnected"),
+                Some(m) if m.is_asleep() => tr("Machine asleep"),
+                _ => tr("Machine offline"),
             }).into_any_element()
         } else {
             state_label(theme, format!("ms-spin-{}", x.id), x.mark())
@@ -1456,8 +1457,8 @@ impl Root {
                         .text_color(theme.text_placeholder)
                         .hover(|st| st.bg(theme.element_hover).text_color(theme.text_muted))
                         .when(!hidden, |d| d.invisible().group_hover(group.clone(), |st| st.visible()))
-                        .child(if hidden { "Show" } else { "Hide" })
-                        .tooltip(move |window, cx| kit::Tooltip::view(if hidden { "Show it in the lists again" } else { "Hide it from the lists until it needs you" }.into(), window, cx))
+                        .child(if hidden { tr("Show") } else { tr("Hide") })
+                        .tooltip(move |window, cx| kit::Tooltip::view(if hidden { tr("Show it in the lists again") } else { tr("Hide it from the lists until it needs you") }.into(), window, cx))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.set_hidden(&sid, !hidden, cx)
@@ -1505,18 +1506,18 @@ impl Root {
         };
         let mut line = div().flex().flex_wrap().items_center().gap_x(px(4.)).text_size(px(12.)).text_color(theme.text_muted).child(kit::icon("corner-down-right", 12., theme.text_muted));
         if let Some((pid, title)) = parent {
-            line = line.child("Helper of");
+            line = line.child(tr("Helper of"));
             line = match title {
                 Some(t) => line.child(link(pid, t, "helper-parent".into(), cx)),
                 None => line.child(div().font_family(mono_font()).child(pid)),
             };
-            line = line.child(if info.keep { "· keeps going after it ends" } else { "· ends with it" });
+            line = line.child(if info.keep { tr("· keeps going after it ends") } else { tr("· ends with it") });
         }
         if !helpers.is_empty() {
             if info.parent.is_some() {
                 line = line.child("·");
             }
-            line = line.child(if helpers.len() == 1 { "Its helper:".to_string() } else { format!("Its {} helpers:", helpers.len()) });
+            line = line.child(if helpers.len() == 1 { tr("Its helper:").to_string() } else { trf("Its {n} helpers:", &[("n", &helpers.len())]) });
             for (n, h) in helpers.iter().enumerate() {
                 if n > 0 {
                     line = line.child(",");
@@ -1577,7 +1578,7 @@ fn looking(theme: &Theme) -> AnyElement {
         .text_size(px(12.5))
         .text_color(theme.text_muted)
         .child(spinner("session-looking", 14., theme.text_muted))
-        .child("Looking for the session on the machine…")
+        .child(tr("Looking for the session on the machine…"))
         .into_any_element()
 }
 
@@ -1596,9 +1597,9 @@ impl Root {
         let title = div()
             .flex()
             .items_center()
-            .child(section_title(theme, "Git", None))
+            .child(section_title(theme, tr("Git"), None))
             .child(div().flex_1())
-            .child(Button::icon_only("m-git-refresh", "refresh-cw").tooltip("Refresh").on_click(cx.listener({
+            .child(Button::icon_only("m-git-refresh", "refresh-cw").tooltip(tr("Refresh")).on_click(cx.listener({
                 let mid = mid.clone();
                 move |this, _, _, cx| this.load_machine_git(&mid, cx)
             })));
@@ -1632,32 +1633,32 @@ impl Root {
         // The GitHub CLI there: what pushes and agents use for GitHub.
         let gh = m.gh.clone();
         let gh_row = match gh.as_ref().map(|g| (g.installed, g.logged_in, g.account.clone())) {
-            Some((true, true, Some(a))) => row("agent-github", "GitHub CLI", Some(true), format!("Signed in as @{a}"), None).into_any_element(),
-            Some((true, _, _)) => row("agent-github", "GitHub CLI", Some(false), "Not signed in".into(), Some("Pushes and agents there use it to reach GitHub.".into()))
-                .child(Button::new("m-gh-login", "Sign in").on_click(cx.listener({
+            Some((true, true, Some(a))) => row("agent-github", "GitHub CLI", Some(true), trf("Signed in as @{account}", &[("account", &a)]), None).into_any_element(),
+            Some((true, _, _)) => row("agent-github", "GitHub CLI", Some(false), tr("Not signed in").into(), Some(tr("Pushes and agents there use it to reach GitHub.").into()))
+                .child(Button::new("m-gh-login", tr("Sign in")).on_click(cx.listener({
                     let mid = mid.clone();
                     move |this, _, window, cx| this.gh_cli_sign_in(&mid, window, cx)
                 })))
                 .into_any_element(),
-            Some((false, _, _)) => row("agent-github", "GitHub CLI", None, "Not installed".into(), Some("Install it from cli.github.com to push and use GitHub from here.".into())).into_any_element(),
-            None => row("agent-github", "GitHub CLI", None, "Checking…".into(), None).into_any_element(),
+            Some((false, _, _)) => row("agent-github", "GitHub CLI", None, tr("Not installed").into(), Some(tr("Install it from cli.github.com to push and use GitHub from here.").into())).into_any_element(),
+            None => row("agent-github", "GitHub CLI", None, tr("Checking…").into(), None).into_any_element(),
         };
         let gh_signed_in = gh.as_ref().is_some_and(|g| g.logged_in);
 
         let rows: Vec<AnyElement> = match self.machine_git.get(&m.id) {
             Some(Load::Ready(g)) if g.setup.git.is_none() => {
-                vec![row("git-branch", "git", Some(false), format!("git isn't installed on {}", m.name), Some("Install it with the system's package manager.".into())).into_any_element()]
+                vec![row("git-branch", "git", Some(false), trf("git isn't installed on {name}", &[("name", &m.name)]), Some(tr("Install it with the system's package manager.").into())).into_any_element()]
             }
             Some(Load::Ready(g)) => {
                 let identity = match (&g.setup.name, &g.setup.email) {
-                    (Some(n), Some(e)) => row("git-branch", "Commits as", Some(true), format!("{n} <{e}>"), None).into_any_element(),
+                    (Some(n), Some(e)) => row("git-branch", tr("Commits as"), Some(true), format!("{n} <{e}>"), None).into_any_element(),
                     _ => {
                         let sets = match (&g.suggested_name, &g.suggested_email) {
-                            (Some(n), Some(e)) => format!("Sets {n} <{e}>, GitHub's private address for you."),
-                            _ => "Uses your GitHub name and private address.".into(),
+                            (Some(n), Some(e)) => trf("Sets {name} <{email}>, GitHub's private address for you.", &[("name", &n), ("email", &e)]),
+                            _ => tr("Uses your GitHub name and private address.").into(),
                         };
-                        row("git-branch", "Commits as", Some(false), "No name or email: commits will fail".into(), Some(sets))
-                            .child(Button::new("m-git-identity", "Use my GitHub identity").loading(fixing).on_click(cx.listener({
+                        row("git-branch", tr("Commits as"), Some(false), tr("No name or email: commits will fail").into(), Some(sets))
+                            .child(Button::new("m-git-identity", tr("Use my GitHub identity")).loading(fixing).on_click(cx.listener({
                                 let mid = mid.clone();
                                 move |this, _, _, cx| this.fix_machine_git(&mid, true, false, cx)
                             })))
@@ -1665,15 +1666,15 @@ impl Root {
                     }
                 };
                 let push = match g.push.as_str() {
-                    "gh" => row("arrow-up", "Pushes to GitHub", Some(true), "With the GitHub CLI's login".into(), None).into_any_element(),
+                    "gh" => row("arrow-up", tr("Pushes to GitHub"), Some(true), tr("With the GitHub CLI's login").into(), None).into_any_element(),
                     other => {
                         let (value, ok) = match other {
-                            "other" => (format!("With {}", g.setup.helpers.iter().chain(g.setup.ssh_keys.iter()).cloned().collect::<Vec<_>>().join(", ")), None),
-                            _ => ("No GitHub login: pushes will fail".to_string(), Some(false)),
+                            "other" => (trf("With {list}", &[("list", &g.setup.helpers.iter().chain(g.setup.ssh_keys.iter()).cloned().collect::<Vec<_>>().join(", "))]), None),
+                            _ => (tr("No GitHub login: pushes will fail").to_string(), Some(false)),
                         };
-                        let detail = if gh_signed_in { "Using the GitHub CLI's login works for any GitHub repository." } else { "Sign in to the GitHub CLI first, then git can use its login." };
-                        row("arrow-up", "Pushes to GitHub", ok, value, Some(detail.into()))
-                            .child(Button::new("m-git-credentials", "Use the GitHub CLI").disabled(!gh_signed_in).loading(fixing).on_click(cx.listener({
+                        let detail = if gh_signed_in { tr("Using the GitHub CLI's login works for any GitHub repository.") } else { tr("Sign in to the GitHub CLI first, then git can use its login.") };
+                        row("arrow-up", tr("Pushes to GitHub"), ok, value, Some(detail.into()))
+                            .child(Button::new("m-git-credentials", tr("Use the GitHub CLI")).disabled(!gh_signed_in).loading(fixing).on_click(cx.listener({
                                 let mid = mid.clone();
                                 move |this, _, _, cx| this.fix_machine_git(&mid, false, true, cx)
                             })))
@@ -1683,7 +1684,7 @@ impl Root {
                 vec![identity, push]
             }
             Some(Load::Failed(e)) => vec![row("git-branch", "git", None, e.clone(), None).into_any_element()],
-            _ => vec![div().flex().items_center().gap(px(10.)).px(px(14.)).py(px(10.)).child(spinner("m-git-spin", 13., theme.text_muted)).child(div().text_size(px(12.5)).text_color(theme.text_muted).child("Checking git…")).into_any_element()],
+            _ => vec![div().flex().items_center().gap(px(10.)).px(px(14.)).py(px(10.)).child(spinner("m-git-spin", 13., theme.text_muted)).child(div().text_size(px(12.5)).text_color(theme.text_muted).child(tr("Checking git…"))).into_any_element()],
         };
         let all: Vec<AnyElement> = std::iter::once(gh_row).chain(rows).collect();
         let count = all.len();
@@ -1712,8 +1713,8 @@ impl Root {
                 let speed = c.latency_ms.map(|ms| format!(" · {ms} ms")).unwrap_or_default();
                 // Through Tailscale: straight to the machine, or through its relay.
                 let path = match (c.network.as_deref(), c.tailnet.as_ref().map(|d| d.path.as_str())) {
-                    (Some("Tailscale"), Some("direct")) => " · peer-to-peer",
-                    (Some("Tailscale"), Some("relay")) => " · through a relay",
+                    (Some("Tailscale"), Some("direct")) => tr(" · peer-to-peer"),
+                    (Some("Tailscale"), Some("relay")) => tr(" · through a relay"),
                     _ => "",
                 };
                 let net = c.network.clone().map(|n| format!(" · {n}{path}")).unwrap_or_default();
@@ -1723,31 +1724,31 @@ impl Root {
                 match c.via.as_str() {
                     "direct" => (
                         "zap",
-                        format!("Direct{net}{speed}"),
+                        format!("{}{net}{speed}", tr("Direct")),
                         c.note.clone().unwrap_or_else(|| match (&via, forwarded) {
-                            (Some(v), Some(port)) => format!("QUIC through {v}'s forwarded port {port}, no ssh in between."),
-                            _ => format!("QUIC to {}{at}, no ssh in between.", c.address.clone().unwrap_or_default()),
+                            (Some(v), Some(port)) => trf("QUIC through {v}'s forwarded port {port}, no ssh in between.", &[("v", &v), ("port", &port)]),
+                            _ => trf("QUIC to {address}{at}, no ssh in between.", &[("address", &c.address.clone().unwrap_or_default()), ("at", &at)]),
                         }),
                         true,
                     ),
                     "ssh" => (
                         "network",
-                        format!("Over ssh{net}{speed}"),
+                        format!("{}{net}{speed}", tr("Over ssh")),
                         c.note.clone().unwrap_or_else(|| match &via {
-                            Some(v) => format!("One ssh connection through {v}, kept open."),
+                            Some(v) => trf("One ssh connection through {v}, kept open.", &[("v", &v)]),
                             // On this network: say what direct would bring.
                             None if !c.direct && c.network.as_deref() == Some("Local network") => {
-                                "One ssh connection, kept open. Connect directly for a faster desktop and terminals.".into()
+                                tr("One ssh connection, kept open. Connect directly for a faster desktop and terminals.").into()
                             }
-                            None => "One ssh connection, kept open.".into(),
+                            None => tr("One ssh connection, kept open.").into(),
                         }),
                         c.direct,
                     ),
-                    _ => ("unplug", "Not connected".into(), c.note.clone().unwrap_or_else(|| "The agent there didn't answer.".into()), c.direct),
+                    _ => ("unplug", tr("Not connected").into(), c.note.clone().unwrap_or_else(|| tr("The agent there didn't answer.").into()), c.direct),
                 }
             }
-            Some(Load::Failed(e)) => ("unplug", "Not connected".into(), e.clone(), false),
-            _ => ("network", "Checking…".into(), String::new(), false),
+            Some(Load::Failed(e)) => ("unplug", tr("Not connected").into(), e.clone(), false),
+            _ => ("network", tr("Checking…").into(), String::new(), false),
         };
         // Not on the tailnet (while this computer is): offer to set it up there.
         let offer_tailscale = m.platform.starts_with("linux")
@@ -1756,10 +1757,10 @@ impl Root {
         // Whether it's reachable away from its own network.
         let tailnet_line = match self.machine_conn.get(&m.id) {
             Some(Load::Ready(c)) => match (&c.tailnet, &c.tailscale) {
-                (Some(d), _) => Some(format!("On your tailnet as {}.", d.name)),
+                (Some(d), _) => Some(trf("On your tailnet as {name}.", &[("name", &d.name)])),
                 // Where it can be reached is up to the machine it's reached through.
-                (None, _) if via.is_some() => via.as_ref().map(|v| format!("Through {v}: reachable wherever {v} is.")),
-                (None, Some(t)) if t.running => Some("Not on your tailnet: reachable only on its network.".to_string()),
+                (None, _) if via.is_some() => via.as_ref().map(|v| trf("Through {v}: reachable wherever {v} is.", &[("v", &v)])),
+                (None, Some(t)) if t.running => Some(tr("Not on your tailnet: reachable only on its network.").to_string()),
                 _ => None,
             },
             _ => None,
@@ -1769,12 +1770,12 @@ impl Root {
         let button = if shut_in && !direct {
             None
         } else if direct {
-            Some(Button::new("m-direct-off", "Use ssh only").style(ButtonStyle::Ghost).loading(changing).on_click(cx.listener({
+            Some(Button::new("m-direct-off", tr("Use ssh only")).style(ButtonStyle::Ghost).loading(changing).on_click(cx.listener({
                 let mid = mid.clone();
                 move |this, _, _, cx| this.set_machine_direct(&mid, false, cx)
             })))
         } else {
-            Some(Button::new("m-direct-on", "Connect directly").loading(changing).on_click(cx.listener({
+            Some(Button::new("m-direct-on", tr("Connect directly")).loading(changing).on_click(cx.listener({
                 let mid = mid.clone();
                 move |this, _, _, cx| this.set_machine_direct(&mid, true, cx)
             })))
@@ -1787,13 +1788,13 @@ impl Root {
                 div()
                     .flex()
                     .items_center()
-                    .child(section_title(theme, "Connection", None))
+                    .child(section_title(theme, tr("Connection"), None))
                     .child(div().flex_1())
-                    .child(Button::new("m-disconnect", "Disconnect").icon("unplug").style(ButtonStyle::Ghost).tooltip("Stop connecting to it until you connect again. Its sessions keep running there.").on_click(cx.listener({
+                    .child(Button::new("m-disconnect", tr("Disconnect")).icon("unplug").style(ButtonStyle::Ghost).tooltip(tr("Stop connecting to it until you connect again. Its sessions keep running there.")).on_click(cx.listener({
                         let mid = mid.clone();
                         move |this, _, _, cx| this.set_machine_connected(&mid, false, cx)
                     })))
-                    .child(Button::icon_only("m-conn-refresh", "refresh-cw").tooltip("Refresh").on_click(cx.listener({
+                    .child(Button::icon_only("m-conn-refresh", "refresh-cw").tooltip(tr("Refresh")).on_click(cx.listener({
                         let mid = mid.clone();
                         move |this, _, _, cx| this.load_machine_connection(&mid, cx)
                     }))),
@@ -1818,7 +1819,7 @@ impl Root {
                             .children(tailnet_line.map(|t| div().text_size(px(11.5)).text_color(theme.text_placeholder).child(t))),
                     )
                     .when(offer_tailscale, |d| {
-                        d.child(Button::new("m-tailscale", "Set up Tailscale").style(ButtonStyle::Ghost).on_click(cx.listener({
+                        d.child(Button::new("m-tailscale", tr("Set up Tailscale")).style(ButtonStyle::Ghost).on_click(cx.listener({
                             let mid = mid.clone();
                             move |this, _, window, cx| this.setup_tailscale(&mid, window, cx)
                         })))
@@ -1868,9 +1869,9 @@ impl Root {
                 match result {
                     Ok(c) => {
                         let text = match (enabled, c.via.as_str()) {
-                            (true, "direct") => "Connected directly.".to_string(),
-                            (true, _) => c.note.clone().unwrap_or_else(|| "Set up, but the direct connection didn't come up; using ssh.".into()),
-                            (false, _) => "Back to ssh only; the listener there was removed.".to_string(),
+                            (true, "direct") => tr("Connected directly.").to_string(),
+                            (true, _) => c.note.clone().unwrap_or_else(|| tr("Set up, but the direct connection didn't come up; using ssh.").into()),
+                            (false, _) => tr("Back to ssh only; the listener there was removed.").to_string(),
                         };
                         this.notify_user(text, enabled && c.via != "direct", cx);
                         this.machine_conn.insert(id, Load::Ready(c));
@@ -1924,7 +1925,7 @@ impl Root {
                 this.git_fixing.remove(&id);
                 match result {
                     Ok(g) => {
-                        let done = if identity { "Commits there now carry your GitHub identity." } else { "git there now uses the GitHub CLI's login." };
+                        let done = if identity { tr("Commits there now carry your GitHub identity.") } else { tr("git there now uses the GitHub CLI's login.") };
                         this.machine_git.insert(id, Load::Ready(g));
                         this.notify_user(done, false, cx)
                     }
@@ -1961,7 +1962,7 @@ impl Root {
             command: Some(command),
             ..Default::default()
         };
-        self.notify_user("Follow the steps in the terminal: copy the code, then open github.com/login/device.", false, cx);
+        self.notify_user(tr("Follow the steps in the terminal: copy the code, then open github.com/login/device."), false, cx);
         self.start_session(req, window, cx);
     }
 
@@ -1975,7 +1976,7 @@ impl Root {
         let Some(local) = self.snapshot.machines.iter().find(|m| m.local).map(|m| m.id.clone()) else {
             let cmd = crate::probe::copy_id_command(&spec, user.as_deref(), None);
             cx.write_to_clipboard(ClipboardItem::new_string(cmd));
-            self.notify_user("Copied. Run it in Terminal, then check again.", false, cx);
+            self.notify_user(tr("Copied. Run it in Terminal, then check again."), false, cx);
             return;
         };
         let job = self.engine.runtime().spawn({
@@ -2001,8 +2002,8 @@ impl Root {
                     ..Default::default()
                 };
                 let then = match &user {
-                    Some(u) => format!("Press Enter and type your password for {u} on {}, then check again.", spec.name),
-                    None => format!("Press Enter and type your password for {}, then check again.", spec.name),
+                    Some(u) => trf("Press Enter and type your password for {u} on {name}, then check again.", &[("u", &u), ("name", &spec.name)]),
+                    None => trf("Press Enter and type your password for {name}, then check again.", &[("name", &spec.name)]),
                 };
                 this.start_session_then(req, Some(then), window, cx);
             });
@@ -2022,7 +2023,7 @@ impl Root {
             typed: Some("curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up".into()),
             ..Default::default()
         };
-        let then = "Press Enter to install Tailscale, then follow the sign-in link.";
+        let then = tr("Press Enter to install Tailscale, then follow the sign-in link.");
         self.start_session_then(req, Some(then.into()), window, cx);
     }
 
@@ -2127,7 +2128,7 @@ impl Root {
                     let text = read.await.ok().and_then(Result::ok);
                     let still = this.update(cx, |this, cx| match this.peek.as_mut().filter(|p| p.id == pid) {
                         Some(p) => {
-                            p.text = Some(text.unwrap_or_else(|| "Couldn't read it.".into()));
+                            p.text = Some(text.unwrap_or_else(|| tr("Couldn't read it.").into()));
                             cx.notify();
                             true
                         }
@@ -2156,7 +2157,7 @@ impl Root {
         let mark = info.map(SessionInfo::mark).unwrap_or(Mark::Idle);
         let open = p.id.clone();
         let body = match (info, &p.view, &p.text) {
-            (None, _, _) => div().size_full().flex().items_center().justify_center().text_size(px(12.5)).text_color(theme.text_muted).child("This session has ended.").into_any_element(),
+            (None, _, _) => div().size_full().flex().items_center().justify_center().text_size(px(12.5)).text_color(theme.text_muted).child(tr("This session has ended.")).into_any_element(),
             (_, Some(view), _) => div().size_full().child(view.clone()).into_any_element(),
             (_, None, Some(text)) => div()
                 .id("peek-text")
@@ -2210,9 +2211,9 @@ impl Root {
                         )
                         .child(state_label(theme, "peek-state", mark))
                         .child(
-                            Button::new("peek-open", "Open")
+                            Button::new("peek-open", tr("Open"))
                                 .icon("arrow-right")
-                                .tooltip("Go to this session")
+                                .tooltip(tr("Go to this session"))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.peek = None;
                                     this.navigate(Route::Session(open.clone()), window, cx);
@@ -2220,7 +2221,7 @@ impl Root {
                         )
                         .child(
                             Button::icon_only("peek-close", "x")
-                                .tooltip("Close")
+                                .tooltip(tr("Close"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.peek = None;
                                     cx.notify();
@@ -2349,10 +2350,10 @@ fn ended(theme: &Theme, id: &str, cx: &mut Context<Root>) -> AnyElement {
         .gap(px(10.))
         .pb(px(80.))
         .child(kit::color_tile("square-terminal", 44.))
-        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("This session has ended"))
+        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(tr("This session has ended")))
         .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(id.to_string()))
         .child(
-            Button::new("session-back", "Back to the machine")
+            Button::new("session-back", tr("Back to the machine"))
                 .icon("arrow-left")
                 .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(machine.clone()), window, cx))),
         )
@@ -2446,7 +2447,7 @@ impl Root {
         }
         if let Some(m) = &machine {
             let name = self.snapshot.machines.iter().find(|x| &x.id == m).map(|x| x.name.clone()).unwrap_or_else(|| m.clone());
-            self.notify_user(format!("Moving it to {name}. Activity shows each step."), false, cx);
+            self.notify_user(trf("Moving it to {name}. Activity shows each step.", &[("name", &name)]), false, cx);
         }
         cx.notify();
         let (engine, id) = (self.engine.clone(), id.to_string());
@@ -2488,7 +2489,7 @@ impl Root {
         let task = cx.spawn(async move |this, cx| {
             let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update(cx, |this, cx| match result {
-                Ok(_) => this.notify_user(format!("Asked the agent: {}.", label.to_lowercase()), false, cx),
+                Ok(_) => this.notify_user(trf("Asked the agent: {action}.", &[("action", &label.to_lowercase())]), false, cx),
                 Err(e) => this.notify_user(e, true, cx),
             });
         });

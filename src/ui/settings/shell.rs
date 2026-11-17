@@ -4,6 +4,7 @@
 use gpui::{AnyElement, Context, div, prelude::*, px};
 
 use super::SettingsPage;
+use crate::ui::i18n::{tr, trf};
 use crate::shell_command::{self, Status};
 use crate::ui::kit::{Button, ButtonStyle, card, icon, section_title};
 use crate::ui::theme::{Theme, mono_font};
@@ -51,38 +52,38 @@ impl SettingsPage {
     pub(super) fn shell_section(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let st = &self.shell;
         let (glyph, color, line): (&str, _, String) = match &st.status {
-            None => ("loader-circle", theme.text_muted, "Looking…".into()),
+            None => ("loader-circle", theme.text_muted, tr("Looking…").into()),
             Some(s) => match s.state {
-                "installed" => ("circle-check", theme.success, format!("Installed: {}", s.path)),
-                "missing" if cfg!(windows) => ("circle", theme.text_muted, "Not installed. Muxin's folder gets added to your PATH.".into()),
-                "missing" => ("circle", theme.text_muted, format!("Not installed. It goes in {}.", s.path)),
-                "other" => ("triangle-alert", theme.warning, format!("{} is already there.", s.path)),
-                _ => ("circle-x", theme.error, "Not available on this computer.".into()),
+                "installed" => ("circle-check", theme.success, trf("Installed: {path}", &[("path", &s.path)])),
+                "missing" if cfg!(windows) => ("circle", theme.text_muted, tr("Not installed. Muxin's folder gets added to your PATH.").into()),
+                "missing" => ("circle", theme.text_muted, trf("Not installed. It goes in {path}.", &[("path", &s.path)])),
+                "other" => ("triangle-alert", theme.warning, trf("{path} is already there.", &[("path", &s.path)])),
+                _ => ("circle-x", theme.error, tr("Not available on this computer.").into()),
             },
         };
         let note = st.status.as_ref().and_then(|s| s.note.clone()).or_else(|| {
             // Before it asks: macOS shows its own password prompt for /usr/local/bin.
-            st.status.as_ref().filter(|s| s.state == "missing" && cfg!(target_os = "macos")).map(|_| "macOS may ask for your password to add it there.".to_string())
+            st.status.as_ref().filter(|s| s.state == "missing" && cfg!(target_os = "macos")).map(|_| tr("macOS may ask for your password to add it there.").to_string())
         });
         // Homebrew's or the package's link goes when they uninstall the app.
         let state = st.status.as_ref().filter(|s| !s.managed).map(|s| (s.state, s.replaceable));
         let button = match state {
-            Some(("missing", _)) => Some(Button::new("shell-install", "Install").icon("plus").style(ButtonStyle::Primary).loading(st.busy).on_click(cx.listener(|this, _, _, cx| this.run_shell(Some(true), cx)))),
-            Some(("other", true)) => Some(Button::new("shell-replace", "Use this copy").icon("refresh-cw").loading(st.busy).on_click(cx.listener(|this, _, _, cx| this.run_shell(Some(true), cx)))),
-            Some(("installed", _)) => Some(Button::new("shell-remove", "Remove").loading(st.busy).on_click(cx.listener(|this, _, _, cx| this.run_shell(Some(false), cx)))),
+            Some(("missing", _)) => Some(Button::new("shell-install", tr("Install")).icon("plus").style(ButtonStyle::Primary).loading(st.busy).on_click(cx.listener(|this, _, _, cx| this.run_shell(Some(true), cx)))),
+            Some(("other", true)) => Some(Button::new("shell-replace", tr("Use this copy")).icon("refresh-cw").loading(st.busy).on_click(cx.listener(|this, _, _, cx| this.run_shell(Some(true), cx)))),
+            Some(("installed", _)) => Some(Button::new("shell-remove", tr("Remove")).loading(st.busy).on_click(cx.listener(|this, _, _, cx| this.run_shell(Some(false), cx)))),
             _ => None,
         };
         div()
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Command line", None))
+            .child(section_title(theme, tr("Command line"), None))
             .child(
                 card(theme)
                     .p(px(14.))
                     .gap(px(10.))
                     .child(div().w_full().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(
-                        "Use Muxin from a terminal, and connect other agents to it with muxin mcp.",
+                        tr("Use Muxin from a terminal, and connect other agents to it with muxin mcp."),
                     ))
                     .child(
                         div()

@@ -77,6 +77,16 @@ pub(crate) fn tr(english: &'static str) -> &'static str {
     english
 }
 
+/// `english|context` in the window's language: the same English that means
+/// something else here ("Open|state" isn't the button "Open"). English shows
+/// the part before `|`.
+pub(crate) fn trc(keyed: &'static str) -> &'static str {
+    match tr(keyed) {
+        t if std::ptr::eq(t, keyed) => keyed.rsplit_once('|').map_or(keyed, |(english, _)| english),
+        t => t,
+    }
+}
+
 /// `english` in the window's language, with each `{name}` replaced.
 pub(crate) fn trf(english: &'static str, args: &[(&str, &dyn std::fmt::Display)]) -> String {
     let mut s = tr(english).to_string();
@@ -107,7 +117,7 @@ mod tests {
                     dirs.push(p);
                 } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("i18n.rs") {
                     let src = std::fs::read_to_string(&p).unwrap();
-                    for call in ["tr(\"", "trf(\""] {
+                    for call in ["tr(\"", "trf(\"", "trc(\""] {
                         let mut pieces = src.split(call);
                         let mut before = pieces.next().unwrap_or_default();
                         for piece in pieces {
@@ -166,11 +176,11 @@ mod tests {
 
     #[test]
     fn tr_and_trf() {
-        set_language("pt-BR");
-        assert_eq!(tr("Language"), "Idioma");
+        // ponytail: never switches CURRENT, other tests read English in parallel.
+        assert_eq!(pt_br().get("Language"), Some(&"Idioma"));
         assert_eq!(tr("not a line anywhere"), "not a line anywhere");
-        set_language("en");
-        assert_eq!(tr("Language"), "Language");
+        assert_eq!(trc("Open|state"), "Open");
+        assert_eq!(pt_br().get("Open|state"), Some(&"Aberto"));
         assert_eq!(trf("{a} and {b}", &[("a", &1), ("b", &"x")]), "1 and x");
     }
 }

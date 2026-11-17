@@ -2,6 +2,7 @@
 //! your machines (under the one it runs on).
 
 use std::sync::Arc;
+use crate::ui::i18n::{tr};
 
 use gpui::{AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, SharedString, Subscription, Window, div, prelude::*, px};
 
@@ -133,7 +134,7 @@ impl Render for VmDialog {
         // What the machines can run arrives with their checks (just after start, say).
         self.options = self.engine.vm_options();
         self.pick_host();
-        let cancel = Button::new("vm-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element();
+        let cancel = Button::new("vm-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element();
         let chip = |id: SharedString, text: String, selected: bool, enabled: bool| {
             div()
                 .id(id)
@@ -199,9 +200,9 @@ impl Render for VmDialog {
                 .text_size(px(12.))
                 .text_color(theme.text_muted)
                 .child(if windows {
-                    "None of your machines can run Windows: it needs a Linux machine (x86-64) with Docker and KVM, like a mini PC or a server."
+                    tr("None of your machines can run Windows: it needs a Linux machine (x86-64) with Docker and KVM, like a mini PC or a server.")
                 } else {
-                    "None of your machines can run it: it needs one with Docker."
+                    tr("None of your machines can run it: it needs one with Docker.")
                 })
                 .into_any_element()
         } else {
@@ -227,9 +228,9 @@ impl Render for VmDialog {
             .flex()
             .flex_col()
             .gap(px(8.))
-            .child(sizes("CPUs", &[2, 4, 8], "", self.cpus, |d, v| d.cpus = v))
-            .child(sizes("Memory", &[4, 8, 16], " GB", self.memory_gb, |d, v| d.memory_gb = v))
-            .when(windows, |d| d.child(sizes("Disk", &[64, 128, 256], " GB", self.disk_gb, |d, v| d.disk_gb = v)));
+            .child(sizes(tr("CPUs"), &[2, 4, 8], "", self.cpus, |d, v| d.cpus = v))
+            .child(sizes(tr("Memory"), &[4, 8, 16], " GB", self.memory_gb, |d, v| d.memory_gb = v))
+            .when(windows, |d| d.child(sizes(tr("Disk"), &[64, 128, 256], " GB", self.disk_gb, |d, v| d.disk_gb = v)));
 
         // What a Linux VM comes with: agent CLIs (with Node.js).
         let comes_with = (!windows).then(|| {
@@ -251,7 +252,7 @@ impl Render for VmDialog {
                         .into_any_element()
                 })
                 .collect();
-            div().flex().flex_col().gap(px(6.)).child(div().flex().flex_wrap().gap(px(6.)).children(chips)).child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Installed with Node.js as it starts (a few minutes more). They sign in the first time you use them."))
+            div().flex().flex_col().gap(px(6.)).child(div().flex().flex_wrap().gap(px(6.)).children(chips)).child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("Installed with Node.js as it starts (a few minutes more). They sign in the first time you use them.")))
         });
         let note = system.map(|s| {
             div().flex().items_start().gap(px(8.)).text_size(px(12.)).text_color(theme.text_muted).child(icon("info", 13., theme.info)).child(div().flex_1().min_w(px(0.)).child(s.note))
@@ -261,18 +262,18 @@ impl Render for VmDialog {
             .flex()
             .flex_col()
             .gap(px(14.))
-            .child(field(&theme, "Name", self.name.clone(), None))
-            .child(field(&theme, "System", systems, None))
-            .child(field(&theme, "Runs on", hosts, None))
-            .child(field(&theme, "Size", size, None))
-            .children(comes_with.map(|c| field(&theme, "Comes with", c, None)))
+            .child(field(&theme, tr("Name"), self.name.clone(), None))
+            .child(field(&theme, tr("System"), systems, None))
+            .child(field(&theme, tr("Runs on"), hosts, None))
+            .child(field(&theme, tr("Size"), size, None))
+            .children(comes_with.map(|c| field(&theme, tr("Comes with"), c, None)))
             .children(note);
-        frame(&theme, "New VM", Some("Windows or Linux on one of your machines, set up with your ssh key and added to your machines.".into()))
+        frame(&theme, tr("New VM"), Some(tr("Windows or Linux on one of your machines, set up with your ssh key and added to your machines.").into()))
             .child(div().id("vm-body").max_h(px(body_max)).overflow_y_scroll().child(fields))
             .children(error_line(&theme, &self.error))
             .child(footer(vec![
                 cancel,
-                Button::new("vm-create", "Create")
+                Button::new("vm-create", tr("Create"))
                     .style(ButtonStyle::Primary)
                     .icon("box")
                     .disabled(self.host.is_none())

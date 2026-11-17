@@ -2,6 +2,7 @@
 //! work environment. Lists them, shows what agents ran, and lets you step in.
 
 use std::collections::HashSet;
+use crate::ui::i18n::{tr, trf};
 
 use gpui::{AnyElement, ClipboardItem, Context, FontWeight, SharedString, div, prelude::*, px};
 
@@ -44,15 +45,14 @@ impl Root {
                     .child(
                         div().flex().flex_col().flex_none().w(px(intro_width)).gap(px(4.)).child(
                             div().text_size(px(12.5)).text_color(theme.text_muted).child(
-                                "A place on your machines for an agent you're using elsewhere (Claude Code on your laptop, say) to work in: it runs commands, edits files and syncs code there through Muxin. Nothing works there on its own; to hand a task to an agent that does, start a box. Workspaces stay until deleted.",
+                                tr("A place on your machines for an agent you're using elsewhere (Claude Code on your laptop, say) to work in: it runs commands, edits files and syncs code there through Muxin. Nothing works there on its own; to hand a task to an agent that does, start a box. Workspaces stay until deleted."),
                             ),
-                        ).child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!(
-                            "{allowed} of {} machines accept workspaces. Agents create them with the workspace_create MCP tool or `muxin workspace create`.",
-                            s.machines.len()
+                        ).child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(trf("{allowed} of {total} machines accept workspaces. Agents create them with the workspace_create MCP tool or `muxin workspace create`.",
+                            &[("allowed", &allowed), ("total", &s.machines.len())],
                         ))),
                     )
                     .child(
-                        Button::new("ws-new", "New workspace")
+                        Button::new("ws-new", tr("New workspace"))
                             .icon("plus")
                             .style(ButtonStyle::Primary)
                             .on_click(cx.listener(|this, _, window, cx| this.show_new_workspace(None, window, cx))),
@@ -63,10 +63,10 @@ impl Root {
                     .flex()
                     .flex_col()
                     .gap(px(10.))
-                    .child(section_title(&theme, "Workspaces", Some(s.workspaces.len())))
+                    .child(section_title(&theme, tr("Workspaces"), Some(s.workspaces.len())))
                     .children(rows)
                     .when(s.workspaces.is_empty(), |d| {
-                        d.child(card(&theme).child(kit::empty_state(&theme, "terminal", "No workspaces yet. Ask an agent to create one, or make one here.")))
+                        d.child(card(&theme).child(kit::empty_state(&theme, "terminal", tr("No workspaces yet. Ask an agent to create one, or make one here."))))
                     }),
             )
     }
@@ -76,8 +76,8 @@ impl Root {
         let shell = w.shell.clone();
         let last = w.history.last();
         let stats = [
-            format!("{} command{}", w.commands, if w.commands == 1 { "" } else { "s" }),
-            format!("used {}", format::ago(Some(w.last_used_at))),
+            if w.commands == 1 { tr("1 command").to_string() } else { trf("{n} commands", &[("n", &w.commands)]) },
+            trf("used {ago}", &[("ago", &format::ago(Some(w.last_used_at)))]),
             format!("created {}", format::ago(Some(w.created_at))),
         ];
         let room = self.content_width - 34. - stats.iter().map(|t| about(t, 11.5) + 14.).sum::<f32>();
@@ -121,7 +121,7 @@ impl Root {
                     .child({
                         let ws = w.clone();
                         Button::icon_only(SharedString::from(format!("ws-session-{}", w.id)), "square-terminal")
-                            .tooltip("New session here")
+                            .tooltip(tr("New session here"))
                             .disabled(w.status != "ready")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
@@ -130,14 +130,14 @@ impl Root {
                     })
                     .child(
                         Button::icon_only(SharedString::from(format!("ws-copy-{}", w.id)), "copy")
-                            .tooltip("Copy shell command")
+                            .tooltip(tr("Copy shell command"))
                             .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(shell.clone()))),
                     )
                     .child({
                         let (wid, name) = (w.id.clone(), w.name.clone());
                         Button::icon_only(SharedString::from(format!("ws-delete-{}", w.id)), "trash-2")
                             .style(ButtonStyle::Danger)
-                            .tooltip("Delete workspace")
+                            .tooltip(tr("Delete workspace"))
                             .on_click(cx.listener(move |this, _, window, cx| this.confirm_destroy_workspace(&wid, &name, window, cx)))
                     }),
             )
@@ -155,8 +155,8 @@ impl Root {
                     .bg(theme.accent2.opacity(0.10))
                     .text_size(px(12.5))
                     .child(icon("git-merge", 14., theme.accent2))
-                    .child(div().flex_1().min_w(px(0.)).child(format!("Pull request #{n} is merged, so this worktree's work is done. Its branch stays in the checkout.")))
-                    .child(Button::new(SharedString::from(format!("ws-clean-{}", w.id)), "Clean up").on_click(cx.listener(move |this, _, window, cx| {
+                    .child(div().flex_1().min_w(px(0.)).child(trf("Pull request #{n} is merged, so this worktree's work is done. Its branch stays in the checkout.", &[("n", &n)])))
+                    .child(Button::new(SharedString::from(format!("ws-clean-{}", w.id)), tr("Clean up")).on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.confirm_destroy_workspace(&wid, &name, window, cx)
                     })))
@@ -174,7 +174,7 @@ impl Root {
                     .text_size(px(12.))
                     .child(div().text_color(theme.text_placeholder).child("$"))
                     .child(div().flex_1().min_w(px(0.)).truncate().text_color(if last.is_some() { theme.text } else { theme.text_placeholder }).child(
-                        last.map(|c| c.command.clone()).unwrap_or_else(|| "no commands yet".into()),
+                        last.map(|c| c.command.clone()).unwrap_or_else(|| tr("no commands yet").into()),
                     ))
                     .children(last.map(|c| exit_badge(theme, c))),
             )
@@ -206,7 +206,7 @@ impl Root {
                 .items_center()
                 .justify_center()
                 .text_color(theme.text_placeholder)
-                .child("This workspace was destroyed.")
+                .child(tr("This workspace was destroyed."))
                 .into_any_element();
         };
         let shell = w.shell.clone();
@@ -222,7 +222,7 @@ impl Root {
             .when(!wide, |d| d.flex_wrap().pt(px(4.)))
             .child({
                 let ws = w.clone();
-                Button::new("ws-new-session", "New session")
+                Button::new("ws-new-session", tr("New session"))
                     .icon("square-terminal")
                     .style(ButtonStyle::Primary)
                     .disabled(w.status != "ready")
@@ -230,19 +230,19 @@ impl Root {
             })
             .child({
                 let (mid, path) = (w.machine_id.clone(), w.path.clone());
-                Button::new("ws-editor", "Open in editor")
+                Button::new("ws-editor", tr("Open in editor"))
                     .icon("code")
                     .disabled(w.status != "ready")
                     .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.pick_editor(&mid, &path, e.position(), cx)))
             })
             .child(
-                Button::new("ws-copy-shell", "Copy shell command")
+                Button::new("ws-copy-shell", tr("Copy shell command"))
                     .icon("terminal")
                     .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(shell.clone()))),
             )
             .child({
                 let wid = w.id.clone();
-                Button::new("ws-changes", "Changes")
+                Button::new("ws-changes", tr("Changes"))
                     .icon("git-branch")
                     .loading(self.ws_ui.loading_changes.contains(&w.id))
                     .on_click(cx.listener(move |this, _, _, cx| this.load_workspace_changes(&wid, cx)))
@@ -252,7 +252,7 @@ impl Root {
                 let name = w.name.clone();
                 Button::icon_only("ws-destroy", "trash-2")
                     .style(ButtonStyle::Danger)
-                    .tooltip("Destroy workspace")
+                    .tooltip(tr("Destroy workspace"))
                     .disabled(w.status == "destroying")
                     .on_click(cx.listener(move |this, _, window, cx| this.confirm_destroy_workspace(&wid, &name, window, cx)))
             });
@@ -282,7 +282,7 @@ impl Root {
             .py(px(8.))
             .child(kv(
                 &theme,
-                "Machine",
+                tr("Machine"),
                 div()
                     .id("ws-machine-link")
                     .flex()
@@ -296,20 +296,20 @@ impl Root {
             ))
             .child(kv(
                 &theme,
-                "Folder",
+                tr("Folder"),
                 div()
                     .flex()
                     .items_center()
                     .gap(px(6.))
                     // A long folder wraps; the copy button stays beside it.
                     .child(kit::mono(w.path.clone()).min_w(px(0.)))
-                    .child(Button::icon_only("ws-copy-path", "copy").tooltip("Copy path").on_click(move |_, _, cx| {
+                    .child(Button::icon_only("ws-copy-path", "copy").tooltip(tr("Copy path")).on_click(move |_, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(path.clone()))
                     })),
             ))
             .child(kv(
                 &theme,
-                "Environment",
+                tr("Environment"),
                 if w.isolation == "docker" {
                     kit::mono(format!(
                         "Docker · {}{}",
@@ -318,18 +318,18 @@ impl Root {
                     ))
                     .into_any_element()
                 } else {
-                    div().child("Directly on the machine").into_any_element()
+                    div().child(tr("Directly on the machine")).into_any_element()
                 },
             ))
-            .children(w.repo.clone().map(|r| kv(&theme, "Repository", kit::mono(r))))
-            .children(w.git_ref.clone().map(|r| kv(&theme, "Checked out", kit::mono(r))))
-            .children(w.branch.clone().map(|b| kv(&theme, "Branch", kit::mono(b))))
-            .children(w.owner.clone().map(|o| kv(&theme, "Created by", o)))
-            .child(kv(&theme, "Created", format!("{} · last used {}", format::ago(Some(w.created_at)), format::ago(Some(w.last_used_at)))));
+            .children(w.repo.clone().map(|r| kv(&theme, tr("Repository"), kit::mono(r))))
+            .children(w.git_ref.clone().map(|r| kv(&theme, tr("Checked out"), kit::mono(r))))
+            .children(w.branch.clone().map(|b| kv(&theme, tr("Branch"), kit::mono(b))))
+            .children(w.owner.clone().map(|o| kv(&theme, tr("Created by"), o)))
+            .child(kv(&theme, tr("Created"), trf("{created} · last used {used}", &[("created", &format::ago(Some(w.created_at))), ("used", &format::ago(Some(w.last_used_at)))])));
 
         let mut body = page("workspace-page", &self.page_scroll).child(header);
         if let Some(err) = &w.error {
-            body = body.child(callout(&theme, "error", "Workspace error", err.clone(), None));
+            body = body.child(callout(&theme, "error", tr("Workspace error"), err.clone(), None));
         }
         body = body.child(details);
         // Sessions working in this folder.
@@ -341,7 +341,7 @@ impl Root {
                     .flex()
                     .flex_col()
                     .gap(px(10.))
-                    .child(kit::section_title(&theme, "Sessions", Some(here.len())))
+                    .child(kit::section_title(&theme, tr("Sessions"), Some(here.len())))
                     .child(card(&theme).children(rows)),
             );
         }
@@ -356,7 +356,7 @@ impl Root {
                     .flex()
                     .flex_col()
                     .gap(px(10.))
-                    .child(section_title(&theme, "Changes", None))
+                    .child(section_title(&theme, tr("Changes"), None))
                     .child(
                         card(&theme)
                             .p(px(12.))
@@ -375,11 +375,11 @@ impl Root {
                 .flex()
                 .flex_col()
                 .gap(px(10.))
-                .child(section_title(&theme, "Commands", Some(w.commands)))
+                .child(section_title(&theme, tr("Commands"), Some(w.commands)))
                 .child(
                     card(&theme)
                         .children(history)
-                        .when(w.history.is_empty(), |d| d.child(kit::empty_state(&theme, "terminal", "Nothing has run here yet."))),
+                        .when(w.history.is_empty(), |d| d.child(kit::empty_state(&theme, "terminal", tr("Nothing has run here yet.")))),
                 ),
         )
         .into_any_element()
@@ -435,7 +435,7 @@ impl Root {
                         .line_height(px(17.))
                         .text_color(theme.text_muted)
                         .children(c.output_tail.iter().map(|l| div().child(l.clone())))
-                        .when(c.output_tail.is_empty(), |d| d.child(div().text_color(theme.text_placeholder).child("(no output)"))),
+                        .when(c.output_tail.is_empty(), |d| d.child(div().text_color(theme.text_placeholder).child(tr("(no output)")))),
                 )
             })
             .into_any_element()
@@ -462,11 +462,11 @@ impl Root {
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .child(section_title(theme, "Agents' workspaces", Some(s.workspaces.len())))
-                            .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child("Folders on your machines that AI tools you use elsewhere work in through Muxin.")),
+                            .child(section_title(theme, tr("Agents' workspaces"), Some(s.workspaces.len())))
+                            .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(tr("Folders on your machines that AI tools you use elsewhere work in through Muxin."))),
                     )
                     .child(
-                        Button::new("ws-all", "All workspaces")
+                        Button::new("ws-all", tr("All workspaces"))
                             .icon("arrow-right")
                             .style(ButtonStyle::Ghost)
                             .on_click(cx.listener(|this, _, window, cx| this.navigate(Route::Workspaces, window, cx))),
@@ -474,7 +474,7 @@ impl Root {
             )
             .child(if rows.is_empty() {
                 card(theme)
-                    .child(div().px(px(14.)).py(px(10.)).text_size(px(12.5)).text_color(theme.text_placeholder).child("None yet. An agent makes one with the workspace_create MCP tool."))
+                    .child(div().px(px(14.)).py(px(10.)).text_size(px(12.5)).text_color(theme.text_placeholder).child(tr("None yet. An agent makes one with the workspace_create MCP tool.")))
                     .into_any_element()
             } else {
                 card(theme).children(rows).into_any_element()
@@ -506,7 +506,7 @@ impl Root {
                     .text_color(theme.text_placeholder)
                     .hover(|st| st.text_color(theme.text_muted))
                     .child(icon(if more { "chevron-down" } else { "chevron-right" }, 11., theme.text_placeholder))
-                    .child(if more { "Show fewer".to_string() } else { format!("Show {folded} more") })
+                    .child(if more { tr("Show fewer").to_string() } else { trf("Show {folded} more", &[("folded", &folded)]) })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.workspaces_more.remove(&key) {
                             this.workspaces_more.insert(key.clone());
@@ -524,7 +524,7 @@ impl Root {
         let id = w.id.clone();
         let place = machine.then(|| workspace_subtitle(w, false));
         let name = super::root::ellipsize(&w.name, 32);
-        let used = format!("used {}", format::ago(Some(w.last_used_at)));
+        let used = trf("used {ago}", &[("ago", &format::ago(Some(w.last_used_at)))]);
         // About what the rest of the row takes: GPUI 0.2 only puts "…" on
         // text whose width it knows.
         let taken = 30. + 18. + about(&name, 13.).min(240.) + about_mono(&w.id, 11.) + w.owner.as_deref().map_or(0., |o| about(o, 11.5) + 10.) + about(&used, 11.5) + about(&w.status, 11.) + 12. + 10. * 5.;
@@ -578,19 +578,19 @@ impl Root {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(section_title(theme, "Agent workspaces", Some(mine.len())))
+                    .child(section_title(theme, tr("Agent workspaces"), Some(mine.len())))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(12.))
-                            .child(kit::checkbox(theme, "ws-allow", allowed, "Allow agents to create workspaces here", cx.listener(move |this, value: &bool, _, cx| {
+                            .child(kit::checkbox(theme, "ws-allow", allowed, tr("Allow agents to create workspaces here"), cx.listener(move |this, value: &bool, _, cx| {
                                 if let Err(e) = this.engine.set_workspaces_allowed(&machine_id, *value) {
                                     this.notify_user(e, true, cx);
                                 }
                             })))
                             .child(
-                                Button::new("ws-new-here", "New workspace")
+                                Button::new("ws-new-here", tr("New workspace"))
                                     .icon("plus")
                                     .disabled(!allowed || m.is_down())
                                     .on_click(cx.listener(move |this, _, window, cx| this.show_new_workspace(Some(new_on.clone()), window, cx))),
@@ -602,7 +602,7 @@ impl Root {
                     .child(kit::empty_state(
                         theme,
                         "terminal",
-                        if allowed { "No workspaces here. Agents create them with workspace_create." } else { "Agents can't create workspaces on this machine." },
+                        if allowed { tr("No workspaces here. Agents create them with workspace_create.") } else { tr("Agents can't create workspaces on this machine.") },
                     ))
                     .into_any_element()
             } else {
@@ -644,7 +644,7 @@ fn workspace_subtitle(w: &WorkspaceInfo, full: bool) -> String {
         parts.push(format!("{repo}{at}"));
     }
     if let Some(src) = &w.worktree_of {
-        parts.push(format!("worktree of {}", if full { src.clone() } else { format::short_folder(src) }));
+        parts.push(trf("worktree of {folder}", &[("folder", &if full { src.clone() } else { format::short_folder(src) })]));
     }
     parts.join("  ·  ")
 }
@@ -678,22 +678,22 @@ fn merged_pull(w: &WorkspaceInfo) -> Option<u64> {
 
 fn status_pill(theme: &Theme, w: &WorkspaceInfo) -> AnyElement {
     match w.status.as_str() {
-        "ready" => kit::pill("ready", theme.success).into_any_element(),
+        "ready" => kit::pill(tr("ready"), theme.success).into_any_element(),
         "creating" => div()
             .flex()
             .items_center()
             .gap(px(5.))
             .child(kit::spinner(SharedString::from(format!("ws-spin-{}", w.id)), 11., theme.accent))
-            .child(kit::pill("creating", theme.accent))
+            .child(kit::pill(tr("creating"), theme.accent))
             .into_any_element(),
-        "destroying" => kit::pill("destroying", theme.warning).into_any_element(),
-        _ => kit::pill("failed", theme.error).into_any_element(),
+        "destroying" => kit::pill(tr("destroying"), theme.warning).into_any_element(),
+        _ => kit::pill(tr("failed"), theme.error).into_any_element(),
     }
 }
 
 fn exit_badge(theme: &Theme, c: &WorkspaceCommand) -> AnyElement {
     let (text, color) = match (c.exit_code, c.timed_out, c.background) {
-        (_, true, _) => ("timed out".to_string(), theme.warning),
+        (_, true, _) => (tr("timed out").to_string(), theme.warning),
         (_, _, true) => ("bg".to_string(), theme.info),
         (Some(0), _, _) => ("0".to_string(), theme.success),
         (Some(code), _, _) => (code.to_string(), theme.error),

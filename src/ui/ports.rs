@@ -6,6 +6,7 @@
 use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
 
 use super::github::Load;
+use crate::ui::i18n::{tr, trf, trc};
 use super::kit::{self, Button, ButtonStyle, icon, spinner};
 use super::root::Root;
 use super::theme::Theme;
@@ -39,11 +40,11 @@ impl Root {
             .flex()
             .items_center()
             .gap(px(8.))
-            .child(kit::section_title(theme, "Servers", count))
+            .child(kit::section_title(theme, tr("Servers"), count))
             .child(div().flex_1())
-            .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child("Open a port"))
+            .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(tr("Open a port")))
             .child(div().w(px(110.)).child(self.port_input.clone()))
-            .child(Button::icon_only("m-ports-refresh", "refresh-cw").tooltip("Look again").on_click(cx.listener({
+            .child(Button::icon_only("m-ports-refresh", "refresh-cw").tooltip(tr("Look again")).on_click(cx.listener({
                 let mid = mid.clone();
                 move |this, _, _, cx| this.load_machine_ports(&mid, cx)
             })));
@@ -56,7 +57,7 @@ impl Root {
                 .text_size(px(12.5))
                 .text_color(theme.text_muted)
                 .child(spinner("m-ports-loading", 13., theme.text_muted))
-                .child(format!("Looking at what's listening on {}…", m.name))
+                .child(trf("Looking at what's listening on {name}…", &[("name", &m.name)]))
                 .into_any_element(),
             Some(Load::Failed(e)) => kit::card(theme).p(px(16.)).text_size(px(12.5)).text_color(theme.error).child(e.clone()).into_any_element(),
             Some(Load::Ready(_)) => {
@@ -82,16 +83,16 @@ impl Root {
                     rows.push(self.port_row(theme, m, &p, Some(f), 500 + i, cx));
                 }
                 if rows.is_empty() && hidden == 0 {
-                    rows.push(div().p(px(16.)).text_size(px(12.5)).text_color(theme.text_muted).child(format!("Nothing is listening on {} right now. Start a server there and look again.", m.name)).into_any_element());
+                    rows.push(div().p(px(16.)).text_size(px(12.5)).text_color(theme.text_muted).child(trf("Nothing is listening on {name} right now. Start a server there and look again.", &[("name", &m.name)])).into_any_element());
                 } else if sites.is_empty() && others.len() == hidden_others && open.is_empty() {
-                    rows.insert(0, div().px(px(16.)).py(px(12.)).text_size(px(12.5)).text_color(theme.text_muted).child("No web servers running there.").into_any_element());
+                    rows.insert(0, div().px(px(16.)).py(px(12.)).text_size(px(12.5)).text_color(theme.text_muted).child(tr("No web servers running there.")).into_any_element());
                 }
                 let label = if more {
-                    "Show fewer".to_string()
+                    tr("Show fewer").to_string()
                 } else if hidden_sites > 0 {
-                    format!("Show {hidden} more")
+                    trf("Show {hidden} more", &[("hidden", &hidden)])
                 } else {
-                    format!("{} other port{}: databases, system services, apps' helpers", others.len(), if others.len() == 1 { "" } else { "s" })
+                    if others.len() == 1 { tr("1 other port: databases, system services, apps' helpers").to_string() } else { trf("{n} other ports: databases, system services, apps' helpers", &[("n", &others.len())]) }
                 };
                 let toggle = (hidden > 0 || (more && (!others.is_empty() || sites.len() > SITES_SHOWN))).then(|| {
                     let mid = mid.clone();
@@ -127,12 +128,12 @@ impl Root {
         let site = p.is_site();
         // Open here, but nothing listens there (yet): it waits for a server.
         let waiting = p.process.is_empty() && p.title.is_none() && p.container.is_none() && open.is_some() && p.address.is_empty();
-        let what = if waiting { "Nothing's listening there yet".to_string() } else { p.name() };
+        let what = if waiting { tr("Nothing's listening there yet").to_string() } else { p.name() };
         let mut detail: Vec<String> = Vec::new();
         if let Some(c) = &p.container
             && p.title.is_some()
         {
-            detail.push(format!("container {c}"));
+            detail.push(trf("container {c}", &[("c", &c)]));
         }
         if !p.process.is_empty() && (p.title.is_some() || p.container.is_some()) {
             detail.push(p.process.clone());
@@ -141,7 +142,7 @@ impl Root {
             detail.push(format!("HTTP {s}"));
         }
         if p.local_only() {
-            detail.push(format!("only on {} itself", m.name));
+            detail.push(trf("only on {name} itself", &[("name", &m.name)]));
         }
         let (mid, port, host) = (m.id.clone(), p.port, p.host.clone());
         let action: AnyElement = match open {
@@ -165,22 +166,22 @@ impl Root {
                             .text_size(px(12.))
                             .text_color(theme.text_accent)
                             .hover(|st| st.bg(theme.ghost_hover))
-                            .tooltip(move |window, cx| kit::Tooltip::view(format!("Open {url2} in your browser").into(), window, cx))
+                            .tooltip(move |window, cx| kit::Tooltip::view(trf("Open {url} in your browser", &[("url", &url2)]).into(), window, cx))
                             .child(format!("localhost:{}", f.local_port))
                             .child(icon("external-link", 11., theme.text_accent))
                             .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
                     )
-                    .child(Button::new(SharedString::from(format!("m-port-close-{n}")), "Close").style(ButtonStyle::Ghost).tooltip("Stop opening it here").on_click(cx.listener(move |this, _, _, cx| this.close_port(&mid2, port, cx))))
+                    .child(Button::new(SharedString::from(format!("m-port-close-{n}")), tr("Close")).style(ButtonStyle::Ghost).tooltip(tr("Stop opening it here")).on_click(cx.listener(move |this, _, _, cx| this.close_port(&mid2, port, cx))))
                     .into_any_element()
             }
-            None if site => Button::new(SharedString::from(format!("m-port-open-{n}")), "Open")
+            None if site => Button::new(SharedString::from(format!("m-port-open-{n}")), tr("Open"))
                 .icon("external-link")
-                .tooltip("Open it in your browser here, at localhost")
+                .tooltip(tr("Open it in your browser here, at localhost"))
                 .on_click(cx.listener(move |this, _, _, cx| this.open_port(&mid, port, Some(host.clone()), true, cx)))
                 .into_any_element(),
-            None => Button::new(SharedString::from(format!("m-port-fwd-{n}")), "Forward")
+            None => Button::new(SharedString::from(format!("m-port-fwd-{n}")), trc("Forward|port"))
                 .style(ButtonStyle::Ghost)
-                .tooltip("Reach it here, at localhost")
+                .tooltip(tr("Reach it here, at localhost"))
                 .on_click(cx.listener(move |this, _, _, cx| this.open_port(&mid, port, Some(host.clone()), false, cx)))
                 .into_any_element(),
         };
@@ -300,7 +301,7 @@ impl Root {
                             this.forward_seen.insert(key);
                         } else if this.forward_seen.remove(&key) {
                             this.close_port(&mid, f.port, cx);
-                            this.notify_user(format!("The server on {name}'s port {} stopped, so localhost:{} is closed.", f.port, f.local_port), false, cx);
+                            this.notify_user(trf("The server on {name}'s port {port} stopped, so localhost:{local} is closed.", &[("name", &name), ("port", &f.port), ("local", &f.local_port)]), false, cx);
                         }
                     }
                     // The page shown: look again when its servers changed.
@@ -352,7 +353,7 @@ impl Root {
             _ => None,
         };
         let (url, mid, port) = (f.url(), m.id.clone(), f.port);
-        let tip = format!("{}'s port {} at localhost:{}: click to open it in your browser", m.name, f.port, f.local_port);
+        let tip = trf("{name}'s port {port} at localhost:{local}: click to open it in your browser", &[("name", &m.name), ("port", &f.port), ("local", &f.local_port)]);
         let w = (self.row_width() - 20. - 30. - 16. - 16. - 110. - 16.).max(30.);
         div()
             .id(SharedString::from(format!("side-fwd-{}-{}", m.id, f.port)))
@@ -383,7 +384,7 @@ impl Root {
                     .right(px(8.))
                     .invisible()
                     .group_hover(group, |st| st.visible())
-                    .tooltip(move |window, cx| kit::Tooltip::view("Close it here".into(), window, cx))
+                    .tooltip(move |window, cx| kit::Tooltip::view(tr("Close it here").into(), window, cx))
                     .child(icon("x", 12., theme.text_placeholder))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();

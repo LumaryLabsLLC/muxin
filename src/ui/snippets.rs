@@ -4,6 +4,7 @@
 //! Snippets menu).
 
 use std::sync::Arc;
+use crate::ui::i18n::{tr, trf};
 
 use gpui::{AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, SharedString, Subscription, Window, div, prelude::*, px};
 
@@ -49,9 +50,9 @@ impl SnippetDialog {
         };
         let lines = cmd.contains('\n').then(|| (one_line(&cmd), cmd.clone()));
         let shown = lines.as_ref().map(|(shown, _)| shown.clone()).unwrap_or(cmd);
-        let name = cx.new(|cx| TextInput::new(cx, "e.g. Disk space").with_text(name));
+        let name = cx.new(|cx| TextInput::new(cx, tr("e.g. Disk space")).with_text(name));
         let command = cx.new(|cx| TextInput::new(cx, "e.g. df -h /").mono().with_text(shown));
-        let folder = cx.new(|cx| TextInput::new(cx, "None").with_text(folder));
+        let folder = cx.new(|cx| TextInput::new(cx, tr("None")).with_text(folder));
         let mut subs = Vec::new();
         for input in [&name, &command, &folder] {
             subs.push(cx.subscribe_in(input, window, |this: &mut Self, _, e: &InputEvent, _, cx| match e {
@@ -94,7 +95,7 @@ impl SnippetDialog {
 impl Render for SnippetDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let title = if self.editing.is_some() { "Edit snippet" } else { "New snippet" };
+        let title = if self.editing.is_some() { tr("Edit snippet") } else { tr("New snippet") };
         let picks = self.folders.iter().enumerate().map(|(i, f)| {
             let f2 = f.clone();
             div()
@@ -116,21 +117,21 @@ impl Render for SnippetDialog {
                     this.folder.update(cx, |i, cx| i.set_text(f, cx));
                 }))
         });
-        frame(&theme, title, Some("A command you run often. Run it on the Run page, from the palette (type >), or in a terminal from its Snippets menu.".into()))
-            .child(field(&theme, "Command", self.command.clone(), self.lines.as_ref().map(|_| "Its lines are joined with ; here, and kept as lines unless you change it.")))
-            .child(field(&theme, "Name", self.name.clone(), Some("Empty: the command is its name.")))
+        frame(&theme, title, Some(tr("A command you run often. Run it on the Run page, from the palette (type >), or in a terminal from its Snippets menu.").into()))
+            .child(field(&theme, tr("Command"), self.command.clone(), self.lines.as_ref().map(|_| tr("Its lines are joined with ; here, and kept as lines unless you change it."))))
+            .child(field(&theme, tr("Name"), self.name.clone(), Some(tr("Empty: the command is its name."))))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(6.))
-                    .child(field(&theme, "Folder", self.folder.clone(), None))
+                    .child(field(&theme, tr("Folder"), self.folder.clone(), None))
                     .when(!self.folders.is_empty(), |d| d.child(div().flex().flex_wrap().gap(px(6.)).children(picks))),
             )
             .children(error_line(&theme, &self.error))
             .child(footer(vec![
-                Button::new("sn-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
-                Button::new("sn-save", "Save").style(ButtonStyle::Primary).key_hint("↵").on_click(cx.listener(|this, _, _, cx| this.submit(cx))).into_any_element(),
+                Button::new("sn-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                Button::new("sn-save", tr("Save")).style(ButtonStyle::Primary).key_hint("↵").on_click(cx.listener(|this, _, _, cx| this.submit(cx))).into_any_element(),
             ]))
     }
 }
@@ -147,14 +148,14 @@ impl Root {
     /// Asks, then deletes a snippet.
     pub(super) fn confirm_delete_snippet(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
         let detail = match self.engine.settings().snippet(&name) {
-            Some(s) => format!("It's taken out of config.toml: {}", one_line(&s.command)),
+            Some(s) => trf("It's taken out of config.toml: {command}", &[("command", &one_line(&s.command))]),
             None => return,
         };
         let dialog = cx.new(|cx| {
             ConfirmDialog::new(
-                format!("Delete {name}?"),
+                trf("Delete {name}?", &[("name", &name)]),
                 detail,
-                "Delete snippet",
+                tr("Delete snippet"),
                 None,
                 move |_, engine| {
                     let mut settings = engine.settings();
@@ -181,14 +182,14 @@ impl Root {
     /// Types `command` into a session's terminal and runs it. False when there's none to type into.
     pub(super) fn type_snippet(&mut self, session: &str, command: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(view) = self.terminals.get(session).cloned() else {
-            self.notify_user("That session has no terminal here to type it into.", true, cx);
+            self.notify_user(tr("That session has no terminal here to type it into."), true, cx);
             return false;
         };
         let typed = view.update(cx, |t, cx| t.type_command(command, cx));
         if typed {
             window.focus(&view.focus_handle(cx));
         } else {
-            self.notify_user("That session has ended.", true, cx);
+            self.notify_user(tr("That session has ended."), true, cx);
         }
         typed
     }
@@ -204,15 +205,15 @@ impl Root {
     /// The Run page's snippets, by folder: run, edit, delete; a new one.
     pub(super) fn render_snippets(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let snippets = self.engine.settings().snippets;
-        let new = Button::new("snippet-new", "New snippet").icon("plus").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, window, cx| this.show_snippet_dialog(None, None, window, cx)));
-        let title = div().flex().items_center().gap(px(8.)).child(div().flex_1().child(section_title(theme, "Snippets", (!snippets.is_empty()).then_some(snippets.len())))).child(new);
+        let new = Button::new("snippet-new", tr("New snippet")).icon("plus").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, window, cx| this.show_snippet_dialog(None, None, window, cx)));
+        let title = div().flex().items_center().gap(px(8.)).child(div().flex_1().child(section_title(theme, tr("Snippets"), (!snippets.is_empty()).then_some(snippets.len())))).child(new);
         if snippets.is_empty() {
             return div()
                 .flex()
                 .flex_col()
                 .gap(px(8.))
                 .child(title)
-                .child(card(theme).child(kit::empty_state(theme, "code", "Save commands you run often. Run one here on the machines picked, from the palette, or in a terminal.")))
+                .child(card(theme).child(kit::empty_state(theme, "code", tr("Save commands you run often. Run one here on the machines picked, from the palette, or in a terminal."))))
                 .into_any_element();
         }
         let mut rows: Vec<AnyElement> = Vec::new();
@@ -254,7 +255,7 @@ impl Root {
             .pr(px(8.))
             .py(px(3.))
             .hover(|st| st.bg(theme.element_hover))
-            .child(Button::icon_only(("snippet-run", i), "play").tooltip("Run it on the machines picked").on_click(cx.listener(move |this, _, _, cx| this.run_snippet_here(&run, cx))))
+            .child(Button::icon_only(("snippet-run", i), "play").tooltip(tr("Run it on the machines picked")).on_click(cx.listener(move |this, _, _, cx| this.run_snippet_here(&run, cx))))
             .child(
                 div()
                     .id(("snippet-fill", i))
@@ -267,7 +268,7 @@ impl Root {
                     .child(div().flex_none().max_w(px(220.)).truncate().text_size(px(13.)).child(s.name.clone()))
                     .child(div().flex_1().min_w(px(0.)).truncate().font_family(mono_font()).text_size(px(11.5)).text_color(theme.text_muted).child(one_line(&s.command)))
                     .tooltip({
-                        let tip: SharedString = "Put it in the box above, to change it before it runs".into();
+                        let tip: SharedString = tr("Put it in the box above, to change it before it runs").into();
                         move |window, cx| kit::Tooltip::view(tip.clone(), window, cx)
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -276,8 +277,8 @@ impl Root {
                         window.focus(&this.run_input.read(cx).focus_handle(cx));
                     })),
             )
-            .child(Button::icon_only(("snippet-edit", i), "pencil").tooltip("Edit").on_click(cx.listener(move |this, _, window, cx| this.show_snippet_dialog(Some(edit.clone()), None, window, cx))))
-            .child(Button::icon_only(("snippet-delete", i), "trash-2").tooltip("Delete").on_click(cx.listener(move |this, _, window, cx| this.confirm_delete_snippet(delete.clone(), window, cx))))
+            .child(Button::icon_only(("snippet-edit", i), "pencil").tooltip(tr("Edit")).on_click(cx.listener(move |this, _, window, cx| this.show_snippet_dialog(Some(edit.clone()), None, window, cx))))
+            .child(Button::icon_only(("snippet-delete", i), "trash-2").tooltip(tr("Delete")).on_click(cx.listener(move |this, _, window, cx| this.confirm_delete_snippet(delete.clone(), window, cx))))
             .into_any_element()
     }
 }

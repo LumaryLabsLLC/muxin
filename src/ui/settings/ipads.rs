@@ -8,6 +8,7 @@ use gpui::{AnyElement, ClipboardItem, Context, RenderImage, SharedString, div, p
 
 use super::SettingsPage;
 use crate::fleet::ipads::Ipad;
+use crate::ui::i18n::{tr, trf};
 use crate::share::pair::{self, View};
 use crate::ui::kit::{Button, ButtonStyle, card, checkbox, icon, section_title};
 use crate::ui::theme::{Theme, mono_font};
@@ -52,7 +53,7 @@ impl SettingsPage {
         self.ipad.error = None;
         self.ipad.note = None;
         if ids.is_empty() {
-            self.ipad.error = Some("Pick a machine that's online.".into());
+            self.ipad.error = Some(tr("Pick a machine that's online.").into());
             cx.notify();
             return;
         }
@@ -118,8 +119,8 @@ impl SettingsPage {
             let _ = this.update(cx, |this, cx| {
                 this.ipad.removing = None;
                 this.ipad.note = Some(match result {
-                    Ok((ipad, kept)) if kept.is_empty() => format!("Unpaired {}.", ipad.name),
-                    Ok((ipad, kept)) => format!("Unpaired {}. {} couldn't be reached and still trust it.", ipad.name, super::some_names(&kept)),
+                    Ok((ipad, kept)) if kept.is_empty() => trf("Unpaired {name}.", &[("name", &ipad.name)]),
+                    Ok((ipad, kept)) => trf("Unpaired {name}. {machines} couldn't be reached and still trust it.", &[("name", &ipad.name), ("machines", &super::some_names(&kept))]),
                     Err(e) => e,
                 });
                 this.ipad.ipads = this.engine.ipads();
@@ -136,7 +137,7 @@ impl SettingsPage {
             .p(px(14.))
             .gap(px(12.))
             .child(div().w_full().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(
-                "Muxin for iPhone and Muxin for iPad reach your machines directly, each with a key of its own. On the iPhone or iPad, tap Pair with your Mac and scan the code that shows here.",
+                tr("Muxin for iPhone and Muxin for iPad reach your machines directly, each with a key of its own. On the iPhone or iPad, tap Pair with your Mac and scan the code that shows here."),
             ))
             .child(match going {
                 Some(v) => self.pairing_now(v, theme),
@@ -164,10 +165,10 @@ impl SettingsPage {
                             .flex()
                             .flex_col()
                             .child(div().text_size(px(13.)).child(i.name.clone()))
-                            .child(div().truncate().text_size(px(12.)).text_color(theme.text_placeholder).child(format!("Paired {} · {}", crate::ui::format::ago(Some(i.paired_at)), names(&i.machines)))),
+                            .child(div().truncate().text_size(px(12.)).text_color(theme.text_placeholder).child(trf("Paired {when} · {machines}", &[("when", &crate::ui::format::ago(Some(i.paired_at))), ("machines", &names(&i.machines))]))),
                     )
                     .child(
-                        Button::new(SharedString::from(format!("ipad-remove-{key}")), "Unpair")
+                        Button::new(SharedString::from(format!("ipad-remove-{key}")), tr("Unpair"))
                             .loading(self.ipad.removing.as_deref() == Some(key.as_str()))
                             .on_click(cx.listener(move |this, _, _, cx| this.remove_ipad(key.clone(), cx))),
                     )
@@ -177,17 +178,17 @@ impl SettingsPage {
         let list = card(theme)
             .px(px(14.))
             .py(px(6.))
-            .when(rows.is_empty(), |c| c.child(div().py(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child("Nothing paired yet.")))
+            .when(rows.is_empty(), |c| c.child(div().py(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(tr("Nothing paired yet."))))
             .children(rows)
             .children(self.ipad.note.clone().map(|n| div().pb(px(8.)).text_size(px(12.)).text_color(theme.text_muted).child(n)));
         div()
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Pair an iPhone or iPad", None))
+            .child(section_title(theme, tr("Pair an iPhone or iPad"), None))
             .child(pairing)
             .child(div().h(px(10.)))
-            .child(section_title(theme, "Paired iPhones and iPads", Some(self.ipad.ipads.len())))
+            .child(section_title(theme, tr("Paired iPhones and iPads"), Some(self.ipad.ipads.len())))
             .child(list)
             .into_any_element()
     }
@@ -200,7 +201,7 @@ impl SettingsPage {
             .into_iter()
             .map(|(id, name, online)| {
                 if !online {
-                    return div().flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_placeholder).child(div().size(px(15.))).child(format!("{name} · offline")).into_any_element();
+                    return div().flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_placeholder).child(div().size(px(15.))).child(trf("{name} · offline", &[("name", &name)])).into_any_element();
                 }
                 let on = !self.ipad.left_out.contains(&id);
                 checkbox(theme, SharedString::from(format!("ipad-machine-{id}")), on, name, cx.listener(move |this, value: &bool, _, cx| {
@@ -216,9 +217,9 @@ impl SettingsPage {
             .collect();
         let outcome = self.ipad.pairing.as_ref().map(|v| {
             let (glyph, color, line) = match v.state.as_str() {
-                "done" => ("circle-check", theme.success, format!("Paired {} with {}.", device_name(v), super::some_names(&v.paired))),
-                "denied" => ("circle-x", theme.text_muted, "Not paired: you didn't allow it.".to_string()),
-                _ => ("triangle-alert", theme.warning, v.error.clone().unwrap_or_else(|| "The pairing ended.".into())),
+                "done" => ("circle-check", theme.success, trf("Paired {device} with {machines}.", &[("device", &device_name(v)), ("machines", &super::some_names(&v.paired))])),
+                "denied" => ("circle-x", theme.text_muted, tr("Not paired: you didn't allow it.").to_string()),
+                _ => ("triangle-alert", theme.warning, v.error.clone().unwrap_or_else(|| tr("The pairing ended.").into())),
             };
             div()
                 .flex()
@@ -232,11 +233,11 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .when(boxes.is_empty(), |d| d.child(div().text_size(px(12.5)).text_color(theme.text_muted).child("Add a machine first: the iPhone or iPad reaches your other machines, not this computer.")))
+            .when(boxes.is_empty(), |d| d.child(div().text_size(px(12.5)).text_color(theme.text_muted).child(tr("Add a machine first: the iPhone or iPad reaches your other machines, not this computer."))))
             .children(boxes)
             .child(
                 div().flex().child(
-                    Button::new("ipad-pair", "Pair an iPhone or iPad")
+                    Button::new("ipad-pair", tr("Pair an iPhone or iPad"))
                         .icon("smartphone")
                         .style(ButtonStyle::Primary)
                         .loading(self.ipad.starting)
@@ -251,7 +252,7 @@ impl SettingsPage {
 
     /// The QR code to scan, then the iPad asking, then the machines taking its key.
     fn pairing_now(&self, v: &View, theme: &Theme) -> AnyElement {
-        let cancel = Button::new("ipad-cancel", "Cancel").on_click(|_, _, _| pair::stop());
+        let cancel = Button::new("ipad-cancel", tr("Cancel")).on_click(|_, _, _| pair::stop());
         match v.state.as_str() {
             "asking" => {
                 let code = v.code.clone().unwrap_or_default();
@@ -260,15 +261,15 @@ impl SettingsPage {
                     .flex()
                     .flex_col()
                     .gap(px(10.))
-                    .child(div().flex().items_center().gap(px(8.)).text_size(px(14.)).child(icon(crate::fleet::ipads::icon(v.device.as_deref().unwrap_or("")), 16., theme.accent)).child(format!("{} wants to pair.", v.device.as_deref().unwrap_or("A device"))))
-                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(format!("Allow it only if the {} shows this code:", device_word(v.device.as_deref()))))
+                    .child(div().flex().items_center().gap(px(8.)).text_size(px(14.)).child(icon(crate::fleet::ipads::icon(v.device.as_deref().unwrap_or("")), 16., theme.accent)).child(trf("{device} wants to pair.", &[("device", &v.device.as_deref().unwrap_or(tr("A device")))])))
+                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(trf("Allow it only if the {device} shows this code:", &[("device", &device_word(v.device.as_deref()))])))
                     .child(div().font_family(mono_font()).text_size(px(28.)).child(spaced))
                     .child(
                         div()
                             .flex()
                             .gap(px(8.))
-                            .child(Button::new("ipad-allow", "Allow").icon("check").style(ButtonStyle::Primary).on_click(|_, _, _| pair::allow(true)))
-                            .child(Button::new("ipad-deny", "Don't allow").on_click(|_, _, _| pair::allow(false))),
+                            .child(Button::new("ipad-allow", tr("Allow")).icon("check").style(ButtonStyle::Primary).on_click(|_, _, _| pair::allow(true)))
+                            .child(Button::new("ipad-deny", tr("Don't allow")).on_click(|_, _, _| pair::allow(false))),
                     )
                     .into_any_element()
             }
@@ -278,7 +279,7 @@ impl SettingsPage {
                 .gap(px(8.))
                 .text_size(px(12.5))
                 .child(icon("loader-circle", 14., theme.text_muted))
-                .child(format!("Pairing {} with {}…", device_name(v), super::some_names(&v.machines)))
+                .child(trf("Pairing {device} with {machines}…", &[("device", &device_name(v)), ("machines", &super::some_names(&v.machines))]))
                 .into_any_element(),
             _ => {
                 let link = v.link.clone();
@@ -293,14 +294,14 @@ impl SettingsPage {
                             .flex()
                             .flex_col()
                             .gap(px(10.))
-                            .child(div().text_size(px(13.)).child("Scan this with Muxin on your iPhone or iPad."))
-                            .child(div().w_full().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(format!("It gets {}. You'll see the same code on both screens before anything is paired.", super::some_names(&v.machines))))
-                            .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child("No camera? Copy the link and paste it in Muxin there. It works for 10 minutes."))
+                            .child(div().text_size(px(13.)).child(tr("Scan this with Muxin on your iPhone or iPad.")))
+                            .child(div().w_full().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text_muted).child(trf("It gets {machines}. You'll see the same code on both screens before anything is paired.", &[("machines", &super::some_names(&v.machines))])))
+                            .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(tr("No camera? Copy the link and paste it in Muxin there. It works for 10 minutes.")))
                             .child(
                                 div()
                                     .flex()
                                     .gap(px(8.))
-                                    .child(Button::new("ipad-copy", "Copy link").icon("copy").on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(link.clone()))))
+                                    .child(Button::new("ipad-copy", tr("Copy link")).icon("copy").on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(link.clone()))))
                                     .child(cancel),
                             ),
                     )
@@ -329,7 +330,7 @@ fn qr_image(link: &str) -> Option<Arc<RenderImage>> {
 
 /// The name the iPhone or iPad gave, cut short: it's whatever its owner called it.
 fn device_name(v: &View) -> String {
-    v.device.as_deref().map(|d| crate::ui::root::ellipsize(d, 28)).unwrap_or_else(|| "it".into())
+    v.device.as_deref().map(|d| crate::ui::root::ellipsize(d, 28)).unwrap_or_else(|| tr("it").into())
 }
 
 /// "iPhone" or "iPad", for a device by the name it paired with.

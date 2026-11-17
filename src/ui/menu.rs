@@ -3,6 +3,7 @@
 use gpui::{AnyElement, ClipboardItem, Context, Corner, FontWeight, MouseButton, Pixels, Point, Window, anchored, deferred, div, prelude::*, px};
 
 use super::kit::{self, icon};
+use crate::ui::i18n::{tr, trf, trc};
 use super::root::{Root, Route};
 use super::theme::Theme;
 use crate::fleet::order::Move;
@@ -218,7 +219,7 @@ fn session_actions(x: &crate::fleet::sessions::SessionInfo) -> Vec<Item> {
         })
         .collect();
     items.push(Item::Separator);
-    items.push(Item::Action { label: "Edit the prompts…".into(), glyph: Glyph::Icon("pencil"), action: Action::EditPrompts, danger: false });
+    items.push(Item::Action { label: tr("Edit the prompts…").into(), glyph: Glyph::Icon("pencil"), action: Action::EditPrompts, danger: false });
     items
 }
 
@@ -228,7 +229,7 @@ fn snippet_items(session: &str, snippets: &[crate::config::Snippet]) -> Vec<Item
     let typed = |s: &crate::config::Snippet| Item::Action { label: s.name.clone(), glyph: Glyph::Icon("code"), action: Action::TypeSnippet(session.to_string(), s.command.clone()), danger: false };
     let mut items = Vec::new();
     if snippets.is_empty() {
-        items.push(Item::Note("Save commands you run often, to type them in here".into()));
+        items.push(Item::Note(tr("Save commands you run often, to type them in here").into()));
     }
     for folder in crate::config::snippet_folders(snippets) {
         let inside = snippets.iter().filter(|s| s.folder.eq_ignore_ascii_case(&folder));
@@ -240,9 +241,9 @@ fn snippet_items(session: &str, snippets: &[crate::config::Snippet]) -> Vec<Item
     if !items.is_empty() {
         items.push(Item::Separator);
     }
-    items.push(Item::Action { label: "New snippet…".into(), glyph: Glyph::Icon("plus"), action: Action::NewSnippet, danger: false });
+    items.push(Item::Action { label: tr("New snippet…").into(), glyph: Glyph::Icon("plus"), action: Action::NewSnippet, danger: false });
     if !snippets.is_empty() {
-        items.push(Item::Action { label: "Edit snippets…".into(), glyph: Glyph::Icon("pencil"), action: Action::EditSnippets, danger: false });
+        items.push(Item::Action { label: tr("Edit snippets…").into(), glyph: Glyph::Icon("pencil"), action: Action::EditSnippets, danger: false });
     }
     items
 }
@@ -252,7 +253,7 @@ fn editor_items(chosen: &str, machine: &str, path: &str, long: bool) -> Vec<Item
     crate::fleet::editor::by_preference(chosen)
         .into_iter()
         .map(|e| Item::Action {
-            label: if long { format!("Open in {}", e.name) } else { e.name.to_string() },
+            label: if long { trf("Open in {name}", &[("name", &e.name)]) } else { e.name.to_string() },
             glyph: Glyph::App(crate::fleet::editor::icon(e.id), "code"),
             action: Action::OpenInEditor(machine.to_string(), path.to_string(), e.id),
             danger: false,
@@ -270,9 +271,9 @@ fn os_power_items(m: &crate::fleet::model::Machine, busy: bool) -> Vec<Item> {
         true => Item::Off { label: label.into(), glyph: Glyph::Icon(icon) },
         false => Item::Action { label: label.into(), glyph: Glyph::Icon(icon), action: Action::OsPower(m.id.clone(), action), danger },
     };
-    let mut items = vec![item("Restart…", "rotate-ccw", crate::ops::OsPower::Restart, false)];
+    let mut items = vec![item(tr("Restart…"), "rotate-ccw", crate::ops::OsPower::Restart, false)];
     if m.cloud.is_none() && !m.parent.as_ref().is_some_and(|p| p.container.is_some()) {
-        items.push(item("Shut down…", "power", crate::ops::OsPower::Shutdown, true));
+        items.push(item(tr("Shut down…"), "power", crate::ops::OsPower::Shutdown, true));
     }
     items
 }
@@ -313,67 +314,68 @@ impl Root {
                 if !m.host.is_empty() {
                     // Asleep: wake it first.
                     if (m.is_asleep() || super::format::is_just_offline(m)) && self.engine.can_wake(&m.id) {
-                        items.push(act("Wake", "power", Action::Wake(id.clone())));
+                        items.push(act(tr("Wake"), "power", Action::Wake(id.clone())));
                         items.push(Item::Separator);
                     }
                     // Disconnected on purpose: connecting comes first.
                     if m.is_disconnected() {
-                        items.push(act("Connect", "plug", Action::Connect(id.clone(), true)));
+                        items.push(act(tr("Connect"), "plug", Action::Connect(id.clone(), true)));
                         items.push(Item::Separator);
                     }
-                    items.push(needs_up(act("New terminal", "square-terminal", Action::NewTerminal(id.clone()))));
+                    items.push(needs_up(act(tr("New terminal"), "square-terminal", Action::NewTerminal(id.clone()))));
                     let agents = AGENTS
                         .iter()
                         .filter(|a| a.id != "shell" && m.agents.iter().any(|i| i == a.id))
-                        .map(|a| (Some(a.name.to_string()), needs_up(Item::Action { label: format!("New {} session…", a.name), glyph: Glyph::Agent(a.id), action: Action::NewAgent(id.clone(), a.id), danger: false })))
+                        .map(|a| (Some(a.name.to_string()), needs_up(Item::Action { label: trf("New {agent} session…", &[("agent", &a.name)]), glyph: Glyph::Agent(a.id), action: Action::NewAgent(id.clone(), a.id), danger: false })))
                         .collect();
-                    items.extend(group("New session", "bot", agents));
+                    items.extend(group(tr("New session"), "bot", agents));
                     let mut desktop = Vec::new();
                     if super::format::has_desktop(m) && !m.local {
-                        desktop.push((Some("Show".to_string()), needs_up(act("Show desktop", "monitor", Action::ShowDesktop(id.clone())))));
+                        desktop.push((Some(tr("Show").to_string()), needs_up(act(tr("Show desktop"), "monitor", Action::ShowDesktop(id.clone())))));
                     }
                     if super::format::has_desktop(m) && !m.local && !s.demo {
                         desktop.push((None, needs_up(act(crate::fleet::remote_desktop::open_label(&m.platform), "external-link", Action::OpenRemoteDesktop(id.clone())))));
                     }
                     if super::format::has_desktop(m) && !s.demo && !m.platform.starts_with("windows") {
-                        desktop.push((None, needs_up(act("Add virtual monitor…", "monitor", Action::AddDisplay(id.clone())))));
+                        desktop.push((None, needs_up(act(tr("Add virtual monitor…"), "monitor", Action::AddDisplay(id.clone())))));
                     }
-                    items.extend(group("Desktop", "monitor", desktop));
-                    items.push(needs_up(act("Run a command…", "zap", Action::RunOn(id.clone()))));
-                    items.push(needs_up(act("Copy files…", "folder", Action::CopyFiles(id.clone()))));
-                    items.push(needs_up(act("Logs", "scroll-text", Action::ShowLogs(id.clone()))));
-                    items.push(needs_up(act("Services", "layers", Action::ShowServices(id.clone()))));
-                    new.push((Some("Runner…".to_string()), needs_up(act("Install runner…", "plus", Action::InstallRunner(id.clone())))));
+                    items.extend(group(tr("Desktop"), "monitor", desktop));
+                    items.push(needs_up(act(tr("Run a command…"), "zap", Action::RunOn(id.clone()))));
+                    items.push(needs_up(act(tr("Copy files…"), "folder", Action::CopyFiles(id.clone()))));
+                    items.push(needs_up(act(tr("Logs"), "scroll-text", Action::ShowLogs(id.clone()))));
+                    items.push(needs_up(act(tr("Services"), "layers", Action::ShowServices(id.clone()))));
+                    new.push((Some(tr("Runner…").to_string()), needs_up(act(tr("Install runner…"), "plus", Action::InstallRunner(id.clone())))));
                 }
                 if m.cloud.is_none() && m.status == "online" {
-                    new.push((Some("Schedule…".to_string()), act("New schedule here…", "clock", Action::NewSchedule(id.clone()))));
+                    new.push((Some(tr("Schedule…").to_string())
+, act(tr("New schedule here…"), "clock", Action::NewSchedule(id.clone()))));
                 }
                 // A machine that can run VMs: make one here.
                 if m.cloud.is_none() && self.engine.vm_options().hosts.iter().any(|h| &h.machine_id == id && !h.systems.is_empty()) {
-                    new.push((Some("VM…".to_string()), act("New VM here…", "box", Action::NewVm(id.clone()))));
+                    new.push((Some("VM…".to_string()), act(tr("New VM here…"), "box", Action::NewVm(id.clone()))));
                 }
-                if let Some(new) = group("New", "plus", new) {
+                if let Some(new) = group(tr("New"), "plus", new) {
                     items.push(Item::Separator);
                     items.push(new);
                 }
                 if !m.host.is_empty() {
                     if !m.is_disconnected() {
-                        items.push(act("Refresh", "refresh-cw", Action::Check(id.clone())));
+                        items.push(act(tr("Refresh"), "refresh-cw", Action::Check(id.clone())));
                     }
                     if !m.is_disconnected() && !m.local {
-                        items.push(act("Disconnect", "unplug", Action::Connect(id.clone(), false)));
+                        items.push(act(tr("Disconnect"), "unplug", Action::Connect(id.clone(), false)));
                     }
                 }
                 items.push(Item::Separator);
-                items.push(act("Rename…", "pencil", Action::RenameMachine(id.clone())));
+                items.push(act(tr("Rename…"), "pencil", Action::RenameMachine(id.clone())));
                 if Root::is_favorite(cx, id) {
-                    items.push(act("Remove from favorites", "star", Action::FavoriteMachine(id.clone(), false)));
+                    items.push(act(tr("Remove from favorites"), "star", Action::FavoriteMachine(id.clone(), false)));
                 } else {
-                    items.push(act("Add to favorites", "star", Action::FavoriteMachine(id.clone(), true)));
+                    items.push(act(tr("Add to favorites"), "star", Action::FavoriteMachine(id.clone(), true)));
                 }
                 // Its place among the machines at its level (VMs: under their host).
                 let (entries, sorted) = Root::order_entries(s, cx);
-                let moves = [("Up", "Move Up", "arrow-up", Move::Up), ("Down", "Move Down", "arrow-down", Move::Down), ("To the top", "Move to Top", "arrow-up", Move::Top)];
+                let moves = [(tr("Up"), tr("Move Up"), "arrow-up", Move::Up), (trc("Down|move"), tr("Move Down"), "arrow-down", Move::Down), (tr("To the top"), tr("Move to Top"), "arrow-up", Move::Top)];
                 let moves: Vec<(Option<String>, Item)> = moves
                     .into_iter()
                     .map(|(short, label, glyph, how)| {
@@ -382,35 +384,35 @@ impl Root {
                     })
                     .collect();
                 if moves.iter().any(|(_, item)| matches!(item, Item::Action { .. })) {
-                    items.extend(group("Move", "arrow-up", moves));
+                    items.extend(group(tr("Move"), "arrow-up", moves));
                 }
                 // Starting, stopping, restarting: under Power.
                 let mut power = Vec::new();
                 // A cloud machine is powered and destroyed; removing it alone would leave it running (and billed).
                 if m.cloud.is_some() {
                     let off = m.status == "offline";
-                    let label = if off { "Power on" } else { "Power off" };
+                    let label = if off { tr("Power on") } else { tr("Power off") };
                     // One that hasn't started has nothing to power yet.
                     power.push((None, if busy || m.awaits_address() { Item::Off { label: label.into(), glyph: Glyph::Icon("power") } } else { act(label, "power", Action::CloudPower(id.clone(), off)) }));
                 }
                 // A VM or container on another machine: started and stopped there.
                 if let Some(p) = m.parent.as_ref().filter(|p| m.cloud.is_none() && p.container.is_some() && s.machines.iter().any(|h| h.id == p.machine_id && !h.is_down())) {
                     let running = p.container_state.as_deref() == Some("running");
-                    let label = if running { "Stop" } else { "Start" };
+                    let label = if running { tr("Stop") } else { tr("Start") };
                     power.push((None, if busy { Item::Off { label: label.into(), glyph: Glyph::Icon("power") } } else { act(label, "power", Action::MachinePower(id.clone(), !running)) }));
                 }
                 power.extend(os_power_items(m, busy).into_iter().map(|item| (None, item)));
                 items.push(Item::Separator);
-                items.extend(group("Power", "power", power));
+                items.extend(group(tr("Power"), "power", power));
                 // A cloud machine, or a VM Muxin made, goes with its disk.
-                let label = if m.cloud.is_some() || m.vm.is_some() { "Destroy…" } else { "Remove from Muxin…" };
+                let label = if m.cloud.is_some() || m.vm.is_some() { tr("Destroy…") } else { tr("Remove from Muxin…") };
                 items.push(Item::Action { label: label.into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
                 items
             }
             MenuTarget::MachineMore(id) => {
                 let Some(m) = s.machines.iter().find(|m| &m.id == id) else { return Vec::new() };
                 let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(id.as_str()) && o.kind != "logs");
-                let install = "Install runner…";
+                let install = tr("Install runner…");
                 let mut items = vec![match m.host.is_empty() || busy || m.is_down() {
                     true => Item::Off { label: install.into(), glyph: Glyph::Icon("plus") },
                     false => act(install, "plus", Action::InstallRunner(id.clone())),
@@ -422,7 +424,7 @@ impl Root {
                     items.push(Item::Separator);
                 }
                 // A cloud machine or a VM Muxin made goes with its disk.
-                let label = if m.cloud.is_some() || m.vm.is_some() { "Destroy…" } else { "Remove from Muxin…" };
+                let label = if m.cloud.is_some() || m.vm.is_some() { tr("Destroy…") } else { tr("Remove from Muxin…") };
                 items.push(Item::Action { label: label.into(), glyph: Glyph::Icon("trash-2"), action: Action::Remove(id.clone()), danger: true });
                 items
             }
@@ -433,30 +435,30 @@ impl Root {
                 if r.local.is_some() && r.machine_id.is_some() {
                     let running = r.local.as_ref().is_some_and(|l| l.listener);
                     if running {
-                        items.push(act("Stop", "square", Action::Runner(id.clone(), RunnerAction::Stop)));
+                        items.push(act(tr("Stop"), "square", Action::Runner(id.clone(), RunnerAction::Stop)));
                     } else {
-                        items.push(act("Start", "play", Action::Runner(id.clone(), RunnerAction::Start)));
+                        items.push(act(tr("Start"), "play", Action::Runner(id.clone(), RunnerAction::Start)));
                     }
-                    items.push(act("Restart", "rotate-ccw", Action::Runner(id.clone(), RunnerAction::Restart)));
-                    items.push(act("Show logs", "scroll-text", Action::Runner(id.clone(), RunnerAction::Logs)));
+                    items.push(act(tr("Restart"), "rotate-ccw", Action::Runner(id.clone(), RunnerAction::Restart)));
+                    items.push(act(tr("Show logs"), "scroll-text", Action::Runner(id.clone(), RunnerAction::Logs)));
                     items.push(Item::Separator);
                 }
                 if let Some(job) = r.job_id.and_then(|j| s.jobs.running.iter().find(|x| x.id == j)) {
-                    items.push(act("Open its job on GitHub", "external-link", Action::OpenUrl(job.url.clone())));
+                    items.push(act(tr("Open its job on GitHub"), "external-link", Action::OpenUrl(job.url.clone())));
                 }
                 if let Some(url) = r.github.as_ref().and_then(runner_settings_url) {
-                    items.push(act("Open on GitHub", "agent-github", Action::OpenUrl(url)));
+                    items.push(act(tr("Open on GitHub"), "agent-github", Action::OpenUrl(url)));
                 }
-                items.push(act("Copy name", "copy", Action::CopyUrl(r.name.clone())));
+                items.push(act(tr("Copy name"), "copy", Action::CopyUrl(r.name.clone())));
                 items.push(Item::Separator);
-                items.push(Item::Action { label: "Remove runner…".into(), glyph: Glyph::Icon("trash-2"), action: Action::RemoveRunner(id.clone()), danger: true });
+                items.push(Item::Action { label: tr("Remove runner…").into(), glyph: Glyph::Icon("trash-2"), action: Action::RemoveRunner(id.clone()), danger: true });
                 items
             }
             MenuTarget::Job(id) => {
                 let Some(j) = s.jobs.queued.iter().chain(s.jobs.running.iter()).find(|j| j.id == *id) else { return Vec::new() };
                 let mut items = Vec::new();
                 if let Some(rid) = &j.runner_id {
-                    items.push(act("Show its runner", "server", Action::ShowRunner(rid.clone())));
+                    items.push(act(tr("Show its runner"), "server", Action::ShowRunner(rid.clone())));
                 }
                 // Stuck: a runner with what it needs, on a machine of the right OS and CPU.
                 if j.status != "in_progress" && j.matching_online == 0 {
@@ -464,14 +466,14 @@ impl Root {
                     let fits: Vec<&crate::fleet::model::Machine> =
                         s.machines.iter().filter(|m| !m.host.is_empty() && m.status == "online" && j.labels.iter().all(|l| platform_label(l).is_none_or(|p| m.platform.contains(p)))).collect();
                     if !extra.is_empty() {
-                        items.push(Item::Note(format!("Needs a runner with {}", extra.join(", "))));
+                        items.push(Item::Note(trf("Needs a runner with {labels}", &[("labels", &extra.join(", "))])));
                     }
                     if fits.is_empty() {
-                        items.push(Item::Note("None of your machines fits it.".into()));
+                        items.push(Item::Note(tr("None of your machines fits it.").into()));
                     }
                     for m in fits {
                         items.push(Item::Action {
-                            label: format!("Add runner on {}", m.name),
+                            label: trf("Add runner on {name}", &[("name", &m.name)]),
                             glyph: Glyph::Icon("plus"),
                             action: Action::InstallWith(m.id.clone(), extra.clone()),
                             danger: false,
@@ -481,10 +483,10 @@ impl Root {
                 if !items.is_empty() {
                     items.push(Item::Separator);
                 }
-                items.push(act("Open on GitHub", "external-link", Action::OpenUrl(j.url.clone())));
-                items.push(act("Copy link", "copy", Action::CopyUrl(j.url.clone())));
+                items.push(act(tr("Open on GitHub"), "external-link", Action::OpenUrl(j.url.clone())));
+                items.push(act(tr("Copy link"), "copy", Action::CopyUrl(j.url.clone())));
                 items.push(Item::Separator);
-                items.push(Item::Action { label: "Cancel run…".into(), glyph: Glyph::Icon("circle-x"), action: Action::CancelRun(*id), danger: true });
+                items.push(Item::Action { label: tr("Cancel run…").into(), glyph: Glyph::Icon("circle-x"), action: Action::CancelRun(*id), danger: true });
                 items
             }
             MenuTarget::Snippets(id) => snippet_items(id, &self.engine.settings().snippets),
@@ -500,23 +502,23 @@ impl Root {
                     true => crate::fleet::boxes::BOX_AGENTS.contains(&a),
                     false => s.machines.iter().find(|m| m.id == x.machine_id).is_some_and(|m| m.agents.iter().any(|i| i == a)),
                 };
-                let mut items = vec![Item::Note(if in_box { "Another agent takes over in the box, with a note of the work so far".into() } else { "Another agent takes over here, with a note of the work so far. This session ends".into() })];
+                let mut items = vec![Item::Note(if in_box { tr("Another agent takes over in the box, with a note of the work so far").into() } else { tr("Another agent takes over here, with a note of the work so far. This session ends").into() })];
                 for a in AGENTS.iter().filter(|a| !a.command.is_empty() && a.id != x.agent && installed(a.id)) {
-                    items.push(Item::Action { label: format!("Hand off to {}", a.name), glyph: Glyph::Agent(a.id), action: Action::Handoff(id.clone(), a.id), danger: false });
+                    items.push(Item::Action { label: trf("Hand off to {agent}", &[("agent", &a.name)]), glyph: Glyph::Agent(a.id), action: Action::Handoff(id.clone(), a.id), danger: false });
                 }
                 // The same agent, fresh: for a conversation that's grown too long.
                 if let Some(a) = AGENTS.iter().find(|a| a.id == x.agent && !a.command.is_empty()) {
                     items.push(Item::Separator);
-                    items.push(Item::Action { label: format!("A fresh {} session", a.name), glyph: Glyph::Agent(a.id), action: Action::Handoff(id.clone(), a.id), danger: false });
+                    items.push(Item::Action { label: trf("A fresh {agent} session", &[("agent", &a.name)]), glyph: Glyph::Agent(a.id), action: Action::Handoff(id.clone(), a.id), danger: false });
                 }
                 // The work to another machine (not a box's: it stays in its box).
                 let others: Vec<&crate::fleet::model::Machine> =
                     s.machines.iter().filter(|m| m.id != x.machine_id && !m.platform.starts_with("windows") && !m.host.is_empty()).collect();
                 if !in_box && !others.is_empty() {
                     items.push(Item::Separator);
-                    items.push(Item::Note("On another machine, with its work".into()));
+                    items.push(Item::Note(tr("On another machine, with its work").into()));
                     for m in others {
-                        let label = format!("Move to {}…", m.name);
+                        let label = trf("Move to {name}…", &[("name", &m.name)]);
                         items.push(match m.is_down() {
                             true => Item::Off { label, glyph: Glyph::Icon("server") },
                             false => Item::Action { label, glyph: Glyph::Icon(if m.local { "laptop" } else { "server" }), action: Action::MoveTo(id.clone(), m.id.clone()), danger: false },
@@ -529,9 +531,9 @@ impl Root {
                 let Some(x) = s.sessions.iter().find(|x| &x.id == id) else { return Vec::new() };
                 // One in Claude's desktop app: open it there, or its folder.
                 let hidden = cx.global::<super::theme::Appearance>().hidden_sessions.contains(id);
-                let hide = if hidden { act("Show in the lists", "eye", Action::HideSession(id.clone(), false)) } else { act("Hide", "minus", Action::HideSession(id.clone(), true)) };
+                let hide = if hidden { act(tr("Show in the lists"), "eye", Action::HideSession(id.clone(), false)) } else { act(tr("Hide"), "minus", Action::HideSession(id.clone(), true)) };
                 if x.app.is_some() {
-                    let mut items = vec![act("Open in Claude", "external-link", Action::OpenInApp(id.clone()))];
+                    let mut items = vec![act(tr("Open in Claude"), "external-link", Action::OpenInApp(id.clone()))];
                     if !x.cwd.is_empty() {
                         items.push(Item::Separator);
                         items.extend(editor_items(&self.engine.settings().editor, &x.machine_id, &x.cwd, true));
@@ -542,19 +544,19 @@ impl Root {
                 }
                 let mut items = Vec::new();
                 if x.agent != "shell" && !x.agent.is_empty() && x.status == "running" {
-                    items.push(Item::Note("Ask the agent".into()));
+                    items.push(Item::Note(tr("Ask the agent").into()));
                     items.extend(session_actions(x));
                     items.push(Item::Separator);
                 }
-                items.push(act("Rename…", "pencil", Action::RenameSession(id.clone())));
+                items.push(act(tr("Rename…"), "pencil", Action::RenameSession(id.clone())));
                 if x.persistent {
-                    items.push(act("Copy attach command", "copy", Action::CopyAttach(id.clone())));
+                    items.push(act(tr("Copy attach command"), "copy", Action::CopyAttach(id.clone())));
                 }
                 if !x.cwd.is_empty() {
                     items.extend(editor_items(&self.engine.settings().editor, &x.machine_id, &x.cwd, true));
                 }
                 if x.status == "exited" {
-                    items.push(act("Restart", "rotate-ccw", Action::Restart(id.clone())));
+                    items.push(act(tr("Restart"), "rotate-ccw", Action::Restart(id.clone())));
                 }
                 items.push(Item::Separator);
                 if x.box_id.is_none() {
@@ -562,8 +564,8 @@ impl Root {
                 }
                 // A box's agent: ending it pauses the box (see confirm_end_session).
                 items.push(match &x.box_id {
-                    Some(b) if *b == x.name => act("Pause box", "pause", Action::End(id.clone())),
-                    _ => Item::Action { label: "End session…".into(), glyph: Glyph::Icon("power"), action: Action::End(id.clone()), danger: true },
+                    Some(b) if *b == x.name => act(tr("Pause box"), "pause", Action::End(id.clone())),
+                    _ => Item::Action { label: tr("End session…").into(), glyph: Glyph::Icon("power"), action: Action::End(id.clone()), danger: true },
                 });
                 items
             }
@@ -587,63 +589,63 @@ impl Root {
                 .collect(),
             MenuTarget::Share(sid) => {
                 let Some(share) = self.share_of(sid).cloned() else { return Vec::new() };
-                let mut items = vec![Item::Note(format!("Ends in {}", super::share::time_left(share.ends_at)))];
+                let mut items = vec![Item::Note(trf("Ends in {time}", &[("time", &super::share::time_left(share.ends_at))]))];
                 if let Some(problem) = &share.problem {
-                    items.insert(0, Item::Note(format!("Guests can't reach {} right now: {problem}", share.target.machine_name)));
+                    items.insert(0, Item::Note(trf("Guests can't reach {name} right now: {problem}", &[("name", &share.target.machine_name), ("problem", problem)])));
                 }
                 if share.guests.is_empty() {
-                    items.push(Item::Note("No one has joined yet.".into()));
+                    items.push(Item::Note(tr("No one has joined yet.").into()));
                 }
                 for g in &share.guests {
                     let state = if g.state == "waiting" {
-                        "waiting"
+                        tr("waiting")
                     } else if g.can_manage {
-                        "can start sessions"
+                        tr("can start sessions")
                     } else if g.can_control {
-                        "using the desktop"
+                        tr("using the desktop")
                     } else if g.can_type {
-                        "typing"
+                        tr("typing")
                     } else {
-                        "watching"
+                        tr("watching")
                     };
-                    let how = if g.client == "browser" { "browser" } else { "Muxin" };
+                    let how = if g.client == "browser" { tr("browser") } else { "Muxin" };
                     let path = if g.path.is_empty() { String::new() } else { format!(" · {}", g.path) };
                     items.push(Item::Separator);
                     items.push(Item::Note(format!("{} · {state} · {how}{path}", g.name)));
                     if g.state == "waiting" {
-                        items.push(act(&format!("Let {} in (code {})", g.name, g.code), "user-check", Action::ShareAdmit(share.id.clone(), g.id, true)));
-                        items.push(Item::Action { label: format!("Deny {}", g.name), glyph: Glyph::Icon("user-x"), action: Action::ShareAdmit(share.id.clone(), g.id, false), danger: true });
+                        items.push(act(&trf("Let {name} in (code {code})", &[("name", &g.name), ("code", &g.code)]), "user-check", Action::ShareAdmit(share.id.clone(), g.id, true)));
+                        items.push(Item::Action { label: trf("Deny {name}", &[("name", &g.name)]), glyph: Glyph::Icon("user-x"), action: Action::ShareAdmit(share.id.clone(), g.id, false), danger: true });
                     } else {
-                        let label = if g.can_type { format!("Stop {} typing", g.name) } else { format!("Let {} type", g.name) };
+                        let label = if g.can_type { trf("Stop {name} typing", &[("name", &g.name)]) } else { trf("Let {name} type", &[("name", &g.name)]) };
                         items.push(act(&label, "keyboard", Action::ShareTyping(share.id.clone(), g.id, !g.can_type)));
                         if share.target.is_machine() && g.can_type {
-                            let label = if g.can_manage { format!("Stop {} starting sessions", g.name) } else { format!("Let {} start and end sessions", g.name) };
+                            let label = if g.can_manage { trf("Stop {name} starting sessions", &[("name", &g.name)]) } else { trf("Let {name} start and end sessions", &[("name", &g.name)]) };
                             items.push(act(&label, "square-terminal", Action::ShareManage(share.id.clone(), g.id, !g.can_manage)));
                         }
                         if share.desktop == crate::share::host::Desktop::Control {
-                            let label = if g.can_control { format!("Stop {} using the desktop", g.name) } else { format!("Let {} use the desktop", g.name) };
+                            let label = if g.can_control { trf("Stop {name} using the desktop", &[("name", &g.name)]) } else { trf("Let {name} use the desktop", &[("name", &g.name)]) };
                             items.push(act(&label, "monitor", Action::ShareControl(share.id.clone(), g.id, !g.can_control)));
                         }
-                        items.push(Item::Action { label: format!("Remove {}", g.name), glyph: Glyph::Icon("user-x"), action: Action::ShareRemove(share.id.clone(), g.id), danger: true });
+                        items.push(Item::Action { label: trf("Remove {name}", &[("name", &g.name)]), glyph: Glyph::Icon("user-x"), action: Action::ShareRemove(share.id.clone(), g.id), danger: true });
                     }
                 }
                 items.push(Item::Separator);
-                items.push(act("Link and options…", "sliders-horizontal", Action::ShareOptions(sid.clone())));
-                items.push(act("Copy link", "copy", Action::CopyUrl(share.link.clone())));
-                items.push(act("Add an hour", "clock", Action::ShareExtend(share.id.clone())));
-                items.push(Item::Action { label: "Stop sharing".into(), glyph: Glyph::Icon("power"), action: Action::ShareStop(share.id.clone()), danger: true });
+                items.push(act(tr("Link and options…"), "sliders-horizontal", Action::ShareOptions(sid.clone())));
+                items.push(act(tr("Copy link"), "copy", Action::CopyUrl(share.link.clone())));
+                items.push(act(tr("Add an hour"), "clock", Action::ShareExtend(share.id.clone())));
+                items.push(Item::Action { label: tr("Stop sharing").into(), glyph: Glyph::Icon("power"), action: Action::ShareStop(share.id.clone()), danger: true });
                 items
             }
             MenuTarget::Apps(machine) => {
-                let mut items = vec![Item::Note("Open in a window of its own".into())];
+                let mut items = vec![Item::Note(tr("Open in a window of its own").into())];
                 match self.app_windows.get(machine) {
-                    None | Some(None) => items.push(Item::Note("Looking for its apps…".into())),
+                    None | Some(None) => items.push(Item::Note(tr("Looking for its apps…").into())),
                     Some(Some(Err(e))) => items.push(Item::Note(e.clone())),
-                    Some(Some(Ok(list))) if list.is_empty() => items.push(Item::Note("No apps are open there.".into())),
+                    Some(Some(Ok(list))) if list.is_empty() => items.push(Item::Note(tr("No apps are open there.").into())),
                     Some(Some(Ok(list))) => {
                         for w in list {
                             let label = match w.minimized {
-                                true => format!("{} (minimized)", w.title),
+                                true => trf("{title} (minimized)", &[("title", &w.title)]),
                                 false => w.title.clone(),
                             };
                             items.push(Item::Action { label, glyph: Glyph::Icon("monitor"), action: Action::OpenApp(machine.clone(), w.clone()), danger: false });
@@ -653,18 +655,18 @@ impl Root {
                 items
             }
             MenuTarget::Editors { machine, path } => {
-                let mut items = vec![Item::Note("Open it in".into())];
+                let mut items = vec![Item::Note(tr("Open it in").into())];
                 items.extend(editor_items(&self.engine.settings().editor, machine, path, false));
                 if items.len() == 1 {
-                    items.push(Item::Note("No editor here: Muxin opens folders in Zed, Cursor or VS Code.".into()));
+                    items.push(Item::Note(tr("No editor here: Muxin opens folders in Zed, Cursor or VS Code.").into()));
                 }
                 items
             }
             MenuTarget::Display { machine, display } => {
                 let Some(d) = s.machines.iter().find(|m| &m.id == machine).and_then(|m| m.displays.iter().find(|d| &d.id == display)) else { return Vec::new() };
                 let mut items = vec![
-                    act("Show", "monitor", Action::ShowDisplay(machine.clone(), display.clone())),
-                    act("Rename…", "pencil", Action::RenameDisplay(machine.clone(), display.clone())),
+                    act(tr("Show"), "monitor", Action::ShowDisplay(machine.clone(), display.clone())),
+                    act(tr("Rename…"), "pencil", Action::RenameDisplay(machine.clone(), display.clone())),
                 ];
                 // Every size it offers (from 1024 wide), and its scale.
                 let current = (d.width.round() as u32, d.height.round() as u32);
@@ -680,12 +682,12 @@ impl Root {
                         })
                         .collect();
                     items.push(Item::Separator);
-                    items.push(Item::Submenu { label: "Resolution".into(), value, glyph: Glyph::Icon("monitor"), items: sizes });
+                    items.push(Item::Submenu { label: tr("Resolution").into(), value, glyph: Glyph::Icon("monitor"), items: sizes });
                 }
                 if [1., 2.].iter().all(|s| d.scales.iter().any(|x| (x - s).abs() < 0.01)) {
                     items.push(Item::Separator);
-                    items.push(Item::Note("Scale".into()));
-                    for (scale, label) in [(1., "100%"), (2., "200% (twice as big, as sharp)")] {
+                    items.push(Item::Note(tr("Scale").into()));
+                    for (scale, label) in [(1., "100%"), (2., tr("200% (twice as big, as sharp)"))] {
                         let glyph = if (d.scale - scale).abs() < 0.01 { Glyph::Selected } else { Glyph::None };
                         let action = Action::SetDisplay(machine.clone(), display.clone(), None, Some(scale));
                         items.push(Item::Action { label: label.into(), glyph, action, danger: false });
@@ -693,7 +695,7 @@ impl Root {
                 }
                 if d.is_virtual {
                     items.push(Item::Separator);
-                    items.push(Item::Action { label: "Remove monitor".into(), glyph: Glyph::Icon("trash-2"), action: Action::RemoveDisplay(machine.clone(), display.clone()), danger: true });
+                    items.push(Item::Action { label: tr("Remove monitor").into(), glyph: Glyph::Icon("trash-2"), action: Action::RemoveDisplay(machine.clone(), display.clone()), danger: true });
                 }
                 items
             }
@@ -701,32 +703,32 @@ impl Root {
                 let favorite = self.gh_is_favorite(name);
                 vec![
                     if favorite {
-                        act("Remove from favorites", "star", Action::Favorite(name.clone(), false))
+                        act(tr("Remove from favorites"), "star", Action::Favorite(name.clone(), false))
                     } else {
-                        act("Add to favorites", "star-filled", Action::Favorite(name.clone(), true))
+                        act(tr("Add to favorites"), "star-filled", Action::Favorite(name.clone(), true))
                     },
                     Item::Separator,
-                    act("Open on GitHub", "external-link", Action::OpenUrl(format!("https://github.com/{name}"))),
-                    act("Copy link", "copy", Action::CopyUrl(format!("https://github.com/{name}"))),
+                    act(tr("Open on GitHub"), "external-link", Action::OpenUrl(format!("https://github.com/{name}"))),
+                    act(tr("Copy link"), "copy", Action::CopyUrl(format!("https://github.com/{name}"))),
                 ]
             }
             MenuTarget::Item { repo, number, pull, url } => {
                 use super::github::Handoff;
                 let mut items = if *pull {
                     vec![
-                        act("Review with agent…", "bot", Action::ItemToAgent(repo.clone(), *number, Handoff::Session)),
-                        act("Review in a new workspace…", "layers", Action::ItemToAgent(repo.clone(), *number, Handoff::Workspace)),
+                        act(tr("Review with agent…"), "bot", Action::ItemToAgent(repo.clone(), *number, Handoff::Session)),
+                        act(tr("Review in a new workspace…"), "layers", Action::ItemToAgent(repo.clone(), *number, Handoff::Workspace)),
                     ]
                 } else {
                     vec![
-                        act("Work on it with an agent…", "bot", Action::ItemToAgent(repo.clone(), *number, Handoff::Session)),
-                        act("Hand off in a box…", "box", Action::ItemToAgent(repo.clone(), *number, Handoff::Box)),
+                        act(tr("Work on it with an agent…"), "bot", Action::ItemToAgent(repo.clone(), *number, Handoff::Session)),
+                        act(tr("Hand off in a box…"), "box", Action::ItemToAgent(repo.clone(), *number, Handoff::Box)),
                     ]
                 };
                 items.extend([
                     Item::Separator,
-                    act("Open on GitHub", "external-link", Action::OpenUrl(url.clone())),
-                    act("Copy link", "copy", Action::CopyUrl(url.clone())),
+                    act(tr("Open on GitHub"), "external-link", Action::OpenUrl(url.clone())),
+                    act(tr("Copy link"), "copy", Action::CopyUrl(url.clone())),
                 ]);
                 items
             }
@@ -734,11 +736,11 @@ impl Root {
                 let Some(w) = s.workspaces.iter().find(|w| &w.id == id) else { return Vec::new() };
                 let mut items = Vec::new();
                 if w.status == "ready" {
-                    items.push(act("New session here", "square-terminal", Action::WorkspaceSession(id.clone())));
+                    items.push(act(tr("New session here"), "square-terminal", Action::WorkspaceSession(id.clone())));
                 }
-                items.push(act("Copy shell command", "copy", Action::CopyUrl(w.shell.clone())));
+                items.push(act(tr("Copy shell command"), "copy", Action::CopyUrl(w.shell.clone())));
                 items.push(Item::Separator);
-                items.push(Item::Action { label: "Delete workspace…".into(), glyph: Glyph::Icon("trash-2"), action: Action::DeleteWorkspace(id.clone()), danger: true });
+                items.push(Item::Action { label: tr("Delete workspace…").into(), glyph: Glyph::Icon("trash-2"), action: Action::DeleteWorkspace(id.clone()), danger: true });
                 items
             }
             MenuTarget::GithubAccounts => {
@@ -746,22 +748,22 @@ impl Root {
                 let mut items = Vec::new();
                 match &self.gh.accounts {
                     Some(Load::Ready(a)) if !a.token_source.is_empty() && a.token_source != "gh" => {
-                        items.push(Item::Note(format!("Using the token in ${}", a.token_source)));
-                        items.push(Item::Note("Unset it to switch accounts.".into()));
+                        items.push(Item::Note(trf("Using the token in ${var}", &[("var", &a.token_source)])));
+                        items.push(Item::Note(tr("Unset it to switch accounts.").into()));
                         return items;
                     }
                     Some(Load::Ready(a)) => {
                         let using = |login: &str, machine: Option<&str>| a.machine_id.as_deref() == machine && a.using.as_deref().is_some_and(|u| u.eq_ignore_ascii_case(login));
                         if !a.machines.is_empty() && !a.accounts.is_empty() {
-                            items.push(Item::Note("On this computer".into()));
+                            items.push(Item::Note(tr("On this computer").into()));
                         }
                         for x in &a.accounts {
-                            let label = if x.ok { format!("@{}", x.login) } else { format!("@{} (sign in again)", x.login) };
+                            let label = if x.ok { format!("@{}", x.login) } else { trf("@{login} (sign in again)", &[("login", &x.login)]) };
                             let glyph = if using(&x.login, None) { Glyph::Selected } else { Glyph::None };
                             items.push(Item::Action { label, glyph, action: Action::UseAccount(x.login.clone(), None), danger: false });
                         }
                         if !a.machines.is_empty() {
-                            items.push(Item::Note("Signed in on your machines".into()));
+                            items.push(Item::Note(tr("Signed in on your machines").into()));
                         }
                         for m in &a.machines {
                             let glyph = if using(&m.login, Some(&m.machine_id)) { Glyph::Selected } else { Glyph::None };
@@ -770,10 +772,10 @@ impl Root {
                         }
                     }
                     Some(Load::Failed(e)) => items.push(Item::Note(e.clone())),
-                    _ => items.push(Item::Note("Loading accounts…".into())),
+                    _ => items.push(Item::Note(tr("Loading accounts…").into())),
                 }
                 items.push(Item::Separator);
-                items.push(act("Add another account…", "plus", Action::AddAccount));
+                items.push(act(tr("Add another account…"), "plus", Action::AddAccount));
                 items
             }
         }
@@ -844,7 +846,7 @@ impl Root {
             Action::CopyAttach(id) => {
                 if let Some(x) = self.snapshot.sessions.iter().find(|x| x.id == id) {
                     cx.write_to_clipboard(ClipboardItem::new_string(x.attach_command.clone()));
-                    self.notify_user("Copied. Paste it into any terminal to attach.", false, cx);
+                    self.notify_user(tr("Copied. Paste it into any terminal to attach."), false, cx);
                 }
             }
             Action::Restart(id) => {
@@ -896,7 +898,7 @@ impl Root {
             }
             Action::CopyUrl(url) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(url));
-                self.notify_user("Copied the link.", false, cx);
+                self.notify_user(tr("Copied the link."), false, cx);
             }
             Action::ShareAdmit(share, guest, yes) => crate::share::host::admit(&share, guest, yes),
             Action::ShareTyping(share, guest, allowed) => crate::share::host::set_typing(&share, guest, allowed),
@@ -908,7 +910,7 @@ impl Root {
             Action::Joined(id, action) => self.run_joined(&id, action, window, cx),
             Action::ShareStop(share) => {
                 crate::share::host::stop(&share);
-                self.notify_user("Stopped sharing. The link doesn't work anymore.", false, cx);
+                self.notify_user(tr("Stopped sharing. The link doesn't work anymore."), false, cx);
             }
         }
         cx.notify();

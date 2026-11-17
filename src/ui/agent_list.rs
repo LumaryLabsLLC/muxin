@@ -12,6 +12,7 @@ use super::sessions::mark_view;
 use super::theme::{ActiveTheme, Appearance, Theme};
 use crate::fleet::sessions::list::{self, Lines};
 use crate::fleet::sessions::{Mark, SessionInfo};
+use crate::ui::i18n::{tr, trf};
 
 /// A session's row is as tall as a machine's, its agent's logo as big; a
 /// helper's is like the rows under a machine.
@@ -71,7 +72,7 @@ impl Root {
                 .flex()
                 .flex_col()
                 .flex_none()
-                .child(self.section_header("Agents", Some(rows.len()), None, cx))
+                .child(self.section_header(tr("Agents"), Some(rows.len()), None, cx))
                 .child(div().id("agent-list").max_h(px(max_h)).overflow_y_scroll().pb(px(10.)).children(items))
                 .into_any_element(),
         )
@@ -91,15 +92,15 @@ impl Root {
         let shown = if selected && mark != Mark::Working { Mark::Idle } else { mark };
         let state = if down {
             match machine {
-                Some(m) if m.is_disconnected() => "disconnected",
-                Some(m) if m.is_asleep() => "asleep",
-                _ => "offline",
+                Some(m) if m.is_disconnected() => tr("disconnected"),
+                Some(m) if m.is_asleep() => tr("asleep"),
+                _ => tr("offline"),
             }
             .to_string()
         } else if exited && shown == Mark::Idle {
             match x.exit_code {
-                Some(c) if c != 0 => format!("exited ({c})"),
-                _ => "exited".to_string(),
+                Some(c) if c != 0 => trf("exited ({c})", &[("c", &c)]),
+                _ => tr("exited").to_string(),
             }
         } else {
             shown.label().to_string()
@@ -224,9 +225,9 @@ mod tests {
     fn the_section_is_on_unless_turned_off() {
         assert!(Appearance::default().sidebar_agents);
         // A config from before it: on.
-        let old: Appearance = toml::from_str("mode = \"dark\"\nsidebar_width = 300.0\n").unwrap();
+        let old = toml::from_str::<Appearance>("mode = \"dark\"\nsidebar_width = 300.0\n").unwrap();
         assert!(old.sidebar_agents);
-        let off: Appearance = toml::from_str("sidebar_agents = false\n").unwrap();
+        let off = toml::from_str::<Appearance>("sidebar_agents = false\n").unwrap();
         assert!(!off.sidebar_agents);
         // It's saved with the rest of [ui].
         let a = Appearance { sidebar_agents: false, ..Default::default() };

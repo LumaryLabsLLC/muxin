@@ -12,6 +12,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::desktop::DesktopView;
+use crate::ui::i18n::{tr, trf};
 use super::dialogs::{DialogEvent, error_line, field, footer, frame};
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, card, icon, section_title};
@@ -26,7 +27,9 @@ use crate::share::host::{Desktop, Port};
 use crate::share::{guest, host};
 
 /// How long a share lasts: what the dialog offers.
-const DURATIONS: &[(&str, u64)] = &[("15 min", 15 * 60), ("1 hour", 3600), ("8 hours", 8 * 3600), ("1 day", 24 * 3600)];
+fn durations() -> [(&'static str, u64); 4] {
+    [(tr("15 min"), 15 * 60), (tr("1 hour"), 3600), (tr("8 hours"), 8 * 3600), (tr("1 day"), 24 * 3600)]
+}
 
 /// Sessions of a shared machine kept open at once (switching back is instant).
 const OPEN_SESSIONS: usize = 6;
@@ -35,12 +38,12 @@ const OPEN_SESSIONS: usize = 6;
 pub(super) fn time_left(ends_at: i64) -> String {
     let left = ends_at - chrono::Utc::now().timestamp();
     if left <= 0 {
-        "Ending".into()
+        tr("Ending").into()
     } else if left < 3600 {
-        format!("{} min", (left / 60).max(1))
+        trf("{n} min", &[("n", &(left / 60).max(1))])
     } else {
         let h = (left + 1800) / 3600;
-        format!("{h} hour{}", if h == 1 { "" } else { "s" })
+        if h == 1 { tr("1 hour").into() } else { trf("{n} hours", &[("n", &h)]) }
     }
 }
 
@@ -86,7 +89,7 @@ fn off_checkbox(theme: &Theme, label: &'static str) -> AnyElement {
 
 /// A server as the user knows it: its page's title, its container, its program.
 fn server_name(p: &ListeningPort) -> String {
-    p.title.clone().filter(|t| !t.trim().is_empty()).or_else(|| p.container.clone()).or_else(|| Some(p.process.clone()).filter(|x| !x.is_empty())).unwrap_or_else(|| format!("Port {}", p.port))
+    p.title.clone().filter(|t| !t.trim().is_empty()).or_else(|| p.container.clone()).or_else(|| Some(p.process.clone()).filter(|x| !x.is_empty())).unwrap_or_else(|| trf("Port {port}", &[("port", &p.port)]))
 }
 
 // ---------------------------------------------------------------------------
@@ -181,16 +184,16 @@ impl ShareDialog {
     }
 
     fn render_making(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let title = format!("Share {}", self.target.title);
+        let title = trf("Share {title}", &[("title", &self.target.title)]);
         match self.error.clone() {
             None => frame(theme, title, None)
-                .child(div().flex().items_center().gap(px(10.)).text_size(px(13.)).text_color(theme.text_muted).child(kit::spinner("share-making", 14., theme.accent)).child("Making a link…"))
+                .child(div().flex().items_center().gap(px(10.)).text_size(px(13.)).text_color(theme.text_muted).child(kit::spinner("share-making", 14., theme.accent)).child(tr("Making a link…")))
                 .into_any_element(),
             Some(e) => frame(theme, title, None)
                 .children(error_line(theme, &Some(e)))
                 .child(footer(vec![
-                    Button::new("share-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
-                    Button::new("share-retry", "Try again").style(ButtonStyle::Primary).on_click(cx.listener(|this, _, _, cx| this.create(cx))).into_any_element(),
+                    Button::new("share-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                    Button::new("share-retry", tr("Try again")).style(ButtonStyle::Primary).on_click(cx.listener(|this, _, _, cx| this.create(cx))).into_any_element(),
                 ]))
                 .into_any_element(),
         }
@@ -198,7 +201,7 @@ impl ShareDialog {
 
     /// Off, view or control: what guests get of the machine's screen.
     fn desktop_row(&self, theme: &Theme, view: &host::ShareView) -> AnyElement {
-        let options = [(Desktop::None, "Off"), (Desktop::View, "View"), (Desktop::Control, "Control")];
+        let options = [(Desktop::None, tr("Off")), (Desktop::View, tr("View")), (Desktop::Control, tr("Control"))];
         let choices = options.into_iter().enumerate().map(|(i, (d, label))| {
             // Control is for people you let in.
             let enabled = d != Desktop::Control || view.approve;
@@ -206,16 +209,16 @@ impl ShareDialog {
             choice(theme, ("share-desktop", i), label, view.desktop == d, enabled).when(enabled, |el| el.on_click(move |_, _, _| host::set_access(&id, d, ports.clone())))
         });
         let (note, warn) = match view.desktop {
-            Desktop::None => ("They don't see the screen.", false),
-            Desktop::View => ("They see the screen, live. You can let someone control it.", false),
-            Desktop::Control => ("You choose who can use its mouse and keyboard, as you.", true),
+            Desktop::None => (tr("They don't see the screen."), false),
+            Desktop::View => (tr("They see the screen, live. You can let someone control it."), false),
+            Desktop::Control => (tr("You choose who can use its mouse and keyboard, as you."), true),
         };
-        let note = if view.approve || view.desktop != Desktop::None { note } else { "Control is only for people you let in." };
+        let note = if view.approve || view.desktop != Desktop::None { note } else { tr("Control is only for people you let in.") };
         div()
             .flex()
             .flex_col()
             .gap(px(5.))
-            .child(div().flex().items_center().gap(px(8.)).child(icon("monitor", 14., theme.text_muted)).child(div().flex_1().text_size(px(12.5)).child("Desktop")).children(choices))
+            .child(div().flex().items_center().gap(px(8.)).child(icon("monitor", 14., theme.text_muted)).child(div().flex_1().text_size(px(12.5)).child(tr("Desktop"))).children(choices))
             .child(div().pl(px(22.)).text_size(px(11.5)).text_color(if warn { theme.warning } else { theme.text_placeholder }).child(note))
             .into_any_element()
     }
@@ -230,10 +233,10 @@ impl ShareDialog {
             _ => 0,
         };
         let list: AnyElement = match &self.servers {
-            None => div().flex().items_center().gap(px(8.)).text_size(px(12.)).text_color(theme.text_muted).child(kit::spinner("share-servers", 12., theme.text_muted)).child("Looking for servers…").into_any_element(),
+            None => div().flex().items_center().gap(px(8.)).text_size(px(12.)).text_color(theme.text_muted).child(kit::spinner("share-servers", 12., theme.text_muted)).child(tr("Looking for servers…")).into_any_element(),
             Some(Err(e)) => div().text_size(px(12.)).text_color(theme.text_muted).child(e.clone()).into_any_element(),
-            Some(Ok(list)) if list.is_empty() => div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!("Nothing is listening on {} right now.", self.target.machine_name)).into_any_element(),
-            Some(Ok(list)) if !list.iter().any(|p| shown(&p)) => div().text_size(px(12.)).text_color(theme.text_placeholder).child("No web servers there right now.").into_any_element(),
+            Some(Ok(list)) if list.is_empty() => div().text_size(px(12.)).text_color(theme.text_placeholder).child(trf("Nothing is listening on {name} right now.", &[("name", &self.target.machine_name)])).into_any_element(),
+            Some(Ok(list)) if !list.iter().any(|p| shown(&p)) => div().text_size(px(12.)).text_color(theme.text_placeholder).child(tr("No web servers there right now.")).into_any_element(),
             Some(Ok(list)) => div()
                 .flex()
                 .flex_col()
@@ -258,7 +261,7 @@ impl ShareDialog {
             .flex()
             .flex_col()
             .gap(px(8.))
-            .child(div().flex().items_center().gap(px(8.)).child(icon("network", 14., theme.text_muted)).child(div().text_size(px(12.5)).child("Servers")))
+            .child(div().flex().items_center().gap(px(8.)).child(icon("network", 14., theme.text_muted)).child(div().text_size(px(12.5)).child(tr("Servers"))))
             .child(
                 div()
                     .pl(px(22.))
@@ -273,14 +276,14 @@ impl ShareDialog {
                                 .text_size(px(12.))
                                 .text_color(theme.text_accent)
                                 .cursor_pointer()
-                                .child(if all_ports { "Only web servers".to_string() } else { format!("Show {others} other port{}", if others == 1 { "" } else { "s" }) })
+                                .child(if all_ports { tr("Only web servers").to_string() } else if others == 1 { tr("Show 1 other port").to_string() } else { trf("Show {n} other ports", &[("n", &others)]) })
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.all_ports = !this.all_ports;
                                     cx.notify()
                                 })),
                         )
                     })
-                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("They open in Muxin, at localhost on their computer.")),
+                    .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("They open in Muxin, at localhost on their computer."))),
             )
             .into_any_element()
     }
@@ -291,20 +294,20 @@ impl ShareDialog {
         let (id, id2, id3) = (view.id.clone(), view.id.clone(), view.id.clone());
         let (approve, can_type) = (view.approve, view.can_type);
         let left = view.ends_at - chrono::Utc::now().timestamp();
-        let type_label = if machine { "They can type in sessions" } else { "They can type" };
+        let type_label = if machine { tr("They can type in sessions") } else { tr("They can type") };
         let typing_row = if approve {
             kit::checkbox(theme, "share-type", can_type, type_label, move |on, _, _| host::set_options(&id2, true, *on)).into_any_element()
         } else {
             off_checkbox(theme, type_label)
         };
         let intro = match (self.copied, machine) {
-            (true, false) => "Link copied. Send it to anyone: it opens in their browser or in Muxin.".to_string(),
-            (false, false) => "Send the link to anyone: it opens in their browser or in Muxin.".to_string(),
-            (copied, true) => format!("{}They see {}'s sessions, in their browser or in Muxin.", if copied { "Link copied. " } else { "" }, self.target.machine_name),
+            (true, false) => tr("Link copied. Send it to anyone: it opens in their browser or in Muxin.").to_string(),
+            (false, false) => tr("Send the link to anyone: it opens in their browser or in Muxin.").to_string(),
+            (true, true) => trf("Link copied. They see {name}'s sessions, in their browser or in Muxin.", &[("name", &self.target.machine_name)]),
+            (false, true) => trf("They see {name}'s sessions, in their browser or in Muxin.", &[("name", &self.target.machine_name)]),
         };
-        let what = if machine { "its sessions" } else { "this session" };
-        let problem = view.problem.clone().map(|p| format!("Guests can't reach {} right now: {p}", self.target.machine_name));
-        frame(theme, format!("Share {}", self.target.title), Some(intro.into()))
+        let problem = view.problem.clone().map(|p| trf("Guests can't reach {name} right now: {problem}", &[("name", &self.target.machine_name), ("problem", &p)]));
+        frame(theme, trf("Share {title}", &[("title", &self.target.title)]), Some(intro.into()))
             .w(px(540.))
             .children(error_line(theme, &problem))
             .child(
@@ -337,11 +340,13 @@ impl ShareDialog {
                             .flex()
                             .flex_col()
                             .gap(px(3.))
-                            .child(kit::checkbox(theme, "share-approve", approve, "Ask me before letting someone in", move |on, _, _| host::set_options(&id, *on, *on && can_type)))
+                            .child(kit::checkbox(theme, "share-approve", approve, tr("Ask me before letting someone in"), move |on, _, _| host::set_options(&id, *on, *on && can_type)))
                             .child(div().pl(px(23.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(if approve {
-                                "You see who's asking, and their code.".to_string()
+                                tr("You see who's asking, and their code.").to_string()
+                            } else if machine {
+                                tr("Anyone with the link can watch its sessions.").to_string()
                             } else {
-                                format!("Anyone with the link can watch {what}.")
+                                tr("Anyone with the link can watch this session.").to_string()
                             })),
                     )
                     .child(
@@ -351,18 +356,18 @@ impl ShareDialog {
                             .gap(px(3.))
                             .child(typing_row)
                             .child(div().pl(px(23.)).text_size(px(11.5)).text_color(if approve && can_type { theme.warning } else { theme.text_placeholder }).child(match (approve, machine) {
-                                (true, false) => "Their keys go to this session, as you.",
-                                (true, true) => "Their keys go to the session they open, as you.",
-                                (false, _) => "Only for people you let in.",
+                                (true, false) => tr("Their keys go to this session, as you."),
+                                (true, true) => tr("Their keys go to the session they open, as you."),
+                                (false, _) => tr("Only for people you let in."),
                             })),
                     )
                     .when(machine, |d| {
                         let id = view.id.clone();
                         let can = approve && can_type;
                         let row = if can {
-                            kit::checkbox(theme, "share-manage", view.manage, "They can start and end sessions", move |on, _, _| host::set_manage(&id, *on)).into_any_element()
+                            kit::checkbox(theme, "share-manage", view.manage, tr("They can start and end sessions"), move |on, _, _| host::set_manage(&id, *on)).into_any_element()
                         } else {
-                            off_checkbox(theme, "They can start and end sessions")
+                            off_checkbox(theme, tr("They can start and end sessions"))
                         };
                         d.child(
                             div()
@@ -371,9 +376,9 @@ impl ShareDialog {
                                 .gap(px(3.))
                                 .child(row)
                                 .child(div().pl(px(23.)).text_size(px(11.5)).text_color(if view.manage { theme.warning } else { theme.text_placeholder }).child(if can {
-                                    format!("A terminal there runs anything, on {} as you.", self.target.machine_name)
+                                    trf("A terminal there runs anything, on {name} as you.", &[("name", &self.target.machine_name)])
                                 } else {
-                                    "Only for people you let in who can type.".to_string()
+                                    tr("Only for people you let in who can type.").to_string()
                                 })),
                         )
                     })
@@ -385,17 +390,17 @@ impl ShareDialog {
                             .items_center()
                             .gap(px(8.))
                             .child(icon("clock", 14., theme.text_muted))
-                            .child(div().flex_1().text_size(px(12.5)).child(format!("Ends in {}", time_left(view.ends_at))))
-                            .children(DURATIONS.iter().enumerate().map(|(i, (label, secs))| {
-                                let (secs, id) = (*secs, id3.clone());
+                            .child(div().flex_1().text_size(px(12.5)).child(trf("Ends in {time}", &[("time", &time_left(view.ends_at))])))
+                            .children(durations().into_iter().enumerate().map(|(i, (label, secs))| {
+                                let id = id3.clone();
                                 // The choice closest to what's left shows as picked.
-                                let picked = DURATIONS.iter().min_by_key(|(_, d)| (*d as i64 - left).abs()).is_some_and(|(l, _)| l == label);
+                                let picked = durations().into_iter().min_by_key(|(_, d)| (*d as i64 - left).abs()).is_some_and(|(l, _)| l == label);
                                 choice(theme, ("share-ttl", i), label, picked, true).on_click(move |_, _, _| host::set_ends_in(&id, Duration::from_secs(secs)))
                             })),
                     ),
             )
             .child(footer(vec![
-                Button::new("share-stop", "Stop sharing")
+                Button::new("share-stop", tr("Stop sharing"))
                     .style(ButtonStyle::Danger)
                     .on_click(cx.listener(move |_, _, _, cx| {
                         host::stop(&view.id);
@@ -403,7 +408,7 @@ impl ShareDialog {
                     }))
                     .into_any_element(),
                 div().flex_1().into_any_element(),
-                Button::new("share-done", "Done").style(ButtonStyle::Outlined).key_hint("esc").on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                Button::new("share-done", tr("Done")).style(ButtonStyle::Outlined).key_hint("esc").on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
             ]))
             .into_any_element()
     }
@@ -475,7 +480,7 @@ impl EventEmitter<DialogEvent> for JoinDialog {}
 impl JoinDialog {
     pub fn new(engine: Arc<Engine>, link: Option<String>, name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let link = cx.new(|cx| TextInput::new(cx, "https://muxin.dev/s#1.…").with_text(link.unwrap_or_default()));
-        let name = cx.new(|cx| TextInput::new(cx, "Your name").with_text(name).selected());
+        let name = cx.new(|cx| TextInput::new(cx, tr("Your name")).with_text(name).selected());
         let mut subs = Vec::new();
         for input in [&link, &name] {
             subs.push(cx.subscribe_in(input, window, |this: &mut Self, _, e: &InputEvent, _, cx| match e {
@@ -513,7 +518,7 @@ impl JoinDialog {
             return;
         }
         if name.is_empty() {
-            self.error = Some("Enter your name first.".into());
+            self.error = Some(tr("Enter your name first.").into());
             cx.notify();
             return;
         }
@@ -564,7 +569,7 @@ impl JoinDialog {
                         guest::Update::Denied => {
                             this.stage = Stage::Form;
                             this.joined = None;
-                            this.error = Some("They didn't let you in.".into());
+                            this.error = Some(tr("They didn't let you in.").into());
                         }
                         guest::Update::Ended(why) => {
                             this.stage = Stage::Form;
@@ -597,24 +602,24 @@ impl JoinDialog {
         let mut facts = div().flex().flex_col().gap(px(8.));
         if i.whole_machine {
             facts = facts.child(fact(theme, if i.can_type { "keyboard" } else { "square-terminal" }, match (i.can_type, i.can_manage) {
-                (_, true) => "Its sessions: you can watch, type, start and end them",
-                (true, false) => "Its sessions: you can watch and type",
-                _ => "Its sessions: you can watch",
+                (_, true) => tr("Its sessions: you can watch, type, start and end them"),
+                (true, false) => tr("Its sessions: you can watch and type"),
+                _ => tr("Its sessions: you can watch"),
             }));
             match i.desktop {
                 Desktop::None => {}
-                Desktop::View => facts = facts.child(fact(theme, "monitor", "Its screen: you can watch")),
-                Desktop::Control if i.can_control => facts = facts.child(fact(theme, "monitor", "Its screen: you can watch and use it")),
-                Desktop::Control => facts = facts.child(fact(theme, "monitor", "Its screen: you can watch, and use it when they let you")),
+                Desktop::View => facts = facts.child(fact(theme, "monitor", tr("Its screen: you can watch"))),
+                Desktop::Control if i.can_control => facts = facts.child(fact(theme, "monitor", tr("Its screen: you can watch and use it"))),
+                Desktop::Control => facts = facts.child(fact(theme, "monitor", tr("Its screen: you can watch, and use it when they let you"))),
             }
             if !i.ports.is_empty() {
                 let n = i.ports.len();
-                facts = facts.child(fact(theme, "network", format!("{n} server{} to open here", if n == 1 { "" } else { "s" })));
+                facts = facts.child(fact(theme, "network", if n == 1 { tr("1 server to open here").to_string() } else { trf("{n} servers to open here", &[("n", &n)]) }));
             }
         } else {
-            facts = facts.child(fact(theme, if i.can_type { "keyboard" } else { "eye" }, if i.can_type { "You can watch and type" } else { "You can watch" }));
+            facts = facts.child(fact(theme, if i.can_type { "keyboard" } else { "eye" }, if i.can_type { tr("You can watch and type") } else { tr("You can watch") }));
         }
-        facts.child(fact(theme, "clock", format!("Ends in {}", time_left(i.ends_at))))
+        facts.child(fact(theme, "clock", trf("Ends in {time}", &[("time", &time_left(i.ends_at))])))
     }
 }
 
@@ -624,13 +629,13 @@ impl Render for JoinDialog {
         match &self.stage {
             Stage::Form | Stage::Connecting => {
                 let connecting = matches!(self.stage, Stage::Connecting);
-                frame(&theme, "Join a share", Some("Paste the link someone sent you.".into()))
-                    .child(field(&theme, "Link", self.link.clone(), None))
-                    .child(field(&theme, "Your name", self.name.clone(), Some("They see it when you ask to join.")))
+                frame(&theme, tr("Join a share"), Some(tr("Paste the link someone sent you.").into()))
+                    .child(field(&theme, tr("Link"), self.link.clone(), None))
+                    .child(field(&theme, tr("Your name"), self.name.clone(), Some(tr("They see it when you ask to join."))))
                     .children(error_line(&theme, &self.error))
                     .child(footer(vec![
-                        Button::new("join-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, _, cx| this.cancel(cx))).into_any_element(),
-                        Button::new("join-go", if connecting { "Connecting…" } else { "Join" })
+                        Button::new("join-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, _, cx| this.cancel(cx))).into_any_element(),
+                        Button::new("join-go", if connecting { tr("Connecting…") } else { tr("Join") })
                             .style(ButtonStyle::Primary)
                             .loading(connecting)
                             .key_hint("↵")
@@ -640,11 +645,11 @@ impl Render for JoinDialog {
                     .into_any_element()
             }
             Stage::Joined { code, info, waiting } => {
-                let by = info.as_ref().map(|i| i.by.clone()).unwrap_or_else(|| "them".into());
-                let title = info.as_ref().map(|i| if i.title.is_empty() { "a session".to_string() } else { i.title.clone() }).unwrap_or_else(|| "a share".into());
-                let sub = info.as_ref().map(|i| if i.whole_machine { format!("A machine · shared by {}", i.by) } else { format!("{} on {} · shared by {}", agent_name(&i.agent), i.machine, i.by) });
+                let by = info.as_ref().map(|i| i.by.clone()).unwrap_or_else(|| tr("them").into());
+                let title = info.as_ref().map(|i| if i.title.is_empty() { tr("a session").to_string() } else { i.title.clone() }).unwrap_or_else(|| tr("a share").into());
+                let sub = info.as_ref().map(|i| if i.whole_machine { trf("A machine · shared by {by}", &[("by", &i.by)]) } else { trf("{agent} on {machine} · shared by {by}", &[("agent", &agent_name(&i.agent)), ("machine", &i.machine), ("by", &i.by)]) });
                 let (a, b) = code.split_at(3.min(code.len()));
-                frame(&theme, format!("Join {title}"), sub.map(SharedString::from))
+                frame(&theme, trf("Join {title}", &[("title", &title)]), sub.map(SharedString::from))
                     .children(info.as_ref().map(|i| Self::facts(&theme, i)))
                     .child(
                         div()
@@ -657,9 +662,9 @@ impl Render for JoinDialog {
                             .bg(theme.surface)
                             .border_1()
                             .border_color(theme.border)
-                            .child(div().text_size(px(12.)).text_color(theme.text_muted).child("Your code"))
+                            .child(div().text_size(px(12.)).text_color(theme.text_muted).child(tr("Your code")))
                             .child(div().font_family(mono_font()).text_size(px(30.)).font_weight(FontWeight::MEDIUM).child(format!("{a} {b}")))
-                            .child(div().text_size(px(12.)).text_color(theme.text_muted).child(format!("Read it to {by} so they know it's you."))),
+                            .child(div().text_size(px(12.)).text_color(theme.text_muted).child(trf("Read it to {by} so they know it's you.", &[("by", &by)]))),
                     )
                     .child(
                         div()
@@ -667,8 +672,8 @@ impl Render for JoinDialog {
                             .items_center()
                             .gap(px(8.))
                             .child(kit::spinner("join-wait", 12., theme.accent))
-                            .child(div().flex_1().text_size(px(12.5)).text_color(theme.text_accent).child(if *waiting { format!("Waiting for {by} to let you in…") } else { "Asking to join…".into() }))
-                            .child(Button::new("join-cancel-wait", "Cancel").style(ButtonStyle::Outlined).on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))),
+                            .child(div().flex_1().text_size(px(12.5)).text_color(theme.text_accent).child(if *waiting { trf("Waiting for {by} to let you in…", &[("by", &by)]) } else { tr("Asking to join…").into() }))
+                            .child(Button::new("join-cancel-wait", tr("Cancel")).style(ButtonStyle::Outlined).on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))),
                     )
                     .into_any_element()
             }
@@ -677,7 +682,7 @@ impl Render for JoinDialog {
 }
 
 fn agent_name(agent: &str) -> &'static str {
-    crate::fleet::sessions::agent(agent).map(|a| a.name).unwrap_or("A session")
+    crate::fleet::sessions::agent(agent).map(|a| a.name).unwrap_or(tr("A session"))
 }
 
 /// Keys for a session open on a share (dropped unless its host lets us type).
@@ -794,7 +799,7 @@ impl Root {
         // The machine stopped being reachable for guests: say why, once.
         let news = self.shares.iter().find_map(|s| {
             let was = before.iter().find(|b| b.id == s.id).and_then(|b| b.problem.as_ref());
-            s.problem.as_ref().filter(|p| was != Some(*p)).map(|p| format!("Guests can't reach {}: {p}", s.target.machine_name))
+            s.problem.as_ref().filter(|p| was != Some(*p)).map(|p| trf("Guests can't reach {name}: {problem}", &[("name", &s.target.machine_name), ("problem", p)]))
         });
         if let Some(news) = news {
             self.notify_user(news, true, cx);
@@ -803,7 +808,7 @@ impl Root {
         for s in &self.shares {
             for g in s.guests.iter().filter(|g| g.state == "waiting") {
                 if self.knocks_seen.insert((s.id.clone(), g.id)) {
-                    knocks.push(format!("{} wants to join {}", g.name, s.target.title));
+                    knocks.push(trf("{name} wants to join {title}", &[("name", &g.name), ("title", &s.target.title)]));
                 }
             }
         }
@@ -818,35 +823,35 @@ impl Root {
     fn shared_button(&self, key: &str, id: &'static str, tooltip: &'static str, disabled: bool, cx: &mut Context<Self>) -> AnyElement {
         let key = key.to_string();
         let Some(share) = self.share_of(&key) else {
-            return Button::new(id, "Share").icon("link").tooltip(tooltip).disabled(disabled).on_click(cx.listener(move |this, _, window, cx| this.show_share(&key, window, cx))).into_any_element();
+            return Button::new(id, tr("Share")).icon("link").tooltip(tooltip).disabled(disabled).on_click(cx.listener(move |this, _, window, cx| this.show_share(&key, window, cx))).into_any_element();
         };
         let waiting = share.guests.iter().filter(|g| g.state == "waiting").count();
         let inside: Vec<&host::GuestView> = share.guests.iter().filter(|g| g.state == "in").collect();
         let typing = inside.iter().any(|g| g.can_type || g.can_control);
         let what = match (inside.len(), waiting) {
-            (_, w) if w > 0 => format!("{w} waiting"),
-            (0, _) => "no one yet".to_string(),
+            (_, w) if w > 0 => trf("{n} waiting", &[("n", &w)]),
+            (0, _) => tr("no one yet").to_string(),
             // The name is the guest's own choice: cut short, as a button never shrinks.
-            (1, _) => format!("{} {}", super::root::ellipsize(&inside[0].name, 16), if inside[0].can_control { "in control" } else if typing { "typing" } else { "watching" }),
-            (n, _) => format!("{n} watching"),
+            (1, _) => format!("{} {}", super::root::ellipsize(&inside[0].name, 16), if inside[0].can_control { tr("in control") } else if typing { tr("typing") } else { tr("watching") }),
+            (n, _) => trf("{n} watching", &[("n", &n)]),
         };
-        Button::new(SharedString::from(format!("{id}-on")), format!("Shared · {what}"))
+        Button::new(SharedString::from(format!("{id}-on")), trf("Shared · {what}", &[("what", &what)]))
             .icon(if typing { "keyboard" } else { "eye" })
             .style(ButtonStyle::Outlined)
-            .tooltip("Who's here, the link, and stopping")
+            .tooltip(tr("Who's here, the link, and stopping"))
             .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.open_menu(super::menu::MenuTarget::Share(key.clone()), e.position(), cx)))
             .into_any_element()
     }
 
     /// The session header's Share button, or what's going on with its share.
     pub(super) fn share_button(&self, info: &SessionInfo, cx: &mut Context<Self>) -> AnyElement {
-        self.shared_button(&info.id, "session-share", "Share this session by link", false, cx)
+        self.shared_button(&info.id, "session-share", tr("Share this session by link"), false, cx)
     }
 
     /// The machine page's Share button: its sessions, and its desktop and
     /// servers if you choose.
     pub(super) fn machine_share_button(&self, m: &Machine, disabled: bool, cx: &mut Context<Self>) -> AnyElement {
-        self.shared_button(&format!("machine:{}", m.id), "m-share", "Share this machine by link", disabled, cx)
+        self.shared_button(&format!("machine:{}", m.id), "m-share", tr("Share this machine by link"), disabled, cx)
     }
 
     /// Over the page: each guest waiting to be let in, whatever is showing.
@@ -858,11 +863,11 @@ impl Root {
                 let (share_id, guest_id) = (share.id.clone(), g.id);
                 let share_id2 = share_id.clone();
                 let (a, b) = g.code.split_at(3.min(g.code.len()));
-                let how = if g.client == "browser" { "In a browser" } else { "In Muxin" };
+                let how = if g.client == "browser" { tr("In a browser") } else { tr("In Muxin") };
                 let wants = match (share.target.is_machine(), share.can_type) {
-                    (true, _) => format!("wants to use {}", share.target.title),
-                    (false, true) => format!("wants to join {}", share.target.title),
-                    (false, false) => format!("wants to watch {}", share.target.title),
+                    (true, _) => trf("wants to use {title}", &[("title", &share.target.title)]),
+                    (false, true) => trf("wants to join {title}", &[("title", &share.target.title)]),
+                    (false, false) => trf("wants to watch {title}", &[("title", &share.target.title)]),
                 };
                 cards.push(
                     div()
@@ -898,7 +903,7 @@ impl Root {
                                 .min_w(px(0.))
                                 .gap(px(2.))
                                 .child(div().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child(format!("{} {wants}", g.name)))
-                                .child(div().text_size(px(12.)).text_color(theme.text_muted).child(format!("{how} · ask {} to read their code", g.name))),
+                                .child(div().text_size(px(12.)).text_color(theme.text_muted).child(trf("{how} · ask {name} to read their code", &[("how", &how), ("name", &g.name)]))),
                         )
                         .child(
                             div()
@@ -906,11 +911,11 @@ impl Root {
                                 .flex_col()
                                 .items_end()
                                 .px(px(8.))
-                                .child(div().text_size(px(11.5)).text_color(theme.text_muted).child("Their code"))
+                                .child(div().text_size(px(11.5)).text_color(theme.text_muted).child(tr("Their code")))
                                 .child(div().font_family(mono_font()).text_size(px(22.)).font_weight(FontWeight::MEDIUM).child(format!("{a} {b}"))),
                         )
-                        .child(Button::new(SharedString::from(format!("knock-deny-{guest_id}")), "Deny").style(ButtonStyle::Outlined).on_click(cx.listener(move |_, _, _, _| host::admit(&share_id, guest_id, false))))
-                        .child(Button::new(SharedString::from(format!("knock-in-{guest_id}")), "Let in").style(ButtonStyle::Primary).on_click(cx.listener(move |_, _, _, _| host::admit(&share_id2, guest_id, true))))
+                        .child(Button::new(SharedString::from(format!("knock-deny-{guest_id}")), tr("Deny")).style(ButtonStyle::Outlined).on_click(cx.listener(move |_, _, _, _| host::admit(&share_id, guest_id, false))))
+                        .child(Button::new(SharedString::from(format!("knock-in-{guest_id}")), tr("Let in")).style(ButtonStyle::Primary).on_click(cx.listener(move |_, _, _, _| host::admit(&share_id2, guest_id, true))))
                         .into_any_element(),
                 );
             }
@@ -964,7 +969,7 @@ impl Root {
                         guest::Update::Typing(allowed) => {
                             j.can_type = allowed;
                             j.can_manage &= allowed;
-                            this.notify_user(if allowed { "You can type now." } else { "Typing is off. You're watching." }, false, cx);
+                            this.notify_user(if allowed { tr("You can type now.") } else { tr("Typing is off. You're watching.") }, false, cx);
                         }
                         guest::Update::Control(allowed) => {
                             j.can_control = allowed;
@@ -972,12 +977,12 @@ impl Root {
                                 d.update(cx, |d, cx| d.set_control(allowed, cx));
                             }
                             if j.info.desktop != Desktop::None {
-                                this.notify_user(if allowed { "You can use their desktop now." } else { "You're watching their desktop." }, false, cx);
+                                this.notify_user(if allowed { tr("You can use their desktop now.") } else { tr("You're watching their desktop.") }, false, cx);
                             }
                         }
                         guest::Update::Manage(allowed) => {
                             j.can_manage = allowed;
-                            this.notify_user(if allowed { "You can start and end sessions now." } else { "Starting and ending sessions is off." }, false, cx);
+                            this.notify_user(if allowed { tr("You can start and end sessions now.") } else { tr("Starting and ending sessions is off.") }, false, cx);
                         }
                         guest::Update::Access { desktop, ports } => {
                             j.info.desktop = desktop;
@@ -1162,7 +1167,7 @@ impl Root {
     pub(super) fn render_joined(&mut self, id: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let Some(j) = self.joined.iter().find(|j| j.id == id) else {
-            return div().size_full().flex().items_center().justify_center().text_color(theme.text_muted).child("That share is closed.").into_any_element();
+            return div().size_full().flex().items_center().justify_center().text_color(theme.text_muted).child(tr("That share is closed.")).into_any_element();
         };
         if let Some(why) = j.ended.clone() {
             let leave = j.id.clone();
@@ -1179,7 +1184,7 @@ impl Root {
                         .max_w(px(420.))
                         .child(kit::color_tile("eye", 36.))
                         .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(why))
-                        .child(Button::new("joined-close", "Close").icon("x").on_click(cx.listener(move |this, _, window, cx| this.leave_joined(&leave, window, cx)))),
+                        .child(Button::new("joined-close", tr("Close")).icon("x").on_click(cx.listener(move |this, _, window, cx| this.leave_joined(&leave, window, cx)))),
                 )
                 .into_any_element();
         }
@@ -1192,7 +1197,7 @@ impl Root {
 
     /// What this guest may do, in a few words ("Watching", "Typing").
     fn joined_mode(j: &JoinedShare) -> &'static str {
-        if j.can_type { "Typing" } else { "Watching" }
+        if j.can_type { tr("Typing") } else { tr("Watching") }
     }
 
     /// One of a shared machine's sessions, or the session shared: like a
@@ -1211,7 +1216,7 @@ impl Root {
         let machine = if j.info.whole_machine { j.info.title.clone() } else { j.info.machine.clone() };
         let (icon_name, (from, to)) = kit::agent_look(&agent);
         let status = match &session {
-            Some(s) if s.status == "exited" => kit::pill("Exited", theme.text_placeholder).into_any_element(),
+            Some(s) if s.status == "exited" => kit::pill(tr("Exited"), theme.text_placeholder).into_any_element(),
             Some(s) if s.busy => div()
                 .flex()
                 .items_center()
@@ -1219,9 +1224,9 @@ impl Root {
                 .text_size(px(12.))
                 .text_color(theme.text_accent)
                 .child(kit::spinner("joined-busy", 12., theme.accent))
-                .child("Working")
+                .child(tr("Working"))
                 .into_any_element(),
-            Some(s) => div().text_size(px(12.)).text_color(theme.text_placeholder).child(if s.agent == "shell" { "Idle" } else { "Waiting for you" }).into_any_element(),
+            Some(s) => div().text_size(px(12.)).text_color(theme.text_placeholder).child(if s.agent == "shell" { tr("Idle") } else { tr("Waiting for you") }).into_any_element(),
             None => div().into_any_element(),
         };
         let can_type = j.can_type;
@@ -1247,25 +1252,25 @@ impl Root {
                     .min_w(px(0.))
                     .gap(px(2.))
                     .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title))
-                    .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!("{} · {machine} · shared by {by}", agent_name(&agent)))),
+                    .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(trf("{agent} · {machine} · shared by {by}", &[("agent", &agent_name(&agent)), ("machine", &machine), ("by", &by)]))),
             )
             .child(status)
             .child(
                 div()
                     .id("joined-mode")
                     .child(kit::pill(Self::joined_mode(j), theme.accent))
-                    .tooltip(move |window, cx| kit::Tooltip::view(if can_type { "Your keys go to their session, as them.".into() } else { format!("You're watching. Only {by} can type.").into() }, window, cx)),
+                    .tooltip(move |window, cx| kit::Tooltip::view(if can_type { tr("Your keys go to their session, as them.").into() } else { trf("You're watching. Only {by} can type.", &[("by", &by)]).into() }, window, cx)),
             )
             .when(whole && desktop, |d| {
-                d.child(Button::new("joined-desktop", "Desktop").icon("monitor").style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, window, cx| this.show_shared(&sid, Showing::Desktop, window, cx))))
+                d.child(Button::new("joined-desktop", tr("Desktop")).icon("monitor").style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, window, cx| this.show_shared(&sid, Showing::Desktop, window, cx))))
             })
             .when(whole && j.can_manage && session.is_some(), |d| {
                 let (sid, name) = (j.id.clone(), name.to_string());
                 let exited = session.as_ref().is_some_and(|s| s.status == "exited");
-                let (label, glyph, action) = if exited { ("Restart", "rotate-ccw", JoinedAction::Restart(name)) } else { ("End", "power", JoinedAction::End(name)) };
+                let (label, glyph, action) = if exited { (tr("Restart"), "rotate-ccw", JoinedAction::Restart(name)) } else { (tr("End"), "power", JoinedAction::End(name)) };
                 d.child(Button::new("joined-end", label).icon(glyph).style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, window, cx| this.run_joined(&sid, action.clone(), window, cx))))
             })
-            .when(!whole, |d| d.child(Button::new("joined-leave", "Leave").icon("x").style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, window, cx| this.leave_joined(&sid2, window, cx)))));
+            .when(!whole, |d| d.child(Button::new("joined-leave", tr("Leave")).icon("x").style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, window, cx| this.leave_joined(&sid2, window, cx)))));
         let body = match j.open.iter().find(|o| o.name == name) {
             Some(o) if o.error.is_some() => div()
                 .flex_1()
@@ -1287,7 +1292,7 @@ impl Root {
         let theme = cx.theme();
         let Some(j) = self.joined.iter().find(|j| j.id == id) else { return div().into_any_element() };
         let Some(d) = j.desktop.clone() else {
-            return div().size_full().flex().items_center().justify_center().text_color(theme.text_muted).child("The desktop isn't shared anymore.").into_any_element();
+            return div().size_full().flex().items_center().justify_center().text_color(theme.text_muted).child(tr("The desktop isn't shared anymore.")).into_any_element();
         };
         let current = d.read(cx).quality();
         let qualities = host::QUALITIES.iter().enumerate().map(|(i, q)| {
@@ -1313,15 +1318,15 @@ impl Root {
                     .flex_1()
                     .min_w(px(0.))
                     .gap(px(2.))
-                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Desktop"))
-                    .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(format!("{} · shared by {} · {}", j.info.title, j.info.by, d.read(cx).status()))),
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(tr("Desktop")))
+                    .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(trf("{title} · shared by {by} · {status}", &[("title", &j.info.title), ("by", &j.info.by), ("status", &d.read(cx).status())]))),
             )
-            .child(div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child("Quality").children(qualities))
+            .child(div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child(tr("Quality")).children(qualities))
             .child(
                 div()
                     .id("joined-control")
-                    .child(kit::pill(if can_control { "In control" } else { "View only" }, theme.accent))
-                    .tooltip(move |window, cx| kit::Tooltip::view(if can_control { "Your mouse and keys work on their screen.".into() } else { format!("You're watching. Only {by} can use it.").into() }, window, cx)),
+                    .child(kit::pill(if can_control { tr("In control") } else { tr("View only") }, theme.accent))
+                    .tooltip(move |window, cx| kit::Tooltip::view(if can_control { tr("Your mouse and keys work on their screen.").into() } else { trf("You're watching. Only {by} can use it.", &[("by", &by)]).into() }, window, cx)),
             );
         div().size_full().flex().flex_col().child(header).child(div().flex_1().min_h(px(0.)).child(d)).into_any_element()
     }
@@ -1335,15 +1340,15 @@ impl Root {
         let mut buttons: Vec<AnyElement> = Vec::new();
         if j.can_manage {
             let sid = sid.clone();
-            buttons.push(Button::new("jm-terminal", "New terminal").icon("square-terminal").style(ButtonStyle::Primary).on_click(cx.listener(move |this, _, window, cx| this.run_joined(&sid, JoinedAction::Start("shell"), window, cx))).into_any_element());
+            buttons.push(Button::new("jm-terminal", tr("New terminal")).icon("square-terminal").style(ButtonStyle::Primary).on_click(cx.listener(move |this, _, window, cx| this.run_joined(&sid, JoinedAction::Start("shell"), window, cx))).into_any_element());
         }
         if j.info.desktop != Desktop::None {
             let sid = sid.clone();
-            buttons.push(Button::new("jm-desktop", "Show desktop").icon("monitor").style(if j.can_manage { ButtonStyle::Outlined } else { ButtonStyle::Primary }).on_click(cx.listener(move |this, _, window, cx| this.show_shared(&sid, Showing::Desktop, window, cx))).into_any_element());
+            buttons.push(Button::new("jm-desktop", tr("Show desktop")).icon("monitor").style(if j.can_manage { ButtonStyle::Outlined } else { ButtonStyle::Primary }).on_click(cx.listener(move |this, _, window, cx| this.show_shared(&sid, Showing::Desktop, window, cx))).into_any_element());
         }
         {
             let sid = sid.clone();
-            buttons.push(Button::new("jm-leave", "Leave").icon("x").on_click(cx.listener(move |this, _, window, cx| this.leave_joined(&sid, window, cx))).into_any_element());
+            buttons.push(Button::new("jm-leave", tr("Leave")).icon("x").on_click(cx.listener(move |this, _, window, cx| this.leave_joined(&sid, window, cx))).into_any_element());
         }
         let header = div()
             .flex()
@@ -1362,8 +1367,8 @@ impl Root {
                             .flex()
                             .flex_col()
                             .gap(px(4.))
-                            .child(div().flex().items_center().gap(px(10.)).child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(j.info.title.clone())).child(kit::pill("Shared with you", theme.accent)))
-                            .child(div().text_size(px(12.)).text_color(theme.text_muted).child(format!("Shared by {} · ends in {}", j.info.by, time_left(j.info.ends_at)))),
+                            .child(div().flex().items_center().gap(px(10.)).child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(j.info.title.clone())).child(kit::pill(tr("Shared with you"), theme.accent)))
+                            .child(div().text_size(px(12.)).text_color(theme.text_muted).child(trf("Shared by {by} · ends in {time}", &[("by", &j.info.by), ("time", &time_left(j.info.ends_at))]))),
                     ),
             )
             .child(div().flex().gap(px(6.)).children(buttons));
@@ -1371,19 +1376,19 @@ impl Root {
         // What you can do here, as the sharer set it.
         let can = |glyph: &'static str, text: String| div().flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text).child(icon(glyph, 14., theme.text_muted)).child(text);
         let mut allowed = div().flex().flex_col().gap(px(8.)).p(px(14.));
-        allowed = allowed.child(can(if j.can_type { "keyboard" } else { "eye" }, if j.can_type { "Watch and type in its sessions".into() } else { format!("Watch its sessions (only {} types)", j.info.by) }));
+        allowed = allowed.child(can(if j.can_type { "keyboard" } else { "eye" }, if j.can_type { tr("Watch and type in its sessions").into() } else { trf("Watch its sessions (only {by} types)", &[("by", &j.info.by)]) }));
         if j.can_manage {
-            allowed = allowed.child(can("square-terminal", "Start, end and restart its sessions".into()));
+            allowed = allowed.child(can("square-terminal", tr("Start, end and restart its sessions").into()));
         }
         match j.info.desktop {
             Desktop::None => {}
-            Desktop::View => allowed = allowed.child(can("monitor", "Watch its screen".into())),
-            Desktop::Control if j.can_control => allowed = allowed.child(can("monitor", "Watch and use its screen".into())),
-            Desktop::Control => allowed = allowed.child(can("monitor", format!("Watch its screen, and use it when {} lets you", j.info.by))),
+            Desktop::View => allowed = allowed.child(can("monitor", tr("Watch its screen").into())),
+            Desktop::Control if j.can_control => allowed = allowed.child(can("monitor", tr("Watch and use its screen").into())),
+            Desktop::Control => allowed = allowed.child(can("monitor", trf("Watch its screen, and use it when {by} lets you", &[("by", &j.info.by)]))),
         }
         if !j.info.ports.is_empty() {
             let n = j.info.ports.len();
-            allowed = allowed.child(can("network", format!("Open {n} of its servers here")));
+            allowed = allowed.child(can("network", trf("Open {n} of its servers here", &[("n", &n)])));
         }
 
         // Its sessions, like a machine's.
@@ -1395,11 +1400,11 @@ impl Root {
                 let (icon_name, (from, to)) = kit::agent_look(&x.agent);
                 let title = if x.title.is_empty() { agent_name(&x.agent).to_string() } else { x.title.clone() };
                 let state = if x.status == "exited" {
-                    div().text_size(px(12.)).text_color(theme.text_placeholder).child("Exited").into_any_element()
+                    div().text_size(px(12.)).text_color(theme.text_placeholder).child(tr("Exited")).into_any_element()
                 } else if x.busy {
-                    div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_accent).child(kit::spinner(("jm-spin", i), 12., theme.accent)).child("Working").into_any_element()
+                    div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_accent).child(kit::spinner(("jm-spin", i), 12., theme.accent)).child(tr("Working")).into_any_element()
                 } else {
-                    div().text_size(px(12.)).text_color(theme.text_placeholder).child(if x.agent == "shell" { "Idle" } else { "Waiting for you" }).into_any_element()
+                    div().text_size(px(12.)).text_color(theme.text_placeholder).child(if x.agent == "shell" { tr("Idle") } else { tr("Waiting for you") }).into_any_element()
                 };
                 let (sid, name) = (sid.clone(), x.name.clone());
                 div()
@@ -1420,7 +1425,7 @@ impl Root {
             })
             .collect();
         let sessions = if sessions.is_empty() {
-            card(&theme).p(px(16.)).flex_row().items_center().gap(px(12.)).child(kit::color_tile("square-terminal", 28.)).child(div().text_size(px(12.5)).text_color(theme.text_muted).child(format!("No sessions are running on {} right now. New ones show up here.", j.info.title))).into_any_element()
+            card(&theme).p(px(16.)).flex_row().items_center().gap(px(12.)).child(kit::color_tile("square-terminal", 28.)).child(div().text_size(px(12.5)).text_color(theme.text_muted).child(trf("No sessions are running on {name} right now. New ones show up here.", &[("name", &j.info.title)]))).into_any_element()
         } else {
             card(&theme).children(sessions).into_any_element()
         };
@@ -1433,9 +1438,9 @@ impl Root {
             .enumerate()
             .map(|(i, p)| {
                 let state = match j.servers.get(&p.port) {
-                    Some(Ok(local)) => format!("Open here at localhost:{local}"),
+                    Some(Ok(local)) => trf("Open here at localhost:{port}", &[("port", local)]),
                     Some(Err(e)) => e.clone(),
-                    None => format!("Port {} on {}", p.port, j.info.title),
+                    None => trf("Port {port} on {name}", &[("port", &p.port), ("name", &j.info.title)]),
                 };
                 let (sid, port) = (sid.clone(), p.port);
                 div()
@@ -1446,8 +1451,8 @@ impl Root {
                     .py(px(10.))
                     .when(i > 0, |d| d.border_t_1().border_color(theme.border_variant))
                     .child(kit::color_tile("network", 26.))
-                    .child(div().flex().flex_col().flex_1().min_w(px(0.)).gap(px(1.)).child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(if p.name.is_empty() { format!("Port {}", p.port) } else { p.name.clone() })).child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(state)))
-                    .child(Button::new(("jm-open", i), "Open").icon("external-link").on_click(cx.listener(move |this, _, _, cx| this.open_shared_server(&sid, port, cx))))
+                    .child(div().flex().flex_col().flex_1().min_w(px(0.)).gap(px(1.)).child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(if p.name.is_empty() { trf("Port {port}", &[("port", &p.port)]) } else { p.name.clone() })).child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(state)))
+                    .child(Button::new(("jm-open", i), tr("Open")).icon("external-link").on_click(cx.listener(move |this, _, _, cx| this.open_shared_server(&sid, port, cx))))
                     .into_any_element()
             })
             .collect();
@@ -1493,7 +1498,7 @@ impl Root {
                         .child(div().w(px((self.row_width() - 110.).max(40.))).truncate().text_size(px(12.5)).text_color(if exited { theme.text_placeholder } else if selected { theme.text } else { theme.text_muted }).child(title))
                         .child(div().flex_1())
                         .when(s.busy && !exited, |d| d.child(kit::spinner(SharedString::from(format!("side-js-spin-{}-{}", j.id, s.name)), 11., theme.accent)))
-                        .when(exited, |d| d.child(div().text_size(px(11.)).text_color(theme.text_placeholder).child("exited")))
+                        .when(exited, |d| d.child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(tr("exited"))))
                         .on_mouse_down(gpui::MouseButton::Right, super::menu::on_right_click(move || super::menu::MenuTarget::JoinedSession(msid.clone(), mname.clone()), cx))
                         .on_click(cx.listener(move |this, _, window, cx| this.show_shared(&sid, Showing::Session(name.clone()), window, cx)))
                         .into_any_element(),
@@ -1504,7 +1509,7 @@ impl Root {
                 rows.push(
                     nested_row(theme, SharedString::from(format!("side-js-more-{}", j.id)), false)
                         .child(div().size(px(16.)).flex().items_center().justify_center().child(icon("ellipsis", 13., theme.text_placeholder)))
-                        .child(div().flex_1().text_size(px(12.)).text_color(theme.text_placeholder).child(if folded_away > 0 { format!("{folded_away} more") } else { "Show fewer".to_string() }))
+                        .child(div().flex_1().text_size(px(12.)).text_color(theme.text_placeholder).child(if folded_away > 0 { trf("{n} more", &[("n", &folded_away)]) } else { tr("Show fewer").to_string() }))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.sidebar_more.remove(&toggle) {
                                 this.sidebar_more.insert(toggle.clone());
@@ -1520,8 +1525,8 @@ impl Root {
                 rows.push(
                     nested_row(theme, SharedString::from(format!("side-jd-{}", j.id)), selected)
                         .child(kit::color_tile("monitor", 16.))
-                        .child(div().flex_1().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child("Desktop"))
-                        .child(div().text_size(px(10.5)).text_color(theme.text_placeholder).child(if j.can_control { "control" } else { "view" }))
+                        .child(div().flex_1().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child(tr("Desktop")))
+                        .child(div().text_size(px(10.5)).text_color(theme.text_placeholder).child(if j.can_control { tr("control") } else { tr("view") }))
                         .on_mouse_down(gpui::MouseButton::Right, super::menu::on_right_click(move || super::menu::MenuTarget::JoinedDesktop(msid.clone()), cx))
                         .on_click(cx.listener(move |this, _, window, cx| this.show_shared(&sid, Showing::Desktop, window, cx)))
                         .into_any_element(),
@@ -1533,13 +1538,13 @@ impl Root {
                 rows.push(
                     nested_row(theme, SharedString::from(format!("side-jp-{}-{}", j.id, p.port)), false)
                         .child(icon("network", 14., theme.text_muted))
-                        .child(div().w(px((self.row_width() - 130.).max(40.))).truncate().text_size(px(12.5)).text_color(theme.text_muted).child(if p.name.is_empty() { format!("Port {}", p.port) } else { p.name.clone() }))
+                        .child(div().w(px((self.row_width() - 130.).max(40.))).truncate().text_size(px(12.5)).text_color(theme.text_muted).child(if p.name.is_empty() { trf("Port {port}", &[("port", &p.port)]) } else { p.name.clone() }))
                         .child(div().flex_1())
                         .child(div().font_family(mono_font()).text_size(px(10.5)).text_color(theme.text_placeholder).child(match local {
                             Some(l) => format!(":{l}"),
                             None => format!(":{}", p.port),
                         }))
-                        .tooltip(|window, cx| kit::Tooltip::view("Open it here, in your browser".into(), window, cx))
+                        .tooltip(|window, cx| kit::Tooltip::view(tr("Open it here, in your browser").into(), window, cx))
                         .on_click(cx.listener(move |this, _, _, cx| this.open_shared_server(&sid, port, cx)))
                         .into_any_element(),
                 );
@@ -1560,13 +1565,13 @@ impl Root {
             (kit::tile(icon_name, from, to, 30.), if j.info.title.is_empty() { agent_name(&j.info.agent).to_string() } else { j.info.title.clone() })
         };
         let doing = if j.ended.is_some() {
-            "ended"
+            tr("ended")
         } else if j.can_control && j.info.desktop == Desktop::Control {
-            "in control"
+            tr("in control")
         } else if j.can_type {
-            "typing"
+            tr("typing")
         } else {
-            "watching"
+            tr("watching")
         };
         let toggle = j.info.whole_machine && j.ended.is_none();
         // Row chrome: margins, padding, tile, gap, and the toggle.
@@ -1609,7 +1614,7 @@ impl Root {
                     .overflow_hidden()
                     .gap(px(1.))
                     .child(div().w(px(text_w)).truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child(title))
-                    .child(div().w(px(text_w)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("from {} · {doing}", j.info.by))),
+                    .child(div().w(px(text_w)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(trf("from {by} · {doing}", &[("by", &j.info.by), ("doing", &doing)]))),
             )
             .when(toggle, |d| {
                 d.child(
@@ -1659,48 +1664,48 @@ impl Root {
         match target {
             MenuTarget::JoinedSession(_, name) => {
                 let exited = j.sessions.iter().any(|s| &s.name == name && s.status == "exited");
-                items.push(item("Open".into(), "square-terminal", JoinedAction::Show(Showing::Session(name.clone()))));
+                items.push(item(tr("Open").into(), "square-terminal", JoinedAction::Show(Showing::Session(name.clone()))));
                 items.push(JoinedItem::Separator);
                 if exited {
-                    items.push(managed("Restart".into(), "rotate-ccw", JoinedAction::Restart(name.clone())));
+                    items.push(managed(tr("Restart").into(), "rotate-ccw", JoinedAction::Restart(name.clone())));
                 }
-                items.push(managed("End session".into(), "power", JoinedAction::End(name.clone())));
+                items.push(managed(tr("End session").into(), "power", JoinedAction::End(name.clone())));
             }
             MenuTarget::JoinedDesktop(_) => {
-                items.push(item("Open".into(), "monitor", JoinedAction::Show(Showing::Desktop)));
+                items.push(item(tr("Open").into(), "monitor", JoinedAction::Show(Showing::Desktop)));
                 items.push(JoinedItem::Separator);
-                items.push(JoinedItem::Note("Quality".into()));
+                items.push(JoinedItem::Note(tr("Quality").into()));
                 let current = j.quality;
                 for q in host::QUALITIES {
                     items.push(JoinedItem::Do { label: quality_label(q).into(), glyph: "", action: JoinedAction::Quality(q), danger: false, picked: q == current });
                 }
             }
             _ if j.info.whole_machine => {
-                items.push(managed("New terminal".into(), "square-terminal", JoinedAction::Start("shell")));
+                items.push(managed(tr("New terminal").into(), "square-terminal", JoinedAction::Start("shell")));
                 for a in crate::fleet::sessions::AGENTS.iter().filter(|a| a.id != "shell" && j.info.agents.iter().any(|i| i == a.id)) {
-                    items.push(match managed(format!("New {} session", a.name), "", JoinedAction::Start(a.id)) {
+                    items.push(match managed(trf("New {agent} session", &[("agent", &a.name)]), "", JoinedAction::Start(a.id)) {
                         JoinedItem::Do { label, action, .. } => JoinedItem::Agent { label, agent: a.id, action: Some(action) },
-                        _ => JoinedItem::Agent { label: format!("New {} session", a.name), agent: a.id, action: None },
+                        _ => JoinedItem::Agent { label: trf("New {agent} session", &[("agent", &a.name)]), agent: a.id, action: None },
                     });
                 }
                 if j.info.desktop != Desktop::None {
-                    items.push(item("Show desktop".into(), "monitor", JoinedAction::Show(Showing::Desktop)));
+                    items.push(item(tr("Show desktop").into(), "monitor", JoinedAction::Show(Showing::Desktop)));
                 }
                 for p in &j.info.ports {
-                    let name = if p.name.is_empty() { format!("port {}", p.port) } else { p.name.clone() };
-                    items.push(item(format!("Open {name} here"), "external-link", JoinedAction::Server(p.port)));
+                    let name = if p.name.is_empty() { trf("port {port}", &[("port", &p.port)]) } else { p.name.clone() };
+                    items.push(item(trf("Open {name} here", &[("name", &name)]), "external-link", JoinedAction::Server(p.port)));
                 }
                 items.push(JoinedItem::Separator);
-                items.push(item("Open".into(), "monitor", JoinedAction::Show(Showing::Machine)));
-                items.push(item("Refresh".into(), "refresh-cw", JoinedAction::Refresh));
+                items.push(item(tr("Open").into(), "monitor", JoinedAction::Show(Showing::Machine)));
+                items.push(item(tr("Refresh").into(), "refresh-cw", JoinedAction::Refresh));
                 if live && !j.can_manage {
-                    items.push(JoinedItem::Note(format!("Ask {} to let you start sessions.", j.info.by)));
+                    items.push(JoinedItem::Note(trf("Ask {by} to let you start sessions.", &[("by", &j.info.by)])));
                 }
             }
-            _ => items.push(item("Open".into(), "square-terminal", JoinedAction::Show(Showing::Session(String::new())))),
+            _ => items.push(item(tr("Open").into(), "square-terminal", JoinedAction::Show(Showing::Session(String::new())))),
         }
         items.push(JoinedItem::Separator);
-        items.push(JoinedItem::Do { label: if live { "Leave share".into() } else { "Close".into() }, glyph: "x", action: JoinedAction::Leave, danger: true, picked: false });
+        items.push(JoinedItem::Do { label: if live { tr("Leave share").into() } else { tr("Close").into() }, glyph: "x", action: JoinedAction::Leave, danger: true, picked: false });
         items
     }
 
@@ -1783,10 +1788,11 @@ pub enum JoinedAction {
 /// "Low", "Medium", "High", "Max".
 fn quality_label(q: &str) -> &'static str {
     match q {
-        "low" => "Low",
-        "high" => "High",
-        "max" => "Max",
-        _ => "Medium",
+        "low" => tr("Low"),
+        "high" => tr("High"),
+        "max" => tr("Max"),
+        _ => tr("Medium"),
+
     }
 }
 

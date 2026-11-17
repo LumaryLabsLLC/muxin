@@ -3,6 +3,7 @@
 //! commands agents ran in workspaces — with the selected item's output.
 
 use chrono::{DateTime, Utc};
+use crate::ui::i18n::{tr, trf};
 use gpui::{AnyElement, ClipboardItem, Context, FontWeight, SharedString, div, prelude::*, px};
 
 use super::detail::op_status_icon;
@@ -99,10 +100,10 @@ impl Root {
         let running = s.operations.iter().filter(|o| o.status == "running").count();
 
         let filters = [
-            (ActivityFilter::All, "All"),
-            (ActivityFilter::Operations, "Operations"),
-            (ActivityFilter::Agents, "Agent commands"),
-            (ActivityFilter::Failed, "Failed"),
+            (ActivityFilter::All, tr("All")),
+            (ActivityFilter::Operations, tr("Operations")),
+            (ActivityFilter::Agents, tr("Agent commands")),
+            (ActivityFilter::Failed, tr("Failed")),
         ];
         let filter_bar = div()
             .flex()
@@ -177,7 +178,7 @@ impl Root {
                         )
                     })
                     .child(
-                        Button::new("activity-clear", "Clear finished")
+                        Button::new("activity-clear", tr("Clear finished"))
                             .icon("trash-2")
                             .disabled(s.operations.iter().all(|o| o.status == "running"))
                             .on_click(cx.listener(|this, _, _, _| this.engine.clear_operations())),
@@ -206,7 +207,7 @@ impl Root {
                                 .justify_center()
                                 .text_size(px(12.5))
                                 .text_color(theme.text_placeholder)
-                                .child("Select an entry to see its output."),
+                                .child(tr("Select an entry to see its output.")),
                         )
                     }))
                     .into_any_element()
@@ -219,8 +220,8 @@ impl Root {
         let width = self.content_width.min(480.);
         let target = s.machines.iter().find(|m| m.status == "online").or(s.machines.first()).map(|m| (m.id.clone(), m.name.clone()));
         let install_detail = match &target {
-            Some((_, name)) => format!("Register a GitHub Actions runner on {name}."),
-            None => "Add a machine first, then put a runner on it.".into(),
+            Some((_, name)) => trf("Register a GitHub Actions runner on {name}.", &[("name", &name)]),
+            None => tr("Add a machine first, then put a runner on it.").into(),
         };
         let mcp = mcp_add_command();
 
@@ -235,10 +236,10 @@ impl Root {
             .pt(px(72.))
             .pb(px(40.))
             .child(kit::tile("activity", kit::tiles::ACTIVITY.0, kit::tiles::ACTIVITY.1, 56.))
-            .child(div().mt(px(18.)).text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("No activity yet"))
+            .child(div().mt(px(18.)).text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(tr("No activity yet")))
             .child(
                 div().mt(px(8.)).w(px(width)).text_center().text_size(px(13.)).text_color(theme.text_muted).child(
-                    "Everything Muxin does on your machines lands here with its full output: runner installs and restarts, log requests, workspace setup, and the commands agents run.",
+                    tr("Everything Muxin does on your machines lands here with its full output: runner installs and restarts, log requests, workspace setup, and the commands agents run."),
                 ),
             )
             .child(
@@ -246,7 +247,7 @@ impl Root {
                     .mt(px(28.))
                     .w(px(width))
                     .overflow_hidden()
-                    .child(start_row(theme, "start-install", "box", kit::tiles::OVERVIEW, "Install a runner", install_detail, "chevron-right", width).on_click(
+                    .child(start_row(theme, "start-install", "box", kit::tiles::OVERVIEW, tr("Install a runner"), install_detail, "chevron-right", width).on_click(
                         cx.listener(move |this, _, window, cx| match &target {
                             Some((id, _)) => this.show_install_dialog(id, window, cx),
                             None => this.show_add_machine(window, cx),
@@ -258,8 +259,8 @@ impl Root {
                             "start-workspace",
                             "terminal",
                             kit::tiles::WORKSPACES,
-                            "Start an agent workspace",
-                            "A persistent work environment for agents, on the host or in Docker.".into(),
+                            tr("Start an agent workspace"),
+                            tr("A persistent work environment for agents, on the host or in Docker.").into(),
                             "chevron-right",
                             width,
                         )
@@ -273,8 +274,8 @@ impl Root {
                             "start-agent",
                             "zap",
                             kit::tiles::JOBS,
-                            "Connect an agent",
-                            "Copy the command that adds Muxin to Claude Code over MCP.".into(),
+                            tr("Connect an agent"),
+                            tr("Copy the command that adds Muxin to Claude Code over MCP.").into(),
                             "copy",
                             width,
                         )
@@ -282,7 +283,7 @@ impl Root {
                         .border_color(theme.border_variant)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(mcp.clone()));
-                            this.notify_user("Copied the Claude Code command", false, cx);
+                            this.notify_user(tr("Copied the Claude Code command"), false, cx);
                         })),
                     ),
             )
@@ -294,7 +295,7 @@ impl Root {
                     .gap(px(6.))
                     .text_size(px(12.))
                     .text_color(theme.text_placeholder)
-                    .child("Open Activity from anywhere with")
+                    .child(tr("Open Activity from anywhere with"))
                     .child(kit::kbd(theme, keys))
             }))
             .into_any_element()
@@ -365,13 +366,12 @@ impl Root {
             .and_then(|id| self.snapshot.machines.iter().find(|m| m.id == id).map(|m| (id, m.name.clone())));
         let runner = op.runner_id.clone();
         let when = match op.finished_at {
-            Some(t) => format!(
-                "{} {} · took {}",
-                if op.status == "succeeded" { "Finished" } else { "Failed" },
-                format::ago(Some(t)),
-                crate::util::short_duration((t - op.started_at).num_seconds().max(0) as u64)
-            ),
-            None => format!("Running for {}", format::elapsed(op.started_at)),
+            Some(t) => {
+                let (ago, took) = (format::ago(Some(t)), crate::util::short_duration((t - op.started_at).num_seconds().max(0) as u64));
+                let args: &[(&str, &dyn std::fmt::Display)] = &[("ago", &ago), ("took", &took)];
+                if op.status == "succeeded" { trf("Finished {ago} · took {took}", args) } else { trf("Failed {ago} · took {took}", args) }
+            },
+            None => trf("Running for {elapsed}", &[("elapsed", &format::elapsed(op.started_at))]),
         };
         // A copy under way: how far, and a way to stop it.
         let progress = op.progress.clone().filter(|_| op.status == "running").map(|p| {
@@ -385,7 +385,7 @@ impl Root {
                 .child(div().flex_1().child(progress_bar(theme, &p)))
                 .child(div().flex_none().font_family(mono_font()).text_size(px(11.5)).text_color(theme.text_muted).child(progress_text(&p)))
                 .when(op.cancellable, |d| {
-                    d.child(Button::new("op-stop", "Stop").icon("x").on_click(cx.listener(move |this, _, _, cx| {
+                    d.child(Button::new("op-stop", tr("Stop")).icon("x").on_click(cx.listener(move |this, _, _, cx| {
                         this.engine.cancel_op(id);
                         cx.notify()
                     })))
@@ -431,7 +431,7 @@ impl Root {
             .when_some(op.error.clone().filter(|e| !op.log.iter().any(|l| l.contains(e.as_str()))), |d, e| {
                 d.child(div().mt(px(6.)).flex().gap(px(6.)).text_color(theme.error).child(icon("circle-x", 13., theme.error)).child(div().flex_1().min_w(px(0.)).child(e)))
             })
-            .when(op.log.is_empty() && op.status == "running", |d| d.child(div().text_color(theme.text_placeholder).child("Waiting for output…")));
+            .when(op.log.is_empty() && op.status == "running", |d| d.child(div().text_color(theme.text_placeholder).child(tr("Waiting for output…"))));
         let body = div().flex_1().min_h(px(0.)).flex().flex_col().children(progress).child(log).into_any_element();
         detail_frame(theme, op_status_icon(theme, op), op.title.clone(), title_w, meta, copy_text, body)
     }
@@ -440,10 +440,10 @@ impl Root {
 fn command_detail(theme: &Theme, w: &WorkspaceInfo, c: &WorkspaceCommand, title_w: f32, cx: &mut Context<Root>) -> AnyElement {
     let ws = w.id.clone();
     let outcome = match (c.background, c.timed_out, c.exit_code) {
-        (true, _, _) => "started in the background".to_string(),
-        (_, true, _) => "timed out".to_string(),
-        (_, _, Some(code)) => format!("exit {code} in {}", crate::util::short_duration(c.duration_ms / 1000)),
-        _ => "running".to_string(),
+        (true, _, _) => tr("started in the background").to_string(),
+        (_, true, _) => tr("timed out").to_string(),
+        (_, _, Some(code)) => trf("exit {code} in {took}", &[("code", &code), ("took", &crate::util::short_duration(c.duration_ms / 1000))]),
+        _ => tr("running").to_string(),
     };
     let meta = div()
         .flex()
@@ -469,7 +469,7 @@ fn command_detail(theme: &Theme, w: &WorkspaceInfo, c: &WorkspaceCommand, title_
     let mut lines: Vec<AnyElement> = vec![div().text_color(theme.text_accent).child(format!("$ {}", c.command)).into_any_element()];
     lines.extend(c.output_tail.iter().map(|l| div().text_color(theme.text_muted).child(l.clone()).into_any_element()));
     if c.output_tail.is_empty() {
-        lines.push(div().text_color(theme.text_placeholder).child("(no output)").into_any_element());
+        lines.push(div().text_color(theme.text_placeholder).child(tr("(no output)")).into_any_element());
     }
     let body = div()
         .id("cmd-output")
@@ -513,7 +513,7 @@ fn detail_frame(theme: &Theme, status: AnyElement, title: String, title_w: f32, 
                         .child(div().w(px(title_w)).truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(title))
                         .child(meta),
                 )
-                .child(Button::icon_only("detail-copy", "copy").tooltip("Copy output").on_click(move |_, _, cx| {
+                .child(Button::icon_only("detail-copy", "copy").tooltip(tr("Copy output")).on_click(move |_, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()))
                 })),
         )
@@ -603,10 +603,10 @@ fn start_row(
 /// The filter matched nothing (but there is other activity).
 fn filtered_empty(theme: &Theme, filter: ActivityFilter) -> AnyElement {
     let (icon_name, title, body) = match filter {
-        ActivityFilter::Failed => ("circle-check", "Nothing failed", "Failed operations and agent commands that exit non-zero show up here."),
-        ActivityFilter::Operations => ("activity", "No operations yet", "Runner installs, restarts, log requests and workspace setup show up here."),
-        ActivityFilter::Agents => ("terminal", "No agent commands yet", "Commands agents run in workspaces show up here with their output."),
-        ActivityFilter::All => ("activity", "Nothing here", "Activity shows up here as it happens."),
+        ActivityFilter::Failed => ("circle-check", tr("Nothing failed"), tr("Failed operations and agent commands that exit non-zero show up here.")),
+        ActivityFilter::Operations => ("activity", tr("No operations yet"), tr("Runner installs, restarts, log requests and workspace setup show up here.")),
+        ActivityFilter::Agents => ("terminal", tr("No agent commands yet"), tr("Commands agents run in workspaces show up here with their output.")),
+        ActivityFilter::All => ("activity", tr("Nothing here"), tr("Activity shows up here as it happens.")),
     };
     div()
         .flex_1()

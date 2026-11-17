@@ -8,6 +8,7 @@ use gpui::{
 };
 
 use super::github::Load;
+use super::i18n::{tr, trf};
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, checkbox, icon, label};
 use super::theme::{ActiveTheme, mono_font, Theme};
@@ -126,7 +127,7 @@ impl EventEmitter<DialogEvent> for AddMachineDialog {}
 impl AddMachineDialog {
     pub fn new(engine: Arc<Engine>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let name = cx.new(|cx| TextInput::new(cx, "Mac Studio"));
-        let host = cx.new(|cx| TextInput::new(cx, "ci@mac-studio.local, an ~/.ssh/config alias, or local").mono());
+        let host = cx.new(|cx| TextInput::new(cx, tr("ci@mac-studio.local, an ~/.ssh/config alias, or local")).mono());
         let on_input = |this: &mut Self, _: &Entity<TextInput>, e: &InputEvent, _: &mut Window, cx: &mut Context<Self>| match e {
             InputEvent::Submit => this.submit(cx),
             InputEvent::Cancel => cx.emit(DialogEvent::Dismissed),
@@ -205,7 +206,7 @@ impl Render for AddMachineDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let mut suggestions: Vec<AnyElement> = vec![
-            suggestion(&theme, "sugg-local", "This computer", "laptop")
+            suggestion(&theme, "sugg-local", tr("This computer"), "laptop")
                 .on_click(cx.listener(|this, _, _, cx| this.pick("local".into(), crate::config::local_hostname(), cx)))
                 .into_any_element(),
         ];
@@ -221,17 +222,17 @@ impl Render for AddMachineDialog {
         }
         let dialog = frame(
             &theme,
-            "Add a machine",
-            Some("Muxin reaches machines with your system ssh, keys and ~/.ssh/config. Checks are read-only.".into()),
+            tr("Add a machine"),
+            Some(tr("Muxin reaches machines with your system ssh, keys and ~/.ssh/config. Checks are read-only.").into()),
         )
-        .child(field(&theme, "Name", self.name.clone(), None))
-        .child(field(&theme, "SSH host", self.host.clone(), Some("Key-based login must work without a password prompt.")))
+        .child(field(&theme, tr("Name"), self.name.clone(), None))
+        .child(field(&theme, tr("SSH host"), self.host.clone(), Some(tr("Key-based login must work without a password prompt."))))
         .child(
             div()
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(label(&theme, "Suggestions"))
+                .child(label(&theme, tr("Suggestions")))
                 .child(div().flex().flex_wrap().gap(px(6.)).children(suggestions)),
         )
         .when(!self.tailnet.is_empty(), |d| {
@@ -258,7 +259,7 @@ impl Render for AddMachineDialog {
                     .flex()
                     .flex_col()
                     .gap(px(6.))
-                    .child(label(&theme, "On your tailnet"))
+                    .child(label(&theme, tr("On your tailnet")))
                     .child(div().flex().flex_wrap().gap(px(6.)).children(chips)),
             )
         })
@@ -272,13 +273,13 @@ impl Render for AddMachineDialog {
                 .enumerate()
                 .map(|(i, n)| {
                     let (host, name, ssh) = (n.host.clone(), n.name.clone(), n.ssh);
-                    let label = if ssh { n.host.clone() } else { format!("{} · Remote Login off", n.name) };
+                    let label = if ssh { n.host.clone() } else { trf("{name} · Remote Login off", &[("name", &n.name)]) };
                     suggestion(&theme, SharedString::from(format!("sugg-net-{i}")), label, if n.mac { "laptop" } else { "server" })
                         .when(!ssh, |d| d.text_color(theme.text_placeholder))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.pick(host.clone(), name.clone(), cx);
                             if !ssh {
-                                this.note = Some(format!("Turn on Remote Login on {name}: Settings › General › Sharing."));
+                                this.note = Some(trf("Turn on Remote Login on {name}: Settings › General › Sharing.", &[("name", &name)]));
                             }
                             cx.notify();
                         }))
@@ -286,11 +287,11 @@ impl Render for AddMachineDialog {
                 })
                 .collect();
             let body = match &self.network {
-                None => div().flex().items_center().gap(px(6.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(kit::spinner("net-spin", 11., theme.text_placeholder)).child("Looking on this network…").into_any_element(),
-                Some(n) if n.is_empty() => div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Nothing else found. Macs show up once Remote Login is on.").into_any_element(),
+                None => div().flex().items_center().gap(px(6.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(kit::spinner("net-spin", 11., theme.text_placeholder)).child(tr("Looking on this network…")).into_any_element(),
+                Some(n) if n.is_empty() => div().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("Nothing else found. Macs show up once Remote Login is on.")).into_any_element(),
                 Some(_) => div().flex().flex_wrap().gap(px(6.)).children(chips).into_any_element(),
             };
-            div().flex().flex_col().gap(px(6.)).child(label(&theme, "On this network")).child(body)
+            div().flex().flex_col().gap(px(6.)).child(label(&theme, tr("On this network"))).child(body)
         })
         .children(self.note.clone().map(|n| {
             div().flex().items_start().gap(px(8.)).text_size(px(12.)).text_color(theme.text_muted).child(icon("info", 13., theme.info)).child(div().flex_1().min_w(px(0.)).child(n))
@@ -300,14 +301,14 @@ impl Render for AddMachineDialog {
                 .flex()
                 .flex_col()
                 .gap(px(4.))
-                .child(kit::checkbox(&theme, "am-direct", self.direct, "Connect to it directly once it answers (faster)", cx.listener(|this, on: &bool, _, cx| {
+                .child(kit::checkbox(&theme, "am-direct", self.direct, tr("Connect to it directly once it answers (faster)"), cx.listener(|this, on: &bool, _, cx| {
                     this.direct = *on;
                     cx.notify();
                 })))
                 .child(div().pl(px(23.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(if self.direct {
-                    "Its agent runs there as a service of yours, on UDP. ssh is the way in where that can't get through."
+                    tr("Its agent runs there as a service of yours, on UDP. ssh is the way in where that can't get through.")
                 } else {
-                    "It stays on ssh. You can connect directly later from its page."
+                    tr("It stays on ssh. You can connect directly later from its page.")
                 })),
         );
         #[cfg(feature = "recipes")]
@@ -316,8 +317,8 @@ impl Render for AddMachineDialog {
         // Someone else's machine comes by link: a way there, or the link pasted here.
         .child({
             let (text, button) = match &self.share_link {
-                Some(_) => ("That's a share link: join it instead.", Button::new("am-join", "Join").style(ButtonStyle::Primary)),
-                None => ("Someone sent you a link to their machine or session?", Button::new("am-join", "Join a share…").style(ButtonStyle::Outlined)),
+                Some(_) => (tr("That's a share link: join it instead."), Button::new("am-join", tr("Join")).style(ButtonStyle::Primary)),
+                None => (tr("Someone sent you a link to their machine or session?"), Button::new("am-join", tr("Join a share…")).style(ButtonStyle::Outlined)),
             };
             let link = self.share_link.clone();
             div()
@@ -336,11 +337,11 @@ impl Render for AddMachineDialog {
         })
         .children(error_line(&theme, &self.error))
         .child(footer(vec![
-            Button::new("am-cloud", "New cloud machine…").style(ButtonStyle::Ghost).icon("cloud").on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::NewCloudMachine))).into_any_element(),
-            Button::new("am-vm", "New VM…").style(ButtonStyle::Ghost).icon("box").on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::NewVm))).into_any_element(),
+            Button::new("am-cloud", tr("New cloud machine…")).style(ButtonStyle::Ghost).icon("cloud").on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::NewCloudMachine))).into_any_element(),
+            Button::new("am-vm", tr("New VM…")).style(ButtonStyle::Ghost).icon("box").on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::NewVm))).into_any_element(),
             div().flex_1().into_any_element(),
-            Button::new("am-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
-            Button::new("am-add", "Add machine").style(ButtonStyle::Primary).key_hint("↵").on_click(cx.listener(|this, _, _, cx| this.submit(cx))).into_any_element(),
+            Button::new("am-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+            Button::new("am-add", tr("Add machine")).style(ButtonStyle::Primary).key_hint("↵").on_click(cx.listener(|this, _, _, cx| this.submit(cx))).into_any_element(),
         ]))
     }
 }
@@ -411,7 +412,7 @@ impl InstallDialog {
         let suggested = engine.suggest_runner_names(&machine_id, 1).join(", ");
         let names = cx.new(|cx| TextInput::new(cx, "runner-01, runner-02").mono().with_text(suggested));
         let labels = cx.new(|cx| TextInput::new(cx, "gpu, xcode-16 (optional)").mono());
-        let image = cx.new(|cx| TextInput::new(cx, "ghcr.io/actions/actions-runner (latest)").mono());
+        let image = cx.new(|cx| TextInput::new(cx, tr("ghcr.io/actions/actions-runner (latest)")).mono());
         let on_input = |this: &mut Self, _: &Entity<TextInput>, e: &InputEvent, _: &mut Window, cx: &mut Context<Self>| match e {
             InputEvent::Submit => this.submit(cx),
             InputEvent::Cancel => cx.emit(DialogEvent::Dismissed),
@@ -449,7 +450,7 @@ impl InstallDialog {
 
     fn submit(&mut self, cx: &mut Context<Self>) {
         let Some(scope) = self.scope.clone() else {
-            self.error = Some("Choose where to register the runners.".into());
+            self.error = Some(tr("Choose where to register the runners.").into());
             cx.notify();
             return;
         };
@@ -502,8 +503,8 @@ impl Render for InstallDialog {
                 .bg(theme.warning.opacity(0.1))
                 .text_size(px(12.5))
                 .child(icon("triangle-alert", 14., theme.warning))
-                .child(div().flex_1().min_w(px(0.)).child("Runners register with a GitHub organization or repository. Add one in Settings first."))
-                .child(Button::new("inst-settings", "Settings").on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::OpenSettings))))
+                .child(div().flex_1().min_w(px(0.)).child(tr("Runners register with a GitHub organization or repository. Add one in Settings first.")))
+                .child(Button::new("inst-settings", tr("Settings")).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::OpenSettings))))
                 .into_any_element()
         } else {
             div()
@@ -550,29 +551,29 @@ impl Render for InstallDialog {
 
         frame(
             &theme,
-            format!("Install runners on {machine_name}"),
+            trf("Install runners on {machine}", &[("machine", &machine_name)]),
             Some(
                 match &platform {
-                    Some(p) => format!("Downloads the latest GitHub Actions runner for {p}, registers it with GitHub and starts it."),
-                    None => "The machine is checked first to pick the right runner build, then it's downloaded, registered and started.".into(),
+                    Some(p) => trf("Downloads the latest GitHub Actions runner for {platform}, registers it with GitHub and starts it.", &[("platform", p)]),
+                    None => tr("The machine is checked first to pick the right runner build, then it's downloaded, registered and started.").into(),
                 }
                 .into(),
             ),
         )
-        .child(field(&theme, "Register with", scope_picker, None))
+        .child(field(&theme, tr("Register with"), scope_picker, None))
         .child(
             div()
                 .flex()
                 .gap(px(14.))
-                .child(div().flex_none().child(field(&theme, "How many", stepper, None)))
-                .child(div().flex_1().child(field(&theme, "Names", self.names.clone(), None))),
+                .child(div().flex_none().child(field(&theme, tr("How many"), stepper, None)))
+                .child(div().flex_1().child(field(&theme, tr("Names"), self.names.clone(), None))),
         )
-        .child(field(&theme, "Extra labels", self.labels.clone(), Some("GitHub adds self-hosted, the OS and the architecture automatically.")))
-        .child(field(&theme, "Run as", mode_picker, None))
+        .child(field(&theme, tr("Extra labels"), self.labels.clone(), Some(tr("GitHub adds self-hosted, the OS and the architecture automatically."))))
+        .child(field(&theme, tr("Run as"), mode_picker, None))
         .children(error_line(&theme, &self.error))
         .child(footer(vec![
-            Button::new("inst-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
-            Button::new("inst-go", if count == 1 { "Install runner".to_string() } else { format!("Install {count} runners") })
+            Button::new("inst-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+            Button::new("inst-go", if count == 1 { tr("Install runner").to_string() } else { trf("Install {n} runners", &[("n", &count)]) })
                 .style(ButtonStyle::Primary)
                 .disabled(self.scope.is_none())
                 .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
@@ -589,24 +590,24 @@ impl InstallDialog {
         let sudo_ok = probe.and_then(|p| p.sudo.as_deref()).is_some_and(|s| matches!(s, "root" | "passwordless"));
         let service_works = !linux || sudo_ok;
         let auto_pick = if service_works {
-            "a service"
+            tr("a service")
         } else if docker.is_some() {
             "Docker"
         } else {
-            "a background process"
+            tr("a background process")
         };
         let options: [(ModeChoice, &'static str, &'static str, String, bool); 4] = [
-            (ModeChoice::Auto, "Auto", "zap", format!("Best fit for this machine: {auto_pick}."), true),
+            (ModeChoice::Auto, tr("Auto"), "zap", trf("Best fit for this machine: {pick}.", &[("pick", &auto_pick)]), true),
             (
                 ModeChoice::Service,
-                "Service",
+                tr("Service"),
                 "server",
                 if !linux {
-                    "Starts at boot (launchd on macOS, a service on Windows).".into()
+                    tr("Starts at boot (launchd on macOS, a service on Windows).").into()
                 } else if sudo_ok {
-                    "systemd service; starts at boot.".into()
+                    tr("systemd service; starts at boot.").into()
                 } else {
-                    "systemd needs passwordless sudo, which this machine doesn't allow.".into()
+                    tr("systemd needs passwordless sudo, which this machine doesn't allow.").into()
                 },
                 service_works,
             ),
@@ -615,12 +616,12 @@ impl InstallDialog {
                 "Docker",
                 "box",
                 match &docker {
-                    Some(v) => format!("Docker {v}: a container per runner that restarts with Docker. No sudo."),
-                    None => "Docker wasn't found at the last check.".into(),
+                    Some(v) => trf("Docker {version}: a container per runner that restarts with Docker. No sudo.", &[("version", v)]),
+                    None => tr("Docker wasn't found at the last check.").into(),
                 },
                 docker.is_some(),
             ),
-            (ModeChoice::Background, "Background", "play", "No root needed, but stops when the machine restarts.".into(), true),
+            (ModeChoice::Background, tr("Background"), "play", tr("No root needed, but stops when the machine restarts.").into(), true),
         ];
         let card = |(choice, title, icon_name, detail, available): (ModeChoice, &'static str, &'static str, String, bool), cx: &mut Context<Self>| {
             let selected = self.mode == choice;
@@ -670,7 +671,7 @@ impl InstallDialog {
                     theme,
                     "inst-docker-socket",
                     socket,
-                    "Let jobs use the machine's Docker (mounts the socket; root-equivalent)",
+                    tr("Let jobs use the machine's Docker (mounts the socket; root-equivalent)"),
                     cx.listener(|this, value: &bool, _, cx| {
                         this.docker_socket = *value;
                         cx.notify()
@@ -729,7 +730,7 @@ impl RenameDialog {
         }
         let text = self.name.read(cx).text().trim().to_string();
         if text.is_empty() {
-            self.error = Some("Give it a name.".into());
+            self.error = Some(tr("Give it a name.").into());
             cx.notify();
             return;
         }
@@ -794,27 +795,27 @@ impl Render for RenameDialog {
         let theme = cx.theme();
         let (title, intro, field_name) = match &self.target {
             RenameTarget::Machine(id) => (
-                "Rename machine",
-                format!("Only the name Muxin shows changes. Its id ({id}), runners and sessions stay the same, and nothing on the machine changes."),
-                "Name",
+                tr("Rename machine"),
+                trf("Only the name Muxin shows changes. Its id ({id}), runners and sessions stay the same, and nothing on the machine changes.", &[("id", &id)]),
+                tr("Name"),
             ),
             RenameTarget::Display(..) => (
-                "Rename display",
-                format!("What Muxin calls this monitor on {}. Its windows and settings stay as they are.", self.machine),
-                "Name",
+                tr("Rename display"),
+                trf("What Muxin calls this monitor on {machine}. Its windows and settings stay as they are.", &[("machine", &self.machine)]),
+                tr("Name"),
             ),
             RenameTarget::Session(_) => (
-                "Rename session",
-                format!("Muxin's agent on {} keeps the title, so it shows wherever you use Muxin. What runs in the session isn't touched.", self.machine),
-                "Title",
+                tr("Rename session"),
+                trf("Muxin's agent on {machine} keeps the title, so it shows wherever you use Muxin. What runs in the session isn't touched.", &[("machine", &self.machine)]),
+                tr("Title"),
             ),
         };
         frame(&theme, title, Some(intro.into()))
             .child(field(&theme, field_name, self.name.clone(), None))
             .children(error_line(&theme, &self.error))
             .child(footer(vec![
-                Button::new("rn-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
-                Button::new("rn-save", if self.saving { "Saving…" } else { "Rename" })
+                Button::new("rn-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                Button::new("rn-save", if self.saving { tr("Saving…") } else { tr("Rename") })
                     .style(ButtonStyle::Primary)
                     .loading(self.saving)
                     .key_hint("↵")
@@ -858,7 +859,7 @@ impl AddDisplayDialog {
         let screens: Vec<_> = m.map(|m| m.displays.iter().filter(|d| d.id != "all").collect()).unwrap_or_default();
         let main = screens.iter().find(|d| d.main).or(screens.first()).map(|d| (d.width.round() as u32, d.height.round() as u32)).filter(|(w, h)| *w >= 640 && *h >= 480);
         let name = cx.new(|cx| TextInput::new(cx, format!("Display {n}")));
-        let password = cx.new(|cx| TextInput::new(cx, "Password").secret());
+        let password = cx.new(|cx| TextInput::new(cx, tr("Password")).secret());
         let on_input = |this: &mut Self, _: &Entity<TextInput>, e: &InputEvent, window: &mut Window, cx: &mut Context<Self>| match e {
             InputEvent::Submit => this.submit(window, cx),
             InputEvent::Cancel => cx.emit(DialogEvent::Dismissed),
@@ -883,7 +884,7 @@ impl AddDisplayDialog {
             // Read once, cleared from the field, kept only in memory while Muxin runs.
             let p = self.password.read(cx).text().to_string();
             if p.is_empty() {
-                self.error = Some(format!("Type your password on {}.", self.machine_name));
+                self.error = Some(trf("Type your password on {machine}.", &[("machine", &self.machine_name)]));
                 cx.notify();
                 return;
             }
@@ -952,7 +953,7 @@ impl Render for AddDisplayDialog {
                     .hover(|st| st.border_color(theme.accent.opacity(0.6)))
                     .child(div().text_size(px(12.5)).text_color(theme.text).child(format!("{w}×{h}")))
                     .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(match (w, h) {
-                        _ if main == Some((w, h)) => "Same as main",
+                        _ if main == Some((w, h)) => tr("Same as main"),
                         (1280, 720) => "720p",
                         (1920, 1080) => "1080p",
                         (2560, 1440) => "1440p",
@@ -966,12 +967,12 @@ impl Render for AddDisplayDialog {
             })
             .collect();
         if self.asking {
-            return password_frame(&theme, &self.machine_name, "plug in the new monitor")
-                .child(field(&theme, "Your password", self.password.clone(), None))
+            return password_frame(&theme, &self.machine_name, tr("plug in the new monitor"))
+                .child(field(&theme, tr("Your password"), self.password.clone(), None))
                 .children(error_line(&theme, &self.error))
                 .child(footer(vec![
-                    Button::new("ad-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
-                    Button::new("ad-pass", if self.adding { "Adding…" } else { "Add monitor" })
+                    Button::new("ad-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                    Button::new("ad-pass", if self.adding { tr("Adding…") } else { tr("Add monitor") })
                         .style(ButtonStyle::Primary)
                         .loading(self.adding)
                         .key_hint("↵")
@@ -982,15 +983,15 @@ impl Render for AddDisplayDialog {
         }
         frame(
             &theme,
-            "Add a virtual monitor",
-            Some(format!("Like plugging another screen into {}: windows can move there, and Muxin shows it on its own. It stays until you remove it or the machine restarts.", self.machine_name).into()),
+            tr("Add a virtual monitor"),
+            Some(trf("Like plugging another screen into {machine}: windows can move there, and Muxin shows it on its own. It stays until you remove it or the machine restarts.", &[("machine", &self.machine_name)]).into()),
         )
-        .child(field(&theme, "Name", self.name.clone(), None))
-        .child(div().flex().flex_col().gap(px(6.)).child(label(&theme, "Size").text_size(px(12.)).text_color(theme.text_muted)).child(div().flex().gap(px(8.)).children(sizes)))
+        .child(field(&theme, tr("Name"), self.name.clone(), None))
+        .child(div().flex().flex_col().gap(px(6.)).child(label(&theme, tr("Size")).text_size(px(12.)).text_color(theme.text_muted)).child(div().flex().gap(px(8.)).children(sizes)))
         .children(error_line(&theme, &self.error))
         .child(footer(vec![
-            Button::new("ad-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
-            Button::new("ad-add", if self.adding { "Adding…" } else { "Add monitor" })
+            Button::new("ad-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+            Button::new("ad-add", if self.adding { tr("Adding…") } else { tr("Add monitor") })
                 .style(ButtonStyle::Primary)
                 .loading(self.adding)
                 .key_hint("↵")
@@ -1005,8 +1006,8 @@ impl Render for AddDisplayDialog {
 fn password_frame(theme: &Theme, machine: &str, what: &str) -> gpui::Div {
     frame(
         theme,
-        format!("Your password on {machine}"),
-        Some(format!("{machine} asks for it to {what}. Muxin sends it to sudo there over its encrypted connection, and keeps it only in memory until you quit.").into()),
+        trf("Your password on {machine}", &[("machine", &machine)]),
+        Some(trf("{machine} asks for it to {what}. Muxin sends it to sudo there over its encrypted connection, and keeps it only in memory until you quit.", &[("machine", &machine), ("what", &what)]).into()),
     )
 }
 
@@ -1027,7 +1028,7 @@ impl EventEmitter<DialogEvent> for MonitorPasswordDialog {}
 impl MonitorPasswordDialog {
     pub fn new(engine: Arc<Engine>, machine: String, display: String, error: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let machine_name = engine.current().machines.iter().find(|m| m.id == machine).map(|m| m.name.clone()).unwrap_or_else(|| machine.clone());
-        let password = cx.new(|cx| TextInput::new(cx, "Password").secret());
+        let password = cx.new(|cx| TextInput::new(cx, tr("Password")).secret());
         let sub = cx.subscribe_in(&password, window, |this: &mut Self, _, e: &InputEvent, _, cx| match e {
             InputEvent::Submit => this.submit(cx),
             InputEvent::Cancel => cx.emit(DialogEvent::Dismissed),
@@ -1051,7 +1052,7 @@ impl MonitorPasswordDialog {
         }
         let p = self.password.read(cx).text().to_string();
         if p.is_empty() {
-            self.error = Some(format!("Type your password on {}.", self.machine_name));
+            self.error = Some(trf("Type your password on {machine}.", &[("machine", &self.machine_name)]));
             cx.notify();
             return;
         }
@@ -1083,12 +1084,12 @@ impl MonitorPasswordDialog {
 impl Render for MonitorPasswordDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        password_frame(&theme, &self.machine_name, "unplug the virtual monitor")
-            .child(field(&theme, "Your password", self.password.clone(), None))
+        password_frame(&theme, &self.machine_name, tr("unplug the virtual monitor"))
+            .child(field(&theme, tr("Your password"), self.password.clone(), None))
             .children(error_line(&theme, &self.error))
             .child(footer(vec![
-                Button::new("mp-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
-                Button::new("mp-go", if self.busy { "Removing…" } else { "Remove monitor" })
+                Button::new("mp-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                Button::new("mp-go", if self.busy { tr("Removing…") } else { tr("Remove monitor") })
                     .style(ButtonStyle::Primary)
                     .loading(self.busy)
                     .key_hint("↵")
@@ -1173,7 +1174,7 @@ impl Render for ConfirmDialog {
             }))
             .children(error_line(&theme, &self.error))
             .child(footer(vec![
-                Button::new("cf-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                Button::new("cf-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
                 Button::new("cf-go", self.confirm_label)
                     .style(ButtonStyle::Outlined)
                     .icon("trash-2")
@@ -1207,7 +1208,7 @@ impl PowerDialog {
     pub fn new(engine: Arc<Engine>, machine: String, action: OsPower, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let machine_name = engine.current().machines.iter().find(|m| m.id == machine).map(|m| m.name.clone()).unwrap_or_else(|| machine.clone());
         let detail = engine.os_power_detail(&machine, action);
-        let password = cx.new(|cx| TextInput::new(cx, "Password").secret());
+        let password = cx.new(|cx| TextInput::new(cx, tr("Password")).secret());
         let sub = cx.subscribe_in(&password, window, |this: &mut Self, _, e: &InputEvent, window, cx| match e {
             InputEvent::Submit => this.submit(window, cx),
             InputEvent::Cancel => cx.emit(DialogEvent::Dismissed),
@@ -1232,7 +1233,7 @@ impl PowerDialog {
             // Read once, cleared from the field, kept only in memory while Muxin runs.
             let typed = self.password.read(cx).text().to_string();
             if typed.is_empty() {
-                self.error = Some(format!("Type your password on {}.", self.machine_name));
+                self.error = Some(trf("Type your password on {machine}.", &[("machine", &self.machine_name)]));
                 cx.notify();
                 return;
             }
@@ -1273,13 +1274,13 @@ impl PowerDialog {
 impl Render for PowerDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let help = "It goes to sudo there over Muxin's encrypted connection, and stays in memory only until Muxin quits.";
+        let help = tr("It goes to sudo there over Muxin's encrypted connection, and stays in memory only until Muxin quits.");
         frame(&theme, format!("{} {}?", self.action.label(), self.machine_name), Some(self.detail.clone().into()))
             .track_focus(&self.focus)
-            .when(self.asking, |d| d.child(field(&theme, "Your password there", self.password.clone(), Some(help))))
+            .when(self.asking, |d| d.child(field(&theme, tr("Your password there"), self.password.clone(), Some(help))))
             .children(error_line(&theme, &self.error))
             .child(footer(vec![
-                Button::new("power-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                Button::new("power-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
                 Button::new("power-go", self.action.label())
                     .style(ButtonStyle::Danger)
                     .icon(if self.action == OsPower::Shutdown { "power" } else { "rotate-ccw" })
@@ -1314,10 +1315,10 @@ const IMAGE_PRESETS: &[&str] = &["node:22", "python:3.13", "rust:1", "golang:1.2
 
 impl NewWorkspaceDialog {
     pub fn new(engine: Arc<Engine>, machine: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let name = cx.new(|cx| TextInput::new(cx, "api-tests (optional)"));
-        let repo = cx.new(|cx| TextInput::new(cx, "acme/api or a git URL (optional)").mono());
+        let name = cx.new(|cx| TextInput::new(cx, tr("api-tests (optional)")));
+        let repo = cx.new(|cx| TextInput::new(cx, tr("acme/api or a git URL (optional)")).mono());
         let git_ref = cx.new(|cx| TextInput::new(cx, "main").mono());
-        let branch = cx.new(|cx| TextInput::new(cx, "new branch (optional)").mono());
+        let branch = cx.new(|cx| TextInput::new(cx, tr("new branch (optional)")).mono());
         let image = cx.new(|cx| TextInput::new(cx, DEFAULT_IMAGE).mono());
         let on_input = |_: &mut Self, _: &Entity<TextInput>, e: &InputEvent, _: &mut Window, cx: &mut Context<Self>| match e {
             InputEvent::Submit => cx.emit(DialogEvent::Dismissed),
@@ -1370,8 +1371,8 @@ impl NewWorkspaceDialog {
                     cx.notify()
                 }))
         };
-        let host = option("env-host", false, "server", "On the machine", "Runs as your ssh user with its tools.", cx);
-        let docker = option("env-docker", true, "box", "In a Docker container", "A fresh, isolated container per workspace.", cx);
+        let host = option("env-host", false, "server", tr("On the machine"), tr("Runs as your ssh user with its tools."), cx);
+        let docker = option("env-docker", true, "box", tr("In a Docker container"), tr("A fresh, isolated container per workspace."), cx);
         let socket = self.docker_socket;
         div()
             .flex()
@@ -1400,7 +1401,7 @@ impl NewWorkspaceDialog {
                             .child(*img)
                             .on_click(cx.listener(move |this, _, _, cx| this.image.update(cx, |i, cx| i.set_text(value.clone(), cx))))
                     })))
-                    .child(checkbox(theme, "ws-docker-socket", socket, "Share the machine's Docker socket (docker-in-docker)", cx.listener(|this, value: &bool, _, cx| {
+                    .child(checkbox(theme, "ws-docker-socket", socket, tr("Share the machine's Docker socket (docker-in-docker)"), cx.listener(|this, value: &bool, _, cx| {
                         this.docker_socket = *value;
                         cx.notify()
                     })))
@@ -1435,7 +1436,7 @@ impl Render for NewWorkspaceDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let snapshot = self.engine.current();
-        let choices: Vec<(Option<String>, String, bool)> = std::iter::once((None, "Least busy".to_string(), true))
+        let choices: Vec<(Option<String>, String, bool)> = std::iter::once((None, tr("Least busy").to_string(), true))
             .chain(snapshot.machines.iter().filter(|m| m.workspaces_allowed).map(|m| (Some(m.id.clone()), m.name.clone(), m.status == "online")))
             .collect();
         let picker = div().flex().flex_wrap().gap(px(6.)).children(choices.into_iter().enumerate().map(|(i, (id, label, online))| {
@@ -1466,23 +1467,23 @@ impl Render for NewWorkspaceDialog {
         }));
         frame(
             &theme,
-            "New workspace",
-            Some("A folder on one of your machines, optionally a git checkout, for an agent (or you) to work in. It stays until you destroy it.".into()),
+            tr("New workspace"),
+            Some(tr("A folder on one of your machines, optionally a git checkout, for an agent (or you) to work in. It stays until you destroy it.").into()),
         )
-        .child(field(&theme, "Machine", picker, None))
-        .child(field(&theme, "Environment", self.environment_picker(&theme, cx), None))
-        .child(field(&theme, "Repository", self.repo.clone(), Some("Private GitHub repos clone with your gh login if the machine can't.")))
+        .child(field(&theme, tr("Machine"), picker, None))
+        .child(field(&theme, tr("Environment"), self.environment_picker(&theme, cx), None))
+        .child(field(&theme, tr("Repository"), self.repo.clone(), Some(tr("Private GitHub repos clone with your gh login if the machine can't."))))
         .child(
             div()
                 .flex()
                 .gap(px(12.))
-                .child(div().flex_1().child(field(&theme, "Check out", self.git_ref.clone(), None)))
-                .child(div().flex_1().child(field(&theme, "Branch", self.branch.clone(), None))),
+                .child(div().flex_1().child(field(&theme, tr("Check out"), self.git_ref.clone(), None)))
+                .child(div().flex_1().child(field(&theme, tr("Branch"), self.branch.clone(), None))),
         )
-        .child(field(&theme, "Name", self.name.clone(), None))
+        .child(field(&theme, tr("Name"), self.name.clone(), None))
         .child(footer(vec![
-            Button::new("nw-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
-            Button::new("nw-create", "Create workspace")
+            Button::new("nw-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+            Button::new("nw-create", tr("Create workspace"))
                 .style(ButtonStyle::Primary)
                 .icon("terminal")
                 .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
@@ -1562,9 +1563,9 @@ impl EventEmitter<DialogEvent> for NewSessionDialog {}
 
 impl NewSessionDialog {
     pub fn new(engine: Arc<Engine>, machine: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let cwd = cx.new(|cx| TextInput::new(cx, "~ (home folder)").mono());
-        let prompt = cx.new(|cx| TextInput::new(cx, "What should it work on? (optional)"));
-        let branch = cx.new(|cx| TextInput::new(cx, "new branch (optional)").mono());
+        let cwd = cx.new(|cx| TextInput::new(cx, tr("~ (home folder)")).mono());
+        let prompt = cx.new(|cx| TextInput::new(cx, tr("What should it work on? (optional)")));
+        let branch = cx.new(|cx| TextInput::new(cx, tr("new branch (optional)")).mono());
         let on_input = |this: &mut Self, _: &Entity<TextInput>, e: &InputEvent, _: &mut Window, cx: &mut Context<Self>| match e {
             InputEvent::Submit => this.submit(cx),
             InputEvent::Cancel => cx.emit(DialogEvent::Dismissed),
@@ -1669,7 +1670,7 @@ impl NewSessionDialog {
             self.cwd.update(cx, |i, cx| i.set_text(cwd, cx));
         }
         if prefill.message.is_some() {
-            self.prompt.update(cx, |i, cx| i.set_placeholder("Anything to add? (optional)", cx));
+            self.prompt.update(cx, |i, cx| i.set_placeholder(tr("Anything to add? (optional)"), cx));
         }
         if prefill.command.is_some() {
             self.agent = "shell";
@@ -1679,8 +1680,8 @@ impl NewSessionDialog {
             // A checkout of it there: a worktree of that (see `place`); else a clone, when that's preferred.
             self.place = if plan.preferred { Place::Clone } else { Place::Worktree };
             let (text, hint) = match &plan.branch {
-                Some(b) => (b.clone(), "new branch (optional)".to_string()),
-                None => (String::new(), format!("stay on {}", plan.git_ref.clone().unwrap_or_else(|| "the default branch".into()))),
+                Some(b) => (b.clone(), tr("new branch (optional)").to_string()),
+                None => (String::new(), trf("stay on {branch}", &[("branch", &plan.git_ref.clone().unwrap_or_else(|| tr("the default branch").into()))])),
             };
             self.branch.update(cx, |i, cx| {
                 i.set_text(text, cx);
@@ -1868,7 +1869,7 @@ impl NewSessionDialog {
         let listing = match load {
             Load::Ready(l) => l,
             Load::Loading => {
-                return Some(div().flex().items_center().gap(px(6.)).child(kit::spinner("ns-folders", 11., theme.text_placeholder)).child(quiet("Looking…".into())).into_any_element());
+                return Some(div().flex().items_center().gap(px(6.)).child(kit::spinner("ns-folders", 11., theme.text_placeholder)).child(quiet(tr("Looking…").into())).into_any_element());
             }
             Load::Failed(e) => return Some(quiet(e.clone())),
         };
@@ -1928,13 +1929,13 @@ impl NewSessionDialog {
             .items_center()
             .gap(px(6.))
             .h(px(22.))
-            .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!("Folders in {here}")))
+            .child(div().flex_1().min_w(px(0.)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(trf("Folders in {folder}", &[("folder", &here)])))
             .when(stale, |d| d.child(kit::spinner("ns-folders", 11., theme.text_placeholder)))
             .children(parent.map(|up| {
-                Button::icon_only("ns-up", "arrow-up").tooltip("Up a folder").disabled(stale).on_click(cx.listener(move |this, _, _, cx| this.go_to_folder(up.clone(), cx)))
+                Button::icon_only("ns-up", "arrow-up").tooltip(tr("Up a folder")).disabled(stale).on_click(cx.listener(move |this, _, _, cx| this.go_to_folder(up.clone(), cx)))
             }));
         let body = if chips.is_empty() {
-            quiet(if needle.is_empty() { "No folders here.".into() } else { format!("No folder matches \"{typed}\".") })
+            quiet(if needle.is_empty() { tr("No folders here.").into() } else { trf("No folder matches \"{typed}\".", &[("typed", &typed)]) })
         } else {
             div().flex().flex_wrap().gap(px(6.)).children(chips).into_any_element()
         };
@@ -1949,7 +1950,7 @@ impl NewSessionDialog {
                 .border_color(theme.border_variant)
                 .child(header)
                 .child(body)
-                .when(more > 0, |d| d.child(quiet(format!("{more} more: type to narrow them down."))))
+                .when(more > 0, |d| d.child(quiet(trf("{n} more: type to narrow them down.", &[("n", &more)]))))
                 .into_any_element(),
         )
     }
@@ -1990,33 +1991,33 @@ impl NewSessionDialog {
         };
         let mut options = Vec::new();
         if source.is_some() {
-            options.push(option("ns-where-wt", "git-branch", "New worktree", "Its own branch".into(), Place::Worktree, cx));
+            options.push(option("ns-where-wt", "git-branch", tr("New worktree"), tr("Its own branch").into(), Place::Worktree, cx));
         }
         if plan.is_some() {
-            options.push(option("ns-where-ws", "layers", "Fresh clone", "A new copy".into(), Place::Clone, cx));
+            options.push(option("ns-where-ws", "layers", tr("Fresh clone"), tr("A new copy").into(), Place::Clone, cx));
         }
-        let folder_note = if plan.is_some() { "One that's there" } else { "Right here" };
-        options.push(option("ns-where-folder", "folder-open", "A folder", folder_note.into(), Place::Folder, cx));
+        let folder_note = if plan.is_some() { tr("One that's there") } else { tr("Right here") };
+        options.push(option("ns-where-folder", "folder-open", tr("A folder"), folder_note.into(), Place::Folder, cx));
         div().flex().gap(px(8.)).children(options).into_any_element()
     }
 
     /// The branch to work on, and whether the machine takes workspaces.
     fn workspace_fields(&self, theme: &Theme, place: Place, source: Option<&crate::fleet::model::Checkout>, machine: Option<&crate::fleet::model::Machine>, cx: &mut Context<Self>) -> AnyElement {
-        let name = machine.map(|m| m.name.clone()).unwrap_or_else(|| "the machine".into());
+        let name = machine.map(|m| m.name.clone()).unwrap_or_else(|| tr("the machine").into());
         let plan = self.prefill.workspace.as_ref();
         let what = match (place, source, plan) {
             (Place::Worktree, Some(c), plan) => {
                 let from = match plan.and_then(|p| p.git_ref.as_deref()) {
-                    Some(r) if r.starts_with("pull/") => "the pull request".to_string(),
+                    Some(r) if r.starts_with("pull/") => tr("the pull request").to_string(),
                     Some(r) => r.to_string(),
-                    None => "the default branch".to_string(),
+                    None => tr("the default branch").to_string(),
                 };
-                format!("Makes a git worktree of {} on {name}: a folder of its own, on its own branch from {from}. The checkout stays as it is, so other agents can work there too.", c.path)
+                trf("Makes a git worktree of {path} on {name}: a folder of its own, on its own branch from {from}. The checkout stays as it is, so other agents can work there too.", &[("path", &c.path), ("name", &name), ("from", &from)])
             }
             (_, _, Some(plan)) => match &plan.git_ref {
-                Some(r) if r.starts_with("pull/") => format!("Clones {} on {name} and checks out the pull request.", plan.repo),
-                Some(r) => format!("Clones {} on {name} at {r}.", plan.repo),
-                None => format!("Clones {} on {name}.", plan.repo),
+                Some(r) if r.starts_with("pull/") => trf("Clones {repo} on {name} and checks out the pull request.", &[("repo", &plan.repo), ("name", &name)]),
+                Some(r) => trf("Clones {repo} on {name} at {ref}.", &[("repo", &plan.repo), ("name", &name), ("ref", r)]),
+                None => trf("Clones {repo} on {name}.", &[("repo", &plan.repo), ("name", &name)]),
             },
             _ => String::new(),
         };
@@ -2031,8 +2032,8 @@ impl NewSessionDialog {
                 .bg(theme.warning.opacity(0.10))
                 .text_size(px(12.5))
                 .child(icon("info", 14., theme.warning))
-                .child(div().flex_1().min_w(px(0.)).child(format!("Workspaces are off on {}.", m.name)))
-                .child(Button::new("ns-allow-ws", "Turn them on").on_click(cx.listener(move |this, _, _, cx| {
+                .child(div().flex_1().min_w(px(0.)).child(trf("Workspaces are off on {name}.", &[("name", &m.name)])))
+                .child(Button::new("ns-allow-ws", tr("Turn them on")).on_click(cx.listener(move |this, _, _, cx| {
                     if let Err(e) = this.engine.set_workspaces_allowed(&id, true) {
                         tracing::warn!("turning on workspaces: {e}");
                     }
@@ -2041,16 +2042,15 @@ impl NewSessionDialog {
         });
         // No checkout of it found there: say how to point Muxin at one.
         let missing = plan.filter(|_| source.is_none()).map(|p| {
-            div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!(
-                "No checkout of {} found on {name}. Have one? Add its folder in Settings › General › Code folders and start this again: the agent then works in a worktree of it, on its own branch, instead of a fresh clone.",
-                p.repo
+            div().text_size(px(11.5)).text_color(theme.text_placeholder).child(trf("No checkout of {repo} found on {name}. Have one? Add its folder in Settings › General › Code folders and start this again: the agent then works in a worktree of it, on its own branch, instead of a fresh clone.",
+                &[("repo", &p.repo), ("name", &name)],
             ))
         });
         div()
             .flex()
             .flex_col()
             .gap(px(8.))
-            .child(field(theme, "Branch", self.branch.clone(), None))
+            .child(field(theme, tr("Branch"), self.branch.clone(), None))
             .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(what))
             .children(missing)
             .children(off)
@@ -2092,7 +2092,7 @@ impl Render for NewSessionDialog {
         let machine_chip = |i: usize, m: &crate::fleet::model::Machine, cx: &mut Context<Self>| {
             let selected = self.new_vm.is_none() && self.machine.as_deref() == Some(m.id.as_str());
             let id = m.id.clone();
-            let kind = m.parent.as_ref().filter(|p| p.inside()).map(|p| if p.relation == "vm" { "VM" } else { "Container" });
+            let kind = m.parent.as_ref().filter(|p| p.inside()).map(|p| if p.relation == "vm" { "VM" } else { tr("Container") });
             div()
                 .id(("ns-machine", i))
                 .flex()
@@ -2153,7 +2153,7 @@ impl Render for NewSessionDialog {
                     .text_size(px(12.5))
                     .text_color(if on { theme.text } else { theme.text_muted })
                     .child(icon("box", 12., if on { theme.text } else { theme.text_muted }))
-                    .child("New VM")
+                    .child(tr("New VM"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.new_vm = Some(("ubuntu-24.04".into(), best.clone()));
                         this.agent_picked = false;
@@ -2178,7 +2178,7 @@ impl Render for NewSessionDialog {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(div().flex_none().flex().items_center().gap(px(4.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(icon("corner-down-right", 11., theme.text_placeholder)).child(format!("In {}", h.name)))
+                    .child(div().flex_none().flex().items_center().gap(px(4.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(icon("corner-down-right", 11., theme.text_placeholder)).child(trf("In {name}", &[("name", &h.name)])))
                     .child(div().flex().flex_wrap().gap(px(6.)).children(chips))
                     .into_any_element(),
             );
@@ -2220,7 +2220,7 @@ impl Render for NewSessionDialog {
                 .filter(|h| h.systems.iter().any(|x| *x == system))
                 .map(|h| {
                     let id = h.machine_id.clone();
-                    chip(SharedString::from(format!("ns-vh-{id}")), format!("on {}", h.name), host.as_deref() == Some(id.as_str()))
+                    chip(SharedString::from(format!("ns-vh-{id}")), trf("on {name}", &[("name", &h.name)]), host.as_deref() == Some(id.as_str()))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(v) = this.new_vm.as_mut() {
                                 v.1 = Some(id.clone());
@@ -2232,7 +2232,7 @@ impl Render for NewSessionDialog {
                 .collect();
             let name = vm_name(&snapshot, &system);
             let with = match crate::fleet::sessions::agent(self.agent) {
-                Some(k) if k.id != "shell" => format!(", with {}", k.name),
+                Some(k) if k.id != "shell" => trf(", with {agent}", &[("agent", &k.name)]),
                 _ => String::new(),
             };
             div()
@@ -2246,8 +2246,8 @@ impl Render for NewSessionDialog {
                 .bg(theme.element.opacity(0.5))
                 .child(div().flex().flex_wrap().gap(px(6.)).children(systems))
                 .child(div().flex().flex_wrap().gap(px(6.)).children(hosts))
-                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(format!(
-                    "A Linux container named {name}{with}, ready in a few minutes. It joins your machines; destroy it from its page when you're done."
+                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(trf("A Linux container named {name}{with}, ready in a few minutes. It joins your machines; destroy it from its page when you're done.",
+                    &[("name", &name), ("with", &with)],
                 )))
         });
         let picker = div()
@@ -2266,11 +2266,11 @@ impl Render for NewSessionDialog {
             let new_vm = self.new_vm.is_some();
             let found = found || new_vm;
             let note = match (kind.id, found, checked) {
-                ("shell", _, _) => "Your login shell",
-                (_, _, _) if new_vm => "Installed with the VM",
-                (_, true, _) => "Installed",
-                (_, false, true) => "Not installed",
-                (_, false, false) => "Checking…",
+                ("shell", _, _) => tr("Your login shell"),
+                (_, _, _) if new_vm => tr("Installed with the VM"),
+                (_, true, _) => tr("Installed"),
+                (_, false, true) => tr("Not installed"),
+                (_, false, false) => tr("Checking…"),
             };
             div()
                 .id(("ns-agent", i))
@@ -2375,8 +2375,8 @@ impl Render for NewSessionDialog {
                 .text_size(px(12.5))
                 .text_color(theme.text)
                 .child(div().pt(px(1.)).child(icon("info", 14., theme.warning)))
-                .child(div().flex_1().min_w(px(0.)).child(format!(
-                    "Sessions on {machine_name} run while Muxin is open; they can't keep running in the background there yet."
+                .child(div().flex_1().min_w(px(0.)).child(trf("Sessions on {machine} run while Muxin is open; they can't keep running in the background there yet.",
+                    &[("machine", &machine_name)],
                 )))
         });
         let place = self.place(&snapshot, cx);
@@ -2387,11 +2387,11 @@ impl Render for NewSessionDialog {
             None => self.machine.is_some() && (!into_workspace || self.workspaces_allowed(&snapshot)),
         };
         let start_label = match (self.new_vm.is_some(), into_workspace) {
-            (true, true) => "Create VM, workspace and start",
-            (true, false) => "Create VM and start",
-            (false, true) if place == Place::Worktree => "Create worktree and start",
-            (false, true) => "Create workspace and start",
-            (false, false) => "Start session",
+            (true, true) => tr("Create VM, workspace and start"),
+            (true, false) => tr("Create VM and start"),
+            (false, true) if place == Place::Worktree => tr("Create worktree and start"),
+            (false, true) => tr("Create workspace and start"),
+            (false, false) => tr("Start session"),
         };
 
         // The buttons stay in view; what's between them and the title scrolls.
@@ -2400,17 +2400,17 @@ impl Render for NewSessionDialog {
             .flex()
             .flex_col()
             .gap(px(14.))
-            .child(field(&theme, "Machine", picker, None))
+            .child(field(&theme, tr("Machine"), picker, None))
         .map(|d| match &self.prefill.command {
             // A prepared command (a Docker workspace's shell) instead of an agent.
-            Some((_, what)) => d.child(field(&theme, "Runs", div().text_size(px(12.5)).text_color(theme.text_muted).child(what.clone()), None)),
-            None => d.child(field(&theme, "Agent", div().flex().flex_col().gap(px(8.)).children(rows), None)),
+            Some((_, what)) => d.child(field(&theme, tr("Runs"), div().text_size(px(12.5)).text_color(theme.text_muted).child(what.clone()), None)),
+            None => d.child(field(&theme, tr("Agent"), div().flex().flex_col().gap(px(8.)).children(rows), None)),
         })
-        .when(self.prefill.workspace.is_some() || source.is_some(), |d| d.child(field(&theme, "Where", self.where_choice(&theme, place, source.as_ref(), cx), None)))
+        .when(self.prefill.workspace.is_some() || source.is_some(), |d| d.child(field(&theme, tr("Where"), self.where_choice(&theme, place, source.as_ref(), cx), None)))
         .map(|d| match place {
             Place::Worktree | Place::Clone => d.child(self.workspace_fields(&theme, place, source.as_ref(), machine.as_ref(), cx)),
             Place::Folder if self.new_vm.is_some() => d,
-            Place::Folder => d.child(field(&theme, "Folder", div().flex().flex_col().gap(px(8.)).child(self.cwd.clone()).child(folder_chips).children(self.folder_browser(&theme, cx)), None)),
+            Place::Folder => d.child(field(&theme, tr("Folder"), div().flex().flex_col().gap(px(8.)).child(self.cwd.clone()).child(folder_chips).children(self.folder_browser(&theme, cx)), None)),
         })
         .when(self.agent != "shell", |d| {
             let prepared = self.prefill.message.clone().map(|m| {
@@ -2430,22 +2430,22 @@ impl Render for NewSessionDialog {
                     .flex()
                     .flex_col()
                     .gap(px(6.))
-                    .children(self.prefill.source.clone().map(|s| div().text_size(px(11.)).text_color(theme.text_placeholder).child(format!("From {s}"))))
+                    .children(self.prefill.source.clone().map(|s| div().text_size(px(11.)).text_color(theme.text_placeholder).child(trf("From {source}", &[("source", &s)]))))
                     .child(div().w_full().text_size(px(12.)).text_color(theme.text_muted).child(shown))
             });
-            d.child(field(&theme, "First message", div().flex().flex_col().gap(px(8.)).children(prepared).child(self.prompt.clone()), None))
+            d.child(field(&theme, tr("First message"), div().flex().flex_col().gap(px(8.)).children(prepared).child(self.prompt.clone()), None))
         })
         .children(in_app_note);
         // A scroll area around one column (as a column itself it squeezes its children).
         let body = div().id("ns-body").max_h(px(body_max)).overflow_y_scroll().child(fields);
         frame(
             &theme,
-            "New session",
-            Some("Runs an agent (or a shell) in a terminal on one of your machines. It keeps running when you close Muxin; come back to it from the sidebar.".into()),
+            tr("New session"),
+            Some(tr("Runs an agent (or a shell) in a terminal on one of your machines. It keeps running when you close Muxin; come back to it from the sidebar.").into()),
         )
         .child(body)
         .child(footer(vec![
-            Button::new("ns-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+            Button::new("ns-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
             Button::new("ns-start", start_label)
                 .style(ButtonStyle::Primary)
                 .icon(if into_workspace { "layers" } else { "square-terminal" })

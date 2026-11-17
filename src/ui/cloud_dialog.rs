@@ -1,6 +1,7 @@
 //! New cloud machine: a DigitalOcean droplet, set up and added to your machines.
 
 use std::sync::Arc;
+use crate::ui::i18n::{tr, trf};
 
 use gpui::{AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, SharedString, Subscription, Window, div, prelude::*, px};
 
@@ -111,26 +112,26 @@ impl Focusable for CloudDialog {
 impl Render for CloudDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let cancel = Button::new("cloud-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element();
+        let cancel = Button::new("cloud-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element();
         let options = match &self.options {
             Load::Ready(o) => o.clone(),
             Load::Loading => {
-                return frame(&theme, "New cloud machine", None)
-                    .child(div().flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(kit::spinner("cloud-load", 13., theme.text_muted)).child("Asking DigitalOcean…"))
+                return frame(&theme, tr("New cloud machine"), None)
+                    .child(div().flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(kit::spinner("cloud-load", 13., theme.text_muted)).child(tr("Asking DigitalOcean…")))
                     .child(footer(vec![cancel]));
             }
             Load::Failed(e) => {
-                return frame(&theme, "New cloud machine", None).children(error_line(&theme, &Some(e.clone()))).child(footer(vec![cancel]));
+                return frame(&theme, tr("New cloud machine"), None).children(error_line(&theme, &Some(e.clone()))).child(footer(vec![cancel]));
             }
         };
         // Not connected yet: that comes first.
         if options.account.is_none() {
-            let why = options.error.clone().unwrap_or_else(|| "Connect your DigitalOcean account first.".into());
-            return frame(&theme, "New cloud machine", None)
+            let why = options.error.clone().unwrap_or_else(|| tr("Connect your DigitalOcean account first.").into());
+            return frame(&theme, tr("New cloud machine"), None)
                 .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(why))
                 .child(footer(vec![
                     cancel,
-                    Button::new("cloud-settings", "Open Settings")
+                    Button::new("cloud-settings", tr("Open Settings"))
                         .style(ButtonStyle::Primary)
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::OpenCloudSettings)))
                         .into_any_element(),
@@ -189,7 +190,7 @@ impl Render for CloudDialog {
                     .border_color(if selected { theme.accent } else { theme.border_variant })
                     .bg(if selected { theme.accent.opacity(0.08) } else { theme.element })
                     .text_size(px(12.5))
-                    .child(div().flex_1().child(format!("{} vCPU · {} GB · {} GB disk", s.vcpus, s.memory_mb / 1024, s.disk_gb)))
+                    .child(div().flex_1().child(trf("{cpus} vCPU · {memory} GB · {disk} GB disk", &[("cpus", &s.vcpus), ("memory", &(s.memory_mb / 1024)), ("disk", &s.disk_gb)])))
                     .child(div().font_family(mono_font()).text_size(px(12.)).text_color(theme.text_muted).child(format!("${:.0}/mo", s.price_monthly)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.size = slug.clone();
@@ -237,23 +238,23 @@ impl Render for CloudDialog {
             div()
                 .text_size(px(12.))
                 .text_color(theme.text_muted)
-                .child(format!("${:.3} an hour (${:.0} a month), billed until you destroy it.", s.price_hourly, s.price_monthly))
+                .child(trf("${hourly} an hour (${monthly} a month), billed until you destroy it.", &[("hourly", &format!("{:.3}", s.price_hourly)), ("monthly", &format!("{:.0}", s.price_monthly))]))
         });
         let create_label = match &picked {
-            Some(s) => format!("Create · ${:.0}/mo", s.price_monthly),
-            None => "Create".into(),
+            Some(s) => trf("Create · ${monthly}/mo", &[("monthly", &format!("{:.0}", s.price_monthly))]),
+            None => tr("Create").into(),
         };
         let body_max = (f32::from(window.viewport_size().height) - MODAL_CHROME).max(220.);
         let fields = div()
             .flex()
             .flex_col()
             .gap(px(14.))
-            .child(field(&theme, "Name", self.name.clone(), None))
-            .child(field(&theme, "Region", kit::rows_of(regions, 4, 6.), None))
-            .child(field(&theme, "Size", div().flex().flex_col().gap(px(4.)).children(size_rows), None))
-            .child(field(&theme, "Comes with", extras, None))
+            .child(field(&theme, tr("Name"), self.name.clone(), None))
+            .child(field(&theme, tr("Region"), kit::rows_of(regions, 4, 6.), None))
+            .child(field(&theme, tr("Size"), div().flex().flex_col().gap(px(4.)).children(size_rows), None))
+            .child(field(&theme, tr("Comes with"), extras, None))
             .children(price);
-        frame(&theme, "New cloud machine", Some("A DigitalOcean droplet, set up for you and added to your machines.".into()))
+        frame(&theme, tr("New cloud machine"), Some(tr("A DigitalOcean droplet, set up for you and added to your machines.").into()))
             .child(div().id("cloud-body").max_h(px(body_max)).overflow_y_scroll().child(fields))
             .children(error_line(&theme, &self.error))
             .child(footer(vec![

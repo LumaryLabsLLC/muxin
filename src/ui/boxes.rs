@@ -3,6 +3,7 @@
 //! agent's terminal (starting a paused one again).
 
 use std::collections::HashSet;
+use crate::ui::i18n::{tr, trf};
 
 use gpui::{AnyElement, Context, FontWeight, SharedString, Window, div, prelude::*, px};
 
@@ -42,16 +43,16 @@ impl Root {
                     .child(
                         div().flex().flex_col().flex_none().w(px(intro_width)).gap(px(4.)).child(
                             div().text_size(px(12.5)).text_color(theme.text_muted).child(
-                                "Hand a task to an agent that works on it by itself: the agent lives in the box, a container of its own on one of your machines, on a new branch of a fresh checkout, with its permission prompts off. A box pauses when its agent has been quiet for a while, and picks up where it left off when you ask it more.",
+                                tr("Hand a task to an agent that works on it by itself: the agent lives in the box, a container of its own on one of your machines, on a new branch of a fresh checkout, with its permission prompts off. A box pauses when its agent has been quiet for a while, and picks up where it left off when you ask it more."),
                             ),
                         ).child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(if docker {
-                            "Agents make them with the box_create MCP tool or `muxin box new`."
+                            tr("Agents make them with the box_create MCP tool or `muxin box new`.")
                         } else {
-                            "Boxes run in Docker: install it on a Linux machine or a Mac (Docker Desktop, OrbStack or Colima)."
+                            tr("Boxes run in Docker: install it on a Linux machine or a Mac (Docker Desktop, OrbStack or Colima).")
                         })),
                     )
                     .child(
-                        Button::new("box-new", "New box")
+                        Button::new("box-new", tr("New box"))
                             .icon("plus")
                             .style(ButtonStyle::Primary)
                             .on_click(cx.listener(|this, _, window, cx| this.show_box_dialog(Default::default(), window, cx))),
@@ -62,9 +63,9 @@ impl Root {
                     .flex()
                     .flex_col()
                     .gap(px(10.))
-                    .child(section_title(&theme, "Boxes", Some(s.boxes.len())))
+                    .child(section_title(&theme, tr("Boxes"), Some(s.boxes.len())))
                     .children(cards)
-                    .when(s.boxes.is_empty(), |d| d.child(card(&theme).child(kit::empty_state(&theme, "box", "No boxes yet. Start one, or ask an agent to.")))),
+                    .when(s.boxes.is_empty(), |d| d.child(card(&theme).child(kit::empty_state(&theme, "box", tr("No boxes yet. Start one, or ask an agent to."))))),
             )
             .child(self.boxes_page_workspaces(&theme, &s, cx))
     }
@@ -75,12 +76,12 @@ impl Root {
         let running = b.state == "running";
         let machine = self.snapshot.machines.iter().find(|m| m.id == b.machine_id).map(|m| m.name.clone()).unwrap_or_else(|| b.machine_id.clone());
         let when = match b.state.as_str() {
-            "paused" => format!("paused {}", format::ago(b.state_at)),
-            _ => format!("started {}", format::ago(b.state_at)),
+            "paused" => trf("paused {ago}", &[("ago", &format::ago(b.state_at))]),
+            _ => trf("started {ago}", &[("ago", &format::ago(b.state_at))]),
         };
         let idle = match b.idle_minutes {
-            0 => "never pauses by itself".to_string(),
-            m => format!("pauses after {m} quiet minutes"),
+            0 => tr("never pauses by itself").to_string(),
+            m => trf("pauses after {m} quiet minutes", &[("m", &m)]),
         };
         let made = format!("made {}", format::ago(b.created_at));
         // What the last line leaves for the folder at its end.
@@ -122,7 +123,7 @@ impl Root {
                     .child(state_pill(theme, b))
                     .child({
                         let id = b.id.clone();
-                        Button::new(SharedString::from(format!("box-open-{}", b.id)), if running { "Open" } else { "Resume" })
+                        Button::new(SharedString::from(format!("box-open-{}", b.id)), if running { tr("Open") } else { tr("Resume") })
                             .icon(if running { "square-terminal" } else { "play" })
                             .loading(opening)
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -134,7 +135,7 @@ impl Root {
                         let id = b.id.clone();
                         d.child(
                             Button::icon_only(SharedString::from(format!("box-pause-{}", b.id)), "pause")
-                                .tooltip("Pause: its agent ends and its container stops; its files stay")
+                                .tooltip(tr("Pause: its agent ends and its container stops; its files stay"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
                                     this.pause_box(&id, cx)
@@ -145,7 +146,7 @@ impl Root {
                         let (id, name) = (b.id.clone(), b.name.clone());
                         Button::icon_only(SharedString::from(format!("box-delete-{}", b.id)), "trash-2")
                             .style(ButtonStyle::Danger)
-                            .tooltip("Delete box")
+                            .tooltip(tr("Delete box"))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.confirm_destroy_box(&id, &name, window, cx)
@@ -208,23 +209,22 @@ impl Root {
             .gap(px(10.))
             .pb(px(80.))
             .child(kit::tile(glyph, from, to, 44.))
-            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(format!("{} is paused", b.name)))
-            .child(div().max_w(px(520.)).text_size(px(12.5)).text_color(theme.text_muted).text_center().child(format!(
-                "Its agent stopped {} and its container with it; its files and conversation are kept. Resume it to pick up where it left off.",
-                format::ago(b.state_at)
+            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(trf("{name} is paused", &[("name", &b.name)])))
+            .child(div().max_w(px(520.)).text_size(px(12.5)).text_color(theme.text_muted).text_center().child(trf("Its agent stopped {ago} and its container with it; its files and conversation are kept. Resume it to pick up where it left off.",
+                &[("ago", &format::ago(b.state_at))],
             )))
             .child(
                 div()
                     .flex()
                     .gap(px(8.))
                     .child(
-                        Button::new("paused-box-resume", "Resume")
+                        Button::new("paused-box-resume", tr("Resume"))
                             .icon("play")
                             .style(ButtonStyle::Primary)
                             .loading(self.box_ui.opening.contains(&b.id))
                             .on_click(cx.listener(move |this, _, window, cx| this.open_box(&id, window, cx))),
                     )
-                    .child(Button::new("paused-box-back", "All boxes").icon("arrow-left").on_click(cx.listener(|this, _, window, cx| this.navigate(Route::Boxes, window, cx)))),
+                    .child(Button::new("paused-box-back", tr("All boxes")).icon("arrow-left").on_click(cx.listener(|this, _, window, cx| this.navigate(Route::Boxes, window, cx)))),
             )
             .into_any_element()
     }
@@ -259,7 +259,7 @@ impl Root {
                 match result {
                     Ok(b) => match b.session_id {
                         Some(session) => this.navigate(Route::Session(session), window, cx),
-                        None => this.notify_user(format!("{} is starting.", b.name), false, cx),
+                        None => this.notify_user(trf("{name} is starting.", &[("name", &b.name)]), false, cx),
                     },
                     Err(e) => this.notify_user(e, true, cx),
                 }
@@ -277,7 +277,7 @@ impl Root {
         let task = cx.spawn(async move |this, cx| {
             let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update(cx, |this, cx| match result {
-                Ok(b) => this.notify_user(format!("Paused {}", b.name), false, cx),
+                Ok(b) => this.notify_user(trf("Paused {name}", &[("name", &b.name)]), false, cx),
                 Err(e) => this.notify_user(e, true, cx),
             });
         });
@@ -288,15 +288,15 @@ impl Root {
         let bid = id.to_string();
         // Work that isn't on GitHub goes with it.
         let unpushed = self.snapshot.boxes.iter().find(|b| b.id == id).and_then(|b| b.git.as_ref()).is_some_and(|g| g.uncommitted > 0 || g.ahead > 0 || (g.commits > 0 && g.pull.is_none()));
-        let mut text = "Its agent ends, and its container and checkout are deleted from the machine. Its branch on GitHub stays.".to_string();
+        let mut text = tr("Its agent ends, and its container and checkout are deleted from the machine. Its branch on GitHub stays.").to_string();
         if unpushed {
-            text.push_str(" It has work that may not be pushed yet: it's lost.");
+            text.push_str(tr(" It has work that may not be pushed yet: it's lost."));
         }
         let dialog = cx.new(|cx| {
             ConfirmDialog::new(
-                format!("Delete {name}?"),
+                trf("Delete {name}?", &[("name", &name)]),
                 text,
-                "Delete box",
+                tr("Delete box"),
                 None,
                 move |_, engine| {
                     let (engine, bid) = (engine.clone(), bid.clone());
@@ -321,23 +321,23 @@ fn state_pill(theme: &Theme, b: &BoxInfo) -> AnyElement {
     let needs_you = b.agent_state.as_deref() == Some("needs_you") || b.attention.as_deref() == Some("bell");
     let done = b.agent_state.as_deref() == Some("done") && b.attention.is_some();
     match (b.state.as_str(), b.busy, b.attention.as_deref()) {
-        ("running", _, _) if needs_you => kit::pill("needs you", theme.warning).into_any_element(),
-        ("running", _, _) if done => kit::pill("done", theme.accent).into_any_element(),
+        ("running", _, _) if needs_you => kit::pill(tr("needs you"), theme.warning).into_any_element(),
+        ("running", _, _) if done => kit::pill(tr("done"), theme.accent).into_any_element(),
         ("running", true, _) => div()
             .flex()
             .items_center()
             .gap(px(5.))
             .child(kit::spinner(SharedString::from(format!("box-spin-{}", b.id)), 11., theme.accent))
-            .child(kit::pill("working", theme.accent))
+            .child(kit::pill(tr("working"), theme.accent))
             .into_any_element(),
-        ("running", false, _) => kit::pill("idle", theme.success).into_any_element(),
+        ("running", false, _) => kit::pill(tr("idle"), theme.success).into_any_element(),
         ("starting", _, _) => div()
             .flex()
             .items_center()
             .gap(px(5.))
             .child(kit::spinner(SharedString::from(format!("box-spin-{}", b.id)), 11., theme.accent))
-            .child(kit::pill("starting", theme.accent))
+            .child(kit::pill(tr("starting"), theme.accent))
             .into_any_element(),
-        _ => kit::pill("paused", theme.text_placeholder).into_any_element(),
+        _ => kit::pill(tr("paused"), theme.text_placeholder).into_any_element(),
     }
 }

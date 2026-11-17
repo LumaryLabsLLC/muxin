@@ -15,6 +15,7 @@ use gpui::{AnyElement, App, FontWeight, Hsla, PathBuilder, SharedString, Window,
 use super::kit::{self, Button, icon};
 use super::services::{cpu, memory};
 use super::theme::Theme;
+use crate::ui::i18n::{tr, trf};
 use crate::fleet::services::{ComposeGraph, ComposeMount, ComposeService};
 
 /// What a box's buttons ask for: a service's logs (by its name), a shell in
@@ -258,8 +259,8 @@ pub fn diagram(g: &ComposeGraph, usage: &Usage, theme: &Theme, width: Rc<Cell<f3
             };
             lines.push(Line { from: (a.right(), a.cy()), to: (b.x, b.cy()), color, dashed: false, arrow: true });
             let label = match d.condition.as_str() {
-                "service_healthy" => Some(("once healthy", theme.success)),
-                "service_completed_successfully" => Some(("once done", theme.info)),
+                "service_healthy" => Some((tr("once healthy"), theme.success)),
+                "service_completed_successfully" => Some((tr("once done"), theme.info)),
                 _ => None,
             };
             if let Some((text, color)) = label {
@@ -316,7 +317,11 @@ pub fn diagram(g: &ComposeGraph, usage: &Usage, theme: &Theme, width: Rc<Cell<f3
     let vols = l.volumes.iter().map(|(name, spot)| {
         let external = g.volumes.iter().any(|v| v.name == *name && v.external);
         let used_by: Vec<&str> = g.services.iter().filter(|s| s.volumes.iter().any(|m| m.kind == "volume" && m.source == *name)).map(|s| s.name.as_str()).collect();
-        let tip = format!("A Docker volume{}: data kept apart from the containers, so it stays when they're recreated. Used by {}.", if external { " made outside this project" } else { "" }, used_by.join(", "));
+        let tip = if external {
+            trf("A Docker volume made outside this project: data kept apart from the containers, so it stays when they're recreated. Used by {services}.", &[("services", &used_by.join(", "))])
+        } else {
+            trf("A Docker volume: data kept apart from the containers, so it stays when they're recreated. Used by {services}.", &[("services", &used_by.join(", "))])
+        };
         div()
             .id(SharedString::from(format!("cmp-vol-{name}")))
             .absolute()
@@ -340,7 +345,7 @@ pub fn diagram(g: &ComposeGraph, usage: &Usage, theme: &Theme, width: Rc<Cell<f3
                     .flex()
                     .flex_col()
                     .child(div().w(px(spot.w - 60.)).truncate().text_size(px(12.5)).text_color(theme.text).child(name.clone()))
-                    .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(if external { "volume · external" } else { "volume" })),
+                    .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(if external { tr("volume · external") } else { tr("volume") })),
             )
     });
     let tags = labels.into_iter().map(|(text, color, x, y)| {
@@ -424,9 +429,9 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, inline: bool, usage: &U
             .flex_none()
             .flex()
             .items_center()
-            .child(Button::icon_only(SharedString::from(format!("cmp-node-logs-{n}")), "scroll-text").tooltip("Its logs").on_click(move |_, window, cx| logs(NodeAction::Logs(c1.clone()), window, cx)))
+            .child(Button::icon_only(SharedString::from(format!("cmp-node-logs-{n}")), "scroll-text").tooltip(tr("Its logs")).on_click(move |_, window, cx| logs(NodeAction::Logs(c1.clone()), window, cx)))
             .when(running, |d| {
-                d.child(Button::icon_only(SharedString::from(format!("cmp-node-shell-{n}")), "square-terminal").tooltip("A shell inside it").on_click(move |_, window, cx| shell(NodeAction::Shell(c2.clone()), window, cx)))
+                d.child(Button::icon_only(SharedString::from(format!("cmp-node-shell-{n}")), "square-terminal").tooltip(tr("A shell inside it")).on_click(move |_, window, cx| shell(NodeAction::Shell(c2.clone()), window, cx)))
             })
     });
     let health_color = match health {
@@ -446,17 +451,17 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, inline: bool, usage: &U
         - 7.
         - if buttons_w > 0. { buttons_w + 7. } else { 0. };
     let name_w = about(&s.name, 13.5).min(name_w).max(40.);
-    let what = if s.build.is_empty() { s.image.clone() } else { format!("Built from {}", s.build) };
+    let what = if s.build.is_empty() { s.image.clone() } else { trf("Built from {build}", &[("build", &s.build)]) };
     let what_tip = {
         let mut t = what.clone();
         if !s.command.is_empty() {
-            t.push_str(&format!("\nRuns: {}", s.command));
+            t.push_str(&trf("\nRuns: {command}", &[("command", &s.command)]));
         }
         if s.env > 0 {
-            t.push_str(&format!("\n{} environment variable{}", s.env, if s.env == 1 { "" } else { "s" }));
+            t.push_str(&if s.env == 1 { tr("\n1 environment variable").to_string() } else { trf("\n{n} environment variables", &[("n", &s.env)]) });
         }
         if !s.restart.is_empty() && s.restart != "no" {
-            t.push_str(&format!("\nRestarts: {}", s.restart));
+            t.push_str(&trf("\nRestarts: {restart}", &[("restart", &s.restart)]));
         }
         t
     };
@@ -465,14 +470,14 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, inline: bool, usage: &U
             let udp = if p.protocol == "udp" { "/udp" } else { "" };
             let label = if p.published.is_empty() { format!("{}{udp}", p.target) } else { format!(":{} → {}{udp}", p.published, p.target) };
             let tip = if p.published.is_empty() {
-                format!("Port {} inside, open on a port Docker picks", p.target)
+                trf("Port {port} inside, open on a port Docker picks", &[("port", &p.target)])
             } else {
                 let on_what = match p.host_ip.as_str() {
-                    "" | "0.0.0.0" | "::" => "every address of this machine".to_string(),
-                    "127.0.0.1" | "::1" => "this machine only (localhost)".to_string(),
+                    "" | "0.0.0.0" | "::" => tr("every address of this machine").to_string(),
+                    "127.0.0.1" | "::1" => tr("this machine only (localhost)").to_string(),
                     ip => ip.to_string(),
                 };
-                format!("Open on {on_what} at port {}, into the container's port {}. Click to open it in your browser here.", p.published, p.target)
+                trf("Open on {on_what} at port {port}, into the container's port {target}. Click to open it in your browser here.", &[("on_what", &on_what), ("port", &p.published), ("target", &p.target)])
             };
             let open = (p.protocol != "udp").then(|| p.published.parse::<u16>().ok()).flatten().map(|port| {
                 let on = on.clone();
@@ -498,7 +503,7 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, inline: bool, usage: &U
     });
     let networks = shows_networks(s).then(|| {
         if !s.network_mode.is_empty() {
-            return div().flex().items_center().h(px(20.)).child(kit::pill(format!("network: {}", s.network_mode), theme.text_muted)).into_any_element();
+            return div().flex().items_center().h(px(20.)).child(kit::pill(trf("network: {mode}", &[("mode", &s.network_mode)]), theme.text_muted)).into_any_element();
         }
         div()
             .flex()
@@ -521,11 +526,16 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, inline: bool, usage: &U
             .children(shown.iter().enumerate().map(|(k, m)| {
                 let volume = m.kind == "volume";
                 let file = !volume && m.source.rsplit('/').next().is_some_and(|last| last.contains('.') && !last.starts_with('.'));
-                let text = format!("{} → {}{}", m.source, m.target, if m.read_only { " (read-only)" } else { "" });
+                let text = format!("{} → {}{}", m.source, m.target, if m.read_only { tr(" (read-only)") } else { "" });
                 let tip = if volume {
-                    format!("The Docker volume {}, seen inside as {}: its data stays when the container's recreated", m.source, m.target)
+                    trf("The Docker volume {source}, seen inside as {target}: its data stays when the container's recreated", &[("source", &m.source), ("target", &m.target)])
                 } else {
-                    format!("This machine's {} {}, seen inside as {}{}", if file { "file" } else { "folder" }, m.source, m.target, if m.read_only { ", read-only" } else { "" })
+                    match (file, m.read_only) {
+                        (true, false) => trf("This machine's file {source}, seen inside as {target}", &[("source", &m.source), ("target", &m.target)]),
+                        (true, true) => trf("This machine's file {source}, seen inside as {target}, read-only", &[("source", &m.source), ("target", &m.target)]),
+                        (false, false) => trf("This machine's folder {source}, seen inside as {target}", &[("source", &m.source), ("target", &m.target)]),
+                        (false, true) => trf("This machine's folder {source}, seen inside as {target}, read-only", &[("source", &m.source), ("target", &m.target)]),
+                    }
                 };
                 div()
                     .id(SharedString::from(format!("cmp-bind-{n}-{k}")))
@@ -537,7 +547,7 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, inline: bool, usage: &U
                     .child(icon(if volume { "hard-drive" } else if file { "file" } else { "folder" }, 11., if volume { theme.info } else { theme.text_placeholder }))
                     .child(div().w(px(inner - 16.)).truncate().text_size(px(11.)).text_color(theme.text_muted).child(text))
             }))
-            .when(more > 0, |d| d.child(div().h(px(16.)).text_size(px(11.)).text_color(theme.text_placeholder).child(format!("+{more} more"))))
+            .when(more > 0, |d| d.child(div().h(px(16.)).text_size(px(11.)).text_color(theme.text_placeholder).child(trf("+{more} more", &[("more", &more)]))))
     });
     div()
         .absolute()
@@ -623,12 +633,12 @@ pub fn legend(g: &ComposeGraph, theme: &Theme) -> AnyElement {
         .px(px(14.))
         .border_b_1()
         .border_color(theme.border_variant)
-        .child(item(line(theme.text_placeholder), "waits for"))
-        .child(item(line(theme.success), "waits until healthy"))
-        .child(item(div().w(px(16.)).h(px(10.)).rounded(crate::ui::kit::corner(3.)).border_1().border_dashed().border_color(theme.info).into_any_element(), "volume"))
-        .child(item(icon("plug", 11., theme.text_accent).into_any_element(), "port on the machine"))
+        .child(item(line(theme.text_placeholder), tr("waits for")))
+        .child(item(line(theme.success), tr("waits until healthy")))
+        .child(item(div().w(px(16.)).h(px(10.)).rounded(crate::ui::kit::corner(3.)).border_1().border_dashed().border_color(theme.info).into_any_element(), tr("volume")))
+        .child(item(icon("plug", 11., theme.text_accent).into_any_element(), tr("port on the machine")))
         .when(shows && !nets.is_empty(), |d| {
-            d.child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Networks"))
+            d.child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("Networks")))
                 .children(nets.into_iter().map(|(name, color)| div().flex().items_center().gap(px(5.)).child(kit::dot(color, 7.)).child(div().text_size(px(11.5)).text_color(theme.text_muted).child(name))))
         })
         .into_any_element()

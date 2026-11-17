@@ -3,6 +3,7 @@
 //! runs and their output.
 
 use gpui::{AnyElement, Context, FontWeight, SharedString, Window, div, prelude::*, px};
+use crate::ui::i18n::{tr, trf};
 
 use super::github::Load;
 use super::kit::{self, Button, ButtonStyle, card, icon, section_title, spinner};
@@ -83,10 +84,10 @@ impl Root {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(()) if what == "run" => {
-                        this.notify_user("Started. Its output shows here when it's done.".to_string(), false, cx);
+                        this.notify_user(tr("Started. Its output shows here when it's done.").to_string(), false, cx);
                         this.schedule_open = Some((machine.clone(), id.clone()));
                     }
-                    Ok(()) => this.notify_user("Deleted".to_string(), false, cx),
+                    Ok(()) => this.notify_user(tr("Deleted").to_string(), false, cx),
                     Err(e) => this.notify_user(e, true, cx),
                 }
                 this.load_schedules(cx);
@@ -148,23 +149,23 @@ impl Root {
                     .flex_col()
                     .gap(px(4.))
                     .min_w(px(0.))
-                    .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child("Schedules"))
-                    .child(div().text_size(px(13.)).text_color(theme.text_muted).child("Commands and agent sessions that run on your machines at set times, in each machine’s own time. They run there, so they don’t need Muxin open.")),
+                    .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(tr("Schedules")))
+                    .child(div().text_size(px(13.)).text_color(theme.text_muted).child(tr("Commands and agent sessions that run on your machines at set times, in each machine’s own time. They run there, so they don’t need Muxin open."))),
             )
             .child(
                 div()
                     .flex()
                     .flex_none()
                     .gap(px(8.))
-                    .child(Button::icon_only("sch-refresh", "refresh-cw").style(ButtonStyle::Ghost).tooltip("Ask the machines again").loading(self.schedules_loading).on_click(cx.listener(|this, _, _, cx| this.load_schedules(cx))))
-                    .child(Button::new("sch-new", "New schedule").style(ButtonStyle::Primary).icon("plus").on_click(cx.listener(|this, _, window, cx| this.show_schedule_dialog(None, window, cx)))),
+                    .child(Button::icon_only("sch-refresh", "refresh-cw").style(ButtonStyle::Ghost).tooltip(tr("Ask the machines again")).loading(self.schedules_loading).on_click(cx.listener(|this, _, _, cx| this.load_schedules(cx))))
+                    .child(Button::new("sch-new", tr("New schedule")).style(ButtonStyle::Primary).icon("plus").on_click(cx.listener(|this, _, window, cx| this.show_schedule_dialog(None, window, cx)))),
             );
         let mut body = page("schedules-page", &self.page_scroll).child(header);
         let list = match &self.schedules {
             Load::Ready(l) => l.clone(),
             Load::Loading => {
                 return body
-                    .child(div().flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(spinner("sch-load", 13., theme.text_muted)).child("Asking your machines…"))
+                    .child(div().flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(spinner("sch-load", 13., theme.text_muted)).child(tr("Asking your machines…")))
                     .into_any_element();
             }
             Load::Failed(e) => return body.child(div().text_size(px(12.5)).text_color(theme.error).child(e.clone())).into_any_element(),
@@ -199,9 +200,9 @@ impl Root {
             .child(div().flex_1())
             .children(m.scheduler.clone().map(|s| {
                 let by = match s.as_str() {
-                    "cron" => "Run by cron".to_string(),
-                    "launchd" => "Run by launchd".to_string(),
-                    "task-scheduler" => "Run by Task Scheduler".to_string(),
+                    "cron" => tr("Run by cron").to_string(),
+                    "launchd" => tr("Run by launchd").to_string(),
+                    "task-scheduler" => tr("Run by Task Scheduler").to_string(),
                     _ => s,
                 };
                 div().text_size(px(11.5)).text_color(theme.text_placeholder).child(by)
@@ -218,7 +219,7 @@ impl Root {
         };
         let what = match s.what.kind.as_str() {
             "agent" => {
-                let name = crate::fleet::sessions::agent(s.what.agent.as_deref().unwrap_or("")).map(|a| a.name).unwrap_or("Agent");
+                let name = crate::fleet::sessions::agent(s.what.agent.as_deref().unwrap_or("")).map(|a| a.name).unwrap_or(tr("Agent"));
                 match &s.what.prompt {
                     Some(p) => format!("{name}: {p}"),
                     None => name.to_string(),
@@ -226,13 +227,13 @@ impl Root {
             }
             _ => s.what.command.clone().unwrap_or_default(),
         };
-        let folder = s.what.cwd.clone().filter(|c| c != "~").map(|c| format!(" · in {c}")).unwrap_or_default();
+        let folder = s.what.cwd.clone().filter(|c| c != "~").map(|c| trf(" · in {folder}", &[("folder", &c)])).unwrap_or_default();
         let (last, last_color) = match &s.last_run {
-            _ if s.running => ("Running…".to_string(), theme.text_accent),
-            Some(r) if r.session.is_some() => (format!("Started a session {}", ago(r.started)), theme.text_placeholder),
-            Some(r) if r.ok => (format!("Ran {}", ago(r.started)), theme.success),
-            Some(r) => (format!("Failed {}{}", ago(r.started), r.exit_code.map(|c| format!(" · exit {c}")).unwrap_or_default()), theme.error),
-            None => ("Not run yet".to_string(), theme.text_placeholder),
+            _ if s.running => (tr("Running…").to_string(), theme.text_accent),
+            Some(r) if r.session.is_some() => (trf("Started a session {ago}", &[("ago", &ago(r.started))]), theme.text_placeholder),
+            Some(r) if r.ok => (trf("Ran {ago}", &[("ago", &ago(r.started))]), theme.success),
+            Some(r) => (trf("Failed {ago}", &[("ago", &ago(r.started))]) + &r.exit_code.map(|c| trf(" · exit {code}", &[("code", &c)])).unwrap_or_default(), theme.error),
+            None => (tr("Not run yet").to_string(), theme.text_placeholder),
         };
         let (m1, m2, m3) = (machine.to_string(), machine.to_string(), machine.to_string());
         let (id1, id2, s_toggle) = (s.id.clone(), s.id.clone(), s.clone());
@@ -272,19 +273,19 @@ impl Root {
             )
             .child(div().flex_none().text_size(px(12.)).text_color(last_color).child(last))
             .child(
-                Button::new(SharedString::from(format!("sch-run-{}", s.id)), "Run now").style(ButtonStyle::Ghost).icon("play").disabled(s.running).on_click(cx.listener(move |this, _, _, cx| {
+                Button::new(SharedString::from(format!("sch-run-{}", s.id)), tr("Run now")).style(ButtonStyle::Ghost).icon("play").disabled(s.running).on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.schedule_do(&m1, &id1, "run", cx)
                 })),
             )
             .child(
-                Button::new(SharedString::from(format!("sch-toggle-{}", s.id)), if s.enabled { "Pause" } else { "Resume" }).style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, _, cx| {
+                Button::new(SharedString::from(format!("sch-toggle-{}", s.id)), if s.enabled { tr("Pause") } else { tr("Resume") }).style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.schedule_toggle(&m2, &s_toggle, cx)
                 })),
             )
             .child(
-                Button::icon_only(SharedString::from(format!("sch-del-{}", s.id)), "trash-2").style(ButtonStyle::Ghost).tooltip("Delete it, with its runs").on_click(cx.listener(move |this, _, _, cx| {
+                Button::icon_only(SharedString::from(format!("sch-del-{}", s.id)), "trash-2").style(ButtonStyle::Ghost).tooltip(tr("Delete it, with its runs")).on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.schedule_do(&m3, &id2, "delete", cx)
                 })),
@@ -310,7 +311,7 @@ impl Root {
             _ => None,
         };
         let content: AnyElement = match state {
-            None => div().flex().items_center().gap(px(8.)).text_size(px(12.)).text_color(theme.text_muted).child(spinner("sch-log", 12., theme.text_muted)).child("Reading its runs…").into_any_element(),
+            None => div().flex().items_center().gap(px(8.)).text_size(px(12.)).text_color(theme.text_muted).child(spinner("sch-log", 12., theme.text_muted)).child(tr("Reading its runs…")).into_any_element(),
             Some(Err(e)) => div().text_size(px(12.)).text_color(theme.error).child(e).into_any_element(),
             Some(Ok(l)) => self.runs_view(theme, key, &l, cx),
         };
@@ -319,7 +320,7 @@ impl Root {
 
     fn runs_view(&mut self, theme: &Theme, key: &(String, String), l: &ScheduleLog, cx: &mut Context<Self>) -> AnyElement {
         if l.runs.is_empty() {
-            return div().text_size(px(12.)).text_color(theme.text_placeholder).child("It hasn't run yet. Run now runs it once.").into_any_element();
+            return div().text_size(px(12.)).text_color(theme.text_placeholder).child(tr("It hasn't run yet. Run now runs it once.")).into_any_element();
         }
         let shown = l.run.as_ref().map(|r| r.started);
         let chips: Vec<AnyElement> = l
@@ -358,11 +359,11 @@ impl Root {
                     .gap(px(10.))
                     .text_size(px(12.))
                     .text_color(theme.text_muted)
-                    .child(format!("It started the session {}.", r.session.clone().unwrap_or_default()))
-                    .child(Button::new("sch-open-session", "Open it").style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, window, cx| this.navigate(super::root::Route::Session(session.clone()), window, cx))))
+                    .child(trf("It started the session {session}.", &[("session", &r.session.clone().unwrap_or_default())]))
+                    .child(Button::new("sch-open-session", tr("Open it")).style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, window, cx| this.navigate(super::root::Route::Session(session.clone()), window, cx))))
                     .into_any_element()
             }
-            _ if l.output.trim().is_empty() => div().text_size(px(12.)).text_color(theme.text_placeholder).child("It printed nothing.").into_any_element(),
+            _ if l.output.trim().is_empty() => div().text_size(px(12.)).text_color(theme.text_placeholder).child(tr("It printed nothing.")).into_any_element(),
             _ => div()
                 .id("sch-output")
                 .max_h(px(280.))
@@ -381,9 +382,9 @@ impl Root {
         let status = l.run.as_ref().map(|r| {
             let what = match (r.ok, r.exit_code, r.seconds) {
                 _ if r.session.is_some() => String::new(),
-                (true, _, Some(s)) => format!("Finished in {}", crate::util::short_duration(s)),
-                (false, Some(c), _) => format!("Exited with {c}"),
-                (false, None, _) => r.error.clone().unwrap_or_else(|| "Ended without an exit status (stopped after 6 hours?)".into()),
+                (true, _, Some(s)) => trf("Finished in {took}", &[("took", &crate::util::short_duration(s))]),
+                (false, Some(c), _) => trf("Exited with {code}", &[("code", &c)]),
+                (false, None, _) => r.error.clone().unwrap_or_else(|| tr("Ended without an exit status (stopped after 6 hours?)").into()),
                 _ => String::new(),
             };
             div().text_size(px(11.5)).text_color(theme.text_placeholder).child(what)
@@ -399,16 +400,16 @@ fn empty(theme: &Theme, cx: &mut Context<Root>) -> AnyElement {
         .flex()
         .flex_col()
         .gap(px(10.))
-        .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child("No schedules yet"))
-        .child(example("Every morning at 9, have Claude Code go through new issues in a repo."))
-        .child(example("Weekdays at 18:00, run the test suite and keep its output."))
-        .child(example("Every 15 minutes, check a site or a disk and print what it found."))
-        .child(div().pt(px(4.)).flex().child(Button::new("sch-empty-new", "New schedule").style(ButtonStyle::Primary).icon("plus").on_click(cx.listener(|this, _, window, cx| this.show_schedule_dialog(None, window, cx)))))
+        .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child(tr("No schedules yet")))
+        .child(example(tr("Every morning at 9, have Claude Code go through new issues in a repo.")))
+        .child(example(tr("Weekdays at 18:00, run the test suite and keep its output.")))
+        .child(example(tr("Every 15 minutes, check a site or a disk and print what it found.")))
+        .child(div().pt(px(4.)).flex().child(Button::new("sch-empty-new", tr("New schedule")).style(ButtonStyle::Primary).icon("plus").on_click(cx.listener(|this, _, window, cx| this.show_schedule_dialog(None, window, cx)))))
         .into_any_element()
 }
 
 /// "5m ago" from Unix seconds.
 fn ago(t: i64) -> String {
     let secs = (chrono::Utc::now().timestamp() - t).max(0) as u64;
-    if secs < 60 { "just now".into() } else { format!("{} ago", crate::util::short_duration(secs)) }
+    if secs < 60 { tr("just now").into() } else { trf("{duration} ago", &[("duration", &crate::util::short_duration(secs))]) }
 }

@@ -3,6 +3,7 @@
 //! operation, so the Activity page has the whole output too.
 
 use std::collections::HashSet;
+use crate::ui::i18n::{tr, trf};
 
 use gpui::{AnyElement, Context, Focusable, FontWeight, SharedString, Window, div, prelude::*, px};
 
@@ -60,7 +61,7 @@ impl Root {
         }
         let targets = self.run_targets();
         if targets.is_empty() {
-            self.notify_user("Pick a machine to run it on.".to_string(), true, cx);
+            self.notify_user(tr("Pick a machine to run it on.").to_string(), true, cx);
             return;
         }
         let runs = self.engine.run_on_machines(&targets, &command, crate::fleet::command::DEFAULT_TIMEOUT);
@@ -99,8 +100,8 @@ impl Root {
             .flex()
             .flex_col()
             .gap(px(4.))
-            .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child("Run"))
-            .child(div().text_size(px(13.)).text_color(theme.text_muted).child("One command on several machines at once, in each one’s login shell from the home folder."));
+            .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(tr("Run")))
+            .child(div().text_size(px(13.)).text_color(theme.text_muted).child(tr("One command on several machines at once, in each one’s login shell from the home folder.")));
 
         let targets: HashSet<String> = self.run_targets().into_iter().collect();
         let running = self.run_last.as_ref().is_some_and(|b| b.runs.iter().any(|(_, r)| r.as_ref().is_ok_and(|op| self.op(*op).is_some_and(|o| o.status == "running"))));
@@ -125,7 +126,7 @@ impl Root {
                 .when(!can, |d| d.opacity(0.45))
                 .when(can, |d| d.cursor_pointer().hover(|st| st.bg(theme.element_hover)).on_click(cx.listener(move |this, _, _, cx| this.toggle_run_machine(&id, cx))))
                 .when(!can, |d| {
-                    let why: SharedString = if m.is_disconnected() { "Disconnected".into() } else if m.is_asleep() { "Asleep".into() } else { "Offline".into() };
+                    let why: SharedString = if m.is_disconnected() { tr("Disconnected").into() } else if m.is_asleep() { tr("Asleep").into() } else { tr("Offline").into() };
                     d.tooltip(move |window, cx| kit::Tooltip::view(why.clone(), window, cx))
                 })
                 .child(kit::tile(format::machine_icon(m), from, to, 20.))
@@ -138,7 +139,7 @@ impl Root {
             .flex_wrap()
             .items_center()
             .gap(px(6.))
-            .child(div().text_size(px(12.)).text_color(theme.text_muted).mr(px(4.)).child("On"))
+            .child(div().text_size(px(12.)).text_color(theme.text_muted).mr(px(4.)).child(tr("On")))
             .children(chips)
             .child(
                 div()
@@ -147,7 +148,7 @@ impl Root {
                     .text_size(px(12.))
                     .text_color(theme.text_accent)
                     .cursor_pointer()
-                    .child(if all_on { "None" } else { "All" })
+                    .child(if all_on { tr("None") } else { tr("All") })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.run_picked = if all_on { Some(HashSet::new()) } else { None };
                         cx.notify();
@@ -163,12 +164,12 @@ impl Root {
                     .items_center()
                     .gap(px(8.))
                     .child(div().flex_1().min_w(px(0.)).flex().child(self.run_input.clone()))
-                    .child(Button::icon_only("run-save", "star").tooltip("Save it as a snippet").on_click(cx.listener(|this, _, window, cx| {
+                    .child(Button::icon_only("run-save", "star").tooltip(tr("Save it as a snippet")).on_click(cx.listener(|this, _, window, cx| {
                         let command = this.run_input.read(cx).text().trim().to_string();
                         this.show_snippet_dialog(None, (!command.is_empty()).then_some(command), window, cx);
                     })))
                     .child(
-                        Button::new("run-go", if targets.len() > 1 { format!("Run on {}", targets.len()) } else { "Run".to_string() })
+                        Button::new("run-go", if targets.len() > 1 { trf("Run on {n}", &[("n", &targets.len())]) } else { tr("Run").to_string() })
                             .icon("play")
                             .style(ButtonStyle::Primary)
                             .disabled(!enabled)
@@ -186,7 +187,7 @@ impl Root {
                     .flex_wrap()
                     .items_center()
                     .gap(px(6.))
-                    .child(div().text_size(px(12.)).text_color(theme.text_muted).mr(px(4.)).child("Recent"))
+                    .child(div().text_size(px(12.)).text_color(theme.text_muted).mr(px(4.)).child(tr("Recent")))
                     .children(self.run_history.iter().enumerate().map(|(i, c)| {
                         let c2 = c.clone();
                         div()
@@ -210,7 +211,7 @@ impl Root {
                                 window.focus(&this.run_input.read(cx).focus_handle(cx));
                             }))
                     }))
-                    .child(Button::icon_only("run-forget", "x").tooltip("Forget these").on_click(cx.listener(|this, _, _, cx| {
+                    .child(Button::icon_only("run-forget", "x").tooltip(tr("Forget these")).on_click(cx.listener(|this, _, _, cx| {
                         this.run_history.clear();
                         this.save_run_history();
                         cx.notify();
@@ -223,9 +224,9 @@ impl Root {
             let done = batch.runs.iter().filter(|(_, r)| r.as_ref().is_ok_and(|op| self.op(*op).is_some_and(|o| o.status != "running"))).count();
             let failed = batch.runs.iter().filter(|(_, r)| r.is_err() || r.as_ref().is_ok_and(|op| self.op(*op).is_some_and(|o| o.status == "failed"))).count();
             let summary = match (done + batch.runs.iter().filter(|(_, r)| r.is_err()).count(), failed) {
-                (d, 0) if d == batch.runs.len() => "All done".to_string(),
-                (d, f) if d == batch.runs.len() => format!("Done · {f} failed"),
-                (d, _) => format!("{d} of {} done", batch.runs.len()),
+                (d, 0) if d == batch.runs.len() => tr("All done").to_string(),
+                (d, f) if d == batch.runs.len() => trf("Done · {f} failed", &[("f", &f)]),
+                (d, _) => trf("{d} of {total} done", &[("d", &d), ("total", &batch.runs.len())]),
             };
             // The one made bigger first, across the page.
             let mut runs: Vec<&(String, Result<u64, String>)> = batch.runs.iter().collect();
@@ -252,7 +253,7 @@ impl Root {
                                     .child(div().w(px((self.content_width - 190.).max(80.))).truncate().font_family(mono_font()).text_size(px(13.)).child(format!("$ {}", super::snippets::one_line(&batch.command)))),
                             )
                             .child(div().flex_none().text_size(px(12.)).text_color(theme.text_muted).child(summary))
-                            .child(Button::new("run-clear", "Clear").icon("x").style(ButtonStyle::Ghost).tooltip("Clear the results").on_click(cx.listener(|this, _, _, cx| {
+                            .child(Button::new("run-clear", tr("Clear")).icon("x").style(ButtonStyle::Ghost).tooltip(tr("Clear the results")).on_click(cx.listener(|this, _, _, cx| {
                                 this.run_last = None;
                                 this.run_expanded = None;
                                 cx.notify();
@@ -261,7 +262,7 @@ impl Root {
                     .child(div().flex().flex_wrap().gap(px(10.)).children(cards)),
             );
         } else if self.runnable().is_empty() {
-            body = body.child(section_title(&theme, "No machines online", None)).child(card(&theme).child(kit::empty_state(&theme, "zap", "Commands run on machines that are online.")));
+            body = body.child(section_title(&theme, tr("No machines online"), None)).child(card(&theme).child(kit::empty_state(&theme, "zap", tr("Commands run on machines that are online."))));
         }
         body.child(snippets).into_any_element()
     }
@@ -287,8 +288,8 @@ impl Root {
             }
         };
         let (state, color): (AnyElement, _) = match (r, op) {
-            (Err(e), _) => (div().child(short(e.clone(), "Didn't start")).into_any_element(), theme.error),
-            (Ok(_), None) => (div().child("Gone").into_any_element(), theme.text_muted),
+            (Err(e), _) => (div().child(short(e.clone(), tr("Didn't start"))).into_any_element(), theme.error),
+            (Ok(_), None) => (div().child(tr("Gone")).into_any_element(), theme.text_muted),
             (Ok(id), Some(o)) if o.status == "running" => (
                 div().flex().items_center().gap(px(5.)).child(spinner(("run-spin", *id as usize), 11., theme.text_muted)).child(format::elapsed(o.started_at)).into_any_element(),
                 theme.text_muted,
@@ -299,9 +300,9 @@ impl Root {
                 if o.status == "succeeded" {
                     (div().flex().items_center().gap(px(4.)).child(kit::icon("check", 12., theme.success)).child(took).into_any_element(), theme.success)
                 } else {
-                    let why = o.error.clone().unwrap_or_else(|| "Failed".into());
-                    let why = why.strip_prefix("Exited with status ").map(|c| format!("Exit {}", c.trim_end_matches('.'))).unwrap_or(why);
-                    (div().flex().items_center().gap(px(4.)).child(kit::icon("x", 12., theme.error)).child(short(why, "Failed")).into_any_element(), theme.error)
+                    let why = o.error.clone().unwrap_or_else(|| tr("Failed").into());
+                    let why = why.strip_prefix("Exited with status ").map(|c| trf("Exit {code}", &[("code", &c.trim_end_matches('.'))])).unwrap_or(why);
+                    (div().flex().items_center().gap(px(4.)).child(kit::icon("x", 12., theme.error)).child(short(why, tr("Failed"))).into_any_element(), theme.error)
                 }
             }
         };
@@ -342,11 +343,11 @@ impl Root {
                     .child(div().flex_none().text_size(px(12.)).text_color(color).child(state))
                     .child(
                         Button::icon_only(SharedString::from(format!("run-big-{machine_id}")), if big { "minimize" } else { "maximize" })
-                            .tooltip(if big { "Smaller" } else { "Bigger: all of its output" })
+                            .tooltip(if big { tr("Smaller") } else { tr("Bigger: all of its output") })
                             .on_click(toggle),
                     )
                     .when_some(op_id, |d, id| {
-                        d.child(Button::icon_only(SharedString::from(format!("run-full-{id}")), "scroll-text").tooltip("All of its output").on_click(cx.listener(move |this, _, _, cx| this.show_operation(id, cx))))
+                        d.child(Button::icon_only(SharedString::from(format!("run-full-{id}")), "scroll-text").tooltip(tr("All of its output")).on_click(cx.listener(move |this, _, _, cx| this.show_operation(id, cx))))
                     }),
             )
             .child(
@@ -367,12 +368,12 @@ impl Root {
                                 .id(SharedString::from(format!("run-more-{machine_id}")))
                                 .text_color(theme.text_accent)
                                 .cursor_pointer()
-                                .child(format!("… {hidden} more lines"))
+                                .child(trf("… {hidden} more lines", &[("hidden", &hidden)]))
                                 .on_click(more),
                         )
                     })
-                    .when(hidden > 0 && big, |d| d.child(div().text_color(theme.text_placeholder).child(format!("… {hidden} earlier lines: all of it is in Activity"))))
-                    .when(shown.is_empty() && why_below.is_none() && op.is_some_and(|o| o.status != "running"), |d| d.child(div().text_color(theme.text_placeholder).child("No output")))
+                    .when(hidden > 0 && big, |d| d.child(div().text_color(theme.text_placeholder).child(trf("… {hidden} earlier lines: all of it is in Activity", &[("hidden", &hidden)]))))
+                    .when(shown.is_empty() && why_below.is_none() && op.is_some_and(|o| o.status != "running"), |d| d.child(div().text_color(theme.text_placeholder).child(tr("No output"))))
                     .children(shown.iter().map(|l| div().text_color(theme.text).child(l.clone())))
                     .children(why_below.map(|why| div().text_color(theme.error).child(why))),
             )

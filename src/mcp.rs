@@ -350,7 +350,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "list_jobs" => ok(api::jobs(engine, Surface::Mcp).await?),
         "check_machines" => ok(json!({ "machines": api::check(engine, args(a)?).await? })),
         "add_machine" => ok(api::add_machine(engine, args(a)?, Surface::Mcp).await?),
-        "remove_machine" => ok(json!({ "removed": api::remove_machine(engine, args(a)?).await? })),
+        "remove_machine" => ok(json!({ "removed": api::remove_machine(engine, args(a)?, Surface::Mcp).await? })),
         "rename_machine" => ok(json!({ "renamed": api::rename_machine(engine, args(a)?).await? })),
         "ignore_warning" => ok(api::ignore_warning(engine, args(a)?).await?),
         "connect_machine" => ok(json!({ "machine": api::connect_machine(engine, args(a)?).await? })),
@@ -516,7 +516,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "check_machines",
-            "description": "Run the read-only machine check now (over ssh, or locally for host \"local\"): CPU, memory, disk, uptime, installed runners and whether they're running. One machine or all. Changes nothing on the machines. A check of all leaves a machine that's asleep alone when the app is told of its waking; naming it checks it, which wakes it for a moment (it stays \"asleep\" unless it's really awake).",
+            "description": "Run the read-only machine check now (over ssh, or locally for host \"local\"): CPU, memory, disk, uptime, installed runners and whether they're running. One machine or all. Changes nothing on the machines. A check of all leaves a machine that's asleep alone when the app is told of its waking; naming it checks it, which wakes it for a moment (it stays \"asleep\" unless it's really awake). A cloud machine that hasn't started (cloud.power \"starting\") has no address to check: naming it asks DigitalOcean whether it has started, and it gets its address and is checked if so.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": "Only this machine; omit for all." } }), &[]),
             "annotations": annotations("Check machines", true, false, true, true),
         }),
@@ -533,7 +533,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "remove_machine",
-            "description": "Remove a machine from config.toml. Its runners stay registered on GitHub; use runner_action remove first to take runners down. On the machine, only a direct-connection pairing with this app is undone (best-effort).",
+            "description": "Remove a machine from config.toml. Its runners stay registered on GitHub; use runner_action remove first to take runners down. On the machine, only a direct-connection pairing with this app is undone (best-effort). Refuses a cloud machine Muxin created, whose droplet would stay billed with nothing listing it: use cloud_destroy.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
             "annotations": annotations("Remove machine", false, true, true, false),
         }),
@@ -610,7 +610,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "cloud_create",
-            "description": "Create a DigitalOcean droplet in the user's account, set it up (their user and SSH key, git, and the extras chosen: Docker, GitHub CLI, languages like Go, Rust, Python or PHP, agent CLIs, Tailscale), and add it to the user's machines. It COSTS MONEY every hour it exists: tell the user the size and price (cloud_options) and get their OK first. Takes a few minutes. It's one of the user's machines from the moment DigitalOcean makes it, before it has started (status \"manual\", cloud.power \"starting\"): if this fails or is cut off after that, the droplet still exists and is billed, cloud_usage counts it and cloud_destroy deletes it; Muxin fills in its address at a machine check once it has started.",
+            "description": "Create a DigitalOcean droplet in the user's account, set it up (their user and SSH key, git, and the extras chosen: Docker, GitHub CLI, languages like Go, Rust, Python or PHP, agent CLIs, Tailscale), and add it to the user's machines. It COSTS MONEY every hour it exists: tell the user the size and price (cloud_options) and get their OK first. Takes a few minutes. It's one of the user's machines from the moment DigitalOcean makes it, before it has started (status \"manual\", cloud.power \"starting\"): if this fails or is cut off after that, the droplet still exists and is billed, cloud_usage counts it and cloud_destroy deletes it; Muxin fills in its address at a machine check once it has started. If DigitalOcean's answer to the request is lost, this looks for the droplet for up to about three minutes and ends with the machine, or with the news that none was made (then try again); when it can't find out, status.attention lists what was asked for (cloud-asked-<name>) with why, until a machine check settles it.",
             "inputSchema": schema(json!({
                 "name": { "type": "string" },
                 "region": { "type": "string", "description": "Region slug, e.g. nyc3. Default: the user's setting, else the nearest." },
@@ -623,7 +623,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "cloud_destroy",
-            "description": "Destroy a cloud machine Muxin created: deletes the droplet (everything on it is lost) and removes it from Muxin. Confirm with the user first; make sure work there is pushed.",
+            "description": "Destroy a cloud machine Muxin created: deletes the droplet (everything on it is lost) and removes it from Muxin. Confirm with the user first; make sure work there is pushed. A droplet DigitalOcean is still making can't be deleted yet: this asks again for up to two minutes. One whose droplet is already gone at DigitalOcean (cloud.power \"gone\") is just taken out of Muxin.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string" }, "wait": { "type": "boolean" } }), &["machine_id"]),
             "annotations": annotations("Destroy cloud machine", false, true, true, true),
         }),

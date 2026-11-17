@@ -506,8 +506,10 @@ pub struct CloudOut {
     /// The most it costs in a month, in USD.
     pub price_monthly: f64,
     pub idle_since: Option<DateTime<Utc>>,
-    /// "on", "off" (still billed) or "starting" (created and billed, no address yet:
-    /// Muxin fills it in at a machine check once it has started), as last seen; null until known.
+    /// "on", "off" (still billed), "starting" (created and billed, no address yet:
+    /// Muxin fills it in at a machine check once it has started) or "gone"
+    /// (DigitalOcean has no such droplet in the account that's signed in:
+    /// deleted there; cloud_destroy takes it out of Muxin), as last seen; null until known.
     pub power: Option<String>,
 }
 
@@ -1287,7 +1289,17 @@ pub async fn check(engine: &Arc<Engine>, req: CheckRequest) -> ApiResult<Vec<Mac
         Some(id) => {
             let s = engine.current();
             let m = find_machine(&s, id)?;
-            if m.host.is_empty() {
+            // A cloud machine that hasn't started has no address to check
+            // yet: DigitalOcean is asked whether it has one by now. Not yet
+            // (or its droplet is gone there): where it stands is the answer.
+            if m.awaits_address() {
+                let id = m.id.clone();
+                let started = engine.cloud_start(&id).await.map_err(|e| ApiError::operation_failed(format!("{} has no address yet, and Muxin couldn't ask DigitalOcean whether it has started: {e}", m.name)))?;
+                if !matches!(started, crate::ops::cloud::Start::Started(_)) {
+                    let s = engine.current();
+                    return Ok(vec![machine_summary(find_machine(&s, &id)?)]);
+                }
+            } else if m.host.is_empty() {
                 return Err(ApiError::invalid(format!("{} has no host in config.toml, so it can't be checked.", m.name)));
             }
             Some(m.id.clone())
@@ -1374,10 +1386,16 @@ pub async fn rename_machine(engine: &Arc<Engine>, req: RenameMachineRequest) -> 
     Ok(machine_summary(find_machine(&s, &id)?))
 }
 
-pub async fn remove_machine(engine: &Arc<Engine>, req: MachineRequest) -> ApiResult<MachineSummary> {
+pub async fn remove_machine(engine: &Arc<Engine>, req: MachineRequest, surface: Surface) -> ApiResult<MachineSummary> {
     engine.refresh_from_disk();
     let s = engine.current();
     let m = find_machine(&s, &req.machine_id)?.clone();
+    // Out of Muxin, its droplet would go on running, and billed, with
+    // nothing here that lists it (the app offers Destroy alone for these).
+    if m.cloud.is_some() {
+        return Err(ApiError::invalid(format!("{} is a cloud machine Muxin created: taken out of Muxin, its droplet would stay at DigitalOcean, billed and listed nowhere here.", m.name))
+            .with_hint(surface.say(format!("Destroy it with cloud_destroy(machine_id: \"{}\"), which deletes the droplet too. That also takes out one whose droplet is already gone.", m.id), format!("muxin cloud destroy {}", m.id))));
+    }
     engine.remove_machine(&m.id).map_err(op_error)?;
     // Its agent forgetting this app (when it was paired) finishes before a CLI run exits.
     engine.unpaired(&m.id).await;
@@ -2589,7 +2607,7 @@ mod tests {
 
         let removed = runner_action(&engine, act(ActionName::Remove, true), Surface::Mcp, |_| {}).await.unwrap();
         assert!(removed.runners.is_empty());
-        remove_machine(&engine, MachineRequest { machine_id: "beelink".into() }).await.unwrap();
+        remove_machine(&engine, MachineRequest { machine_id: "beelink".into() }, Surface::Mcp).await.unwrap();
         assert!(!engine.current().machines.iter().any(|m| m.id == "beelink"));
 
         // Installing on the unreachable laptop fails as an operation, with a hint.

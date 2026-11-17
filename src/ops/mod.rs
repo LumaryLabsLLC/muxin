@@ -450,6 +450,8 @@ impl Engine {
             None => inventory_edit::edit_file(self.inventory_path(), edit)?,
         }
         self.reload_inventory_keeping(keep_link.then_some(machine_id));
+        // And how long it had been idle (a cloud machine): one made later under its name isn't it.
+        cloud::forget_idle(machine_id);
         // Its pairing goes too, so a machine added later under its name starts unpaired.
         if self.demo_world().is_none() && crate::fleet::direct::paired(machine_id).is_some() {
             let _ = crate::fleet::direct::save(machine_id, None);

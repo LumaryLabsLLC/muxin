@@ -654,6 +654,7 @@ fn status_word(m: &Machine) -> &'static str {
         "offline" if format::is_just_offline(m) => "offline",
         "offline" => "can't connect",
         "asleep" => "asleep",
+        "manual" if m.droplet_gone() => "gone",
         "manual" if m.awaits_address() => "starting",
         "manual" => "no host",
         "disconnected" => "disconnected",

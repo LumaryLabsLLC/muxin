@@ -35,8 +35,14 @@ pub struct Inputs<'a> {
     pub tailnet: &'a HashMap<String, TailnetDevice>,
     /// Tailscale on this computer, when it's installed.
     pub tailscale: Option<&'a TailscaleStatus>,
-    /// Cloud machines' power as the provider last reported it, by machine id.
+    /// Cloud machines' power as the provider last reported it, by machine id
+    /// ("gone": it has no such droplet).
     pub droplets: &'a HashMap<String, String>,
+    /// Droplets asked for whose answer never came (cloud::pending).
+    pub cloud_asked: &'a [crate::cloud::pending::Asked],
+    /// Why the provider can't be asked about machines that wait for their
+    /// address, when that takes the user (signing in again).
+    pub cloud_trouble: Option<&'a str>,
     /// How each machine's live link goes: ("direct" | "ssh", its network,
     /// such as "Local network"), by machine id.
     pub links: &'a HashMap<String, (&'static str, Option<&'static str>)>,
@@ -151,7 +157,7 @@ pub fn build(input: &Inputs) -> Snapshot {
                 explain_unreachable(spec, p, input.settings.check_interval_minutes > 0, device, input.tailscale)
             }
         });
-        machine_diagnostics(&mut diagnostics, spec, probe, unreachable.as_ref());
+        machine_diagnostics(&mut diagnostics, spec, probe, unreachable.as_ref(), input.droplets.get(&spec.id).map(String::as_str), input.cloud_trouble);
         // The ones it's meant to have (a NAS's small system volume), as config.toml says.
         diagnostics.retain(|d| !spec.ignore_warnings.contains(&d.code));
         diagnostics.sort_by_key(|d| level_rank(&d.level));
@@ -854,16 +860,32 @@ fn runner_diagnostics(
 /// attention: longer than creating one waits for it to start (six minutes).
 const STARTING_TOO_LONG_MINUTES: i64 = 10;
 
-fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Option<&ProbeResult>, unreachable: Option<&Unreachable>) {
+/// What to do about a cloud machine whose droplet DigitalOcean doesn't have.
+const GONE_HINT: &str = "If you deleted it at DigitalOcean, destroy it here too: that takes it out of your machines, and nothing is billed for it. If Muxin is signed in to another account or team than the one it was made in, sign in to that one (Settings › Cloud) and check the machine by name.";
+
+/// `droplet`: a cloud machine's state as the provider last gave it ("gone":
+/// it has no such droplet). `cloud_trouble`: why the provider can't be asked.
+fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Option<&ProbeResult>, unreachable: Option<&Unreachable>, droplet: Option<&str>, cloud_trouble: Option<&str>) {
     // A cloud machine from the moment it's created: no host isn't a mistake in config.toml.
     if spec.awaits_address() {
-        out.push(diag(
-            "info",
-            "cloud-starting",
-            "It's created on DigitalOcean and billed from then; it has no address yet.".into(),
-            Some("Muxin adds its address at a machine check once it has started. Destroy it if you don't want it.".into()),
-            None,
-        ));
+        out.push(match (droplet, cloud_trouble) {
+            (Some("gone"), _) => diag("warning", "cloud-gone", "DigitalOcean has no droplet for it in the account Muxin is signed in to.".into(), Some(GONE_HINT.into()), None),
+            // Signed out: it still exists and is billed, and nothing changes until the user signs in.
+            (_, Some(why)) => diag(
+                "warning",
+                "cloud-starting",
+                "It's created on DigitalOcean and billed from then; it has no address yet.".into(),
+                Some(format!("Muxin can't ask DigitalOcean whether it has started: {why} Destroy it if you don't want it.")),
+                None,
+            ),
+            _ => diag(
+                "info",
+                "cloud-starting",
+                "It's created on DigitalOcean and billed from then; it has no address yet.".into(),
+                Some("Muxin adds its address at a machine check once it has started. Destroy it if you don't want it.".into()),
+                None,
+            ),
+        });
         return;
     }
     if !spec.is_checkable() {
@@ -1165,19 +1187,51 @@ fn attention(
     // Cloud machines that were created and never started, as far as Muxin
     // knows: a create that was cut off (Muxin quit, or crashed), or a droplet
     // that's taking far longer than the six minutes creating one waits. They're billed.
+    let ago = |minutes: i64| if minutes >= 120 { format!("{}h", minutes / 60) } else { format!("{minutes}m") };
     for m in machines.iter().filter(|m| m.awaits_address()) {
         let Some(c) = &m.cloud else { continue };
+        // Its droplet isn't there anymore: nothing is billed, and nothing will start.
+        if m.droplet_gone() {
+            out.push(Attention {
+                id: format!("cloud-gone-{}", m.id),
+                level: "warning".into(),
+                title: format!("DigitalOcean doesn't have {}'s droplet", m.name),
+                detail: GONE_HINT.into(),
+                action: action("View machine", "machine", Some(m.id.clone())),
+            });
+            continue;
+        }
         let minutes = c.created_at.map(|t| (input.now - t).num_minutes()).unwrap_or(STARTING_TOO_LONG_MINUTES);
-        if minutes >= STARTING_TOO_LONG_MINUTES {
-            let since = if minutes >= 120 { format!("{}h", minutes / 60) } else { format!("{minutes}m") };
+        if minutes >= STARTING_TOO_LONG_MINUTES || input.cloud_trouble.is_some() {
+            let next = match input.cloud_trouble {
+                Some(why) => format!("Muxin can't ask DigitalOcean whether it has started: {why}"),
+                None => "Muxin adds its address at a machine check once it has started.".to_string(),
+            };
             out.push(Attention {
                 id: format!("cloud-starting-{}", m.id),
                 level: "warning".into(),
-                title: format!("{} was created {since} ago and hasn't started", m.name),
-                detail: format!("It costs ${:.3} an hour while it exists. Muxin adds its address at a machine check once it has started. Destroy it from its page if you don't want it.", c.price_hourly),
+                title: format!("{} was created {} ago and hasn't started", m.name, ago(minutes.max(0))),
+                detail: format!("It costs ${:.3} an hour while it exists. {next} Destroy it from its page if you don't want it.", c.price_hourly),
                 action: action("View machine", "machine", Some(m.id.clone())),
             });
         }
+    }
+
+    // Droplets asked for whose answer never came, and that couldn't be
+    // settled since: made (and billed) or not, Muxin doesn't know. Past the
+    // time the Muxin that asked looks for it itself.
+    for a in input.cloud_asked.iter().filter(|a| a.settled(input.now)) {
+        let next = match &a.problem {
+            Some(why) => why.clone(),
+            None => "Muxin asks DigitalOcean at every machine check, and adds it to your machines if it's there.".to_string(),
+        };
+        out.push(Attention {
+            id: format!("cloud-asked-{}", a.droplet),
+            level: "warning".into(),
+            title: format!("Muxin asked DigitalOcean for {} {} ago and didn't hear back", a.name, ago((input.now - a.asked_at).num_minutes().max(0))),
+            detail: format!("If the droplet was made, it costs ${:.3} an hour, and it isn't in your machines yet. {next}", a.price_hourly),
+            action: action("Check machines", "check", None),
+        });
     }
 
     // Cloud machines nobody has used for a while (Settings › Cloud says how long).
@@ -1366,6 +1420,8 @@ mod tests {
             tailnet: &HashMap::new(),
             tailscale: None,
             droplets: &HashMap::new(),
+            cloud_asked: &[],
+            cloud_trouble: None,
             links: &HashMap::new(),
             paired: &HashSet::new(),
             ssh_only: &HashSet::new(),
@@ -1436,7 +1492,7 @@ mod tests {
         waiting.reboot_required = true;
         let reboot = |spec: &MachineSpec| {
             let mut out = Vec::new();
-            machine_diagnostics(&mut out, spec, Some(&waiting), None);
+            machine_diagnostics(&mut out, spec, Some(&waiting), None, None, None);
             out.into_iter().find(|d| d.code == "reboot-required").expect("it wants a reboot")
         };
         assert_eq!(reboot(&inv.machines[0]).actions[0].kind, "machine_restart");
@@ -1921,6 +1977,8 @@ mod tests {
                 tailnet: &HashMap::new(),
                 tailscale: None,
                 droplets: &HashMap::new(),
+                cloud_asked: &[],
+                cloud_trouble: None,
                 links: &links,
                 paired: &paired,
                 ssh_only: &ssh_only,

@@ -1718,7 +1718,7 @@ fn main() -> ExitCode {
         }
         Some(Command::RemoveMachine(a)) => {
             let req = api::MachineRequest { machine_id: a.machine_id };
-            run(&runtime, &a.agent, async move |e| api::remove_machine(&e, req).await, |m| {
+            run(&runtime, &a.agent, async move |e| api::remove_machine(&e, req, api::Surface::Cli).await, |m| {
                 format!("Removed {} ({}) from config.toml. On the machine, only a direct connection from this app (if it had one) is turned off.\n", m.name, m.id)
             })
         }

@@ -341,6 +341,8 @@ impl Root {
         let off = m.status == "offline";
         // Created, and not started as far as Muxin knows: nothing to power yet, but it's billed.
         let starting = m.awaits_address();
+        // DigitalOcean doesn't have its droplet: all that's left is taking it out of Muxin.
+        let gone = m.droplet_gone();
         let powering = s.operations.iter().find(|o| o.status == "running" && o.machine_id.as_deref() == Some(&m.id)).and_then(|o| match o.kind.as_str() {
             "cloud-power-on" => Some(true),
             "cloud-power-off" => Some(false),
@@ -349,6 +351,7 @@ impl Root {
         let power_label = match powering {
             Some(true) => "Powering on…",
             Some(false) => "Shutting down…",
+            None if gone => "Power on",
             None if starting => "Starting…",
             None if off => "Power on",
             None => "Power off",
@@ -359,6 +362,7 @@ impl Root {
         let state = match powering {
             Some(true) => ("Powering on…".to_string(), theme.text_muted),
             Some(false) => ("Shutting down…".to_string(), theme.text_muted),
+            None if gone => ("Not at DigitalOcean anymore".to_string(), theme.warning),
             None if starting => ("Starting · billed from now".to_string(), theme.warning),
             None if off => ("Powered off · still billed".to_string(), theme.warning),
             None => (format!("Running{}", idle.unwrap_or_default()), theme.text_placeholder),
@@ -979,6 +983,7 @@ fn status_label(m: &Machine) -> &'static str {
     match m.status.as_str() {
         "online" => "Online",
         "offline" | "asleep" => format::unreachable_word(m),
+        "manual" if m.droplet_gone() => "Gone",
         "manual" if m.awaits_address() => "Starting",
         "manual" => "No host",
         _ => "Not checked",

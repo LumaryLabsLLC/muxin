@@ -297,6 +297,12 @@ impl Machine {
     pub fn awaits_address(&self) -> bool {
         self.cloud.is_some() && self.host.is_empty()
     }
+
+    /// A cloud machine whose droplet the provider doesn't have (in the
+    /// account that's signed in): deleted there, as far as Muxin can tell.
+    pub fn droplet_gone(&self) -> bool {
+        self.cloud.as_ref().is_some_and(|c| c.power.as_deref() == Some("gone"))
+    }
 }
 
 /// One of a machine's monitors: a real one, or a virtual one Muxin added.

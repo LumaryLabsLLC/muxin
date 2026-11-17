@@ -62,6 +62,20 @@ struct Sea {
     asked_about: u32,
     /// "POST /droplets", "DELETE /droplets/7", ...
     calls: Vec<String>,
+    /// How far its clock is ahead of this computer's, in seconds: what its
+    /// `Date` header says, and when it says it made a droplet.
+    clock_ahead: i64,
+    /// Its clock moves on this many seconds with every list of droplets it
+    /// gives: minutes pass there while a test's looks take milliseconds.
+    clock_runs: i64,
+    /// What it answers with in place of the list of droplets ("429 Too Many Requests").
+    on_list: Option<&'static str>,
+    /// And in place of one droplet.
+    on_droplet: Option<&'static str>,
+    /// How many more times it won't delete a droplet (it's "still making it").
+    busy_deletes: u32,
+    /// Gives every droplet, whatever name is asked for.
+    ignores_name: bool,
 }
 
 /// A stand-in for DigitalOcean: its droplets exist only here.
@@ -75,7 +89,20 @@ impl Ocean {
     fn start() -> Ocean {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let api = format!("http://{}/v2", listener.local_addr().unwrap());
-        let sea = Arc::new(Mutex::new(Sea { droplets: Vec::new(), next_id: 7001, on_create: OnCreate::Make, starts_after: None, asked_about: 0, calls: Vec::new() }));
+        let sea = Arc::new(Mutex::new(Sea {
+            droplets: Vec::new(),
+            next_id: 7001,
+            on_create: OnCreate::Make,
+            starts_after: None,
+            asked_about: 0,
+            calls: Vec::new(),
+            clock_ahead: 0,
+            clock_runs: 0,
+            on_list: None,
+            on_droplet: None,
+            busy_deletes: 0,
+            ignores_name: false,
+        }));
         let ocean = Ocean { api, sea };
         let serving = ocean.clone();
         std::thread::spawn(move || {
@@ -93,6 +120,53 @@ impl Ocean {
 
     fn starts_after(&self, asks: u32) {
         self.sea.lock().unwrap().starts_after = Some(asks);
+    }
+
+    /// Its clock is this many seconds ahead of this computer's (negative: behind).
+    fn clock(&self, ahead: i64) {
+        self.sea.lock().unwrap().clock_ahead = ahead;
+    }
+
+    fn clock_runs(&self, seconds_a_list: i64) {
+        self.sea.lock().unwrap().clock_runs = seconds_a_list;
+    }
+
+    /// The time there.
+    fn now(&self) -> chrono::DateTime<Utc> {
+        Utc::now() + chrono::Duration::seconds(self.sea.lock().unwrap().clock_ahead)
+    }
+
+    fn on_list(&self, status: Option<&'static str>) {
+        self.sea.lock().unwrap().on_list = status;
+    }
+
+    fn on_droplet(&self, status: Option<&'static str>) {
+        self.sea.lock().unwrap().on_droplet = status;
+    }
+
+    fn busy_deletes(&self, times: u32) {
+        self.sea.lock().unwrap().busy_deletes = times;
+    }
+
+    fn ignores_name(&self) {
+        self.sea.lock().unwrap().ignores_name = true;
+    }
+
+    /// Deleted there (in its panel, with doctl), without Muxin.
+    fn deletes(&self, id: u64) {
+        self.sea.lock().unwrap().droplets.retain(|d| d.id != id);
+    }
+
+    /// Everything there was made this much longer ago.
+    fn older(&self, seconds: i64) {
+        for d in self.sea.lock().unwrap().droplets.iter_mut() {
+            let made = chrono::DateTime::parse_from_rfc3339(&d.created_at).unwrap().with_timezone(&Utc) - chrono::Duration::seconds(seconds);
+            d.created_at = made.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        }
+    }
+
+    fn asked(&self, call: &str) -> usize {
+        self.calls().iter().filter(|c| c.as_str() == call).count()
     }
 
     /// A droplet that's there without Muxin having heard of it.
@@ -149,7 +223,9 @@ impl Ocean {
         let body: Value = serde_json::from_slice(&buf[head_end..]).unwrap_or(Value::Null);
         let Some((status, answer)) = self.answer(&method, &target, &body) else { return };
         let text = if answer.is_null() { String::new() } else { answer.to_string() };
-        let _ = stream.write_all(format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}", text.len()).as_bytes());
+        // What time it has, as every answer of DigitalOcean's says.
+        let date = self.now().format("%a, %d %b %Y %H:%M:%S GMT");
+        let _ = stream.write_all(format!("HTTP/1.1 {status}\r\ndate: {date}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}", text.len()).as_bytes());
     }
 
     /// The status line and body for a request; None hangs up without a word.
@@ -158,6 +234,15 @@ impl Ocean {
         let mut sea = self.sea.lock().unwrap();
         sea.calls.push(format!("{method} {path}{}", query.split('&').find(|q| q.starts_with("name=")).map(|q| format!("?{q}")).unwrap_or_default()));
         let not_found = ("404 Not Found", json!({ "id": "not_found", "message": "The resource you were accessing could not be found." }));
+        let refusal = |status: &'static str| {
+            let message = match &status[..3] {
+                "401" => "Unable to authenticate you",
+                "429" => "API Rate limit exceeded.",
+                _ => "Server Error",
+            };
+            (status, json!({ "id": "error", "message": message }))
+        };
+        let now_there = Utc::now() + chrono::Duration::seconds(sea.clock_ahead);
         let droplet = |d: &Made| {
             json!({
                 "id": d.id, "name": d.name, "status": d.status, "created_at": d.created_at,
@@ -188,7 +273,7 @@ impl Ocean {
                     size: body["size"].as_str().unwrap_or_default().into(),
                     status: "new".into(),
                     ip: None,
-                    created_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    created_at: now_there.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 };
                 sea.droplets.push(made.clone());
                 if sea.on_create == OnCreate::MakeAndHangUp {
@@ -197,10 +282,24 @@ impl Ocean {
                 ("202 Accepted", json!({ "droplet": droplet(&made) }))
             }
             ("GET", "/droplets") => {
-                let name = query.split('&').find_map(|q| q.strip_prefix("name=")).unwrap_or("").to_string();
-                ("200 OK", json!({ "droplets": sea.droplets.iter().filter(|d| d.name.eq_ignore_ascii_case(&name)).map(droplet).collect::<Vec<_>>() }))
+                if let Some(status) = sea.on_list {
+                    return Some(refusal(status));
+                }
+                sea.clock_ahead += sea.clock_runs;
+                let param = |key: &str| query.split('&').find_map(|q| q.strip_prefix(key)).map(str::to_string);
+                let name = param("name=").unwrap_or_default();
+                let page = param("page=").and_then(|p| p.parse::<usize>().ok()).unwrap_or(1).max(1);
+                let per_page = param("per_page=").and_then(|p| p.parse::<usize>().ok()).unwrap_or(20).max(1);
+                let all: Vec<&Made> = sea.droplets.iter().filter(|d| sea.ignores_name || d.name.eq_ignore_ascii_case(&name)).collect();
+                let shown: Vec<Value> = all.iter().skip((page - 1) * per_page).take(per_page).map(|d| droplet(d)).collect();
+                // As DigitalOcean pages: a link to the next page while there's one.
+                let links = if page * per_page < all.len() { json!({ "pages": { "next": format!("{}/droplets?page={}&per_page={per_page}", self.api, page + 1) } }) } else { json!({}) };
+                ("200 OK", json!({ "droplets": shown, "links": links, "meta": { "total": all.len() } }))
             }
             ("GET", p) if p.starts_with("/droplets/") => {
+                if let Some(status) = sea.on_droplet {
+                    return Some(refusal(status));
+                }
                 let id: u64 = p["/droplets/".len()..].parse().unwrap_or(0);
                 sea.asked_about += 1;
                 let boots = sea.starts_after.is_some_and(|n| sea.asked_about >= n);
@@ -216,6 +315,10 @@ impl Ocean {
                 }
             }
             ("DELETE", p) if p.starts_with("/droplets/") => {
+                if sea.busy_deletes > 0 {
+                    sea.busy_deletes -= 1;
+                    return Some(("422 Unprocessable Entity", json!({ "id": "unprocessable_entity", "message": "Droplet already has a pending event." })));
+                }
                 let id: u64 = p["/droplets/".len()..].parse().unwrap_or(0);
                 let before = sea.droplets.len();
                 sea.droplets.retain(|d| d.id != id);
@@ -305,7 +408,8 @@ fn folder(name: &str, ocean: &Ocean, start_wait: Option<(Duration, u32)>) -> Pat
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("config.toml"), "# A test's machines.\n").unwrap();
-    stand_in::set(&dir, StandIn { api: ocean.api.clone(), start_wait });
+    // The other waits (looking again, asking again) pause for milliseconds.
+    stand_in::set(&dir, StandIn { api: ocean.api.clone(), start_wait, pause: Some(Duration::from_millis(10)) });
     dir
 }
 
@@ -324,6 +428,35 @@ fn ssh_key() {
 
 fn me() -> String {
     super::local_user()
+}
+
+fn asked(name: &str, asked_at: chrono::DateTime<Utc>) -> pending::Asked {
+    pending::Asked {
+        name: name.into(),
+        droplet: crate::util::slug(name),
+        region: REGION.into(),
+        size: SIZE.into(),
+        price_hourly: HOURLY,
+        user: "dev".into(),
+        asked_at,
+        clock_ahead_secs: Some(0),
+        problem: None,
+    }
+}
+
+/// Time passes: what was asked for, and what DigitalOcean made, are this
+/// much older (past the time the Muxin that asked looks for it itself).
+fn later(dir: &Path, ocean: &Ocean, seconds: i64) {
+    for a in pending::read(dir) {
+        pending::remove(dir, &a);
+        pending::add(dir, &pending::Asked { asked_at: a.asked_at - chrono::Duration::seconds(seconds), ..a }).unwrap();
+    }
+    ocean.older(seconds);
+}
+
+fn attention(muxin: &Process, id: &str) -> Option<crate::fleet::model::Attention> {
+    muxin.engine.republish();
+    muxin.engine.current().attention.iter().find(|a| a.id == id).cloned()
 }
 
 // ---------------------------------------------------------------------------
@@ -475,10 +608,14 @@ fn a_droplet_that_doesnt_start_in_time_stays_in_muxin() {
     assert_eq!((usage.machines.len(), usage.hourly_now), (1, HOURLY));
 
     // It starts after all: the next machine check gives it its address.
+    // The check waits for that: a command (`muxin check`) exits when its check returns.
     ocean.boots(ocean.droplets()[0].id);
     muxin.run(muxin.engine.run_check(None));
-    wait("its address", || Some(muxin.machines()).filter(|m| !m[0].awaits_address()));
-    assert_eq!(muxin.machines()[0].host, format!("{}@{ADDRESS}", me()));
+    assert_eq!(muxin.machines()[0].host, format!("{}@{ADDRESS}", me()), "{}", muxin.config());
+    // And it was checked at its new address (nothing answers there).
+    let snap = muxin.engine.current();
+    let m = snap.machines.iter().find(|m| m.id == "slow").unwrap();
+    assert!(m.probe.is_some() && m.status == "offline", "{} {:?}", m.status, m.probe.is_some());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -526,33 +663,26 @@ fn a_create_digitalocean_turns_down_leaves_nothing() {
 }
 
 /// An error of DigitalOcean's own doesn't say whether the droplet was made.
-/// Muxin looks, finds none, and looks once more later before it lets go:
-/// meanwhile the same droplet isn't asked for again.
+/// Muxin looks until it's sure: for as long as DigitalOcean could still make
+/// it (a couple of minutes, by its clock), and then says nothing was made.
+/// Meanwhile the same droplet isn't asked for again.
 #[test]
-fn a_create_that_failed_at_digitalocean_is_looked_for_before_its_let_go() {
+fn a_create_that_failed_at_digitalocean_is_looked_for_until_its_sure() {
     let ocean = Ocean::start();
     ocean.on_create(OnCreate::Fail);
+    // A minute passes there with every look.
+    ocean.clock_runs(60);
     let dir = folder("failed", &ocean, None);
     let muxin = Process::start(&dir);
     let failed = muxin.ends(muxin.create("Dev Box"));
-    assert_eq!(
-        failed.error.as_deref(),
-        Some("DigitalOcean: Server Error. DigitalOcean doesn't list the droplet, so it probably wasn't made. Muxin looks once more at the next machine check, and adds it to your machines if it's there after all.")
-    );
-    assert!(ocean.calls().contains(&"GET /droplets?name=dev-box".to_string()), "{:?}", ocean.calls());
+    assert_eq!(failed.error.as_deref(), Some("DigitalOcean: Server Error. DigitalOcean made no droplet for it, so nothing is billed. Try again."));
+    assert!(failed.log.iter().any(|l| l == "▸ It isn't listed. DigitalOcean can still make it for a couple of minutes: looking again until then"), "{:?}", failed.log);
+    // Not at the first "it isn't there": while it could still be made, that says nothing.
+    assert_eq!(ocean.asked("GET /droplets?name=dev-box"), 3, "{:?}", ocean.calls());
     assert!(muxin.machines().is_empty());
-    let asked = pending::read(&dir);
-    assert_eq!(asked.iter().map(|a| (a.name.as_str(), a.droplet.as_str())).collect::<Vec<_>>(), [("Dev Box", "dev-box")]);
-    ocean.on_create(OnCreate::Make);
-    assert!(muxin.ends(muxin.create("Dev Box")).error.unwrap().starts_with("Muxin asked DigitalOcean for \"Dev Box\" a moment ago"));
-    assert!(ocean.droplets().is_empty());
-
-    // A couple of minutes on (here: the entry made older), still nothing there: it's let go.
-    pending::remove(&dir, &asked[0]);
-    pending::add(&dir, &pending::Asked { asked_at: asked[0].asked_at - chrono::Duration::seconds(pending::SETTLE_SECS), ..asked[0].clone() }).unwrap();
-    muxin.run(muxin.engine.cloud_catch_up());
-    assert!(!pending::any(&dir) && muxin.machines().is_empty());
+    assert!(!pending::any(&dir), "sure now: crossed off");
     // And the name can be created.
+    ocean.on_create(OnCreate::Make);
     let op = muxin.create("Dev Box");
     assert_eq!(muxin.logs(op, "Waiting for it to start").status, "running");
     assert_eq!((ocean.droplets().len(), muxin.machines().len()), (1, 1));
@@ -567,21 +697,13 @@ fn a_droplet_asked_for_as_muxin_ended_is_found_later() {
     let ocean = Ocean::start();
     let dir = folder("asked", &ocean, None);
     let now = Utc::now();
-    let asked = |name: &str, ago: i64| pending::Asked {
-        name: name.into(),
-        droplet: crate::util::slug(name),
-        region: REGION.into(),
-        size: SIZE.into(),
-        price_hourly: HOURLY,
-        user: "dev".into(),
-        asked_at: now - chrono::Duration::seconds(ago),
-    };
+    let asked = |name: &str, ago: i64| asked(name, now - chrono::Duration::seconds(ago));
     // Made, and never heard of. An older droplet of the same name isn't it.
     let old = ocean.has("build-box", now - chrono::Duration::days(3));
-    let made = ocean.has("build-box", now - chrono::Duration::seconds(118));
-    pending::add(&dir, &asked("Build Box", 120)).unwrap();
+    let made = ocean.has("build-box", now - chrono::Duration::seconds(298));
+    pending::add(&dir, &asked("Build Box", 300)).unwrap();
     // Never made: the request didn't get there.
-    pending::add(&dir, &asked("Never", 300)).unwrap();
+    pending::add(&dir, &asked("Never", 600)).unwrap();
     // Asked for a moment ago by a Muxin that may still be waiting for the answer.
     let young = asked("Just Now", 5);
     ocean.has("just-now", now - chrono::Duration::seconds(4));
@@ -607,7 +729,7 @@ fn a_droplet_asked_for_as_muxin_ended_is_found_later() {
     let refused = muxin.ends(muxin.create("just now"));
     assert_eq!(
         refused.error.as_deref(),
-        Some("Muxin asked DigitalOcean for \"just now\" a moment ago and didn't hear back. It's finding out whether the droplet was made: try again in a minute or two.")
+        Some("Muxin has asked DigitalOcean for \"just now\" and hasn't heard back. It's finding out whether the droplet was made: try again in a few minutes.")
     );
     assert_eq!(ocean.droplets().len(), 3, "nothing new was made");
 
@@ -632,5 +754,413 @@ fn destroying_it_while_its_created_stops_the_create() {
     let failed = muxin.ends(op);
     assert_eq!(failed.error.as_deref(), Some("Dev Box was destroyed (or taken out of config.toml) while it was being created."));
     assert!(ocean.droplets().is_empty() && muxin.machines().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Which droplet is the one that was asked for
+
+/// DigitalOcean says when it made a droplet by its own clock. This
+/// computer's being minutes off (here: ten minutes fast, then ten slow)
+/// doesn't make Muxin miss the droplet it asked for.
+#[test]
+fn this_computers_clock_being_wrong_doesnt_lose_the_droplet() {
+    for (name, ahead) in [("fast-clock", -600), ("slow-clock", 600)] {
+        let ocean = Ocean::start();
+        ocean.clock(ahead);
+        ocean.on_create(OnCreate::MakeAndHangUp);
+        let dir = folder(name, &ocean, None);
+        let muxin = Process::start(&dir);
+        let op = muxin.create("Dev Box");
+        let o = muxin.logs(op, "Waiting for it to start");
+        assert_eq!(o.status, "running", "{name}: {:?} {:?}", o.log, o.error);
+        assert!(o.log.iter().any(|l| l == "✓ It did"), "{name}: {:?}", o.log);
+        let machines = muxin.machines();
+        assert_eq!(machines.len(), 1, "{name}");
+        let cloud = machines[0].cloud.as_ref().unwrap();
+        assert_eq!(cloud.id, ocean.droplets()[0].id);
+        // Billed from when DigitalOcean made it, by its clock.
+        let made = chrono::DateTime::parse_from_rfc3339(&cloud.created_at).unwrap().with_timezone(&Utc);
+        assert!((made - ocean.now()).num_seconds().abs() < 30 && (made - Utc::now()).num_seconds().abs() > 500, "{name}: {}", cloud.created_at);
+        assert!(!pending::any(&dir));
+        muxin.dies();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A droplet of the same name that DigitalOcean made at another time isn't
+/// the one Muxin asked for: it's somebody's (made by hand, with doctl, from
+/// another Muxin), and Muxin doesn't take it for its own.
+#[test]
+fn a_droplet_of_that_name_made_at_another_time_isnt_taken() {
+    let ocean = Ocean::start();
+    ocean.on_create(OnCreate::Fail);
+    ocean.clock_runs(60);
+    // Made by hand four minutes before Muxin asked, where and as big as Muxin asks.
+    let by_hand = ocean.has("dev-box", Utc::now() - chrono::Duration::minutes(4));
+    let dir = folder("stranger", &ocean, None);
+    let muxin = Process::start(&dir);
+    let failed = muxin.ends(muxin.create("Dev Box"));
+    assert_eq!(failed.error.as_deref(), Some("DigitalOcean: Server Error. DigitalOcean made no droplet for it, so nothing is billed. Try again."));
+    assert!(muxin.machines().is_empty(), "{}", muxin.config());
+    assert!(!pending::any(&dir));
+
+    // An entry that stayed for days (nobody ran Muxin) doesn't match what's made later either.
+    ocean.clock_runs(0);
+    pending::add(&dir, &asked("Dev Box", Utc::now() - chrono::Duration::days(3))).unwrap();
+    let later = ocean.has("dev-box", Utc::now() - chrono::Duration::hours(1));
+    muxin.run(muxin.engine.cloud_catch_up());
+    assert!(muxin.machines().is_empty(), "{}", muxin.config());
+    assert!(!pending::any(&dir), "nothing was made for it, and nothing will be");
+    // Theirs, untouched.
+    assert_eq!(ocean.droplets().iter().map(|d| d.id).collect::<Vec<_>>(), [by_hand, later]);
+    assert!(!ocean.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", ocean.calls());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two droplets that both fit what was asked for can't be told apart, so
+/// Muxin doesn't guess: it says so, keeps what it asked for, and shows it
+/// until one of the two is out of the way.
+#[test]
+fn two_droplets_that_fit_are_shown_not_guessed_between() {
+    let ocean = Ocean::start();
+    ocean.on_create(OnCreate::MakeAndHangUp);
+    // Somebody made one of that name in the same minute.
+    let theirs = ocean.has("dev-box", Utc::now());
+    let dir = folder("several", &ocean, None);
+    let muxin = Process::start(&dir);
+    let failed = muxin.ends(muxin.create("Dev Box"));
+    let ours = ocean.droplets().iter().map(|d| d.id).find(|id| *id != theirs).expect("the droplet Muxin asked for");
+    let cant_tell = format!(
+        "DigitalOcean has 2 droplets called dev-box that were made at that time ({theirs}, {ours}), so Muxin can't tell which one it asked for. Rename or delete the one that isn't Muxin's in DigitalOcean's panel, and Muxin adds the other to your machines at the next machine check."
+    );
+    assert!(failed.error.as_deref().is_some_and(|e| e.ends_with(&cant_tell)), "{:?}", failed.error);
+    assert!(muxin.machines().is_empty(), "{}", muxin.config());
+    assert_eq!(pending::read(&dir).iter().map(|a| a.problem.clone()).collect::<Vec<_>>(), [Some(cant_tell.clone())]);
+    // The droplet's name is taken meanwhile, however the machine's is written.
+    let again = muxin.ends(muxin.create("dev-box"));
+    assert!(again.error.as_deref().is_some_and(|e| e.starts_with("Muxin has asked DigitalOcean for \"dev-box\" and hasn't heard back.")), "{:?}", again.error);
+    assert_eq!(ocean.droplets().len(), 2, "nothing new was asked for");
+    // While the Muxin that asked may still be looking, it isn't under what needs attention.
+    assert!(attention(&muxin, "cloud-asked-dev-box").is_none());
+
+    // Later, and by whichever Muxin checks the machines: still two, still shown.
+    later(&dir, &ocean, 300);
+    muxin.run(muxin.engine.cloud_catch_up());
+    assert!(muxin.machines().is_empty());
+    let shown = attention(&muxin, "cloud-asked-dev-box").expect("what was asked for and isn't settled is shown");
+    assert_eq!((shown.level.as_str(), shown.title.as_str()), ("warning", "Muxin asked DigitalOcean for Dev Box 5m ago and didn't hear back"));
+    assert_eq!(shown.detail, format!("If the droplet was made, it costs ${HOURLY:.3} an hour, and it isn't in your machines yet. {cant_tell}"));
+
+    // The user deletes theirs at DigitalOcean: the other is Muxin's.
+    ocean.deletes(theirs);
+    muxin.run(muxin.engine.cloud_catch_up());
+    let machines = muxin.machines();
+    assert_eq!(machines.iter().map(|m| (m.name.as_str(), m.cloud.as_ref().map(|c| c.id))).collect::<Vec<_>>(), [("Dev Box", Some(ours))]);
+    assert!(!pending::any(&dir));
+    assert!(attention(&muxin, "cloud-asked-dev-box").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// When DigitalOcean can't be asked what it made (it's limiting requests,
+/// it has an error of its own), what was asked for stays written down, says
+/// why, and is shown, until an ask goes through.
+#[test]
+fn a_lookup_that_fails_keeps_what_was_asked_for_and_says_why() {
+    let ocean = Ocean::start();
+    ocean.on_create(OnCreate::MakeAndHangUp);
+    ocean.on_list(Some("429 Too Many Requests"));
+    let dir = folder("lookup-fails", &ocean, None);
+    let muxin = Process::start(&dir);
+    let failed = muxin.ends(muxin.create("Dev Box"));
+    let error = failed.error.clone().unwrap_or_default();
+    let couldnt = "Muxin couldn't find out whether DigitalOcean made the droplet all the same (DigitalOcean is rate-limiting requests; try again in a minute).";
+    assert!(error.starts_with("Couldn't reach DigitalOcean: "), "{error}");
+    assert!(error.ends_with(&format!("{couldnt} Muxin asks again at every machine check, and adds it to your machines if it's there; until then it's listed under what needs attention.")), "{error}");
+    // It was made, and is billed: not a machine yet, and not forgotten.
+    assert_eq!(ocean.droplets().len(), 1);
+    assert!(muxin.machines().is_empty());
+    assert_eq!(pending::read(&dir).iter().map(|a| a.problem.as_deref().map(str::to_string)).collect::<Vec<_>>(), [Some(couldnt.to_string())]);
+
+    // Another error, a few minutes on: one failed ask isn't "there's none".
+    later(&dir, &ocean, 300);
+    ocean.on_list(Some("500 Internal Server Error"));
+    muxin.run(muxin.engine.cloud_catch_up());
+    assert_eq!(pending::read(&dir).len(), 1);
+    let shown = attention(&muxin, "cloud-asked-dev-box").expect("shown while it isn't settled");
+    assert!(shown.detail.ends_with("Muxin couldn't ask DigitalOcean whether it made it: DigitalOcean: Server Error."), "{}", shown.detail);
+
+    // DigitalOcean answers again: there it is.
+    ocean.on_list(None);
+    muxin.run(muxin.engine.cloud_catch_up());
+    assert_eq!(muxin.machines().iter().map(|m| m.cloud.as_ref().map(|c| c.id)).collect::<Vec<_>>(), [Some(ocean.droplets()[0].id)]);
+    assert!(!pending::any(&dir) && attention(&muxin, "cloud-asked-dev-box").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The list of droplets comes in pages. A droplet on a later page is still
+/// found (here DigitalOcean gives every droplet, whatever name is asked for).
+#[test]
+fn the_list_of_droplets_is_read_to_its_end() {
+    let ocean = Ocean::start();
+    ocean.ignores_name();
+    for n in 0..450 {
+        ocean.has(&format!("other-{n}"), Utc::now());
+    }
+    let wanted = ocean.has("dev-box", Utc::now());
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let client = crate::cloud::digitalocean::Client::for_stand_in(&ocean.api);
+    let found = rt.block_on(client.droplets_named("dev-box")).unwrap();
+    assert_eq!(found.iter().map(|d| d.id).collect::<Vec<_>>(), [wanted]);
+    assert_eq!(ocean.asked("GET /droplets?name=dev-box"), 3, "451 droplets, 200 a page");
+    assert_eq!(client.clock_ahead(), Some(0));
+}
+
+// ---------------------------------------------------------------------------
+// Waiting for the address
+
+/// A blip while waiting for a droplet to start is waited out. Errors that
+/// last aren't taken for "not yet": the droplet deleted at DigitalOcean, or a
+/// sign-in that ran out, end the wait with what's true.
+#[test]
+fn errors_while_a_droplet_starts_say_whats_true() {
+    // A blip (DigitalOcean limits requests for a moment): the create goes on.
+    let ocean = Ocean::start();
+    let dir = folder("blip", &ocean, Some((Duration::from_millis(10), 3000)));
+    let muxin = Process::start(&dir);
+    let op = muxin.create("Dev Box");
+    muxin.logs(op, "Waiting for it to start");
+    ocean.on_droplet(Some("429 Too Many Requests"));
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(muxin.op(op).status, "running");
+    ocean.on_droplet(Some("500 Internal Server Error"));
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(muxin.op(op).status, "running");
+    ocean.on_droplet(None);
+    ocean.boots(ocean.droplets()[0].id);
+    let o = muxin.logs(op, "Started at");
+    assert!(o.log.iter().any(|l| l == &format!("✓ Started at {ADDRESS}")), "{:?} {:?}", o.log, o.error);
+    muxin.dies();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Deleted at DigitalOcean while it starts.
+    let ocean = Ocean::start();
+    let dir = folder("gone", &ocean, Some((Duration::from_millis(10), 3000)));
+    let muxin = Process::start(&dir);
+    let op = muxin.create("Dev Box");
+    muxin.logs(op, "Waiting for it to start");
+    let droplet = ocean.droplets()[0].id;
+    ocean.deletes(droplet);
+    let failed = muxin.ends(op);
+    assert_eq!(
+        failed.error,
+        Some(format!("DigitalOcean doesn't have Dev Box's droplet ({droplet}) anymore: it was deleted there while it was starting, so it isn't billed. It's still in your machines: destroy it from its page to take it out."))
+    );
+    let snap = muxin.engine.current();
+    let m = snap.machines.iter().find(|m| m.id == "dev-box").expect("still listed");
+    assert!(m.droplet_gone() && m.awaits_address());
+    assert_eq!(m.diagnostics.iter().map(|d| (d.level.as_str(), d.code.as_str())).collect::<Vec<_>>(), [("warning", "cloud-gone")]);
+    let shown = attention(&muxin, "cloud-gone-dev-box").expect("shown");
+    assert_eq!(shown.title, "DigitalOcean doesn't have Dev Box's droplet");
+    assert!(attention(&muxin, "cloud-starting-dev-box").is_none(), "it isn't starting, and isn't billed");
+    // A machine check doesn't ask about it again and again.
+    let before = ocean.calls().len();
+    muxin.run(muxin.engine.cloud_catch_up());
+    assert_eq!(ocean.calls().len(), before, "{:?}", ocean.calls());
+    // Another Muxin knows it too (it's kept with the machines' state).
+    let other = Process::start(&dir);
+    assert!(other.engine.current().machines.iter().any(|m| m.id == "dev-box" && m.droplet_gone()));
+    other.dies();
+    // Destroying it takes it out of Muxin.
+    assert_eq!(muxin.ends(muxin.engine.cloud_destroy("dev-box").unwrap()).status, "succeeded");
+    assert!(muxin.machines().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The sign-in runs out while it starts: it exists and is billed, and no waiting brings its address.
+    let ocean = Ocean::start();
+    let dir = folder("signed-out", &ocean, Some((Duration::from_millis(10), 3000)));
+    let muxin = Process::start(&dir);
+    let op = muxin.create("Dev Box");
+    muxin.logs(op, "Waiting for it to start");
+    ocean.on_droplet(Some("401 Unauthorized"));
+    let failed = muxin.ends(op);
+    assert_eq!(
+        failed.error.as_deref(),
+        Some("DigitalOcean didn't accept the sign-in. Connect again in Settings › Cloud. Dev Box was created and stays in your machines, and DigitalOcean bills for it: once you're signed in again, Muxin adds its address at a machine check (what it was to come with isn't installed then).")
+    );
+    assert!(muxin.machines()[0].awaits_address());
+    // What needs attention says why it has no address, at once.
+    muxin.run(muxin.engine.cloud_catch_up());
+    let shown = attention(&muxin, "cloud-starting-dev-box").expect("shown");
+    assert!(shown.detail.contains("Muxin can't ask DigitalOcean whether it has started: DigitalOcean didn't accept the sign-in. Connect again in Settings › Cloud."), "{}", shown.detail);
+    let snap = muxin.engine.current();
+    let m = snap.machines.iter().find(|m| m.id == "dev-box").unwrap();
+    assert_eq!(m.diagnostics.iter().map(|d| (d.level.as_str(), d.code.as_str())).collect::<Vec<_>>(), [("warning", "cloud-starting")]);
+    // Signed in again, and started: the address comes, and the trouble goes.
+    ocean.on_droplet(None);
+    ocean.boots(ocean.droplets()[0].id);
+    muxin.run(muxin.engine.cloud_catch_up());
+    assert_eq!(muxin.machines()[0].host, format!("{}@{ADDRESS}", me()));
+    assert!(attention(&muxin, "cloud-starting-dev-box").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Checking a machine that hasn't started by its name asks DigitalOcean
+/// about it, and says where it stands, rather than "it has no host".
+#[test]
+fn checking_a_starting_machine_by_name_asks_digitalocean() {
+    use crate::api::{self, CheckRequest};
+    let ocean = Ocean::start();
+    let dir = folder("check-by-name", &ocean, None);
+    let first = Process::start(&dir);
+    let op = first.create("Dev Box");
+    first.logs(op, "Waiting for it to start");
+    first.dies();
+    let droplet = ocean.droplets()[0].id;
+
+    let muxin = Process::start(&dir);
+    let check = || muxin.run(api::check(&muxin.engine, CheckRequest { machine_id: Some("Dev Box".into()) }));
+    let before = ocean.asked(&format!("GET /droplets/{droplet}"));
+    let stands = check().expect("where it stands");
+    assert_eq!(ocean.asked(&format!("GET /droplets/{droplet}")), before + 1);
+    assert_eq!(stands.len(), 1);
+    assert_eq!((stands[0].id.as_str(), stands[0].status.as_str(), stands[0].host.as_str()), ("dev-box", "manual", ""));
+    assert_eq!(stands[0].cloud.as_ref().and_then(|c| c.power.as_deref()), Some("starting"));
+
+    // DigitalOcean can't be asked: that's said, in its words.
+    ocean.on_droplet(Some("401 Unauthorized"));
+    let e = check().unwrap_err();
+    assert_eq!((e.code, e.message.as_str()), ("operation_failed", "Dev Box has no address yet, and Muxin couldn't ask DigitalOcean whether it has started: DigitalOcean didn't accept the sign-in. Connect again in Settings › Cloud."));
+
+    // Started: it gets its address, and is checked at it (nothing answers there).
+    ocean.on_droplet(None);
+    ocean.boots(droplet);
+    let checked = check().expect("checked");
+    assert_eq!((checked[0].host.clone(), checked[0].status.as_str()), (format!("{}@{ADDRESS}", me()), "offline"));
+    assert!(checked[0].checked_at.is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Destroying, and taking out of Muxin
+
+/// DigitalOcean won't delete a droplet it's still making. Muxin asks again
+/// until it will; if it never will, the machine stays listed and says so.
+#[test]
+fn a_droplet_digitalocean_is_still_making_is_deleted_once_it_can_be() {
+    let ocean = Ocean::start();
+    let dir = folder("busy-delete", &ocean, Some((Duration::from_millis(20), 3000)));
+    let muxin = Process::start(&dir);
+    let op = muxin.create("Dev Box");
+    muxin.logs(op, "Waiting for it to start");
+    let droplet = ocean.droplets()[0].id;
+
+    // It never will (as far as the two minutes of asking go): nothing is taken out of Muxin.
+    ocean.busy_deletes(1000);
+    let refused = muxin.ends(muxin.engine.cloud_destroy("dev-box").unwrap());
+    assert_eq!(
+        refused.error.as_deref(),
+        Some("DigitalOcean can't delete Dev Box yet, because it's still working on it (DigitalOcean: Droplet already has a pending event). It's still in your machines, and billed: destroy it again in a few minutes.")
+    );
+    assert_eq!(ocean.asked(&format!("DELETE /droplets/{droplet}")), super::DELETE_WAIT.1 as usize);
+    assert_eq!((ocean.droplets().len(), muxin.machines().len()), (1, 1));
+    assert_eq!(muxin.op(op).status, "running", "the create goes on: its droplet is still there");
+
+    // It will after a few asks.
+    ocean.busy_deletes(3);
+    let destroyed = muxin.ends(muxin.engine.cloud_destroy("dev-box").unwrap());
+    assert_eq!(destroyed.status, "succeeded", "{:?} {:?}", destroyed.log, destroyed.error);
+    assert!(destroyed.log.iter().any(|l| l == "▸ DigitalOcean is still working on it and can't delete it yet; asking again for up to two minutes"), "{:?}", destroyed.log);
+    assert!(ocean.droplets().is_empty() && muxin.machines().is_empty());
+    assert_eq!(muxin.ends(op).error.as_deref(), Some("Dev Box was destroyed (or taken out of config.toml) while it was being created."));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A create that's setting its machine up sees another Muxin destroy it (the
+/// app, while `muxin cloud create` waits), and stops: the address it was
+/// trying may be somebody else's machine by then.
+#[test]
+fn another_muxins_destroy_stops_the_setup() {
+    let ocean = Ocean::start();
+    ocean.starts_after(1);
+    let dir = folder("setup-destroyed", &ocean, Some((Duration::from_millis(10), 500)));
+    let command = Process::start(&dir);
+    let op = command.create("Dev Box");
+    let o = command.logs(op, "Setting it up");
+    assert_eq!(o.status, "running", "{:?} {:?}", o.log, o.error);
+
+    let app = Process::start(&dir);
+    let destroyed = app.ends(app.engine.cloud_destroy("dev-box").unwrap());
+    assert_eq!(destroyed.status, "succeeded", "{:?}", destroyed.log);
+
+    // Within one try of its address (ssh gives up on it after a few seconds).
+    let stopped = command.ends(op);
+    assert_eq!(stopped.error.as_deref(), Some("Dev Box was destroyed (or taken out of config.toml) while it was being set up."));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Taking a cloud machine out of Muxin without destroying it would leave a
+/// billed droplet that nothing here lists, so a command or an agent is told
+/// to destroy it instead (as the app only offers).
+#[test]
+fn a_cloud_machine_isnt_taken_out_of_muxin_without_its_droplet() {
+    use crate::api::{self, MachineRequest, Surface};
+    let ocean = Ocean::start();
+    let dir = folder("remove", &ocean, None);
+    let muxin = Process::start(&dir);
+    let op = muxin.create("Dev Box");
+    muxin.logs(op, "Waiting for it to start");
+    let remove = |surface| muxin.run(api::remove_machine(&muxin.engine, MachineRequest { machine_id: "dev-box".into() }, surface)).unwrap_err();
+    let e = remove(Surface::Mcp);
+    assert_eq!((e.code, e.message.as_str()), ("invalid", "Dev Box is a cloud machine Muxin created: taken out of Muxin, its droplet would stay at DigitalOcean, billed and listed nowhere here."));
+    assert_eq!(e.hint.as_deref(), Some("Destroy it with cloud_destroy(machine_id: \"dev-box\"), which deletes the droplet too. That also takes out one whose droplet is already gone."));
+    assert_eq!(remove(Surface::Cli).hint.as_deref(), Some("muxin cloud destroy dev-box"));
+    assert_eq!((muxin.machines().len(), ocean.droplets().len()), (1, 1));
+    muxin.dies();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// The idle watch
+
+/// How long a cloud machine has been idle is kept for its droplet. A machine
+/// destroyed and made again under the same name is another droplet: it
+/// doesn't inherit hours of idleness (and with them, a power-off or a
+/// destroy minutes after it comes up).
+#[test]
+fn a_machine_made_again_under_a_name_starts_its_idle_clock_anew() {
+    let now = Utc::now();
+    let long_ago = now - chrono::Duration::hours(5);
+    let mut idle = super::IdleState::default();
+    assert_eq!(*idle.clock("dev", 7001, long_ago), long_ago);
+    assert_eq!(*idle.clock("dev", 7001, now), long_ago, "the same droplet keeps its clock");
+    idle.acted.insert("dev".into());
+    // Destroyed elsewhere and made again before the watch looked: another droplet under the id.
+    assert_eq!(*idle.clock("dev", 7002, now), now);
+    assert!(!idle.acted.contains("dev"), "and it hasn't been acted on");
+    // A machine that's gone takes what's kept for it along.
+    idle.clock("old", 1, long_ago);
+    idle.acted.insert("old".into());
+    idle.keep_only(&["dev"].into_iter().collect());
+    assert_eq!(idle.last_active.keys().collect::<Vec<_>>(), ["dev"]);
+    assert!(idle.droplets.len() == 1 && idle.acted.is_empty());
+
+    // Destroying a machine forgets its clock at once.
+    let ocean = Ocean::start();
+    let dir = folder("idle", &ocean, Some((Duration::from_millis(20), 3000)));
+    let muxin = Process::start(&dir);
+    let op = muxin.create("Idle Box");
+    muxin.logs(op, "Waiting for it to start");
+    let droplet = ocean.droplets()[0].id;
+    super::IDLE.lock().unwrap().get_or_insert_with(Default::default).clock("idle-box", droplet, long_ago);
+    assert_eq!(super::idle_since("idle-box"), Some(long_ago));
+    assert_eq!(muxin.ends(muxin.engine.cloud_destroy("idle-box").unwrap()).status, "succeeded");
+    assert_eq!(super::idle_since("idle-box"), None);
+    // And one that's made under a name whose old clock is still around doesn't get it.
+    super::IDLE.lock().unwrap().get_or_insert_with(Default::default).clock("idle-box", droplet, long_ago);
+    let op = muxin.create("Idle Box");
+    muxin.logs(op, "Waiting for it to start");
+    assert_eq!(super::idle_since("idle-box"), None);
+    muxin.dies();
     let _ = std::fs::remove_dir_all(&dir);
 }

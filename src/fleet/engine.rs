@@ -28,6 +28,8 @@ const MAX_OP_LOG_LINES: usize = 2000;
 const MAX_NOTICES: usize = 50;
 /// How often to look for an offline machine coming back.
 const OFFLINE_RECHECK: Duration = Duration::from_secs(30);
+/// How long a machine check waits for the cloud catch-up it started (see `run_check`).
+const CATCH_UP_WAIT: Duration = Duration::from_secs(20);
 /// How long a machine's promise to say when it wakes is taken at its word:
 /// past that, a check of every machine looks at it again, this often.
 const PROMISE_HOLDS: Duration = Duration::from_secs(2 * 3600);
@@ -90,6 +92,9 @@ struct State {
     tailscale: Option<super::model::TailscaleStatus>,
     /// Cloud machines' power as the provider last reported it ("active", "off", ...).
     droplets: HashMap<String, String>,
+    /// Why the provider couldn't be asked about cloud machines that wait for
+    /// their address, when the user has to do something about it (sign in again).
+    cloud_trouble: Option<String>,
     /// Machines' monitors, as last listed (see fleet::desktop).
     displays: HashMap<String, Vec<super::model::DisplayInfo>>,
     /// Monitors' sizes from before Muxin first changed them, by machine and
@@ -218,6 +223,7 @@ impl Engine {
             tailnet: persisted.tailnet,
             tailscale: None,
             droplets: persisted.droplets,
+            cloud_trouble: None,
             displays: HashMap::new(),
             display_before: HashMap::new(),
             cancels: HashMap::new(),
@@ -845,6 +851,16 @@ impl Engine {
         }
     }
 
+    /// Notes why the provider can't be asked about cloud machines that wait
+    /// for their address (None: it can).
+    pub(crate) fn set_cloud_trouble(&self, trouble: Option<String>) {
+        let mut st = self.state.lock().unwrap();
+        if st.cloud_trouble != trouble {
+            st.cloud_trouble = trouble;
+            self.publish(&mut st);
+        }
+    }
+
     /// Remembers a destroyed cloud machine for this month's costs (and the
     /// next one's, for a while), and forgets its power state.
     pub(crate) fn record_destroyed(&self, machine_id: &str, entry: crate::config::DestroyedCloud) {
@@ -1411,11 +1427,14 @@ impl Engine {
             (jobs, in_flight.into_iter().map(|m| m.id).collect())
         };
         // A cloud machine whose create was cut off: found, or given its
-        // address, alongside the check (it's then checked like the others).
-        if self.demo.is_none() {
+        // address, alongside the check, and checked then like the others.
+        // With a check of every machine, and with one of a machine that
+        // waits for its address.
+        let named: Vec<String> = only.iter().flatten().filter(|id| self.current().machines.iter().any(|m| m.awaits_address() && m.id == **id)).cloned().collect();
+        let catching_up = (self.demo.is_none() && (full || !named.is_empty())).then(|| {
             let me = self.clone();
-            self.rt.spawn(async move { me.cloud_catch_up().await });
-        }
+            self.rt.spawn(async move { me.cloud_catch_up_and_check(named).await })
+        });
         // These are looked at on purpose, asleep or not.
         let _looking: Vec<super::asleep::Looking> = jobs.iter().map(|(s, _)| super::asleep::look(&s.id)).collect();
 
@@ -1483,21 +1502,30 @@ impl Engine {
             }
         }
 
-        let mut st = self.state.lock().unwrap();
-        if full {
-            st.check_running = false;
-            st.check_finished_at = Some(Utc::now());
-            let known: HashSet<String> = st.inventory.machines.iter().map(|m| m.id.clone()).collect();
-            st.probes.retain(|id, _| known.contains(id));
-            self.settings_changed.notify_waiters(); // reschedule the next automatic check
+        {
+            let mut st = self.state.lock().unwrap();
+            if full {
+                st.check_running = false;
+                st.check_finished_at = Some(Utc::now());
+                let known: HashSet<String> = st.inventory.machines.iter().map(|m| m.id.clone()).collect();
+                st.probes.retain(|id, _| known.contains(id));
+                self.settings_changed.notify_waiters(); // reschedule the next automatic check
+            }
+            if self.demo.is_none() {
+                // Another process may have checked machines since we last looked;
+                // fold those in first so this write doesn't throw them away.
+                self.merge_disk_state(&mut st);
+                self.save_state(&mut st);
+            }
+            self.publish(&mut st);
         }
-        if self.demo.is_none() {
-            // Another process may have checked machines since we last looked;
-            // fold those in first so this write doesn't throw them away.
-            self.merge_disk_state(&mut st);
-            self.save_state(&mut st);
+        // What the catch-up found belongs to this check: a command (`muxin
+        // check`, `status --refresh`) exits once this returns, and would cut
+        // it off. Waited for a bounded time, so a slow DigitalOcean doesn't
+        // hold a check up (it goes on by itself then).
+        if let Some(task) = catching_up {
+            let _ = tokio::time::timeout(CATCH_UP_WAIT, task).await;
         }
-        self.publish(&mut st);
     }
 
     /// Re-reads [settings] if another process changed config.toml. Returns true if the settings changed.
@@ -1661,6 +1689,8 @@ impl Engine {
         let links: HashMap<String, (&'static str, Option<&'static str>)> =
             st.inventory.machines.iter().filter_map(|m| super::link::current(&m.id).map(|l| (m.id.clone(), (l.transport(), l.network())))).collect();
         let (paired, ssh_only) = if self.demo.is_some() { Default::default() } else { (super::direct::paired_ids(), super::direct::ssh_only()) };
+        // Droplets asked for and not heard of (a file that's there only while one is).
+        let cloud_asked = if self.demo.is_none() && crate::cloud::pending::any(&self.paths.dir) { crate::cloud::pending::read(&self.paths.dir) } else { Vec::new() };
         let mut snapshot = build(&Inputs {
             now: Utc::now(),
             demo: self.demo.is_some(),
@@ -1682,6 +1712,8 @@ impl Engine {
             tailnet: &st.tailnet,
             tailscale: st.tailscale.as_ref(),
             droplets: &st.droplets,
+            cloud_asked: &cloud_asked,
+            cloud_trouble: st.cloud_trouble.as_deref(),
             links: &links,
             paired: &paired,
             ssh_only: &ssh_only,

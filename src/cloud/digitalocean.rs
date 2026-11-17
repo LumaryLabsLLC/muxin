@@ -2,8 +2,10 @@
 //! in, which regions and sizes exist, the account's SSH keys, and creating,
 //! reading, finding by name, powering and destroying droplets.
 
+use std::sync::Mutex;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -13,20 +15,51 @@ const API: &str = "https://api.digitalocean.com/v2";
 /// The image new machines run.
 pub const IMAGE: &str = "ubuntu-24-04-x64";
 
+/// How many droplets a page of the list holds, and how many pages are read
+/// (10,000 droplets: past that the list isn't taken for whole).
+const PER_PAGE: usize = 200;
+const MAX_PAGES: usize = 50;
+
 pub struct Client {
     http: reqwest::Client,
     token: String,
     /// Where the API is: DigitalOcean's, or a test's stand-in.
     api: String,
+    /// How far DigitalOcean's clock is ahead of this computer's, in seconds,
+    /// as its last answer's `Date` header had it.
+    ahead: Mutex<Option<i64>>,
 }
 
 /// Why a request failed. `maybe_done`: what was asked for may have happened
 /// all the same, because the request went out and DigitalOcean's answer never
 /// came, or was an error of its own (a 5xx). False when the request never got
 /// there, or DigitalOcean turned it down (a 4xx): nothing changed there.
-struct Failure {
-    message: String,
-    maybe_done: bool,
+#[derive(Debug, Clone)]
+pub struct Failure {
+    pub message: String,
+    pub maybe_done: bool,
+    /// DigitalOcean's status, when it answered.
+    pub status: Option<u16>,
+}
+
+impl Failure {
+    /// DigitalOcean has no such thing in this account (anymore).
+    pub fn gone(&self) -> bool {
+        self.status == Some(404)
+    }
+
+    /// It doesn't accept the sign-in (anymore), or the sign-in may not do
+    /// this: asking again changes nothing until the user signs in again.
+    pub fn signed_out(&self) -> bool {
+        matches!(self.status, Some(401 | 403))
+    }
+
+    /// It can't do this to the droplet right now, because it's still doing
+    /// something else to it ("Droplet already has a pending event."): a
+    /// little later it can.
+    pub fn busy(&self) -> bool {
+        matches!(self.status, Some(409 | 422)) || self.message.to_lowercase().contains("pending event")
+    }
 }
 
 /// A droplet that wasn't created, as far as Muxin heard.
@@ -103,7 +136,14 @@ impl Client {
 
     fn at(api: &str, token: String) -> Client {
         let http = crate::util::http_client(|| reqwest::Client::builder().timeout(Duration::from_secs(30)));
-        Client { http, token, api: api.trim_end_matches('/').to_string() }
+        Client { http, token, api: api.trim_end_matches('/').to_string(), ahead: Mutex::new(None) }
+    }
+
+    /// How far DigitalOcean's clock is ahead of this computer's, in seconds
+    /// (negative: behind), once it has answered anything. Times it gives
+    /// (when a droplet was made) are by its clock, not this computer's.
+    pub fn clock_ahead(&self) -> Option<i64> {
+        *self.ahead.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// A client for a test's stand-in for the API (see `stand_in`).
@@ -125,16 +165,23 @@ impl Client {
         if let Some(b) = body {
             req = req.json(&b);
         }
-        let lost = |message: String| Failure { message, maybe_done: true };
+        let lost = |message: String| Failure { message, maybe_done: true, status: None };
+        let sent = Utc::now();
         let resp = req.send().await.map_err(|e| {
             if e.is_timeout() {
                 lost("DigitalOcean didn't answer within 30 seconds. Try again in a moment.".to_string())
             } else {
                 // No connection (no network, no such host): the request never left.
-                Failure { message: format!("Couldn't reach DigitalOcean: {}", root_cause(&e)), maybe_done: !e.is_connect() }
+                Failure { message: format!("Couldn't reach DigitalOcean: {}", root_cause(&e)), maybe_done: !e.is_connect(), status: None }
             }
         })?;
         let status = resp.status();
+        // Its clock against this one's, taking the answer as written halfway
+        // through the wait for it.
+        if let Some(there) = resp.headers().get(reqwest::header::DATE).and_then(|d| d.to_str().ok()).and_then(|d| DateTime::parse_from_rfc2822(d).ok()) {
+            let here = sent + (Utc::now() - sent) / 2;
+            *self.ahead.lock().unwrap_or_else(|e| e.into_inner()) = Some((there.with_timezone(&Utc) - here).num_seconds());
+        }
         // An answer that breaks off is as good as none: what it said isn't known.
         let text = match resp.text().await {
             Ok(t) => t,
@@ -154,6 +201,7 @@ impl Client {
                 _ => format!("DigitalOcean: {message}"),
             },
             maybe_done: !status.is_client_error(),
+            status: Some(status.as_u16()),
         })
     }
 
@@ -261,21 +309,43 @@ impl Client {
     pub async fn droplets_named(&self, name: &str) -> Result<Vec<Droplet>, String> {
         // Names are letters, digits, '-' and '.': nothing a URL needs escaped.
         let safe: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_')).collect();
-        let v = self.call(Method::GET, &format!("/droplets?name={safe}&per_page=200"), None).await?;
-        let list = v["droplets"].as_array().ok_or("DigitalOcean's list of droplets didn't read.")?;
-        // Filtered here too, in case the list comes back whole.
-        Ok(list.iter().map(droplet).filter(|d| d.name.eq_ignore_ascii_case(name)).collect())
+        let mut found = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let v = self.call(Method::GET, &format!("/droplets?name={safe}&per_page={PER_PAGE}&page={page}"), None).await?;
+            let list = v["droplets"].as_array().ok_or("DigitalOcean's list of droplets didn't read.")?;
+            // Filtered here too, in case the list comes back whole.
+            found.extend(list.iter().map(droplet).filter(|d| d.name.eq_ignore_ascii_case(name)));
+            // More pages: it says so, or (should it not say) the page is full.
+            let more = match v["links"]["pages"].as_object() {
+                Some(pages) => pages.get("next").and_then(Value::as_str).is_some_and(|next| !next.is_empty()),
+                None => list.len() >= PER_PAGE,
+            };
+            if !more {
+                return Ok(found);
+            }
+        }
+        // Not the whole list: "it isn't there" can't be read from it.
+        Err(format!("DigitalOcean's list of droplets is longer than Muxin reads ({} pages).", MAX_PAGES))
     }
 
     pub async fn droplet(&self, id: u64) -> Result<Droplet, String> {
-        let v = self.call(Method::GET, &format!("/droplets/{id}"), None).await?;
+        self.find_droplet(id).await.map_err(|f| f.message)
+    }
+
+    /// A droplet, with why when it can't be read: `Failure::gone` when
+    /// DigitalOcean has none with this id (it was deleted there, or the
+    /// sign-in is another account's).
+    pub async fn find_droplet(&self, id: u64) -> Result<Droplet, Failure> {
+        let v = self.request(Method::GET, &format!("/droplets/{id}"), None).await?;
         Ok(droplet(&v["droplet"]))
     }
 
-    pub async fn delete_droplet(&self, id: u64) -> Result<(), String> {
-        match self.call(Method::DELETE, &format!("/droplets/{id}"), None).await {
+    /// Deletes a droplet. `Failure::busy` when DigitalOcean can't yet (it's
+    /// still making it).
+    pub async fn delete_droplet(&self, id: u64) -> Result<(), Failure> {
+        match self.request(Method::DELETE, &format!("/droplets/{id}"), None).await {
             // Already gone is what was wanted.
-            Err(e) if e.contains("404") || e.to_lowercase().contains("not be found") => Ok(()),
+            Err(f) if f.gone() => Ok(()),
             other => other.map(|_| ()),
         }
     }
@@ -327,6 +397,9 @@ pub(crate) mod stand_in {
     pub struct StandIn {
         pub api: String,
         pub start_wait: Option<(Duration, u32)>,
+        /// What the other waits pause for between asks, in place of seconds
+        /// (looking again for a droplet, asking again to delete one).
+        pub pause: Option<Duration>,
     }
 
     static ALL: Mutex<Vec<(PathBuf, StandIn)>> = Mutex::new(Vec::new());

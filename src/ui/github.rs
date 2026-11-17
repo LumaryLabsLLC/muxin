@@ -1009,23 +1009,15 @@ impl Root {
             None => {}
         }
         family.extend(forks.iter().map(|f| self.gh_repo_link(theme, "Your fork", f, cx)));
-        let header = div()
+        // The buttons go beside the name when there's room, else under it: the
+        // page beside the list is ~360 wide at the smallest window, and three
+        // labelled buttons take ~420.
+        let wide = self.content_width - LIST_WIDTH >= 760.;
+        let buttons = div()
             .flex()
-            .items_start()
-            .gap(px(14.))
-            .child(kit::tile("agent-github", TILE.0, TILE.1, 40.))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .gap(px(4.))
-                    .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(r.full_name.clone()))
-                    .children(r.description.clone().map(|d| div().text_size(px(13.)).text_color(theme.text_muted).child(d)))
-                    .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(meta.join("  ·  ")))
-                    .children(family),
-            )
+            .items_center()
+            .when(wide, |d| d.flex_none().gap(px(14.)))
+            .when(!wide, |d| d.flex_wrap().gap(px(8.)).pt(px(6.)))
             .child(
                 Button::new("gh-repo-fav", if favorite { "Favorite" } else { "Add to favorites" })
                     .icon(if favorite { "star-filled" } else { "star" })
@@ -1042,12 +1034,37 @@ impl Root {
                     }))
             }))
             .child(Button::new("gh-repo-open", "Open on GitHub").icon("external-link").on_click(move |_, _, cx| cx.open_url(&url)));
+        let info = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(0.))
+            .gap(px(4.))
+            .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(r.full_name.clone()))
+            .children(r.description.clone().map(|d| div().text_size(px(13.)).text_color(theme.text_muted).child(d)))
+            // Each item keeps its "·", so a wrap never leaves one alone at a line's end.
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_x(px(6.))
+                    .text_size(px(12.))
+                    .text_color(theme.text_placeholder)
+                    .children(meta.iter().enumerate().map(|(i, m)| div().whitespace_nowrap().child(if i == 0 { m.clone() } else { format!("·  {m}") }))),
+            )
+            .children(family);
+        let header = div().flex().items_start().gap(px(14.)).child(kit::tile("agent-github", TILE.0, TILE.1, 40.));
+        let header = if wide { header.child(info).child(buttons) } else { header.child(info.child(buttons)) };
 
         let tab = self.gh.tab;
+        // A narrow page: shorter tab names (the long ones ran past the bar).
+        let short_tabs = self.content_width - LIST_WIDTH < 480.;
         let tab_button = |t: RepoTab, label: String, cx: &mut Context<Self>| {
             let active = tab == t;
             div()
                 .id(SharedString::from(label.clone()))
+                .flex_none()
+                .whitespace_nowrap()
                 .h(px(28.))
                 .px(px(12.))
                 .flex()
@@ -1071,10 +1088,12 @@ impl Root {
             .bg(theme.element)
             .border_1()
             .border_color(theme.border_variant)
+            .max_w_full()
+            .overflow_hidden()
             .child(tab_button(RepoTab::Issues, format!("Issues  {}", issues.len()), cx))
-            .child(tab_button(RepoTab::Pulls, format!("Pull requests  {}", pulls.len()), cx))
+            .child(tab_button(RepoTab::Pulls, format!("{}  {}", if short_tabs { "PRs" } else { "Pull requests" }, pulls.len()), cx))
             .child(tab_button(RepoTab::Actions, "Actions".into(), cx))
-            .child(tab_button(RepoTab::Checkouts, format!("On your machines  {}", checkouts.len()), cx));
+            .child(tab_button(RepoTab::Checkouts, format!("{}  {}", if short_tabs { "Machines" } else { "On your machines" }, checkouts.len()), cx));
 
         let content = match tab {
             RepoTab::Issues | RepoTab::Pulls => {
@@ -1115,8 +1134,8 @@ impl Root {
             .text_size(px(12.))
             .text_color(theme.text_placeholder)
             .child(icon("corner-down-right", 12., theme.text_placeholder))
-            .child(what)
-            .child(div().text_color(theme.text_accent).hover(|st| st.text_color(theme.text)).child(repo.to_string()))
+            .child(div().flex_none().child(what))
+            .child(div().min_w(px(0.)).text_color(theme.text_accent).hover(|st| st.text_color(theme.text)).child(repo.to_string()))
             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::GithubRepo(target.clone()), window, cx)))
             .into_any_element()
     }
@@ -1131,6 +1150,8 @@ impl Root {
                 ))
                 .into_any_element();
         }
+        // Just the icons when the page is narrow: the words take ~290 of the row.
+        let compact = self.content_width - LIST_WIDTH < 600.;
         let rows: Vec<AnyElement> = checkouts
             .iter()
             .enumerate()
@@ -1162,6 +1183,8 @@ impl Root {
                             .flex_col()
                             .flex_1()
                             .min_w(px(0.))
+                            // What still doesn't fit is cut here, not drawn over the buttons.
+                            .overflow_hidden()
                             .gap(px(2.))
                             .child(
                                 div()
@@ -1169,8 +1192,8 @@ impl Root {
                                     .items_center()
                                     .gap(px(8.))
                                     .text_size(px(13.))
-                                    .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.text).child(machine_name))
-                                    .child(div().font_family(mono_font()).text_size(px(11.5)).text_color(theme.text_muted).child(c.path.clone())),
+                                    .child(div().flex_none().font_weight(FontWeight::MEDIUM).text_color(theme.text).child(machine_name))
+                                    .child(div().min_w(px(0.)).truncate().font_family(mono_font()).text_size(px(11.5)).text_color(theme.text_muted).child(format::short_folder(&c.path))),
                             )
                             .child(
                                 div()
@@ -1180,7 +1203,8 @@ impl Root {
                                     .text_size(px(11.5))
                                     .text_color(theme.text_placeholder)
                                     .child(kit::color_icon(theme, "git-branch", 11., theme.text_placeholder))
-                                    .child(div().font_family(mono_font()).child(c.branch.clone()))
+                                    // A long branch gives way first; the sync state stays.
+                                    .child(div().min_w(px(0.)).truncate().font_family(mono_font()).child(c.branch.clone()))
                                     .child(format!("· {sync}"))
                                     .child(if c.dirty == 0 { "· clean".to_string() } else { format!("· {} changed", c.dirty) })
                                     // Your fork's, on its upstream's page.
@@ -1188,9 +1212,21 @@ impl Root {
                             ),
                     )
                     .when(busy, |d| d.child(spinner(SharedString::from(format!("gh-git-{i}")), 13., theme.accent)))
-                    .child(Button::new(("gh-fetch", i), "Fetch").disabled(busy).on_click(cx.listener(move |this, _, _, cx| this.gh_git(&fetch, "fetch", cx))))
-                    .child(Button::new(("gh-pull", i), "Pull").icon("arrow-down").disabled(busy || c.behind == 0).on_click(cx.listener(move |this, _, _, cx| this.gh_git(&pull, "pull", cx))))
-                    .child(Button::new(("gh-push", i), "Push").icon("arrow-up").disabled(busy || c.ahead == 0).on_click(cx.listener(move |this, _, _, cx| this.gh_git(&push, "push", cx))))
+                    .child(
+                        (if compact { Button::icon_only(("gh-fetch", i), "refresh-cw").tooltip("Fetch") } else { Button::new(("gh-fetch", i), "Fetch") })
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, _, cx| this.gh_git(&fetch, "fetch", cx))),
+                    )
+                    .child(
+                        (if compact { Button::icon_only(("gh-pull", i), "arrow-down").tooltip("Pull") } else { Button::new(("gh-pull", i), "Pull").icon("arrow-down") })
+                            .disabled(busy || c.behind == 0)
+                            .on_click(cx.listener(move |this, _, _, cx| this.gh_git(&pull, "pull", cx))),
+                    )
+                    .child(
+                        (if compact { Button::icon_only(("gh-push", i), "arrow-up").tooltip("Push") } else { Button::new(("gh-push", i), "Push").icon("arrow-up") })
+                            .disabled(busy || c.ahead == 0)
+                            .on_click(cx.listener(move |this, _, _, cx| this.gh_git(&push, "push", cx))),
+                    )
                     .child({
                         let (mid, path) = (c.machine_id.clone(), c.path.clone());
                         Button::icon_only(("gh-editor", i), "code").tooltip("Open in an editor").on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.pick_editor(&mid, &path, e.position(), cx)))

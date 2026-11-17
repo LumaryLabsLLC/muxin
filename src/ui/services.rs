@@ -623,11 +623,25 @@ fn chip(theme: &Theme, id: String, label: impl Into<SharedString>, on: bool) -> 
 /// "Are you sure?" with a yes and a cancel, for the right side of a row.
 #[allow(clippy::too_many_arguments)]
 fn confirm_row(theme: &Theme, n: usize, text: String, risky: bool, yes: &'static str, yes_icon: &'static str, on_yes: impl Fn(&mut Window, &mut gpui::App) + 'static, on_no: impl Fn(&mut gpui::App) + 'static) -> AnyElement {
+    // The question fits the room it has, ending in "…" (two lines at most);
+    // all of it on hover.
+    let tip = text.clone();
     div()
+        .min_w(px(0.))
         .flex()
         .items_center()
         .gap(px(6.))
-        .child(div().text_size(px(12.)).text_color(if risky { theme.error } else { theme.text_muted }).child(text))
+        .child(
+            div()
+                .id(SharedString::from(format!("svc-ask-{n}")))
+                .min_w(px(0.))
+                .line_clamp(2)
+                .text_ellipsis()
+                .text_size(px(12.))
+                .text_color(if risky { theme.error } else { theme.text_muted })
+                .tooltip(move |window, cx| kit::Tooltip::view(tip.clone().into(), window, cx))
+                .child(text),
+        )
         .child(Button::new(SharedString::from(format!("svc-yes-{n}")), yes).icon(yes_icon).style(ButtonStyle::Danger).on_click(move |_, window, cx| on_yes(window, cx)))
         .child(Button::new(SharedString::from(format!("svc-no-{n}")), "Cancel").style(ButtonStyle::Ghost).on_click(move |_, _, cx| on_no(cx)))
         .into_any_element()
@@ -735,10 +749,13 @@ impl Render for ServicesView {
             .child(Button::icon_only("svc-refresh", "refresh-cw").tooltip("Refresh").on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))));
 
         // Bars under the toolbar: the password, operations under way, the last error.
+        // Narrow: the field and its buttons go under the message, and long
+        // words (the message, an error) wrap rather than run off the edge.
         let asking = self.asking.as_ref().map(|(s, action)| {
             div()
                 .flex_none()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .gap(px(10.))
                 .px(px(14.))
@@ -746,20 +763,33 @@ impl Render for ServicesView {
                 .border_b_1()
                 .border_color(theme.border_variant)
                 .bg(theme.surface)
-                .child(icon("lock", 14., theme.text_muted))
-                .child(div().text_size(px(12.5)).text_color(theme.text).child(format!("To {action} {}, Muxin needs your password on {machine_name}.", s.name)))
-                .child(div().w(px(200.)).child(self.password.clone()))
-                .child(Button::new("svc-password-go", "Continue").style(ButtonStyle::Primary).on_click(cx.listener(|this, _, window, cx| this.give_password(window, cx))))
                 .child(
-                    Button::new("svc-password-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, _, cx| {
-                        this.asking = None;
-                        this.password_error = None;
-                        cx.notify();
-                    })),
+                    div()
+                        .min_w(px(0.))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(icon("lock", 14., theme.text_muted).flex_none())
+                        .child(div().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text).child(format!("To {action} {}, Muxin needs your password on {machine_name}.", s.name))),
                 )
-                .children(self.password_error.clone().map(|e| div().text_size(px(12.)).text_color(theme.error).child(e)))
-                .child(div().flex_1())
-                .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child("Kept in memory until you quit."))
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(div().w(px(200.)).child(self.password.clone()))
+                        .child(Button::new("svc-password-go", "Continue").style(ButtonStyle::Primary).on_click(cx.listener(|this, _, window, cx| this.give_password(window, cx))))
+                        .child(
+                            Button::new("svc-password-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, _, cx| {
+                                this.asking = None;
+                                this.password_error = None;
+                                cx.notify();
+                            })),
+                        ),
+                )
+                .children(self.password_error.clone().map(|e| div().min_w(px(0.)).text_size(px(12.)).text_color(theme.error).child(e)))
+                .child(div().flex_none().ml_auto().text_size(px(11.)).text_color(theme.text_placeholder).child("Kept in memory until you quit."))
         });
         let ops = (!self.ops.is_empty()).then(|| {
             let snap = self.engine.current();
@@ -792,7 +822,7 @@ impl Render for ServicesView {
                 .text_size(px(12.5))
                 .text_color(theme.error)
                 .child(icon("circle-alert", 14., theme.error))
-                .child(div().flex_1().child(e))
+                .child(div().flex_1().min_w(px(0.)).child(e))
                 .child(Button::icon_only("svc-error-x", "x").on_click(cx.listener(|this, _, _, cx| {
                     this.error = None;
                     cx.notify();
@@ -1025,6 +1055,9 @@ fn about(text: &str, size: f32) -> f32 {
 }
 
 /// Text that may not fit: cut off, the whole of it on hover.
+/// One action button's place in a row (its icon button and a little room).
+const ACTION_SLOT: f32 = 30.;
+
 fn clipped(id: String, text: String, size: f32, color: gpui::Hsla, w: f32) -> gpui::Stateful<gpui::Div> {
     let tip = text.clone();
     div()
@@ -1217,6 +1250,7 @@ impl ServicesView {
                             let _ = view.update(cx, |v, cx| v.act(s.clone(), action, false, window, cx));
                         })
                     };
+                    let asking = matches!(&confirming, Some((ck, _)) if *ck == k);
                     let actions = match &confirming {
                         Some((ck, action)) if *ck == k => {
                             let risky = s.keeps_muxen_connected() && *action != "restart";
@@ -1259,26 +1293,38 @@ impl ServicesView {
                                     let _ = view.update(cx, |_, cx| cx.emit(ServicesEvent::Logs(source.clone())));
                                 })
                             };
-                            let mut row = div().flex().items_center().gap(px(4.)).child(logs);
-                            if container && running {
+                            // Each kind of button in a slot of its own, together at the
+                            // column's end: the same button in the same place on every row
+                            // (a stopped one's Start where the others' Stop is), however
+                            // many the row has. A shell and Remove are containers' (every
+                            // row of their table has those slots).
+                            let shell = (container && running).then(|| {
                                 let (view, name) = (view.clone(), s.name.clone());
-                                row = row.child(Button::icon_only(SharedString::from(format!("svc-shell-{n}")), "square-terminal").tooltip("A shell inside it").on_click(move |_, _, cx| {
+                                Button::icon_only(SharedString::from(format!("svc-shell-{n}")), "square-terminal").tooltip("A shell inside it").on_click(move |_, _, cx| {
                                     let command = format!("docker exec -it {name} sh -c 'command -v bash >/dev/null && exec bash || exec sh'");
                                     let _ = view.update(cx, |_, cx| cx.emit(ServicesEvent::Terminal { cwd: "~".into(), command, title: format!("{name} · shell") }));
-                                }));
-                            }
-                            if running {
-                                row = row.child(act("restart", "Restart", "rotate-ccw", "restart")).child(act("stop", "Stop", "circle-stop", "stop"));
-                            } else {
-                                row = row.child(act("start", "Start", "play", "start"));
-                            }
-                            if container {
+                                })
+                            });
+                            let restart = running.then(|| act("restart", "Restart", "rotate-ccw", "restart"));
+                            let stop_start = if running { act("stop", "Stop", "circle-stop", "stop") } else { act("start", "Start", "play", "start") };
+                            let remove = container.then(|| {
                                 let (view, s2) = (view.clone(), s.clone());
-                                row = row.child(Button::icon_only(SharedString::from(format!("svc-rm-{n}")), "trash-2").tooltip("Remove").on_click(move |_, window, cx| {
+                                Button::icon_only(SharedString::from(format!("svc-rm-{n}")), "trash-2").tooltip("Remove").on_click(move |_, window, cx| {
                                     let _ = view.update(cx, |v, cx| v.act(s2.clone(), "remove", false, window, cx));
-                                }));
-                            }
-                            row.into_any_element()
+                                })
+                            });
+                            let slot = |b: Option<AnyElement>| div().w(px(ACTION_SLOT)).flex_none().flex().justify_center().children(b);
+                            div()
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .child(slot(Some(logs.into_any_element())))
+                                .when(container, |d| d.child(slot(shell.map(IntoElement::into_any_element))))
+                                .child(slot(restart.map(IntoElement::into_any_element)))
+                                .child(slot(Some(stop_start.into_any_element())))
+                                .when(container, |d| d.child(slot(remove.map(IntoElement::into_any_element))))
+                                .into_any_element()
                         }
                     };
                     // Whether it starts at boot (systemd): click to change.
@@ -1340,9 +1386,11 @@ impl ServicesView {
                             d.child(div().flex_none().w(px(W_CPU)).flex().justify_end().text_size(px(12.)).text_color(theme.text_muted).child(cpu(s.cpu)))
                                 .child(div().flex_none().w(px(W_MEM)).flex().justify_end().text_size(px(12.)).text_color(theme.text_muted).child(memory(s.memory)))
                         })
-                        .child(div().flex_none().w(px(c.state)).pl(px(12.)).child(clipped(format!("svc-state-{n}"), state, 12., if failed { theme.error } else { theme.text_muted }, c.state - 12.)))
-                        .when(services_tab && c.boot, |d| d.child(div().flex_none().w(px(W_BOOT)).flex().children(boot)))
-                        .child(div().flex_none().w(px(c.actions)).flex().justify_end().child(actions))
+                        // Asking "are you sure?": the question takes the state's and
+                        // boot's room too, so it can be read.
+                        .when(!asking, |d| d.child(div().flex_none().w(px(c.state)).pl(px(12.)).child(clipped(format!("svc-state-{n}"), state, 12., if failed { theme.error } else { theme.text_muted }, c.state - 12.))))
+                        .when(!asking && services_tab && c.boot, |d| d.child(div().flex_none().w(px(W_BOOT)).flex().children(boot)))
+                        .child(div().flex_none().w(px(c.actions + if asking { c.state + 10. + if services_tab && c.boot { W_BOOT + 10. } else { 0. } } else { 0. })).flex().justify_end().child(actions))
                 })
                 .collect()
         })

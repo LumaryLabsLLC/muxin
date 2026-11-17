@@ -481,6 +481,16 @@ impl DesktopView {
         &self.via
     }
 
+    /// How wide it was last drawn (its toolbar is as wide): None before then.
+    pub fn width(&self) -> Option<f32> {
+        self.area.get().map(|b| f32::from(b.size.width))
+    }
+
+    /// Whether its toolbar is narrow: its buttons show as icons then.
+    pub fn narrow(&self) -> bool {
+        self.width().is_some_and(|w| w < NARROW_BAR)
+    }
+
     /// The display shown (None: the default one).
     pub fn display(&self) -> Option<&str> {
         self.display.as_deref()
@@ -1937,6 +1947,9 @@ fn option_may_type(cx: &App) -> bool {
 /// Opens a display's menu: (machine, display, where), from a right-click on it.
 pub type DisplayMenu = Rc<dyn Fn(&str, &str, gpui::Point<Pixels>, &mut Window, &mut App)>;
 
+/// Narrower than this, a desktop's toolbar shows its buttons as icons.
+pub const NARROW_BAR: f32 = 600.;
+
 /// Status, network and resolution for a desktop, then `extra` controls (close,
 /// pop out, full screen): the bar above every desktop view.
 pub fn toolbar(view: &Entity<DesktopView>, extra: Vec<AnyElement>, cx: &App) -> AnyElement {
@@ -1946,10 +1959,18 @@ pub fn toolbar(view: &Entity<DesktopView>, extra: Vec<AnyElement>, cx: &App) -> 
 /// The toolbar, with `menu` opening a monitor's menu on right-click.
 pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, menu: Option<DisplayMenu>, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let (status, via, machine, shown, engine, shortcuts, keys_open) = {
+    let (status, via, machine, shown, engine, shortcuts, keys_open, width) = {
         let v = view.read(cx);
-        (v.status(), v.via().to_string(), v.machine.clone(), v.display.clone(), v.engine.clone(), v.shortcuts(), v.keys_menu.is_some())
+        (v.status(), v.via().to_string(), v.machine.clone(), v.display.clone(), v.engine.clone(), v.shortcuts(), v.keys_menu.is_some(), v.width())
     };
+    // Narrow (beside a terminal, a small window): Keys is just its icon, and
+    // the status and the keyboard chip are cut to what's left, with "…".
+    let narrow = width.is_some_and(|w| w < NARROW_BAR);
+    let about = |text: &str, size: f32| text.chars().count() as f32 * size * 0.62 + 4.;
+    // What the rest of the bar takes, about: its padding, the status's icon,
+    // the monitors and their sizes, Keys and the controls after it (icons
+    // when it's narrow, else most likely words).
+    let mut taken = 28. + 24. + if narrow { 36. } else { 80. } + extra.len() as f32 * if narrow { 36. } else { 100. };
     // Its monitors, when it has more than one: pick the one to show (none
     // for an app's window).
     let app_window = shown.as_deref().is_some_and(|d| d.starts_with("window:"));
@@ -1960,6 +1981,9 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
     // Shown unless another is picked: the main monitor.
     let default = displays.iter().find(|d| d.main && d.id != "all").or_else(|| displays.iter().find(|d| d.id != "all")).map(|d| d.id.clone());
     let showing = shown.or(default);
+    if displays.len() > 1 {
+        taken += 14. + displays.iter().map(|d| about(&d.name.chars().take(18).collect::<String>(), 11.5) + 18.).sum::<f32>();
+    }
     let monitors = (displays.len() > 1).then(|| {
         div().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(displays.iter().map(|d| {
             let (on, id, view) = (showing.as_deref() == Some(d.id.as_str()), d.id.clone(), view.clone());
@@ -2010,6 +2034,9 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
     let sizes = screen.and_then(|d| {
         let current = d.size();
         let choices = size_choices(d);
+        if choices.len() > 1 {
+            taken += 14. + choices.iter().map(|(_, label)| about(label, 11.5) + 18.).sum::<f32>();
+        }
         (choices.len() > 1).then(|| {
             group(
                 choices
@@ -2024,6 +2051,7 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
         })
     });
     let scales = screen.filter(|d| [1., 2.].iter().all(|s| d.scales.iter().any(|x| (x - s).abs() < 0.01))).map(|d| {
+        taken += 14. + 2. * (about("100%", 11.5) + 18.);
         group(
             [(1., "100%"), (2., "200%")]
                 .into_iter()
@@ -2036,23 +2064,49 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
         )
     });
     // Where this computer's own shortcuts go: a click changes it, as the
-    // release key does.
-    let keyboard = (shortcuts != Shortcuts::NotOffered).then(|| {
-        let there = shortcuts == Shortcuts::There;
+    // release key does. By the machine's name (a shared desktop has none here).
+    let there = shortcuts == Shortcuts::There;
+    let name = engine.current().machines.iter().find(|m| m.id == machine).map(|m| m.name.clone()).unwrap_or_default();
+    let switch = (shortcuts != Shortcuts::NotOffered).then(|| desktop_keys::switch_label(there, &name));
+    // What's left is for the status and the chip: all of both when they fit
+    // (the network too, when it also does). Else the chip keeps its words (it's
+    // a button: cut, it read "Send ⌘Tab to F…") and the status gives way, down
+    // to a few words; only then is the chip cut too.
+    let chip_chrome = 26. + if there { 12. } else { 0. };
+    let chip_need = switch.as_deref().map_or(0., |l| about(l, 11.5) + chip_chrome);
+    let status_need = about(&status, 12.5);
+    let via_need = if via.is_empty() { 0. } else { about(&via, 12.) + 27. };
+    let (status_room, chip_room, show_via) = match width.map(|w| (w - taken).max(0.)) {
+        None => (None, None, true),
+        Some(r) if status_need + via_need + chip_need <= r => (None, None, true),
+        Some(r) if status_need + chip_need <= r => (None, None, false),
+        Some(r) => {
+            let chip = chip_need.min((r - 90.).max(r * 0.45));
+            (Some(r - chip), Some(chip), false)
+        }
+    };
+    // Cut by characters, at about the width there is (None: all of it).
+    let fit = |text: &str, room: Option<f32>, size: f32| match room {
+        None => text.to_string(),
+        Some(r) => super::root::ellipsize(text, (((r - 4.) / (size * 0.62)) as usize).max(4)),
+    };
+    let status = fit(&status, status_room, 12.5);
+    let keyboard = switch.map(|label| {
         let (examples, release) = (desktop_keys::examples(), desktop_keys::release_key_label());
-        // By its name (a shared desktop has none here).
-        let name = engine.current().machines.iter().find(|m| m.id == machine).map(|m| m.name.clone()).unwrap_or_default();
         let to = if name.is_empty() { "the machine" } else { name.as_str() };
         let tip = match shortcuts {
             Shortcuts::There => format!("{examples} go to {to}. Click, or press {release} by themselves, to get them back."),
             Shortcuts::NeedsPermission => format!("{examples} act on this computer. Click to send them to {to}: macOS asks to allow Muxin under Accessibility first."),
             _ => format!("{examples} act on this computer. Click, or press {release} by themselves, to send them to {to}."),
         };
-        let label = desktop_keys::switch_label(there, &name);
+        let label = fit(&label, chip_room.map(|r| r - chip_chrome), 11.5);
         let view = view.clone();
         div()
             .id("desktop-shortcuts")
-            .flex_none()
+            // It gives way, cut, if the guess above was short.
+            .min_w(px(0.))
+            .overflow_hidden()
+            .whitespace_nowrap()
             .px(px(8.))
             .h(px(22.))
             .flex()
@@ -2072,9 +2126,8 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
     // Combinations to send by a click: a Mac's Spaces, the Windows key.
     let keys = (shortcuts != Shortcuts::NotOffered).then(|| {
         let view = view.clone();
-        Button::new("desktop-keys", "Keys")
+        (if narrow { Button::icon_only("desktop-keys", "keyboard") } else { Button::new("desktop-keys", "Keys").icon("keyboard") })
             .style(if keys_open { ButtonStyle::Outlined } else { ButtonStyle::Ghost })
-            .icon("keyboard")
             .tooltip("Send a key combination to the machine")
             .on_click(move |e: &gpui::ClickEvent, _, cx| view.update(cx, |v, cx| v.toggle_keys_menu(e.position(), cx)))
     });
@@ -2085,21 +2138,24 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
         .gap(px(10.))
         .h(px(36.))
         .px(px(14.))
+        // Nothing draws past the pane's edge.
+        .overflow_hidden()
         .border_b_1()
         .border_color(theme.border_variant)
         .bg(theme.surface)
-        // Status and network give way first when the bar is narrow.
+        // Status and network give way first when the bar is narrow. Its icon
+        // stays whole (not a sliver at the edge).
         .child(
             div()
                 .flex_1()
-                .min_w(px(0.))
+                .min_w(px(14.))
                 .overflow_hidden()
                 .flex()
                 .items_center()
                 .gap(px(10.))
                 .child(kit::color_icon(&theme, "monitor", 14., theme.text_muted))
-                .child(div().flex_none().text_size(px(12.5)).text_color(theme.text_muted).child(status))
-                .when(!via.is_empty(), |d| {
+                .child(div().flex_none().whitespace_nowrap().text_size(px(12.5)).text_color(theme.text_muted).child(status))
+                .when(show_via && !via.is_empty(), |d| {
                     d.child(div().flex_none().flex().items_center().gap(px(5.)).text_size(px(12.)).text_color(theme.text_placeholder).child(kit::color_icon(&theme, "network", 12., theme.text_placeholder)).child(via))
                 }),
         )

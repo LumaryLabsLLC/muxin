@@ -103,7 +103,7 @@ actions!(
 const WORKSPACE: &str = "Root";
 pub(super) const SIDEBAR_DEFAULT: f32 = 256.;
 /// Sessions listed under a machine before the rest fold behind "N more".
-const SIDEBAR_SESSIONS: usize = 5;
+pub(super) const SIDEBAR_SESSIONS: usize = 5;
 const SIDEBAR_MIN: f32 = 220.;
 const SIDEBAR_MAX: f32 = 420.;
 /// Utilization samples kept for the overview's pulse chart.
@@ -430,6 +430,8 @@ pub struct Root {
     pub(super) settings: Option<Entity<SettingsPage>>,
     pub(super) notice: Option<Notice>,
     pub(super) page_scroll: ScrollHandle,
+    /// The sidebar's machine list, to know whether more of it is below.
+    machine_list_scroll: ScrollHandle,
     pub(super) pulse: VecDeque<PulseSample>,
     /// The overview lists every notice, not just the first few.
     pub(super) heads_up_open: bool,
@@ -508,6 +510,11 @@ pub struct Root {
     pub(super) ports_more: std::collections::HashSet<String>,
     /// Machines whose page lists all their sessions (not just the first few).
     pub(super) sessions_more: std::collections::HashSet<String>,
+    /// The Overview lists every agent session (not just the first few).
+    pub(super) overview_agents_more: bool,
+    /// Lists of workspaces shown in full (not just the first few): a
+    /// machine's id for its page, "" for the Boxes page.
+    pub(super) workspaces_more: std::collections::HashSet<String>,
     /// Machines whose page lists their hidden sessions too; and whose sidebar
     /// rows list all their sessions.
     pub(super) hidden_open: std::collections::HashSet<String>,
@@ -683,6 +690,7 @@ impl Root {
             settings: None,
             notice: None,
             page_scroll: ScrollHandle::new(),
+            machine_list_scroll: ScrollHandle::new(),
             pulse: VecDeque::with_capacity(PULSE_SAMPLES),
             heads_up_open: false,
             last_pulse: None,
@@ -720,6 +728,8 @@ impl Root {
             usage_at: None,
             ports_more: Default::default(),
             sessions_more: Default::default(),
+            overview_agents_more: false,
+            workspaces_more: Default::default(),
             hidden_open: Default::default(),
             sidebar_more: Default::default(),
             machine_gpus: Default::default(),
@@ -2580,10 +2590,13 @@ impl Root {
         }
         if !unassigned.is_empty() {
             rows.push(self.section_header("On GitHub only", Some(unassigned.len()), None, cx).into_any_element());
+            // Indented like a machine's rows: row_width() counts it.
+            self.sidebar_indent.set(22. - CHILD_PAD);
             for r in unassigned {
                 let row = self.runner_row(&theme, &s, r, selected_runner.as_deref() == Some(&r.id), cx).into_any_element();
                 rows.push(div().pl(px(22. - CHILD_PAD)).child(row).into_any_element());
             }
+            self.sidebar_indent.set(0.);
         }
         if s.machines.is_empty() {
             rows.push(
@@ -2642,7 +2655,30 @@ impl Root {
                 ),
             )
             // As tall as it needs, scrolling when the Agents section below needs the room.
-            .child(div().id("machine-list").flex_shrink().min_h(px(0.)).overflow_y_scroll().pb(px(12.)).children(rows))
+            // With more of it below, its end fades: a line running down there (to a
+            // machine on the one above) then reads as going on, not as a stray.
+            .child({
+                let list = &self.machine_list_scroll;
+                let more_below = f32::from(list.max_offset().height) + f32::from(list.offset().y) > 2.;
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_shrink()
+                    .min_h(px(0.))
+                    .child(div().id("machine-list").track_scroll(list).flex_shrink().min_h(px(0.)).overflow_y_scroll().pb(px(12.)).children(rows))
+                    .when(more_below, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .h(px(36.))
+                                .bg(gpui::linear_gradient(180., gpui::linear_color_stop(theme.sidebar.opacity(0.), 0.), gpui::linear_color_stop(theme.sidebar, 1.))),
+                        )
+                    })
+            })
             // Every agent session, the ones that need you first (agent_list.rs).
             .children(self.agents_section(window, cx))
             .child(div().flex_1())
@@ -2963,8 +2999,10 @@ impl Root {
         let (id, toggle_id) = (m.id.clone(), m.id.clone());
         let (from, to) = format::machine_tile(m);
         let down = m.status != "online";
+        // Down: one word ("Offline"), so the name keeps its room; the
+        // machine's page says how long and why.
         let meta = if down {
-            format::machine_subtitle_in(m, true).0
+            format::unreachable_word(m).to_string()
         } else {
             match m.parent.as_ref().map(|p| p.relation.as_str()) {
                 Some("vm") => "VM".to_string(),
@@ -3129,6 +3167,7 @@ impl Root {
             _ => String::new(),
         };
         let dim = matches!(r.state.as_str(), "offline" | "unknown");
+        let name_room = (self.row_width() - 90.).max(60.);
         div()
             .id(SharedString::from(format!("side-r-{}", r.id)))
             .flex()
@@ -3144,13 +3183,18 @@ impl Root {
             .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
             .child(div().flex_none().w(px(3.)).h(px(12.)).rounded_full().bg(if dim { theme.track } else { theme.state(&r.state) }))
             // The runner name wins; the job name takes whatever room is left.
+            // A long one ("On GitHub only" lists any name) is cut by its
+            // characters, leaving room for its state.
             .child(
                 div()
                     .flex_none()
+                    .max_w(px(name_room))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
                     .font_family(mono_font())
                     .text_size(px(12.))
                     .text_color(if dim { theme.text_placeholder } else { theme.text_muted })
-                    .child(r.name.clone()),
+                    .child(ellipsize(&r.name, (name_room / 7.3) as usize)),
             )
             .child(
                 div()
@@ -3542,22 +3586,24 @@ impl Root {
         let shown = view.read(cx).display().map(str::to_string);
         let virtual_shown = shown.clone().filter(|d| machine.is_some_and(|m| m.displays.iter().any(|x| &x.id == d && x.is_virtual)));
         let can_add = machine.is_some() && !self.snapshot.demo;
+        // Words and icons, or just the icons when the bar is narrow (their
+        // words on hover).
+        let narrow = view.read(cx).narrow();
+        let button = |id: &'static str, label: &'static str, glyph: &'static str| {
+            if narrow { Button::icon_only(id, glyph).tooltip(label) } else { Button::new(id, label).style(ButtonStyle::Ghost).icon(glyph) }
+        };
         let mut extra = Vec::new();
         if let Some(display) = virtual_shown {
             let mid = id.to_string();
             extra.push(
-                Button::new("desktop-remove-monitor", "Remove monitor")
-                    .style(ButtonStyle::Ghost)
-                    .icon("trash-2")
+                button("desktop-remove-monitor", "Remove monitor", "trash-2")
                     .on_click(cx.listener(move |this, _, window, cx| this.remove_display(mid.clone(), display.clone(), window, cx)))
                     .into_any_element(),
             );
         } else if can_add {
             let mid = id.to_string();
             extra.push(
-                Button::new("desktop-add-monitor", "Add monitor")
-                    .style(ButtonStyle::Ghost)
-                    .icon("plus")
+                button("desktop-add-monitor", "Add monitor", "plus")
                     .on_click(cx.listener(move |this, _, window, cx| this.show_add_display(mid.clone(), window, cx)))
                     .into_any_element(),
             );
@@ -3566,23 +3612,17 @@ impl Root {
         if machine.is_some() && !self.snapshot.demo {
             let mid = id.to_string();
             extra.push(
-                Button::new("desktop-apps", "Apps")
-                    .style(ButtonStyle::Ghost)
-                    .icon("layout-grid")
+                button("desktop-apps", "Apps", "layout-grid")
                     .tooltip("Open one of its apps in a window of its own")
                     .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.show_apps(&mid, e.position(), cx)))
                     .into_any_element(),
             );
         }
         extra.extend(vec![
-            Button::new("desktop-window", "Open in window")
-                .style(ButtonStyle::Ghost)
-                .icon("external-link")
+            button("desktop-window", "Open in window", "external-link")
                 .on_click(cx.listener(move |this, _, window, cx| this.pop_out_desktop(&pop, window, cx)))
                 .into_any_element(),
-            Button::new("desktop-close", "Close")
-                .style(ButtonStyle::Ghost)
-                .icon("x")
+            button("desktop-close", "Close", "x")
                 .on_click(cx.listener(move |this, _, window, cx| this.close_desktop(&close, window, cx)))
                 .into_any_element(),
         ]);
@@ -4166,7 +4206,7 @@ fn route_title(s: &Snapshot, route: &Route) -> (Option<&'static str>, String) {
 }
 
 /// "build (macos-arm64)" -> "build (macos-arm6…" when longer than `max` characters.
-fn ellipsize(s: &str, max: usize) -> String {
+pub(super) fn ellipsize(s: &str, max: usize) -> String {
     if s.chars().count() <= max { s.to_string() } else { format!("{}…", s.chars().take(max - 1).collect::<String>()) }
 }
 

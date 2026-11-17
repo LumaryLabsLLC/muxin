@@ -167,9 +167,74 @@ pub fn machine_icon(m: &Machine) -> &'static str {
     }
 }
 
+/// A folder as a list row shows it: the home folder as `~`, and a long path
+/// cut in the middle, keeping where it starts and the folder itself
+/// ("~/Library/…/scratch-2026-11-14-992bc9"), so it doesn't run over what's
+/// beside it.
+pub fn short_folder(path: &str) -> String {
+    short_folder_in(path, 48)
+}
+
+/// `short_folder` within `long` characters (at least 12), for a row with less room.
+pub fn short_folder_in(path: &str, long: usize) -> String {
+    #[allow(non_snake_case)]
+    let LONG = long.max(12);
+    let path = if path.len() > 1 { path.trim_end_matches('/') } else { path };
+    // /Users/<name> and /home/<name> are home on a Mac and on Linux.
+    let path = ["/Users/", "/home/"]
+        .iter()
+        .find_map(|home| path.strip_prefix(home).map(|rest| match rest.split_once('/') {
+            Some((_, below)) => format!("~/{below}"),
+            None => "~".to_string(),
+        }))
+        .unwrap_or_else(|| path.to_string());
+    if path.chars().count() <= LONG {
+        return path;
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    let last = parts.last().copied().unwrap_or_default();
+    // Where it starts: "~/Library", "/var/lib", "C:".
+    let head = match parts.first() {
+        Some(&"") | Some(&"~") if parts.len() > 2 => format!("{}/{}", parts[0], parts[1]),
+        Some(first) => first.to_string(),
+        None => String::new(),
+    };
+    let cut = format!("{head}/…/{last}");
+    if parts.len() > 2 && cut.chars().count() <= LONG {
+        return cut;
+    }
+    // Even the folder's own name is long: its end.
+    let tail: String = last.chars().rev().take(LONG - 2).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("…/{tail}")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::short_os;
+    use super::{short_folder, short_folder_in, short_os};
+
+    #[test]
+    fn long_folders_are_cut_in_the_middle() {
+        assert_eq!(short_folder("/Users/adib/Developer/apps/VideoRecorder"), "~/Developer/apps/VideoRecorder");
+        assert_eq!(short_folder("/home/adib"), "~");
+        assert_eq!(short_folder("/home/adib/"), "~");
+        assert_eq!(short_folder("~/code/api"), "~/code/api");
+        assert_eq!(short_folder("/"), "/");
+        assert_eq!(short_folder("/srv/www"), "/srv/www");
+        assert_eq!(
+            short_folder("/Users/adib/Library/Application Support/Claude/scratch-workspaces/42d69953-8e71-43b1/f3ba1d4e-4665-497c/scratch-2026-11-14-992bc9"),
+            "~/Library/…/scratch-2026-11-14-992bc9"
+        );
+        assert_eq!(short_folder("/var/lib/docker/volumes/a-very-long-volume-name/_data/some/project"), "/var/…/project");
+        // A folder whose own name is long: its end, so what tells it apart shows.
+        let long = format!("/tmp/{}", "x".repeat(70) + "-end");
+        let short = short_folder(&long);
+        assert!(short.starts_with("…/") && short.ends_with("x-end") && short.chars().count() <= 48, "{short}");
+        assert!(short_folder("/Users/adib/Developer/opensource/zennotescli/.claude/worktrees/recursing-tesla-bca620").chars().count() <= 48);
+        // Less room: cut sooner, the same way.
+        assert_eq!(short_folder_in("/home/ci/muxen/boxes/box-7k2m9q/repo", 24), "~/muxen/…/repo");
+        assert_eq!(short_folder_in("/home/ci/api", 24), "~/api");
+        assert!(short_folder_in("/Users/adib/a-folder-with-a-really-long-name-indeed", 20).chars().count() <= 20);
+    }
 
     #[test]
     fn short_os_names() {

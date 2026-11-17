@@ -249,22 +249,26 @@ impl Root {
             .when(!s.enabled, |d| d.opacity(0.6))
             .child(kit::tile(glyph, from, to, 28.))
             .child(
+                // Narrow: when it runs goes under its name, and what it runs
+                // ends in "…" (two lines at most) rather than a cut.
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_w(px(0.))
+                    .overflow_hidden()
                     .gap(px(2.))
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
-                            .gap(px(8.))
-                            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(s.name.clone()))
+                            .gap_x(px(8.))
+                            .child(div().min_w(px(0.)).text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(s.name.clone()))
                             .child(div().text_size(px(12.)).text_color(theme.text_muted).child(s.when_text.clone()))
                             .when(!s.enabled, |d| d.child(kit::pill("off", theme.text_placeholder))),
                     )
-                    .child(div().truncate().when(s.what.kind == "command", |d| d.font_family(mono_font())).text_size(px(12.)).text_color(theme.text_placeholder).child(format!("{what}{folder}"))),
+                    .child(div().line_clamp(2).text_ellipsis().when(s.what.kind == "command", |d| d.font_family(mono_font())).text_size(px(12.)).text_color(theme.text_placeholder).child(format!("{what}{folder}"))),
             )
             .child(div().flex_none().text_size(px(12.)).text_color(last_color).child(last))
             .child(

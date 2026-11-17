@@ -16,6 +16,15 @@ use crate::fleet::model::{Machine, Operation};
 /// Output lines each machine's card shows, and the one made bigger.
 const LINES: usize = 14;
 const MORE_LINES: usize = 2000;
+/// The longest state a card's header shows (else a word, and the why under it).
+const STATE_CHARS: usize = 24;
+/// What a Recent chip shows of a command (about its 320px, in mono).
+const RECENT_CHARS: usize = 42;
+
+/// `text` cut to `n` characters, ending in "…" when it was longer.
+pub(super) fn cut(text: &str, n: usize) -> String {
+    if text.chars().count() <= n { text.to_string() } else { format!("{}…", text.chars().take(n.saturating_sub(1)).collect::<String>()) }
+}
 
 /// The last command run: on which machines, and each one's operation (or why it didn't start).
 pub struct RunBatch {
@@ -193,7 +202,8 @@ impl Root {
                             .hover(|st| st.bg(theme.element_hover))
                             .font_family(mono_font())
                             .text_size(px(11.5))
-                            .child(div().w_full().truncate().child(super::snippets::one_line(c)))
+                            // Cut by hand: the chip's width comes from its text, so GPUI's "…" never shows.
+                            .child(div().w_full().truncate().child(cut(&super::snippets::one_line(c), RECENT_CHARS)))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 let text = super::snippets::one_line(&c2);
                                 this.run_input.update(cx, |i, cx| i.set_text(text, cx));
@@ -231,7 +241,16 @@ impl Root {
                             .flex()
                             .items_center()
                             .gap(px(10.))
-                            .child(div().flex_1().min_w(px(0.)).truncate().font_family(mono_font()).text_size(px(13.)).child(format!("$ {}", super::snippets::one_line(&batch.command))))
+                            // Its width told, so a long command ends in "…" before the summary.
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .overflow_hidden()
+                                    .child(div().w(px((self.content_width - 190.).max(80.))).truncate().font_family(mono_font()).text_size(px(13.)).child(format!("$ {}", super::snippets::one_line(&batch.command)))),
+                            )
                             .child(div().flex_none().text_size(px(12.)).text_color(theme.text_muted).child(summary))
                             .child(Button::new("run-clear", "Clear").icon("x").style(ButtonStyle::Ghost).tooltip("Clear the results").on_click(cx.listener(|this, _, _, cx| {
                                 this.run_last = None;
@@ -257,8 +276,18 @@ impl Root {
         let (from, to) = m.map(format::machine_tile).unwrap_or(kit::tiles::OTHER);
         let icon = m.map(format::machine_icon).unwrap_or("server");
         let op = r.as_ref().ok().and_then(|id| self.op(*id));
+        // The header keeps the state short; a long why (an ssh error) goes under it, in full.
+        let mut why_below: Option<String> = None;
+        let mut short = |why: String, word: &str| {
+            if why.chars().count() <= STATE_CHARS {
+                why
+            } else {
+                why_below = Some(why);
+                word.to_string()
+            }
+        };
         let (state, color): (AnyElement, _) = match (r, op) {
-            (Err(e), _) => (div().child(e.clone()).into_any_element(), theme.error),
+            (Err(e), _) => (div().child(short(e.clone(), "Didn't start")).into_any_element(), theme.error),
             (Ok(_), None) => (div().child("Gone").into_any_element(), theme.text_muted),
             (Ok(id), Some(o)) if o.status == "running" => (
                 div().flex().items_center().gap(px(5.)).child(spinner(("run-spin", *id as usize), 11., theme.text_muted)).child(format::elapsed(o.started_at)).into_any_element(),
@@ -272,7 +301,7 @@ impl Root {
                 } else {
                     let why = o.error.clone().unwrap_or_else(|| "Failed".into());
                     let why = why.strip_prefix("Exited with status ").map(|c| format!("Exit {}", c.trim_end_matches('.'))).unwrap_or(why);
-                    (div().flex().items_center().gap(px(4.)).child(kit::icon("x", 12., theme.error)).child(why).into_any_element(), theme.error)
+                    (div().flex().items_center().gap(px(4.)).child(kit::icon("x", 12., theme.error)).child(short(why, "Failed")).into_any_element(), theme.error)
                 }
             }
         };
@@ -323,8 +352,8 @@ impl Root {
             .child(
                 div()
                     .id(SharedString::from(format!("run-out-{machine_id}")))
-                    .when(big, |d| d.max_h(px(560.)).overflow_scroll())
-                    .when(!big, |d| d.overflow_x_scroll())
+                    // Long lines wrap, as in a terminal, inside the padding.
+                    .when(big, |d| d.max_h(px(560.)).overflow_y_scroll())
                     .px(px(12.))
                     .py(px(9.))
                     .min_h(px(60.))
@@ -343,8 +372,9 @@ impl Root {
                         )
                     })
                     .when(hidden > 0 && big, |d| d.child(div().text_color(theme.text_placeholder).child(format!("… {hidden} earlier lines: all of it is in Activity"))))
-                    .when(shown.is_empty() && op.is_some_and(|o| o.status != "running"), |d| d.child(div().text_color(theme.text_placeholder).child("No output")))
-                    .children(shown.iter().map(|l| div().whitespace_nowrap().text_color(theme.text).child(l.clone()))),
+                    .when(shown.is_empty() && why_below.is_none() && op.is_some_and(|o| o.status != "running"), |d| d.child(div().text_color(theme.text_placeholder).child("No output")))
+                    .children(shown.iter().map(|l| div().text_color(theme.text).child(l.clone())))
+                    .children(why_below.map(|why| div().text_color(theme.error).child(why))),
             )
             .into_any_element()
     }

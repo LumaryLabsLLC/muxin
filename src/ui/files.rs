@@ -398,7 +398,8 @@ impl Render for CopyDialog {
             n => format!("{n} selected{}", if sizes > 0 { format!(" · {} in files", format::bytes(sizes)) } else { String::new() }),
         };
         let copy_label = match &to_shown {
-            Some(p) => format!("Copy to {to_name} {p}"),
+            // A button never shrinks: a long folder is cut in the middle.
+            Some(p) => format!("Copy to {to_name} {}", format::short_folder(p)),
             None => "Copy".into(),
         };
         let hidden = self.show_hidden;
@@ -435,16 +436,16 @@ impl Render for CopyDialog {
                     .child(self.pane_view(&theme, Side::To, cx)),
             )
             .children((!replaces.is_empty()).then(|| {
-                div().flex().items_center().gap(px(8.)).text_size(px(12.)).text_color(theme.warning).child(icon("triangle-alert", 13., theme.warning)).child(format!(
+                div().flex().items_center().gap(px(8.)).text_size(px(12.)).text_color(theme.warning).child(icon("triangle-alert", 13., theme.warning)).child(div().flex_1().min_w(px(0.)).child(format!(
                     "Replaces {} already there.",
                     match replaces.as_slice() {
                         [one] => one.clone(),
                         many => format!("{} items", many.len()),
                     }
-                ))
+                )))
             }))
             .children(same_place.then(|| div().text_size(px(12.)).text_color(theme.text_muted).child("That's the same folder; pick another one to copy into.")))
-            .children(self.error.clone().map(|e| div().flex().gap(px(8.)).text_size(px(12.5)).text_color(theme.error).child(icon("circle-x", 13., theme.error)).child(e)))
+            .children(self.error.clone().map(|e| div().flex().gap(px(8.)).text_size(px(12.5)).text_color(theme.error).child(icon("circle-x", 13., theme.error)).child(div().flex_1().min_w(px(0.)).child(e))))
             .child(
                 div()
                     .flex()
@@ -460,7 +461,7 @@ impl Render for CopyDialog {
                             });
                         }
                     }))
-                    .child(div().flex_1().text_size(px(12.)).text_color(theme.text_placeholder).child(summary))
+                    .child(div().flex_1().min_w(px(0.)).text_size(px(12.)).text_color(theme.text_placeholder).child(summary))
                     .child(Button::new("cp-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))))
                     .child(Button::new("cp-go", copy_label).style(ButtonStyle::Primary).disabled(!ready).on_click(cx.listener(|this, _, _, cx| this.submit(cx)))),
             )

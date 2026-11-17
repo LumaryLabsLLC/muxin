@@ -647,7 +647,8 @@ impl Root {
                 let side: AnyElement = if item.side_is_keys {
                     if item.side.is_empty() { div().into_any_element() } else { kit::kbd(theme, item.side).into_any_element() }
                 } else {
-                    div().text_size(px(11.5)).text_color(theme.text_placeholder).child(item.side).into_any_element()
+                    // Within its column ("Run on <machine>"): past it, it ran over the title.
+                    div().whitespace_nowrap().text_size(px(11.5)).text_color(theme.text_placeholder).child(super::root::ellipsize(&item.side, 20)).into_any_element()
                 };
                 div()
                     .id(("palette-item", i))
@@ -672,7 +673,7 @@ impl Root {
                             .child(div().w(px(text_w)).truncate().text_size(px(13.)).text_color(theme.text).child(item.title))
                             .when(!item.detail.is_empty(), |d| d.child(div().w(px(text_w)).truncate().text_size(px(11.5)).text_color(theme.text_muted).child(item.detail))),
                     )
-                    .child(div().w(px(120.)).flex_none().flex().justify_end().child(side))
+                    .child(div().w(px(120.)).flex_none().flex().justify_end().overflow_hidden().child(side))
                     .on_click(cx.listener(move |this, _, window, cx| this.run_palette_item(Some(i), window, cx)))
                     .into_any_element()
             })

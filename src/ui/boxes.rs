@@ -82,6 +82,9 @@ impl Root {
             0 => "never pauses by itself".to_string(),
             m => format!("pauses after {m} quiet minutes"),
         };
+        let made = format!("made {}", format::ago(b.created_at));
+        // What the last line leaves for the folder at its end.
+        let room = self.content_width - 34. - [&made, &when, &idle].iter().map(|t| super::workspaces::about(t, 11.5) + 14.).sum::<f32>();
         div()
             .id(SharedString::from(format!("boxcard-{}", b.id)))
             .flex()
@@ -180,11 +183,10 @@ impl Root {
                     .gap(px(14.))
                     .text_size(px(11.5))
                     .text_color(theme.text_placeholder)
-                    .child(format!("made {}", format::ago(b.created_at)))
-                    .child(when)
-                    .child(idle)
-                    .child(div().flex_1())
-                    .child(div().truncate().font_family(mono_font()).child(b.path.clone())),
+                    .child(div().flex_none().child(made))
+                    .child(div().flex_none().child(when))
+                    .child(div().flex_none().child(idle))
+                    .child(super::workspaces::folder_at_end(&b.path, room)),
             )
             .on_click({
                 let id = b.id.clone();

@@ -412,10 +412,16 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, inline: bool, usage: &U
         s.containers.first().map(|c| c.status.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| s.state())
     };
     let first = s.containers.first().map(|c| c.name.clone());
+    let buttons_w = match &first {
+        Some(_) if running => 52.,
+        Some(_) => 26.,
+        None => 0.,
+    };
     let buttons = first.map(|container| {
         let (logs, shell) = (on.clone(), on.clone());
         let (c1, c2) = (s.name.clone(), container);
         div()
+            .flex_none()
             .flex()
             .items_center()
             .child(Button::icon_only(SharedString::from(format!("cmp-node-logs-{n}")), "scroll-text").tooltip("Its logs").on_click(move |_, window, cx| logs(NodeAction::Logs(c1.clone()), window, cx)))
@@ -428,6 +434,18 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, inline: bool, usage: &U
         "unhealthy" => theme.error,
         _ => theme.warning,
     };
+    // The name gets what the dot, ×n, health and buttons leave (about: GPUI
+    // only puts the "…" at a width it's told), so the buttons stay in the box.
+    let about = |text: &str, size: f32| text.chars().count() as f32 * size * 0.62 + 4.;
+    let replicas = s.replicas.filter(|r| *r > 1).map(|r| format!("×{r}"));
+    let name_w = inner
+        - 8.
+        - 7.
+        - replicas.as_deref().map_or(0., |r| about(r, 11.) + 7.)
+        - if health.is_empty() { 0. } else { about(health, 11.) + 12. + 7. }
+        - 7.
+        - if buttons_w > 0. { buttons_w + 7. } else { 0. };
+    let name_w = about(&s.name, 13.5).min(name_w).max(40.);
     let what = if s.build.is_empty() { s.image.clone() } else { format!("Built from {}", s.build) };
     let what_tip = {
         let mut t = what.clone();
@@ -545,8 +563,8 @@ fn service_box(n: usize, s: &ComposeService, spot: Spot, inline: bool, usage: &U
                 .items_center()
                 .gap(px(7.))
                 .child(kit::dot(dot, 8.))
-                .child(div().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(s.name.clone()))
-                .when(s.replicas.is_some_and(|r| r > 1), |d| d.child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(format!("×{}", s.replicas.unwrap_or(1)))))
+                .child(div().flex().flex_col().min_w(px(0.)).overflow_hidden().child(div().w(px(name_w)).truncate().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(s.name.clone())))
+                .children(replicas.map(|r| div().flex_none().text_size(px(11.)).text_color(theme.text_placeholder).child(r)))
                 .when(!health.is_empty(), |d| d.child(kit::pill(health.to_string(), health_color)))
                 .child(div().flex_1())
                 .children(buttons),
@@ -592,12 +610,16 @@ pub fn legend(g: &ComposeGraph, theme: &Theme) -> AnyElement {
     let line = |color: Hsla| div().flex().items_center().child(div().w(px(16.)).h(px(1.5)).bg(color)).child(div().text_size(px(9.)).text_color(color).child("▶")).into_any_element();
     let nets = network_colors(g);
     let shows = g.services.iter().any(shows_networks);
+    // Many networks: the key wraps onto more lines.
     div()
         .flex_none()
         .flex()
+        .flex_wrap()
         .items_center()
-        .gap(px(16.))
-        .h(px(30.))
+        .gap_x(px(16.))
+        .gap_y(px(4.))
+        .min_h(px(30.))
+        .py(px(5.))
         .px(px(14.))
         .border_b_1()
         .border_color(theme.border_variant)

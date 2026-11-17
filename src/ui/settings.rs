@@ -469,7 +469,7 @@ impl SettingsPage {
                 .flex()
                 .items_center()
                 .gap(px(12.))
-                .child(note(theme, "triangle-alert", theme.warning, "Not signed in to GitHub."))
+                .child(note(theme, "triangle-alert", theme.warning, "Not signed in to GitHub.").w_auto().flex_none())
                 .child(
                     Button::new("gh-sign-in", "Sign in with GitHub")
                         .style(ButtonStyle::Primary)
@@ -1036,7 +1036,7 @@ impl SettingsPage {
         let status = match (on, sharing.as_slice()) {
             (false, _) => "Off.".to_string(),
             (true, []) => "No machine with a desktop is connected right now.".to_string(),
-            (true, names) => format!("Shared with {} now.", names.join(", ")),
+            (true, names) => format!("Shared with {} now.", some_names(names)),
         };
         let engine = self.engine.clone();
         div()
@@ -1114,9 +1114,9 @@ impl SettingsPage {
         }
         let status = match (on, with.as_slice()) {
             (false, []) => "Off.".to_string(),
-            (false, names) => format!("Taking them out on {}…", names.join(", ")),
+            (false, names) => format!("Taking them out on {}…", some_names(names)),
             (true, []) => "On. None of your machines has one of these agents yet.".to_string(),
-            (true, names) => format!("On for {}.", names.join(", ")),
+            (true, names) => format!("On for {}.", some_names(names)),
         };
         let resume = self.engine.settings().agents.resume;
         let helpers = self.engine.settings().agents.helpers;
@@ -1144,7 +1144,7 @@ impl SettingsPage {
                     .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Claude Code, Codex, Copilot CLI, Qwen Code and Kimi Code."))
                     .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Muxin adds a small hook to their settings on your machines. Turning this off takes it out."))
                     .child(div().text_size(px(11.5)).text_color(theme.text_muted).child(status))
-                    .children(trouble.into_iter().take(3).map(|t| div().text_size(px(11.5)).text_color(theme.warning).child(t)))
+                    .children(trouble.into_iter().take(3).map(|t| div().w_full().min_w(px(0.)).text_size(px(11.5)).text_color(theme.warning).child(t)))
                     .child(div().h(px(6.)))
                     .child(kit::checkbox(theme, "agent-resume", resume, "Continue agents' conversations after a restart", move |on, _, cx| {
                         let mut s = engine2.settings();
@@ -1395,31 +1395,49 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        // The page is the window less the sidebar. When the eight tabs with
+        // their words don't fit (~760 wide, more than the smallest window
+        // has), the others show just their icons, their names on hover.
+        let page_width = {
+            let a = cx.global::<Appearance>();
+            f32::from(window.viewport_size().width) - if a.sidebar_hidden { 0. } else { a.sidebar_width } - 56.
+        };
+        let full_width: f32 = SettingsTab::ALL.iter().map(|t| t.label().chars().count() as f32 * 7.3 + 41.).sum::<f32>() + 30.;
+        let compact = page_width < full_width;
+        // Narrower: their names without the icons, which keeps every tab
+        // where it was as you switch. Narrower still: icons, but the selected one's name.
+        let words_width: f32 = SettingsTab::ALL.iter().map(|t| t.label().chars().count() as f32 * 7. + 18.).sum::<f32>() + 36.;
+        let words_only = compact && page_width >= words_width + 56.;
         let tabs: Vec<AnyElement> = SettingsTab::ALL
             .into_iter()
             .map(|tab| {
                 let selected = self.tab == tab;
+                let worded = selected || !compact || words_only;
                 div()
                     .id(SharedString::from(format!("settings-tab-{}", tab.label())))
                     .flex()
                     .items_center()
                     .gap(px(7.))
+                    .flex_none()
                     .h(px(30.))
-                    .px(px(12.))
+                    .px(px(if words_only { 9. } else if worded { 10. } else { 9. }))
                     .rounded(crate::ui::kit::corner(7.))
                     .cursor_pointer()
                     .text_size(px(13.))
                     .text_color(if selected { theme.text } else { theme.text_muted })
                     .when(selected, |d| d.bg(theme.surface).border_1().border_color(theme.border).when(!crate::ui::kit::square(), |d| d.shadow_sm()))
                     .when(!selected, |d| d.hover(|st| st.text_color(theme.text)))
-                    .child(icon(tab.icon(), 14., if selected { theme.text } else { theme.text_placeholder }))
-                    .child(tab.label())
+                    .when(!words_only, |d| d.child(icon(tab.icon(), 14., if selected { theme.text } else { theme.text_placeholder })))
+                    .when(worded, |d| d.child(tab.label()))
+                    .when(!worded, |d| d.tooltip(move |window, cx| kit::Tooltip::view(tab.label().into(), window, cx)))
                     .on_click(cx.listener(move |this, _, _, cx| this.show_tab(tab, cx)))
                     .into_any_element()
             })
             .collect();
-        let bar = div().flex_none().px(px(28.)).pt(px(18.)).pb(px(14.)).border_b_1().border_color(theme.border_variant).child(
-            div().flex().w_full().max_w(px(760.)).gap(px(2.)).p(px(3.)).rounded(crate::ui::kit::corner(9.)).bg(theme.element).border_1().border_color(theme.border_variant).children(tabs),
+        // The bar is as wide as its tabs: a fixed width cut the last one off
+        // once there were eight.
+        let bar = div().flex_none().flex().px(px(28.)).pt(px(18.)).pb(px(14.)).border_b_1().border_color(theme.border_variant).child(
+            div().flex().flex_none().gap(px(2.)).p(px(3.)).rounded(crate::ui::kit::corner(9.)).bg(theme.element).border_1().border_color(theme.border_variant).children(tabs),
         );
         let body = div().w_full().max_w(px(760.)).flex().flex_col().gap(px(28.));
         let body = match self.tab {
@@ -1544,10 +1562,12 @@ impl SettingsPage {
                 } else {
                     div().w(px(26.)).into_any_element()
                 };
-                row(sc.label.into()).child(chip).child(reset).into_any_element()
+                // The reset button (or its room) before the keys, so they end
+                // at the right edge like the chips above.
+                row(sc.label.into()).child(reset).child(chip).into_any_element()
             })
             .collect();
-        let fixed = row("Terminal text size".into()).child(kit::kbd(theme, "⌘+  ⌘−  ⌘0")).child(div().w(px(26.)));
+        let fixed = row("Terminal text size".into()).child(kit::kbd(theme, "⌘+  ⌘−  ⌘0"));
 
         div()
             .flex()
@@ -1724,8 +1744,30 @@ fn code_folder_depth(entry: &str) -> Option<usize> {
     depth.parse().ok()
 }
 
-fn note(_theme: &Theme, icon_name: &'static str, color: gpui::Hsla, text: impl Into<SharedString>) -> impl IntoElement {
-    div().flex().items_center().gap(px(8.)).text_size(px(12.5)).child(icon(icon_name, 14., color)).child(text.into())
+/// An icon and a line of what happened. The text can be long (what GitHub
+/// said, say), so it wraps beside the icon: as wide as what it's in, like
+/// other wrapping text in Settings.
+fn note(_theme: &Theme, icon_name: &'static str, color: gpui::Hsla, text: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .flex()
+        .items_start()
+        .gap(px(8.))
+        .w_full()
+        .min_w(px(0.))
+        .text_size(px(12.5))
+        // As tall as the first line, so the icon sits beside it.
+        .child(div().flex_none().h(px(20.)).flex().items_center().child(icon(icon_name, 14., color)))
+        .child(div().flex_1().min_w(px(0.)).child(text.into()))
+}
+
+/// Machines' names in a line: the first three, then how many more ("a, b,
+/// c and 2 more"). A line in Settings doesn't wrap by itself.
+pub(super) fn some_names(names: &[String]) -> String {
+    const SHOWN: usize = 3;
+    match names.len() {
+        n if n <= SHOWN => names.join(", "),
+        n => format!("{} and {} more", names[..SHOWN].join(", "), n - SHOWN),
+    }
 }
 
 /// A fix to run: copyable, and a button when it's a GitHub permission Muxin can ask for.
@@ -1856,6 +1898,14 @@ fn swatch_rows(swatches: Vec<AnyElement>) -> gpui::Div {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_a_few_machines() {
+        let names = |n: usize| (1..=n).map(|i| format!("m{i}")).collect::<Vec<_>>();
+        assert_eq!(some_names(&names(1)), "m1");
+        assert_eq!(some_names(&names(3)), "m1, m2, m3");
+        assert_eq!(some_names(&names(5)), "m1, m2, m3 and 2 more");
+    }
 
     #[test]
     fn reads_code_folder_entries() {

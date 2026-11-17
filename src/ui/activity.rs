@@ -132,15 +132,19 @@ impl Root {
                     }))
             }));
 
-        let list: Vec<AnyElement> = entries.iter().map(|e| self.feed_row(&theme, e, selected.as_ref() == Some(&e.item()), cx)).collect();
+        // GPUI only puts the "…" at a width it's told: the list's text gets the
+        // list's width less its padding, icon and gap; the detail's title the rest.
+        let list_w = (self.content_width * 0.36).clamp(260., 380.);
+        let (row_text_w, title_w) = (list_w - 60., (self.content_width - list_w - 16. - 96.).max(80.));
+        let list: Vec<AnyElement> = entries.iter().map(|e| self.feed_row(&theme, e, selected.as_ref() == Some(&e.item()), row_text_w, cx)).collect();
         let empty = entries.is_empty();
         let detail = match &selected {
-            Some(ActivityItem::Op(id)) => s.operations.iter().find(|o| o.id == *id).map(|o| self.op_detail(&theme, o, cx)),
+            Some(ActivityItem::Op(id)) => s.operations.iter().find(|o| o.id == *id).map(|o| self.op_detail(&theme, o, title_w, cx)),
             Some(ActivityItem::Command { workspace, index }) => s
                 .workspaces
                 .iter()
                 .find(|w| &w.id == workspace)
-                .and_then(|w| w.history.get(*index).map(|c| command_detail(&theme, w, c, cx))),
+                .and_then(|w| w.history.get(*index).map(|c| command_detail(&theme, w, c, title_w, cx))),
             None => None,
         };
         let has_detail = detail.is_some();
@@ -190,7 +194,7 @@ impl Root {
                     .px(px(28.))
                     .pb(px(24.))
                     .child(
-                        card(&theme).w(px((self.content_width * 0.36).clamp(260., 380.))).flex_none().overflow_hidden().child(
+                        card(&theme).w(px(list_w)).flex_none().overflow_hidden().child(
                             div().id("activity-feed").size_full().overflow_y_scroll().p(px(6.)).children(list),
                         ),
                     )
@@ -296,7 +300,7 @@ impl Root {
             .into_any_element()
     }
 
-    fn feed_row(&self, theme: &Theme, e: &Entry, selected: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn feed_row(&self, theme: &Theme, e: &Entry, selected: bool, text_w: f32, cx: &mut Context<Self>) -> AnyElement {
         let item = e.item();
         let (status, title, subtitle) = match e {
             Entry::Op(o) => {
@@ -336,9 +340,10 @@ impl Root {
                     .flex_col()
                     .flex_1()
                     .min_w(px(0.))
+                    .overflow_hidden()
                     .gap(px(2.))
-                    .child(div().truncate().text_size(px(12.5)).when(is_command, |d| d.font_family(mono_font())).child(title))
-                    .child(div().truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(subtitle))
+                    .child(div().w(px(text_w)).truncate().text_size(px(12.5)).when(is_command, |d| d.font_family(mono_font())).child(title))
+                    .child(div().w(px(text_w)).truncate().text_size(px(11.)).text_color(theme.text_placeholder).child(subtitle))
                     .children(match e {
                         Entry::Op(o) if o.status == "running" => o.progress.as_ref().map(|p| div().pt(px(3.)).child(progress_bar(theme, p))),
                         _ => None,
@@ -352,7 +357,7 @@ impl Root {
             .into_any_element()
     }
 
-    fn op_detail(&self, theme: &Theme, op: &Operation, cx: &mut Context<Self>) -> AnyElement {
+    fn op_detail(&self, theme: &Theme, op: &Operation, title_w: f32, cx: &mut Context<Self>) -> AnyElement {
         let copy_text = op.log.join("\n");
         let machine = op
             .machine_id
@@ -424,15 +429,15 @@ impl Root {
             .line_height(px(19.))
             .children(lines)
             .when_some(op.error.clone().filter(|e| !op.log.iter().any(|l| l.contains(e.as_str()))), |d, e| {
-                d.child(div().mt(px(6.)).flex().gap(px(6.)).text_color(theme.error).child(icon("circle-x", 13., theme.error)).child(e))
+                d.child(div().mt(px(6.)).flex().gap(px(6.)).text_color(theme.error).child(icon("circle-x", 13., theme.error)).child(div().flex_1().min_w(px(0.)).child(e)))
             })
             .when(op.log.is_empty() && op.status == "running", |d| d.child(div().text_color(theme.text_placeholder).child("Waiting for output…")));
         let body = div().flex_1().min_h(px(0.)).flex().flex_col().children(progress).child(log).into_any_element();
-        detail_frame(theme, op_status_icon(theme, op), op.title.clone(), meta, copy_text, body)
+        detail_frame(theme, op_status_icon(theme, op), op.title.clone(), title_w, meta, copy_text, body)
     }
 }
 
-fn command_detail(theme: &Theme, w: &WorkspaceInfo, c: &WorkspaceCommand, cx: &mut Context<Root>) -> AnyElement {
+fn command_detail(theme: &Theme, w: &WorkspaceInfo, c: &WorkspaceCommand, title_w: f32, cx: &mut Context<Root>) -> AnyElement {
     let ws = w.id.clone();
     let outcome = match (c.background, c.timed_out, c.exit_code) {
         (true, _, _) => "started in the background".to_string(),
@@ -477,11 +482,11 @@ fn command_detail(theme: &Theme, w: &WorkspaceInfo, c: &WorkspaceCommand, cx: &m
         .line_height(px(19.))
         .children(lines)
         .into_any_element();
-    detail_frame(theme, command_icon(theme, c), c.command.clone(), meta, c.output_tail.join("\n"), body)
+    detail_frame(theme, command_icon(theme, c), c.command.clone(), title_w, meta, c.output_tail.join("\n"), body)
 }
 
 /// Header (status, title, meta, copy) above a scrolling output pane.
-fn detail_frame(theme: &Theme, status: AnyElement, title: String, meta: AnyElement, copy_text: String, body: AnyElement) -> AnyElement {
+fn detail_frame(theme: &Theme, status: AnyElement, title: String, title_w: f32, meta: AnyElement, copy_text: String, body: AnyElement) -> AnyElement {
     card(theme)
         .flex_1()
         .min_h(px(0.))
@@ -503,8 +508,9 @@ fn detail_frame(theme: &Theme, status: AnyElement, title: String, meta: AnyEleme
                         .flex_col()
                         .flex_1()
                         .min_w(px(0.))
+                        .overflow_hidden()
                         .gap(px(3.))
-                        .child(div().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(title))
+                        .child(div().w(px(title_w)).truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(title))
                         .child(meta),
                 )
                 .child(Button::icon_only("detail-copy", "copy").tooltip("Copy output").on_click(move |_, _, cx| {

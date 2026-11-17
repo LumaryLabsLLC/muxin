@@ -28,7 +28,10 @@ impl SettingsPage {
 
     fn edit_prompt(&mut self, a: &'static SessionAction, window: &mut Window, cx: &mut Context<Self>) {
         let (text, _) = self.prompt_of(a);
-        let input = cx.new(|cx| TextInput::new(cx, a.prompt).with_text(text));
+        // The field is one line (there's no multi-line one yet): it starts at
+        // the prompt's beginning, not its end cut mid-word, and the whole of
+        // it shows wrapped below.
+        let input = cx.new(|cx| TextInput::new(cx, a.prompt).with_text(text).at_start());
         let subscription = cx.subscribe_in(&input, window, |this, _, e: &InputEvent, _, cx| match e {
             InputEvent::Submit => this.save_prompt(cx),
             InputEvent::Cancel => {
@@ -115,7 +118,7 @@ impl SettingsPage {
                     .flex_col()
                     .gap(px(6.))
                     .child(e.input.clone())
-                    .child(div().text_size(px(12.)).text_color(theme.text_placeholder).child(if typed.trim().is_empty() { format!("Empty uses Muxin's: {}", a.prompt) } else { typed }))
+                    .child(div().w_full().min_w(px(0.)).text_size(px(12.)).text_color(theme.text_placeholder).child(if typed.trim().is_empty() { format!("Empty uses Muxin's: {}", a.prompt) } else { typed }))
                     .into_any_element()
             }
             None => div().text_size(px(12.5)).line_height(px(18.)).text_color(theme.text_muted).child(text).into_any_element(),

@@ -10,6 +10,10 @@ use super::root::{Route, Root};
 use crate::fleet::model::{Job, Machine, Snapshot};
 use crate::fleet::sessions::{Mark, SessionInfo};
 
+/// How many agent sessions the Overview lists before Show more (any that need
+/// you or failed are listed as well).
+const AGENTS_SHOWN: usize = 5;
+
 const CARD_MIN_WIDTH: f32 = 300.;
 const GAP: f32 = 14.;
 const PAGE_PADDING: f32 = 28.;
@@ -286,17 +290,17 @@ impl Root {
             Some(p) => {
                 let cpu = p.cpu_pct.map(|v| v as f32 / 100.);
                 let mem = format::mem_fraction(m);
-                // On a Mac, what Finder calls available (it counts what macOS clears by itself).
-                let disk_free = match (p.disk_free, p.disk_available) {
-                    (Some(f), Some(a)) if a > f => Some(format!("{} available", format::bytes(a))),
-                    (f, _) => f.map(|f| format!("{} free", format::bytes(f))),
-                };
+                // On a Mac, what Finder calls available (it counts what macOS
+                // clears by itself). "free" is in the label: the figure alone
+                // fits beside CPU and memory in a card.
+                let disk_free = p.disk_available.filter(|a| p.disk_free.is_some_and(|f| *a > f)).or(p.disk_free).map(format::bytes);
                 div()
                     .flex()
                     .gap(px(14.))
                     .child(mini_stat(theme, "CPU", cpu.map(|f| format!("{:.0}%", f * 100.)), cpu, theme.accent))
                     .child(mini_stat(theme, "Memory", mem.map(|f| format!("{:.0}%", f * 100.)), mem, theme.accent))
-                    .child(mini_stat(theme, "Disk", disk_free, format::disk_used_fraction(m), if format::disk_low(m) { theme.error } else { theme.accent }))
+                    // Wider than the other two: its figure is the longest ("1.6 TB").
+                    .child(div().flex_none().w(relative(0.4)).child(mini_stat(theme, "Disk free", disk_free, format::disk_used_fraction(m), if format::disk_low(m) { theme.error } else { theme.accent })))
                     .into_any_element()
             }
             None => div()
@@ -339,23 +343,32 @@ impl Root {
                     .items_center()
                     .gap(px(12.))
                     .child(div().when(offline, |d| d.opacity(0.55)).child(kit::tile(format::machine_icon(m), from, to, 36.)))
+                    // Its state beside its name; the line under them has the card's
+                    // width (beside the state too, it hid what matters: "VM on Beac…").
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .flex_1()
                             .min_w(px(0.))
-                            .child(div().w(px(inner - 48. - 90.)).truncate().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(m.name.clone()))
                             .child(
                                 div()
-                                    .w(px(inner - 48. - 90.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    // In a column: GPUI's "…" needs it (straight in a row, it was cut without).
+                                    .child(div().flex().flex_col().flex_1().min_w(px(0.)).overflow_hidden().child(div().w(px(inner - 48. - 90.)).truncate().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(m.name.clone())))
+                                    .child(div().flex_none().child(status)),
+                            )
+                            .child(
+                                div()
+                                    .w(px(inner - 48.))
                                     .truncate()
                                     .text_size(px(11.5))
                                     .text_color(if tone == "error" { theme.error } else { theme.text_placeholder })
                                     .child(subtitle),
                             ),
-                    )
-                    .child(status),
+                    ),
             )
             .child(
                 div()
@@ -374,14 +387,47 @@ impl Root {
             .into_any_element()
     }
 
-    /// Every agent session, across the machines: needing you first, then working, then done.
+    /// Every agent session, across the machines: needing you first, then
+    /// working, then done. The first few, and any that need you or failed;
+    /// the rest behind Show more.
     fn render_agents(&self, theme: &Theme, s: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
         let mut sessions: Vec<&SessionInfo> = s.sessions.iter().collect();
         sessions.sort_by_key(|x| (std::cmp::Reverse(x.mark()), x.status == "exited", std::cmp::Reverse(x.created_at)));
         let content = if sessions.is_empty() {
             card(theme).child(kit::empty_state(theme, "square-terminal", "No agents running. Start Claude Code, Codex or a shell on any machine.")).into_any_element()
         } else {
-            card(theme).children(sessions.iter().enumerate().map(|(i, x)| self.machine_session_row(theme, x, i, true, cx))).into_any_element()
+            let more = self.overview_agents_more;
+            let kept = |i: usize, x: &SessionInfo| i < AGENTS_SHOWN || x.mark() >= Mark::Failed;
+            let folded = sessions.iter().enumerate().filter(|(i, x)| !kept(*i, x)).count();
+            let rows: Vec<AnyElement> = sessions
+                .iter()
+                .enumerate()
+                .filter(|(i, x)| more || kept(*i, x))
+                .enumerate()
+                .map(|(row, (_, x))| self.machine_session_row(theme, x, row, true, cx))
+                .collect();
+            let footer = (folded > 0).then(|| {
+                div()
+                    .id("ov-agents-more")
+                    .px(px(14.))
+                    .py(px(9.))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .border_t_1()
+                    .border_color(theme.border_variant)
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(theme.text_placeholder)
+                    .hover(|st| st.text_color(theme.text_muted))
+                    .child(icon(if more { "chevron-down" } else { "chevron-right" }, 11., theme.text_placeholder))
+                    .child(if more { "Show fewer".to_string() } else { format!("Show {folded} more") })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.overview_agents_more = !this.overview_agents_more;
+                        cx.notify();
+                    }))
+            });
+            card(theme).children(rows).children(footer).into_any_element()
         };
         div().flex().flex_col().gap(px(10.)).child(section_title(theme, "Agents", Some(sessions.len()))).child(content)
     }
@@ -642,8 +688,10 @@ fn mini_stat(theme: &Theme, label: &'static str, value: Option<String>, fraction
                 .flex()
                 .justify_between()
                 .gap(px(4.))
+                // A value that doesn't fit is cut at the column, not drawn into the next.
+                .overflow_hidden()
                 .text_size(px(11.))
-                .child(div().text_color(theme.text_placeholder).child(label))
+                .child(div().flex_none().whitespace_nowrap().text_color(theme.text_placeholder).child(label))
                 .child(div().font_family(mono_font()).whitespace_nowrap().text_color(theme.text_muted).child(value.unwrap_or_else(|| "—".into()))),
         )
         .child(meter(theme, fraction.unwrap_or(0.), color))

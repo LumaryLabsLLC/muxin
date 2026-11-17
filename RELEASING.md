@@ -55,6 +55,9 @@ scripts/aur.sh 0.2.0 --push                   # and the AUR package
 
 If a job fails for a reason outside the code, like a dropped connection to
 Apple's servers, run just the failed jobs again: `gh run rerun <run id> --failed`.
+Signing already tries again when Apple's timestamp server doesn't answer ("A
+timestamp was expected but was not found"), five tries over about five minutes
+(`scripts/codesign-retry.sh`), so only a longer outage needs that.
 
 A Mac job cancelled after about 15 minutes with no steps means GitHub had no
 Mac for it ("The job was not acquired by Runner"). Run it again, or if that keeps

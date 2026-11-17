@@ -35,9 +35,13 @@ case "$(uname -s)" in
     # changes with every build, and the permissions go with it). By fingerprint:
     # a keychain can hold several certificates of the same name.
     identity=${MUXEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/^ *[0-9][0-9]*) \([0-9A-F]\{40\}\) "Developer ID Application: .*/\1/p' | head -n1)}
+    # A secure timestamp asks Apple's timestamp server, which can be down for a
+    # few minutes: scripts/codesign-retry.sh signs again when it doesn't answer.
     if [ "${MUXEN_RELEASE:-}" = 1 ]; then
+      sign=scripts/codesign-retry.sh
       sign_flags="--options runtime --timestamp"
     else
+      sign=codesign
       sign_flags="--timestamp=none"
     fi
     if [ -z "$identity" ] && [ "${MUXEN_RELEASE:-}" = 1 ]; then
@@ -56,7 +60,7 @@ case "$(uname -s)" in
       sed "s/@VERSION@/$version/g" agent/macos/Info.plist > "$app/Contents/Info.plist"
       cp assets/brand/Muxin.icns "$app/Contents/Resources/Muxin.icns"
       # shellcheck disable=SC2086
-      codesign --force $sign_flags --entitlements agent/macos/entitlements.plist -s "${identity:--}" "$app"
+      "$sign" --force $sign_flags --entitlements agent/macos/entitlements.plist -s "${identity:--}" "$app"
       codesign --verify --strict "$app"
       COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$stage" -cf "$out/muxen-agent-darwin-$arch.app.tar" "Muxin Agent.app"
       rm -rf "$stage"
@@ -64,7 +68,7 @@ case "$(uname -s)" in
     if [ -n "$identity" ]; then
       for f in "$out"/muxen-agent-darwin-aarch64 "$out"/muxen-agent-darwin-x86_64; do
         # shellcheck disable=SC2086
-        codesign --force $sign_flags --identifier com.lumarylabs.muxen-agent -s "$identity" "$f"
+        "$sign" --force $sign_flags --identifier com.lumarylabs.muxen-agent -s "$identity" "$f"
       done
       echo "▸ signed the macOS agents and Muxin Agent.app ($identity)"
     else

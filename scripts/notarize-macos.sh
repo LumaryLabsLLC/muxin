@@ -80,7 +80,8 @@ hdiutil create -quiet -volname "Muxin $version" -srcfolder "$work/dmg" -fs HFS+ 
 if [ -n "$notarize" ]; then
     # By fingerprint: a keychain can hold several certificates of the same name.
     identity=${MUXEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/^ *[0-9][0-9]*) \([0-9A-F]\{40\}\) "Developer ID Application: .*/\1/p' | head -n1)}
-    codesign --force --timestamp -s "$identity" "$dmg"
+    # Signed again when Apple's timestamp server doesn't answer.
+    scripts/codesign-retry.sh --force --timestamp -s "$identity" "$dmg"
     notarize "$dmg" "$@"
     staple "$dmg"
     spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"

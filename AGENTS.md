@@ -1,6 +1,6 @@
 # Plancia — product and repository contract
 
-The canonical repository is `domenicomassafra/plancia`. The shared contract at `~/.dstack/contracts/shared-root/AGENTS.md` and project issues also apply. The former local checkout name (`muxin`) does not establish ownership. This public repository contains the `web/` UI. The FastAPI backend and FleetProbe live in private `domenicomassafra/controlcenter:dashboard/`. The Muxin donor was retired in #60; its history and Apache-2.0 attributions remain.
+The canonical repository is `domenicomassafra/plancia`. The global agent contract is already in your context (every agent receives it from its own native file), and project issues also apply. The former local checkout name (`muxin`) does not establish ownership. This public repository contains the `web/` UI. The FastAPI backend and FleetProbe live in private `domenicomassafra/controlcenter:dashboard/`. The Muxin donor was retired in #60; its history and Apache-2.0 attributions remain.
 
 ## Mappa
 
@@ -29,7 +29,7 @@ The canonical repository is `domenicomassafra/plancia`. The shared contract at `
 
 Run agent work, `npm ci`, builds, tests, and Playwright on Mac Studio, in an issue-specific worktree. Use `python3 ~/.local/share/controlcenter/resource-guard/workload_launcher.py worker -- <command>` for builds and tests. MiniPC (`ssh minipc`) hosts installed services and runtimes and is used for Linux/systemd verification. Run Python tests under ControlCenter `dashboard/`; under `web/`, run `npm ci`, `npm run build`, and `npm test`, all through the launcher. Also run `git diff --check`, inspect privacy/provenance and the diff. Do not restore retired donor Rust sources.
 
-The shared contract at `~/.dstack/contracts/shared-root/AGENTS.md` owns review, merge, installation, verification and issue closure. Use the current issue for its scope and acceptance criteria. Do not commit unapproved device images, secrets, accounts, personal logs, Notion/Obsidian data, or profiles. Preserve donor provenance: `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`, `upstream = LumaryLabsLLC/muxin` (Apache-2.0).
+The global agent contract is already in your context (every agent receives it from its own native file); it owns review, merge, installation, verification and issue closure. Use the current issue for its scope and acceptance criteria. Do not commit unapproved device images, secrets, accounts, personal logs, Notion/Obsidian data, or profiles. Preserve donor provenance: `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`, `upstream = LumaryLabsLLC/muxin` (Apache-2.0).
 
 ## Agent skills
 

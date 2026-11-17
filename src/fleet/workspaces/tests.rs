@@ -75,6 +75,7 @@ fn machine(id: &str, platform: &str, cpu: f64, working: usize, disk_free: u64, a
             mem_used: Some(40),
             disk_total: Some(1_000_000_000_000),
             disk_free: Some(disk_free),
+            disk_available: None,
             disk_path: None,
             uptime_sec: None,
             load: Vec::new(),

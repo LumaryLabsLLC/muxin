@@ -233,9 +233,13 @@ impl Root {
                     ))
                     .child(metric_card(
                         &theme,
-                        "Disk free",
-                        p.disk_free.map(format::bytes),
-                        p.disk_total.map(|t| format!("of {} · {}", format::bytes(t), p.disk_path.clone().unwrap_or_default())),
+                        if p.disk_available.is_some_and(|a| p.disk_free.is_some_and(|f| a > f)) { "Disk available" } else { "Disk free" },
+                        // On a Mac, what Finder calls available, with what's free right now beside it.
+                        p.disk_available.filter(|a| p.disk_free.is_some_and(|f| *a > f)).or(p.disk_free).map(format::bytes),
+                        p.disk_total.map(|t| {
+                            let now = p.disk_free.filter(|f| p.disk_available.is_some_and(|a| a > *f)).map(|f| format!(" · {} right now", format::bytes(f))).unwrap_or_default();
+                            format!("of {}{now} · {}", format::bytes(t), p.disk_path.clone().unwrap_or_default())
+                        }),
                         disk,
                         if format::disk_low(&m) { theme.error } else { theme.accent },
                     ))

@@ -286,7 +286,11 @@ impl Root {
             Some(p) => {
                 let cpu = p.cpu_pct.map(|v| v as f32 / 100.);
                 let mem = format::mem_fraction(m);
-                let disk_free = p.disk_free.map(|f| format!("{} free", format::bytes(f)));
+                // On a Mac, what Finder calls available (it counts what macOS clears by itself).
+                let disk_free = match (p.disk_free, p.disk_available) {
+                    (Some(f), Some(a)) if a > f => Some(format!("{} available", format::bytes(a))),
+                    (f, _) => f.map(|f| format!("{} free", format::bytes(f))),
+                };
                 div()
                     .flex()
                     .gap(px(14.))

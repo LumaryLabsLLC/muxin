@@ -378,6 +378,8 @@ impl World {
             mem_used: Some((mem_total as f64 * mem) as u64),
             disk_total: Some(hw.disk_total_gb * 1_000_000_000),
             disk_free: Some((hw.disk_free_gb * 1e9) as u64),
+            // A Mac's Finder counts what macOS can clear too.
+            disk_available: (hw.os == "darwin").then(|| ((hw.disk_free_gb * 1.2).min(hw.disk_total_gb as f64) * 1e9) as u64),
             disk_path: Some(match hw.os {
                 "windows" => "C:".into(),
                 "darwin" => "/System/Volumes/Data".into(),

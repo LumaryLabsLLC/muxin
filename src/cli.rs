@@ -62,7 +62,7 @@ pub fn machines(list: &[MachineSummary]) -> String {
                 m.runners.clone(),
                 m.cpu_pct.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "—".into()),
                 m.mem_pct.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "—".into()),
-                m.disk_free.clone().unwrap_or_else(|| "—".into()),
+                m.disk_available.clone().or_else(|| m.disk_free.clone()).unwrap_or_else(|| "—".into()),
                 m.uptime.clone().unwrap_or_else(|| "—".into()),
                 match (m.problems, m.worst.as_deref()) {
                     (0, Some("unknown")) => "unknown".into(),
@@ -73,6 +73,16 @@ pub fn machines(list: &[MachineSummary]) -> String {
         })
         .collect();
     table(&["MACHINE", "STATUS", "PLATFORM", "RUNNERS", "CPU", "MEM", "DISK FREE", "UPTIME", "HEALTH"], &rows)
+}
+
+/// Free disk space, and on a Mac what Finder calls available when that's
+/// more: "28 GB (182 GB available)".
+fn disk_free(s: &MachineSummary) -> String {
+    match (&s.disk_free, &s.disk_available, s.disk_free_bytes, s.disk_available_bytes) {
+        (Some(free), Some(available), Some(f), Some(a)) if a > f => format!("{free} ({available} available)"),
+        (Some(free), _, _, _) => free.clone(),
+        _ => "—".into(),
+    }
 }
 
 pub fn machine(m: &MachineDetail) -> String {
@@ -114,7 +124,7 @@ pub fn machine(m: &MachineDetail) -> String {
             "cpu {}  mem {}  disk free {}  up {}",
             s.cpu_pct.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "—".into()),
             s.mem_pct.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "—".into()),
-            s.disk_free.clone().unwrap_or_else(|| "—".into()),
+            disk_free(s),
             s.uptime.clone().unwrap_or_else(|| "—".into())
         );
     }

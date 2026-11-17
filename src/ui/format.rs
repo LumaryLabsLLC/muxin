@@ -41,7 +41,9 @@ pub fn mem_fraction(m: &Machine) -> Option<f32> {
 pub fn disk_used_fraction(m: &Machine) -> Option<f32> {
     let p = m.probe.as_ref().filter(|p| p.ok)?;
     let total = p.disk_total?.max(1);
-    Some(1.0 - (p.disk_free? as f64 / total as f64) as f32)
+    // By what Finder calls available on a Mac: what macOS clears by itself isn't used up.
+    let free = p.disk_available.map_or(p.disk_free?, |a| a.max(p.disk_free.unwrap_or(0)));
+    Some(1.0 - (free as f64 / total as f64) as f32)
 }
 
 pub fn disk_low(m: &Machine) -> bool {

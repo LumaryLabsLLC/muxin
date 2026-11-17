@@ -1383,6 +1383,8 @@ impl Root {
                     .flex_col()
                     .flex_1()
                     .min_w(px(0.))
+                    // What still doesn't fit is cut here, not drawn over the state beside it.
+                    .overflow_hidden()
                     .gap(px(1.))
                     .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child(x.title.clone()))
                     .child(
@@ -1395,7 +1397,7 @@ impl Root {
                             .when(with_machine, |d| d.child("·"))
                             .child(x.agent_name.clone())
                             .child("·")
-                            .child(div().font_family(mono_font()).child(x.cwd.clone()))
+                            .child(div().font_family(mono_font()).child(format::short_folder(&x.cwd)))
                             .child("·")
                             .child(format!("started {}", format::ago(x.created_at)))
                             .children(helper_of.map(|p| div().child("·").child(format!("helper of {p}")).flex().gap(px(6.))))
@@ -1403,7 +1405,7 @@ impl Root {
                     )
                     .children(x.git.as_ref().map(|g| git_line(theme, &format!("row-{}", x.id), g, false).mt(px(3.)))),
             )
-            .child(state)
+            .child(div().flex_none().child(state))
             // Hide it from the lists (on hover), or show a hidden one again.
             .when(depth == 0, |d| {
                 let hidden = self.is_hidden(x, cx);

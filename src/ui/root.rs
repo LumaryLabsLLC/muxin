@@ -508,6 +508,8 @@ pub struct Root {
     pub(super) ports_more: std::collections::HashSet<String>,
     /// Machines whose page lists all their sessions (not just the first few).
     pub(super) sessions_more: std::collections::HashSet<String>,
+    /// The Overview lists every agent session (not just the first few).
+    pub(super) overview_agents_more: bool,
     /// Machines whose page lists their hidden sessions too; and whose sidebar
     /// rows list all their sessions.
     pub(super) hidden_open: std::collections::HashSet<String>,
@@ -720,6 +722,7 @@ impl Root {
             usage_at: None,
             ports_more: Default::default(),
             sessions_more: Default::default(),
+            overview_agents_more: false,
             hidden_open: Default::default(),
             sidebar_more: Default::default(),
             machine_gpus: Default::default(),

@@ -1404,8 +1404,9 @@ impl Render for SettingsPage {
                     .flex()
                     .items_center()
                     .gap(px(7.))
+                    .flex_none()
                     .h(px(30.))
-                    .px(px(12.))
+                    .px(px(10.))
                     .rounded(crate::ui::kit::corner(7.))
                     .cursor_pointer()
                     .text_size(px(13.))
@@ -1418,8 +1419,10 @@ impl Render for SettingsPage {
                     .into_any_element()
             })
             .collect();
-        let bar = div().flex_none().px(px(28.)).pt(px(18.)).pb(px(14.)).border_b_1().border_color(theme.border_variant).child(
-            div().flex().w_full().max_w(px(760.)).gap(px(2.)).p(px(3.)).rounded(crate::ui::kit::corner(9.)).bg(theme.element).border_1().border_color(theme.border_variant).children(tabs),
+        // The bar is as wide as its tabs: a fixed width cut the last one off
+        // once there were eight.
+        let bar = div().flex_none().flex().px(px(28.)).pt(px(18.)).pb(px(14.)).border_b_1().border_color(theme.border_variant).child(
+            div().flex().flex_none().gap(px(2.)).p(px(3.)).rounded(crate::ui::kit::corner(9.)).bg(theme.element).border_1().border_color(theme.border_variant).children(tabs),
         );
         let body = div().w_full().max_w(px(760.)).flex().flex_col().gap(px(28.));
         let body = match self.tab {

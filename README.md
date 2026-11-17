@@ -128,7 +128,7 @@ muxin status
 
   The macOS themes also switch to the system fonts (SF Pro, and SF Mono when it's installed). The Terminal themes make Muxin look like a TUI in a terminal: one monospace font, square corners, `[ Buttons ]` and `── Headings ──`. The choice is saved in `config.toml` (`[ui]`).
 
-Keyboard: ⌘P goes to any machine, session or desktop by name, and ⇧⌘P (or ⌘P then `>`) runs any command, including **Theme: Choose…**, which previews each theme as you move through the list · ⌘1…⌘9 go to your machines · ⌃1…⌃7 overview, jobs, boxes, GitHub, usage, run, schedules (Alt on Linux and Windows) · ⌘J activity · ⌘R check machines · ⇧⌘R sync GitHub · ⌘N add machine · ⌘T new session · ⌘F or `/` search your machines and sessions · ⌘B sidebar · ⌘[ / ⌘] back / forward · ⇧⌘] / ⇧⌘[ next / previous session · ⌘, settings. Hold ⌘ to see them in the app, and change them in Settings › Keyboard. On Linux and Windows, use Ctrl instead of ⌘. Coming from herdr? **Keys like › herdr** at the top of Settings › Keyboard uses herdr's keys wherever Muxin does the same thing (a herdr space is a machine here, a tab a session).
+Keyboard: ⌘P goes to any machine, session or desktop by name, and ⇧⌘P (or ⌘P then `>`) runs any command, including **Theme: Choose…**, which previews each theme as you move through the list, your snippets and your saved recipes · ⌘1…⌘9 go to your machines · ⌃1…⌃7 overview, jobs, boxes, GitHub, usage, run, schedules (Alt on Linux and Windows) · ⌘J activity · ⌘R check machines · ⇧⌘R sync GitHub · ⌘N add machine · ⌘T new session · ⌘F or `/` search your machines and sessions · ⌘B sidebar · ⌘[ / ⌘] back / forward · ⇧⌘] / ⇧⌘[ next / previous session · ⌘, settings. Hold ⌘ to see them in the app, and change them in Settings › Keyboard. On Linux and Windows, use Ctrl instead of ⌘. Coming from herdr? **Keys like › herdr** at the top of Settings › Keyboard uses herdr's keys wherever Muxin does the same thing (a herdr space is a machine here, a tab a session).
 
 ## Your settings: `config.toml`
 
@@ -673,6 +673,7 @@ In the app, a machine's page has a **Components** card, under Git:
 - **What's there and what isn't.** Every component Muxin has for that machine's system is listed: a check mark when it's there, a box to pick it when it's missing. The card checks when the page is first shown, and again with its refresh button.
 - **Install** installs what you picked, what they need first. **Update** shows once an agent CLI is there, and brings the agent CLIs to their newest versions. Both run as an operation you watch in Activity, and the card checks again when it's done.
 - **Save as recipe…** saves what's picked under a name. **Saved recipes**, under the grid, lists them: **Apply** installs one on this machine, and each can be renamed or deleted. They're kept in `recipes.json` beside `config.toml`.
+- **The command palette** (⇧⌘P) has them too. With a machine on screen (its page, desktop, logs, services or one of its sessions), **Apply recipe: <name>** applies a saved recipe there, **Components on <machine>** scrolls its page to this card, and **Update agent CLIs on <machine>** is the card's Update, once the card has found one. Anywhere else, **Apply recipe: <name>…** and **Components on a machine…** ask which machine first, from the online Linux and Mac ones. Typing finds them (`recipe`, `install`, `tools`, a component's name); nothing installs until you pick one.
 - **Add machine** has a **Recipe** row once you've saved one. Pick it, and it's applied as soon as the new machine answers. When the machine doesn't answer within 10 minutes, a failed operation says so, and nothing is installed.
 - A Windows machine's card says Muxin has no components for it yet.
 
@@ -746,7 +747,7 @@ Source layout:
 - `src/share`: sharing sessions by link (the host's gateway, joining, WebRTC); `share-server/`: the server that introduces the two sides and serves the browser's join page.
 - `src/fleet`: the engine and snapshot model; `link.rs` and `direct.rs` (connections), `tailscale.rs` and `engine/roaming.rs` (moving between networks), `files.rs`, `clipboard.rs`, `discover.rs` (machines on this network).
 - `src/probe`: machine checks.
-- `src/recipe`: [recipes](#recipes). The components (`components/*.toml`), checking a machine for them (`mod.rs`), applying them (`apply.rs`, with the scripts every step runs through in `scripts/`) and the saved ones (`saved.rs`). The window's side is `src/ui/recipes.rs` and `src/ui/saved_recipes.rs`.
+- `src/recipe`: [recipes](#recipes). The components (`components/*.toml`), checking a machine for them (`mod.rs`), applying them (`apply.rs`, with the scripts every step runs through in `scripts/`) and the saved ones (`saved.rs`). The window's side is `src/ui/recipes.rs`, `src/ui/saved_recipes.rs` and, in the command palette, `src/ui/palette/recipes.rs`.
 - `src/github`: the GitHub API client.
 - `src/ops`: installs and runner control.
 - `src/fleet/workspaces/`: agent workspaces (host and Docker).

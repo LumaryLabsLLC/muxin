@@ -11,6 +11,10 @@ use super::root::{Root, Route};
 use super::settings::SettingsTab;
 use super::theme::{self, Mode, Theme, mono_font};
 
+/// Saved recipes and the Components card, in the palette.
+#[cfg(feature = "recipes")]
+mod recipes;
+
 actions!(palette, [PaletteUp, PaletteDown]);
 
 const CONTEXT: &str = "Palette";
@@ -44,6 +48,9 @@ pub struct Palette {
     themes: Option<(theme::Appearance, String)>,
     /// The text the list was last made for (changes that leave it alone don't reset the selection).
     query: String,
+    /// The saved recipes, and a machine being picked for one.
+    #[cfg(feature = "recipes")]
+    recipes: recipes::State,
     _changes: Subscription,
 }
 
@@ -84,6 +91,9 @@ enum Run {
     Theme(&'static str),
     /// A snippet's command: into the terminal on screen, else on the Run page.
     Snippet(String),
+    /// A saved recipe, the Components card or its Update, on a machine.
+    #[cfg(feature = "recipes")]
+    Recipe(recipes::RecipeRun),
 }
 
 enum Glyph {
@@ -116,6 +126,14 @@ struct Item {
 impl Item {
     fn new(title: impl Into<String>, detail: impl Into<String>, side: impl Into<String>, glyph: Glyph, run: Run) -> Item {
         Item { title: title.into(), detail: detail.into(), side: side.into(), side_is_keys: false, glyph, run, indent: false, group: None, also: String::new(), score: None }
+    }
+
+    /// How well it matches `query`: the title counts most; the rest (machine,
+    /// folder, kind, words it doesn't show) can still match.
+    fn matches(&self, query: &str) -> Option<i32> {
+        score(query, &self.title)
+            .map(|s| s + 500)
+            .or_else(|| score(query, &format!("{} {} {} {}", self.title, self.detail, self.also, if self.side_is_keys { "" } else { &self.side })))
     }
 }
 
@@ -189,7 +207,16 @@ impl Root {
         window.focus(&input.focus_handle(cx));
         self.context_menu = None;
         let query = input.read(cx).text().to_string();
-        self.palette = Some(Palette { input, picked: None, scroll: ScrollHandle::new(), themes: None, query, _changes: changes });
+        self.palette = Some(Palette {
+            input,
+            picked: None,
+            scroll: ScrollHandle::new(),
+            themes: None,
+            query,
+            #[cfg(feature = "recipes")]
+            recipes: recipes::State::new(&self.engine),
+            _changes: changes,
+        });
         cx.notify();
     }
 
@@ -274,6 +301,9 @@ impl Root {
         let Some(run) = self.palette_items(cx).into_iter().nth(ix).map(|i| i.run) else { return };
         match run {
             Run::Do(Command::ChooseTheme) => return self.choose_theme(cx),
+            // It closes the palette itself, or asks for a machine in it.
+            #[cfg(feature = "recipes")]
+            Run::Recipe(r) => return self.run_recipe_item(r, window, cx),
             Run::Theme(id) => {
                 // Keep it: nothing to go back to.
                 if let Some(p) = &mut self.palette {
@@ -323,6 +353,8 @@ impl Root {
                 }
             },
             Run::Theme(_) => {}
+            #[cfg(feature = "recipes")]
+            Run::Recipe(_) => {}
         }
     }
 
@@ -332,19 +364,15 @@ impl Root {
         let text = p.input.read(cx).text().to_string();
         let (items, query) = match text.strip_prefix('>') {
             _ if p.themes.is_some() => (self.theme_items(), text.trim().to_string()),
+            #[cfg(feature = "recipes")]
+            _ if p.recipes.picking() => (self.recipe_machine_items(&p.recipes, cx), text.trim().to_string()),
             Some(q) => (self.command_items(cx), q.trim().to_string()),
             None => (self.place_items(cx), text.trim().to_string()),
         };
         if query.is_empty() {
             return items;
         }
-        // The title counts most; the rest (machine, folder, kind) can still match.
-        let matches = |i: &Item| {
-            score(&query, &i.title)
-                .map(|s| s + 500)
-                .or_else(|| score(&query, &format!("{} {} {} {}", i.title, i.detail, i.also, if i.side_is_keys { "" } else { &i.side })))
-        };
-        let scores: Vec<Option<i32>> = items.iter().map(matches).collect();
+        let scores: Vec<Option<i32>> = items.iter().map(|i| i.matches(&query)).collect();
         if items.iter().any(|i| i.group.is_some()) {
             // Places keep their tree: a machine stays, as the heading, when
             // something under it matches.
@@ -525,7 +553,20 @@ impl Root {
             item("About Muxin", "info", None, Run::Go(Route::About)),
         ];
         let snippets = self.snippet_items();
-        share.into_iter().chain(rename).chain(all).chain([item("New snippet…", "code", None, Run::Do(Command::NewSnippet))]).chain(snippets).collect()
+        // Its Components card comes with the machine on screen; saved recipes after the snippets.
+        #[cfg(feature = "recipes")]
+        let (here, recipes) = self.recipe_items();
+        #[cfg(not(feature = "recipes"))]
+        let (here, recipes): (Vec<Item>, Vec<Item>) = Default::default();
+        share
+            .into_iter()
+            .chain(rename)
+            .chain(here)
+            .chain(all)
+            .chain([item("New snippet…", "code", None, Run::Do(Command::NewSnippet))])
+            .chain(snippets)
+            .chain(recipes)
+            .collect()
     }
 
     /// Each snippet, saying where it goes: the terminal on screen, the
@@ -637,13 +678,16 @@ impl Root {
             })
             .collect();
         let empty = rows.is_empty();
-        let hint = if picking {
-            "↑↓ try   ↵ keep   esc put back"
+        // The search box's icon, the keys, and what an empty list says.
+        let (glyph, hint, nothing) = if picking {
+            ("palette", "↑↓ try   ↵ keep   esc put back", "No theme like that.")
         } else if commands {
-            "↑↓ move   ↵ run   esc close"
+            ("zap", "↑↓ move   ↵ run   esc close", "No command like that.")
         } else {
-            "↑↓ move   ↵ open   >  commands   esc close"
+            ("search", "↑↓ move   ↵ open   >  commands   esc close", "Nothing like that. Type > for commands.")
         };
+        #[cfg(feature = "recipes")]
+        let (glyph, hint, nothing) = p.recipes.words().unwrap_or((glyph, hint, nothing));
         let panel = div()
             .id("palette")
             .key_context(CONTEXT)
@@ -669,7 +713,7 @@ impl Root {
                     .h(px(50.))
                     .border_b_1()
                     .border_color(theme.border_variant)
-                    .child(icon(if picking { "palette" } else if commands { "zap" } else { "search" }, 15., theme.text_muted))
+                    .child(icon(glyph, 15., theme.text_muted))
                     .child(div().flex_1().min_w(px(0.)).text_size(px(14.)).child(p.input.clone())),
             )
             .child(
@@ -679,7 +723,7 @@ impl Root {
                     .overflow_y_scroll()
                     .track_scroll(&p.scroll)
                     .py(px(8.))
-                    .when(empty, |d| d.child(div().px(px(EDGE)).py(px(10.)).text_size(px(12.5)).text_color(theme.text_muted).child(if picking { "No theme like that." } else if commands { "No command like that." } else { "Nothing like that. Type > for commands." })))
+                    .when(empty, |d| d.child(div().px(px(EDGE)).py(px(10.)).text_size(px(12.5)).text_color(theme.text_muted).child(nothing)))
                     .children(rows),
             )
             .child(

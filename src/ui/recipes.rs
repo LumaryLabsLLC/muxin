@@ -2,17 +2,25 @@
 //! a machine has, installing the missing ones picked, and updating what's
 //! there. Both are `recipe_apply`, as an operation; the card checks again
 //! once it's done. What's picked can be saved as a recipe (saved_recipes.rs).
+//! The palette has them too (palette/recipes.rs).
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
-use gpui::{App, AnyElement, Context, SharedString, div, prelude::*, px};
+use gpui::{App, AnyElement, Context, ScrollHandle, SharedString, Window, canvas, div, point, prelude::*, px};
 
 use super::github::Load;
 use super::kit::{self, Button, ButtonStyle, card, icon, section_title};
-use super::root::Root;
+use super::root::{Root, Route};
 use super::theme::Theme;
 use crate::fleet::model::Machine;
 use crate::recipe::{self, MachineCheck};
+
+/// How long a machine's page keeps its Components card in view after the
+/// palette asked for it, while the cards above it load and grow.
+const REVEAL_FOR: Duration = Duration::from_secs(2);
+/// Where a page's first card sits, below the top (overview::page).
+const PAGE_TOP: f32 = 22.;
 
 /// The Components cards, by machine id.
 #[derive(Default)]
@@ -25,6 +33,9 @@ pub struct Recipes {
     applying: HashMap<String, u64>,
     /// The saved recipes, read when first shown and again after a change.
     pub(super) saved: Option<Vec<crate::recipe::saved::SavedRecipe>>,
+    /// A machine whose card the palette asked for, and when: its page
+    /// scrolls to the card for a moment (REVEAL_FOR).
+    reveal: Option<(String, Instant)>,
 }
 
 impl Recipes {
@@ -37,9 +48,46 @@ impl Recipes {
     pub(super) fn watch(&mut self, machine_id: &str, op: u64) {
         self.applying.insert(machine_id.to_string(), op);
     }
+
+    /// What the card's Update would bring up to date on a machine, once the card has checked it.
+    pub(super) fn updatable(&self, machine_id: &str) -> Vec<String> {
+        match self.checks.get(machine_id) {
+            Some(Load::Ready(found)) => found.updatable(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Scrolls `page` so the element it's put in sits where a page's first card
+/// does. It's an empty element, absolute in its parent; drawn again (the
+/// cards above grew), it scrolls again.
+fn scroll_here(page: ScrollHandle) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            let (view, offset) = (page.bounds(), page.offset());
+            let below = f32::from(bounds.top() - view.top()) - PAGE_TOP;
+            let to = (f32::from(offset.y) - below).clamp(-f32::from(page.max_offset().height), 0.);
+            if (to - f32::from(offset.y)).abs() > 0.5 {
+                page.set_offset(point(offset.x, px(to)));
+                window.request_animation_frame();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size(px(0.))
 }
 
 impl Root {
+    /// A machine's page, scrolled to its Components card (the palette's Components).
+    pub(super) fn show_components(&mut self, machine_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(Route::Machine(machine_id.to_string()), window, cx);
+        self.recipes.reveal = Some((machine_id.to_string(), Instant::now()));
+        cx.notify();
+    }
+
     pub(super) fn machine_components(&mut self, theme: &Theme, m: &Machine, cx: &mut Context<Self>) -> AnyElement {
         // Applying here, from this card or Add machine.
         if let Some(op) = self.snapshot.operations.iter().find(|o| o.kind == "recipe" && o.status == "running" && o.machine_id.as_deref() == Some(&m.id)) {
@@ -72,7 +120,16 @@ impl Root {
             Some(Load::Failed(e)) => row().child(icon("circle-alert", 13., theme.warning)).child(div().flex_1().min_w(px(0.)).child(e.clone())).into_any_element(),
             _ => row().child(kit::spinner("m-rc-spin", 13., theme.text_muted)).child("Checking components…").into_any_element(),
         };
-        div().flex().flex_col().gap(px(10.)).child(title).child(card(theme).child(body).children(saved)).into_any_element()
+        // Asked for in the palette: the page scrolls here for a moment.
+        let reveal = match &self.recipes.reveal {
+            Some((id, since)) if *id == m.id && since.elapsed() < REVEAL_FOR => Some(scroll_here(self.page_scroll.clone())),
+            Some((id, _)) if *id == m.id => {
+                self.recipes.reveal = None;
+                None
+            }
+            _ => None,
+        };
+        div().relative().flex().flex_col().gap(px(10.)).child(title).child(card(theme).child(body).children(saved)).children(reveal).into_any_element()
     }
 
     /// What's there (a check mark), what's missing (a box to pick it), and the buttons.
@@ -181,7 +238,7 @@ impl Root {
     }
 
     /// Applies `ids` (with `update`, updates what's behind too), shown on the Activity page.
-    fn apply_components(&mut self, machine_id: &str, ids: Vec<String>, update: bool, cx: &mut Context<Self>) {
+    pub(super) fn apply_components(&mut self, machine_id: &str, ids: Vec<String>, update: bool, cx: &mut Context<Self>) {
         let started = recipe::catalog().and_then(|catalog| {
             let components = catalog.resolve(&ids)?;
             let others = catalog.conflicting(&components).into_iter().cloned().collect();

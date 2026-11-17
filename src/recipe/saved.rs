@@ -71,17 +71,29 @@ fn unique_ids(ids: &[String]) -> Vec<String> {
 }
 
 /// Writes them to `path`, readable by this user only. A file there that
-/// doesn't read is kept beside it as recipes.json.broken first, so a hand edit
-/// gone wrong isn't lost.
+/// doesn't read (not JSON, or not even text: a hand edit saved as UTF-16) is
+/// kept beside it first, as recipes.json.broken, so a hand edit gone wrong
+/// isn't lost. One kept from before stays: the next goes to
+/// recipes.json.broken-2, and so on.
 pub fn write(path: &Path, list: &[SavedRecipe]) -> Result<(), String> {
-    if let Ok(text) = std::fs::read_to_string(path)
-        && parse(&text).is_none()
+    if let Ok(bytes) = std::fs::read(path)
+        && std::str::from_utf8(&bytes).ok().and_then(parse).is_none()
     {
-        let aside = path.with_extension("json.broken");
+        let aside = aside(path);
         std::fs::rename(path, &aside).map_err(|e| format!("Couldn't move the old {} aside: {e}", path.display()))?;
     }
     let bytes = serde_json::to_vec_pretty(list).map_err(|e| e.to_string())?;
     crate::config::write_atomic(path, &bytes).map_err(|e| format!("Couldn't save the recipes: {e:#}"))
+}
+
+/// Where a file that doesn't read is kept: recipes.json.broken, or the first
+/// recipes.json.broken-N that isn't taken.
+fn aside(path: &Path) -> std::path::PathBuf {
+    let first = path.with_extension("json.broken");
+    if !first.exists() {
+        return first;
+    }
+    (2u32..).map(|n| path.with_extension(format!("json.broken-{n}"))).find(|p| !p.exists()).unwrap_or(first)
 }
 
 /// Adds `recipe`, or puts it in place of the one called `replacing` (renaming
@@ -237,6 +249,35 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("recipes.json.broken")).unwrap(), "[{\"name\": \"Agents\", ");
         std::fs::write(&path, b"{\"name\": \"not a list\"}").unwrap();
         assert!(read(&path).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that isn't text at all (a hand edit saved as UTF-16) is kept
+    /// aside too, byte for byte; and a second broken one doesn't take the
+    /// place of the first.
+    #[test]
+    fn every_broken_file_is_kept_aside() {
+        let dir = folder("aside");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("recipes.json");
+        let list = vec![recipe("Agents", &["claude"])];
+        let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain("[{\"name\": \"Web\"}]".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        std::fs::write(&path, &utf16).unwrap();
+        assert!(read(&path).is_empty());
+        write(&path, &list).unwrap();
+        assert_eq!(read(&path), list);
+        assert_eq!(std::fs::read(dir.join("recipes.json.broken")).unwrap(), utf16, "kept as it was");
+
+        // Two more broken edits: each gets a name of its own.
+        for (n, text) in [(2, "[{"), (3, "not json")] {
+            std::fs::write(&path, text).unwrap();
+            write(&path, &list).unwrap();
+            assert_eq!(std::fs::read_to_string(dir.join(format!("recipes.json.broken-{n}"))).unwrap(), text);
+        }
+        assert_eq!(std::fs::read(dir.join("recipes.json.broken")).unwrap(), utf16, "the first one is still there");
+        // A file that reads is simply replaced: nothing more is kept.
+        write(&path, &list[..0]).unwrap();
+        assert!(!dir.join("recipes.json.broken-4").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

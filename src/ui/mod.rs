@@ -1,6 +1,7 @@
 //! The native window, built with GPUI (Zed's UI framework).
 
 mod about;
+pub(crate) mod i18n;
 mod agent_list;
 mod box_dialog;
 mod boxes;
@@ -61,6 +62,7 @@ use theme::Appearance;
 use root::{Quit, Root};
 
 pub fn run(engine: Arc<Engine>, initial_view: Option<String>, listener: Option<crate::instance::Listener>) {
+    i18n::set_language(&engine.settings().language);
     if !engine.is_demo() {
         std::thread::spawn(crate::renamed::retire_old_app);
     }

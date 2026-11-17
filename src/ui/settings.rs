@@ -1,5 +1,6 @@
 //! Settings: which GitHub orgs/repos to watch, polling intervals, the inventory file.
 
+use crate::ui::i18n::{tr, trf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1306,6 +1307,49 @@ impl SettingsPage {
             )
     }
 
+    /// The window's language (see ui::i18n). Changes at once.
+    fn language_section(&self, theme: &Theme) -> impl IntoElement {
+        let chosen = self.engine.settings().language;
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(section_title(theme, tr("Language"), None))
+            .child(
+                card(theme)
+                    .w_full()
+                    .px(px(14.))
+                    .py(px(12.))
+                    .gap(px(8.))
+                    .child(div().flex().child(div().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(crate::ui::i18n::LANGUAGES.iter().map(|&(id, name)| {
+                        let on = chosen == id;
+                        let engine = self.engine.clone();
+                        div()
+                            .id(SharedString::from(format!("language-{}", if id.is_empty() { "system" } else { id })))
+                            .px(px(10.))
+                            .h(px(24.))
+                            .flex()
+                            .items_center()
+                            .rounded(crate::ui::kit::corner(5.))
+                            .cursor_pointer()
+                            .text_size(px(12.))
+                            .text_color(if on { theme.text } else { theme.text_placeholder })
+                            .when(on, |d| d.bg(theme.element_selected))
+                            .when(!on, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+                            .child(if id.is_empty() { tr(name) } else { name })
+                            .on_click(move |_, _, cx| {
+                                let mut s = engine.settings();
+                                s.language = id.to_string();
+                                crate::ui::i18n::set_language(id);
+                                let _ = engine.update_settings(s);
+                                cx.refresh_windows();
+                            })
+                    }))))
+                    .child(div().w_full().min_w(px(0.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("The window's language. The command line and the MCP server stay in English."))),
+            )
+    }
+
     /// The editor machines' folders open in.
     fn editor_section(&self, theme: &Theme) -> impl IntoElement {
         let chosen = self.engine.settings().editor;
@@ -1447,6 +1491,7 @@ impl Render for SettingsPage {
                 .child(self.clipboard_section(&theme))
                 .child(self.desktop_section(&theme))
                 .child(self.tray_section(&theme, cx))
+                .child(self.language_section(&theme))
                 .child(self.editor_section(&theme))
                 .child(self.code_folders_section(&theme, cx))
                 .child(self.connections_section(&theme))

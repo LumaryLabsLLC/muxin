@@ -625,6 +625,9 @@ pub struct Settings {
     pub wake_notices: bool,
     /// The editor machines' folders open in: "zed", "cursor", "vscode", or "" for the first one installed.
     pub editor: String,
+    /// The window's language: "" follows the system, else "en" or "pt-BR" (see ui::i18n).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub language: String,
     /// Cloud machines: how Muxin signs in, what new ones come with, what happens when they sit idle.
     pub cloud: CloudSettings,
     /// Session actions' prompts the user changed, by action ("commit", "review", ...;
@@ -843,6 +846,7 @@ impl Default for Settings {
             connect_directly: true,
             wake_notices: true,
             editor: String::new(),
+            language: String::new(),
             cloud: CloudSettings::default(),
             prompts: Default::default(),
             share: ShareSettings::default(),

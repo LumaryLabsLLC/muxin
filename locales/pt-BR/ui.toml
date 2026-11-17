@@ -1,0 +1,6 @@
+# The window in Brazilian Portuguese: "English in the code" = "Tradução".
+# Keep each {name} as it is. See src/ui/i18n.rs.
+
+"Language" = "Idioma"
+"System" = "Sistema"
+"The window's language. The command line and the MCP server stay in English." = "O idioma da janela. A linha de comando e o servidor MCP continuam em inglês."

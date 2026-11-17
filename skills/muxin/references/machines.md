@@ -48,7 +48,7 @@ muxin recipe apply beelink claude codex --update --json  # and update the agent 
 - Each component comes back `already`, `installed`, `failed`, `skipped` (not tried: `error` says why, often with a `hint`) or `unsupported`; with `--update` also `current` or `updated` (the agent CLIs only). It exits 1 when any is `failed` or `skipped`; the others may have installed, and the error's `details.components` has every result.
 - On Linux a component that needs root goes through `sudo -n`. When sudo asks for a password it's `skipped`, and so is what requires it: pass the hint on, don't work around it. On a Mac every step runs as the user, and packages come from Homebrew.
 - `apply` waits until it's done and has no `--no-wait`. Linux and macOS only: on a Windows machine everything is `unsupported`.
-- Recipes the user saved in the app (a name for some components, applied from a machine's page or as a machine is added) aren't in the CLI: name the components by id, and ask which ones a saved recipe holds.
+- Recipes the user saved in the app (a name for some components, applied from a machine's page, the command palette, or as a machine is added) aren't in the CLI: name the components by id, and ask which ones a saved recipe holds.
 - A headless Muxin built with `--no-default-features` alone has no `muxin recipe`.
 
 ## What's running

@@ -812,7 +812,8 @@ fn copyable(theme: &Theme, i: usize, text: String) -> impl IntoElement {
                 .text_size(px(12.))
                 .text_color(theme.text_muted)
                 .when(looks_like_command, |d| d.font_family(mono_font()).px(px(6.)).py(px(2.)).rounded(crate::ui::kit::corner(4.)).bg(theme.element))
-                .child(text),
+                // Shown in the window's language, copied as the engine wrote it.
+                .child(tr_msg(&text)),
         )
         .when(looks_like_command, |d| {
             d.child(Button::icon_only(("copy-hint", i), "copy").tooltip(tr("Copy")).on_click(move |_, _, cx| {

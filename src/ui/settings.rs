@@ -1824,7 +1824,7 @@ fn hint_line(theme: &Theme, i: usize, hint: String) -> impl IntoElement {
         .items_center()
         .gap(px(6.))
         .pl(px(24.))
-        .child(mono(hint).text_size(px(12.)).px(px(6.)).py(px(2.)).rounded(crate::ui::kit::corner(4.)).bg(theme.element).text_color(theme.text_muted))
+        .child(mono(tr_msg(&hint)).text_size(px(12.)).px(px(6.)).py(px(2.)).rounded(crate::ui::kit::corner(4.)).bg(theme.element).text_color(theme.text_muted))
         .child(Button::icon_only(("hint-copy", i), "copy").tooltip(tr("Copy")).on_click(move |_, _, cx| {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))
         }))

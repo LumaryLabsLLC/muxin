@@ -278,6 +278,12 @@ mod tests {
     fn engine_messages_in_pt_br() {
         assert_eq!(engine_one("beelink is asleep. Wake it first.").as_deref(), Some("beelink está dormindo. Acorde-a primeiro."));
         assert_eq!(engine_one("Something no template knows."), None);
+        // Muxin's own session prompts: every one has its pt-BR, placeholders kept for prompt_in.
+        for a in crate::fleet::sessions::actions::ACTIONS {
+            let pt = engine_one(a.prompt).unwrap_or_else(|| panic!("no pt-BR for {}'s prompt", a.id));
+            assert_eq!(placeholders(&pt), placeholders(a.prompt), "{}", a.id);
+            assert!(engine_one(a.label).is_some(), "no pt-BR for {}'s label", a.id);
+        }
     }
 
     #[test]

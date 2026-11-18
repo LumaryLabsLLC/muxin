@@ -214,8 +214,8 @@ fn session_actions(x: &crate::fleet::sessions::SessionInfo) -> Vec<Item> {
     let mut items: Vec<Item> = ACTIONS
         .iter()
         .map(|a| match a.fits(x.git.as_ref()) {
-            true => Item::Action { label: a.label_for(x.git.as_ref()), glyph: Glyph::Icon(a.icon), action: Action::SessionAction(x.id.clone(), a.id), danger: false },
-            false => Item::Off { label: a.label.to_string(), glyph: Glyph::Icon(a.icon) },
+            true => Item::Action { label: tr_msg(&a.label_for(x.git.as_ref())), glyph: Glyph::Icon(a.icon), action: Action::SessionAction(x.id.clone(), a.id), danger: false },
+            false => Item::Off { label: tr_msg(a.label), glyph: Glyph::Icon(a.icon) },
         })
         .collect();
     items.push(Item::Separator);

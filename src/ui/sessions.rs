@@ -2481,10 +2481,10 @@ impl Root {
 
     pub(super) fn run_session_action(&mut self, id: &str, action: &'static str, cx: &mut Context<Self>) {
         let (engine, id) = (self.engine.clone(), id.to_string());
-        let label = crate::fleet::sessions::actions::action(action).map(|a| a.label).unwrap_or(action);
+        let label = tr_msg(crate::fleet::sessions::actions::action(action).map(|a| a.label).unwrap_or(action));
         let job = engine.runtime().spawn({
             let engine = engine.clone();
-            async move { engine.session_action(&id, action).await }
+            async move { engine.session_action_in(&id, action, &tr_msg).await }
         });
         let task = cx.spawn(async move |this, cx| {
             let result = job.await.unwrap_or_else(|e| Err(e.to_string()));

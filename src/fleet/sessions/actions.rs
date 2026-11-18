@@ -110,17 +110,28 @@ impl SessionAction {
 /// An action's prompt (the user's, else Muxin's) with the session's branch,
 /// base and pull request filled in.
 pub fn prompt(action: &SessionAction, custom: Option<&str>, git: Option<&GitStatus>) -> String {
-    let text = custom.map(str::trim).filter(|t| !t.is_empty()).unwrap_or(action.prompt);
-    let branch = git.map(|g| g.branch.as_str()).filter(|b| !b.is_empty()).unwrap_or("this branch");
-    let base = git.and_then(|g| g.base.as_deref()).unwrap_or("the default branch");
-    let pull = git.and_then(|g| g.pull.as_ref()).map(|p| p.url.as_str()).unwrap_or("this branch's pull request");
-    text.replace("{branch}", branch).replace("{base}", base).replace("{pull}", pull)
+    prompt_in(action, custom, git, &|s| s.to_string())
+}
+
+/// `prompt`, with Muxin's own words (its prompt, "this branch", ...) put
+/// through `language` first: the window asks in its own language.
+pub fn prompt_in(action: &SessionAction, custom: Option<&str>, git: Option<&GitStatus>, language: &dyn Fn(&str) -> String) -> String {
+    let text = custom.map(str::trim).filter(|t| !t.is_empty()).map(str::to_string).unwrap_or_else(|| language(action.prompt));
+    let branch = git.map(|g| g.branch.clone()).filter(|b| !b.is_empty()).unwrap_or_else(|| language("this branch"));
+    let base = git.and_then(|g| g.base.clone()).unwrap_or_else(|| language("the default branch"));
+    let pull = git.and_then(|g| g.pull.as_ref()).map(|p| p.url.clone()).unwrap_or_else(|| language("this branch's pull request"));
+    text.replace("{branch}", &branch).replace("{base}", &base).replace("{pull}", &pull)
 }
 
 impl Engine {
     /// Asks a session's agent to do one of the actions: types its prompt in.
     /// Returns what was sent.
     pub async fn session_action(self: &Arc<Self>, id: &str, action_id: &str) -> Result<String, String> {
+        self.session_action_in(id, action_id, &|s| s.to_string()).await
+    }
+
+    /// `session_action`, with Muxin's own prompt in a language (see `prompt_in`).
+    pub async fn session_action_in(self: &Arc<Self>, id: &str, action_id: &str, language: &(dyn Fn(&str) -> String + Sync)) -> Result<String, String> {
         let action = action(action_id).ok_or_else(|| format!("\"{action_id}\" isn't a session action. Use one of: {}.", ACTIONS.iter().map(|a| a.id).collect::<Vec<_>>().join(", ")))?;
         let find = || self.current().sessions.iter().find(|s| s.id == id).cloned().ok_or_else(|| format!("No session called {id}."));
         let mut session = find()?;
@@ -136,7 +147,7 @@ impl Engine {
             return Err(format!("{} has exited.", session.title));
         }
         let custom = self.settings().prompts.get(action.id).cloned();
-        let text = prompt(action, custom.as_deref(), session.git.as_ref());
+        let text = prompt_in(action, custom.as_deref(), session.git.as_ref(), language);
         self.control_session(id, Control::Send { text: &text, enter: true }).await?;
         Ok(text)
     }

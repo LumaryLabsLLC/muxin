@@ -3,3 +3,25 @@
 # that changes as {name}; keep each {name} in the translation.
 
 "{name} is asleep. Wake it first." = "{name} está dormindo. Acorde-a primeiro."
+
+# Session actions (src/fleet/sessions/actions.rs): labels, and Muxin's own
+# prompts, typed into the agent in the window's language. Keep {branch},
+# {base} and {pull} as they are.
+"Commit" = "Commit"
+"Commit and push" = "Commit e push"
+"Open a pull request" = "Abrir um pull request"
+"Update pull request #{n}" = "Atualizar pull request #{n}"
+"Review the changes" = "Revisar as mudanças"
+"Fix the review comments" = "Corrigir os comentários do review"
+"Resolve conflicts" = "Resolver conflitos"
+"Write a recap" = "Escrever um resumo"
+"this branch" = "este branch"
+"the default branch" = "o branch padrão"
+"this branch's pull request" = "o pull request deste branch"
+"Commit the changes you made, with a clear message that says what changed and why. Don't push yet." = "Faça commit das mudanças que você fez, com uma mensagem clara dizendo o que mudou e por quê. Não faça push ainda."
+"Commit the changes you made with a clear message, then push the branch." = "Faça commit das mudanças que você fez com uma mensagem clara e depois faça push do branch."
+"Push this branch ({branch}) and open a pull request for it with the GitHub CLI (gh pr create). Write a title and a description that say what changed and why. If it has a pull request already, update that one's description instead." = "Faça push deste branch ({branch}) e abra um pull request para ele com o GitHub CLI (gh pr create). Escreva um título e uma descrição dizendo o que mudou e por quê. Se ele já tiver um pull request, atualize a descrição desse."
+"Review the changes on this branch against {base} the way a careful reviewer would: bugs, edge cases, missing tests, anything unclear. List what you find, most important first. Don't change any code yet." = "Revise as mudanças deste branch em relação a {base} como um revisor cuidadoso faria: bugs, casos de borda, testes faltando, qualquer coisa pouco clara. Liste o que encontrar, do mais importante para o menos. Não altere código ainda."
+"Read the review comments on this branch's pull request ({pull}) with the GitHub CLI. Fix what they ask for, reply to each one saying what you did, then push." = "Leia os comentários de review do pull request deste branch ({pull}) com o GitHub CLI. Corrija o que pedem, responda a cada um dizendo o que você fez e depois faça push."
+"Bring this branch up to date with {base} and resolve any conflicts, keeping what both sides meant. Run the tests, then tell me what you changed." = "Atualize este branch com {base} e resolva os conflitos, mantendo a intenção dos dois lados. Rode os testes e depois me diga o que você mudou."
+"Write a short recap of this session: what you changed, what's left to do, and anything I should check." = "Escreva um resumo curto desta sessão: o que você mudou, o que falta fazer e o que eu devo conferir."

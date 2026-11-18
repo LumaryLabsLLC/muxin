@@ -5,7 +5,7 @@
 use gpui::{AnyElement, Context, Entity, Focusable, FontWeight, SharedString, Subscription, Window, div, prelude::*, px};
 
 use super::SettingsPage;
-use crate::ui::i18n::{tr, trf};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use crate::fleet::sessions::actions::{ACTIONS, SessionAction};
 use crate::ui::input::{InputEvent, TextInput};
 use crate::ui::kit::{Button, ButtonStyle, card, icon, section_title};
@@ -23,7 +23,7 @@ impl SettingsPage {
     fn prompt_of(&self, a: &SessionAction) -> (String, bool) {
         match self.engine.settings().prompts.get(a.id).filter(|p| !p.trim().is_empty()) {
             Some(p) => (p.clone(), true),
-            None => (a.prompt.to_string(), false),
+            None => (tr_msg(a.prompt), false),
         }
     }
 
@@ -32,7 +32,7 @@ impl SettingsPage {
         // The field is one line (there's no multi-line one yet): it starts at
         // the prompt's beginning, not its end cut mid-word, and the whole of
         // it shows wrapped below.
-        let input = cx.new(|cx| TextInput::new(cx, a.prompt).with_text(text).at_start());
+        let input = cx.new(|cx| TextInput::new(cx, tr_msg(a.prompt)).with_text(text).at_start());
         let subscription = cx.subscribe_in(&input, window, |this, _, e: &InputEvent, _, cx| match e {
             InputEvent::Submit => this.save_prompt(cx),
             InputEvent::Cancel => {
@@ -63,7 +63,8 @@ impl SettingsPage {
     fn set_prompt(&mut self, action: &'static str, text: Option<String>, cx: &mut Context<Self>) {
         let own = crate::fleet::sessions::actions::action(action).map(|a| a.prompt).unwrap_or_default();
         let mut s = self.engine.settings();
-        match text.filter(|t| !t.is_empty() && t != own) {
+        // Muxin's own, in English or in the window's language, isn't a change.
+        match text.filter(|t| !t.is_empty() && t != own && *t != tr_msg(own)) {
             Some(t) => s.prompts.insert(action.to_string(), t),
             None => s.prompts.remove(action),
         };
@@ -94,7 +95,7 @@ impl SettingsPage {
             .items_center()
             .gap(px(8.))
             .child(icon(a.icon, 14., theme.text_muted))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child(a.label))
+            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child(tr_msg(a.label)))
             .when(changed, |d| d.child(div().text_size(px(11.)).text_color(theme.text_accent).child(tr("changed"))))
             .child(div().flex_1())
             .when(editing.is_none(), |d| {
@@ -119,7 +120,7 @@ impl SettingsPage {
                     .flex_col()
                     .gap(px(6.))
                     .child(e.input.clone())
-                    .child(div().w_full().min_w(px(0.)).text_size(px(12.)).text_color(theme.text_placeholder).child(if typed.trim().is_empty() { trf("Empty uses Muxin's: {prompt}", &[("prompt", &a.prompt)]) } else { typed }))
+                    .child(div().w_full().min_w(px(0.)).text_size(px(12.)).text_color(theme.text_placeholder).child(if typed.trim().is_empty() { trf("Empty uses Muxin's: {prompt}", &[("prompt", &tr_msg(a.prompt))]) } else { typed }))
                     .into_any_element()
             }
             None => div().text_size(px(12.5)).line_height(px(18.)).text_color(theme.text_muted).child(text).into_any_element(),

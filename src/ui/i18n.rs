@@ -49,7 +49,7 @@ fn parse(files: &[&str]) -> Result<HashMap<String, &'static str>, String> {
         let table: toml::Table = toml::from_str(file).map_err(|e| format!("file {i}: {e}"))?;
         for (k, v) in table {
             let v = v.as_str().ok_or_else(|| format!("{k:?} isn't text"))?;
-            // ponytail: leaked once per line at start, the table lives as long as the app.
+            // Kept for as long as the app runs: each line is leaked once, at start.
             out.insert(k, &*Box::leak(v.to_string().into_boxed_str()));
         }
     }
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn tr_and_trf() {
-        // ponytail: never switches CURRENT, other tests read English in parallel.
+        // Doesn't switch the language: other tests read English meanwhile.
         assert_eq!(pt_br().get("Language"), Some(&"Idioma"));
         assert_eq!(tr("not a line anywhere"), "not a line anywhere");
         assert_eq!(trc("Open|state"), "Open");

@@ -1245,9 +1245,10 @@ impl ServicesView {
                     };
                     let container = s.kind == "docker";
                     let state = if container { s.status.clone() } else { s.state.clone() };
+                    // Icons, named on hover: each sits in a slot as wide as one (see ACTION_SLOT).
                     let act = |id: &str, label: &'static str, icon_name: &'static str, action: &'static str| {
                         let (view, s) = (view.clone(), s.clone());
-                        word_or_icon(SharedString::from(format!("svc-{id}-{n}")), label, icon_name, c.compact).on_click(move |_, window, cx| {
+                        word_or_icon(SharedString::from(format!("svc-{id}-{n}")), label, icon_name, true).on_click(move |_, window, cx| {
                             let _ = view.update(cx, |v, cx| v.act(s.clone(), action, false, window, cx));
                         })
                     };

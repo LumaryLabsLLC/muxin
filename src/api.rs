@@ -412,6 +412,9 @@ pub struct ScopeOut {
 
 #[derive(Debug, Serialize)]
 pub struct AttentionOut {
+    /// What it's about: "unreachable" (machines that don't answer),
+    /// "runners-offline", "cloud-gone-<machine id>", ...
+    pub id: String,
     /// "error" | "warning" | "info"
     pub level: String,
     pub title: String,
@@ -1055,6 +1058,7 @@ pub fn status_from(s: &Snapshot, surface: Surface) -> StatusResponse {
             let target = a.action.as_ref().and_then(|x| x.target.clone());
             let kind = a.action.as_ref().map(|x| x.kind.as_str()).unwrap_or("");
             AttentionOut {
+                id: a.id.clone(),
                 level: a.level.clone(),
                 title: a.title.clone(),
                 detail: a.detail.clone(),

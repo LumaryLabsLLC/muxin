@@ -11,7 +11,7 @@
 //! `identity/key.der` (this app), `direct.json` (paired machines).
 
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -100,6 +100,125 @@ pub fn paired(machine_id: &str) -> Option<Paired> {
 /// The machines paired for direct connections, by id.
 pub fn paired_ids() -> HashSet<String> {
     load().into_keys().collect()
+}
+
+/// One address this device has on one of its network interfaces.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Interface {
+    /// "en0" (Wi-Fi on an iPhone), "pdp_ip0" (cellular), "utun4" (a VPN).
+    pub name: String,
+    pub ip: IpAddr,
+    /// The size of its network: 24 for 255.255.255.0.
+    pub prefix: u8,
+}
+
+/// Where this device stands to a paired machine: what explains a machine
+/// that doesn't answer an iPhone or iPad that left its network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Way {
+    /// This device has a network at all (Wi-Fi, cellular, a cable).
+    pub online: bool,
+    /// It's on one of the machine's local networks. None when the machine
+    /// has no local address to go by (a cloud machine).
+    pub near: Option<bool>,
+    /// Tailscale is on here.
+    pub tailscale: bool,
+    /// The machine had a Tailscale address when it was last reached.
+    pub on_tailnet: bool,
+    /// Its name or address only means something on its own network
+    /// ("studio.local", "192.168.1.20").
+    pub home_only: bool,
+}
+
+/// [`Way`] for each paired machine, from this device's networks right now.
+/// Empty when the system won't list them.
+pub fn ways() -> HashMap<String, Way> {
+    let Some(here) = interfaces() else { return HashMap::new() };
+    load().iter().map(|(id, p)| (id.clone(), way(p, &here))).collect()
+}
+
+pub fn way(p: &Paired, here: &[Interface]) -> Way {
+    let starts = |i: &Interface, names: &[&str]| names.iter().any(|n| i.name.starts_with(n));
+    let tunnel = |i: &Interface| starts(i, &["utun", "tailscale", "ipsec", "ppp", "wg", "zt"]);
+    let cellular = |i: &Interface| starts(i, &["pdp_ip", "rmnet", "wwan"]);
+    let lan: Vec<Ipv4Addr> = p.lan.iter().filter_map(|a| a.parse().ok()).collect();
+    let shares = |i: &Interface| match i.ip {
+        IpAddr::V4(me) if (1..32).contains(&i.prefix) => {
+            let mask = u32::MAX << (32 - i.prefix);
+            lan.iter().any(|m| u32::from(me) & mask == u32::from(*m) & mask)
+        }
+        _ => false,
+    };
+    let host = p.host.trim().trim_end_matches('.').to_ascii_lowercase();
+    let host_ip = host.trim_matches(['[', ']']).parse::<IpAddr>().ok();
+    let local_name = [".local", ".lan", ".home", ".home.arpa", ".internal", ".localdomain"].iter().any(|s| host.ends_with(s)) || !host.contains('.');
+    Way {
+        online: here.iter().any(|i| !tunnel(i)),
+        near: (!lan.is_empty()).then(|| here.iter().any(|i| !tunnel(i) && !cellular(i) && shares(i))),
+        // Carriers hand out 100.64.0.0/10 too: Tailscale's is the one on a tunnel.
+        tailscale: here.iter().any(|i| is_tailnet(i.ip) && (tunnel(i) || i.ip.is_ipv6())),
+        on_tailnet: p.tailnet.iter().any(|a| a.parse::<IpAddr>().is_ok()) || host_ip.is_some_and(is_tailnet) || host.ends_with(".ts.net"),
+        home_only: match host_ip {
+            Some(IpAddr::V4(a)) => a.is_private() || a.is_loopback() || a.is_link_local(),
+            // fc00::/7 (a private network's own, Tailscale's aside) and fe80::/10.
+            Some(IpAddr::V6(a)) => a.is_loopback() || (a.segments()[0] & 0xfe00 == 0xfc00 && !is_tailnet(a.into())) || a.segments()[0] & 0xffc0 == 0xfe80,
+            None => local_name,
+        },
+    }
+}
+
+/// An address Tailscale gives: 100.64.0.0/10, or fd7a:115c:a1e0::/48.
+fn is_tailnet(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(a) => a.octets()[0] == 100 && a.octets()[1] & 0xc0 == 64,
+        IpAddr::V6(a) => a.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
+    }
+}
+
+/// This device's addresses by interface, without loopback and link-local
+/// ones. None when the system won't say.
+#[cfg(unix)]
+pub fn interfaces() -> Option<Vec<Interface>> {
+    let mut out = Vec::new();
+    // SAFETY: getifaddrs gives a list that's read here and freed once, below;
+    // each entry's pointers are checked before they're read, as the family says.
+    unsafe {
+        let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut list) != 0 {
+            return None;
+        }
+        let mut cur = list;
+        while !cur.is_null() {
+            let ifa = &*cur;
+            cur = ifa.ifa_next;
+            if ifa.ifa_addr.is_null() || ifa.ifa_flags & libc::IFF_UP as u32 == 0 || ifa.ifa_flags & libc::IFF_LOOPBACK as u32 != 0 {
+                continue;
+            }
+            let v4 = |sa: *const libc::sockaddr| Ipv4Addr::from(u32::from_be((*(sa as *const libc::sockaddr_in)).sin_addr.s_addr));
+            // (The mask is read as the address's family: its own isn't always set.)
+            let (ip, prefix): (IpAddr, u8) = match (*ifa.ifa_addr).sa_family as i32 {
+                libc::AF_INET if v4(ifa.ifa_addr).is_link_local() => continue,
+                libc::AF_INET => (v4(ifa.ifa_addr).into(), if ifa.ifa_netmask.is_null() { 0 } else { u32::from(v4(ifa.ifa_netmask)).leading_ones() as u8 }),
+                libc::AF_INET6 => {
+                    let a = std::net::Ipv6Addr::from((*(ifa.ifa_addr as *const libc::sockaddr_in6)).sin6_addr.s6_addr);
+                    if a.segments()[0] & 0xffc0 == 0xfe80 {
+                        continue;
+                    }
+                    // Nothing here goes by an IPv6 network's size.
+                    (a.into(), 0)
+                }
+                _ => continue,
+            };
+            out.push(Interface { name: std::ffi::CStr::from_ptr(ifa.ifa_name).to_string_lossy().into_owned(), ip, prefix });
+        }
+        libc::freeifaddrs(list);
+    }
+    Some(out)
+}
+
+#[cfg(not(unix))]
+pub fn interfaces() -> Option<Vec<Interface>> {
+    None
 }
 
 /// Machines the user keeps on ssh: Muxin doesn't suggest connecting to them
@@ -413,6 +532,93 @@ pub async fn resolve_host(spec: &MachineSpec) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn on(name: &str, ip: &str, prefix: u8) -> Interface {
+        Interface { name: name.into(), ip: ip.parse().unwrap(), prefix }
+    }
+
+    fn machine(host: &str, lan: &[&str], tailnet: &[&str]) -> Paired {
+        let list = |a: &[&str]| a.iter().map(|s| s.to_string()).collect();
+        Paired { fingerprint: "f".repeat(64), host: host.into(), port: 47821, lan: list(lan), tailnet: list(tailnet) }
+    }
+
+    /// A phone tells whether it's on a machine's network from its own
+    /// addresses: the same network on Wi-Fi counts, cellular and tunnels don't.
+    #[test]
+    fn a_device_knows_whether_its_on_a_machines_network() {
+        let studio = machine("studio.local", &["192.168.148.202"], &[]);
+        let at_home = way(&studio, &[on("en0", "192.168.148.60", 24)]);
+        assert_eq!(at_home, Way { online: true, near: Some(true), tailscale: false, on_tailnet: false, home_only: true });
+
+        // On cellular, and on someone else's Wi-Fi.
+        assert_eq!(way(&studio, &[on("pdp_ip0", "10.44.1.9", 32), on("pdp_ip0", "2607:fb90::12", 0)]).near, Some(false));
+        assert_eq!(way(&studio, &[on("en0", "192.168.1.60", 24)]).near, Some(false));
+        // A carrier's address that looks like home's isn't home.
+        let ten = machine("10.0.0.5", &["10.0.0.5"], &[]);
+        assert_eq!(way(&ten, &[on("pdp_ip0", "10.0.0.77", 24)]).near, Some(false));
+        assert_eq!(way(&ten, &[on("en0", "10.0.0.77", 24)]).near, Some(true));
+        // Nor is a VPN's.
+        assert_eq!(way(&studio, &[on("utun3", "192.168.148.9", 24), on("pdp_ip0", "10.44.1.9", 32)]).near, Some(false));
+        // A network of any size: /16 holds it, /28 doesn't.
+        assert_eq!(way(&studio, &[on("en0", "192.168.3.60", 16)]).near, Some(true));
+        assert_eq!(way(&studio, &[on("en0", "192.168.148.100", 28)]).near, Some(false));
+        // A laptop on this phone's own hotspot is on its network.
+        let tethered = machine("laptop.local", &["172.20.10.3"], &[]);
+        assert_eq!(way(&tethered, &[on("pdp_ip0", "10.44.1.9", 32), on("bridge100", "172.20.10.1", 28)]).near, Some(true));
+
+        // A machine with no local address (a cloud one): no telling.
+        let cloud = machine("203.0.113.9", &[], &[]);
+        let w = way(&cloud, &[on("en0", "192.168.148.60", 24)]);
+        assert_eq!((w.near, w.home_only), (None, false));
+    }
+
+    #[test]
+    fn a_device_knows_whether_tailscale_could_carry_it() {
+        let studio = machine("studio.local", &["192.168.148.202"], &[]);
+        let beelink = machine("adib-ser", &["192.168.148.247"], &["100.123.240.0", "fd7a:115c:a1e0::c530:f001"]);
+        let cellular = on("pdp_ip0", "10.44.1.9", 32);
+        let away = std::slice::from_ref(&cellular);
+
+        // Tailscale is the 100.64.0.0/10 address on a tunnel; a carrier hands those out too.
+        assert!(way(&studio, &[cellular.clone(), on("utun4", "100.64.56.41", 32)]).tailscale);
+        assert!(way(&studio, &[cellular.clone(), on("utun4", "fd7a:115c:a1e0::1", 0)]).tailscale);
+        assert!(!way(&studio, &[on("pdp_ip0", "100.72.3.4", 30)]).tailscale);
+        assert!(!way(&studio, &[cellular.clone(), on("utun2", "10.8.0.2", 24)]).tailscale, "another VPN");
+
+        // Which machines it could carry to.
+        assert!(way(&beelink, away).on_tailnet);
+        assert!(!way(&studio, away).on_tailnet);
+        assert!(way(&machine("box.tail0000.ts.net", &["192.168.1.9"], &[]), away).on_tailnet, "added by its Tailscale name");
+        assert!(way(&machine("100.100.1.1", &["192.168.1.9"], &[]), away).on_tailnet, "or address");
+
+        // Names that mean something at home only, and ones that work anywhere.
+        for (host, home) in [("studio.local", true), ("Studio.local.", true), ("adib-ser", true), ("192.168.1.20", true), ("nas.lan", true), ("fd12:3456::9", true)] {
+            assert_eq!(way(&machine(host, &["192.168.1.20"], &[]), away).home_only, home, "{host}");
+        }
+        for host in ["box.example.com", "203.0.113.9", "2001:db8::9", "fd7a:115c:a1e0::9"] {
+            assert!(!way(&machine(host, &["192.168.1.20"], &[]), away).home_only, "{host}");
+        }
+
+        // No network at all: a tunnel left up doesn't count as one.
+        assert!(!way(&studio, &[]).online);
+        assert!(!way(&studio, &[on("utun4", "100.64.56.41", 32)]).online);
+        assert!(way(&studio, away).online);
+    }
+
+    /// The system's own list: this computer's addresses, none of them
+    /// loopback or link-local, each IPv4 one with its network's size.
+    #[cfg(unix)]
+    #[test]
+    fn lists_this_devices_addresses() {
+        let here = interfaces().expect("the system lists its interfaces");
+        for i in &here {
+            assert!(!i.name.is_empty() && !i.ip.is_loopback(), "{i:?}");
+            match i.ip {
+                IpAddr::V4(a) => assert!(!a.is_link_local() && i.prefix <= 32, "{i:?}"),
+                IpAddr::V6(a) => assert!(a.segments()[0] & 0xffc0 != 0xfe80, "{i:?}"),
+            }
+        }
+    }
 
     /// A direct way that doesn't answer is left alone for a while, and ssh
     /// is used meanwhile. Not when the machine is asleep: a sleeping Mac

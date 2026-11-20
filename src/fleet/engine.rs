@@ -1689,6 +1689,9 @@ impl Engine {
         let links: HashMap<String, (&'static str, Option<&'static str>)> =
             st.inventory.machines.iter().filter_map(|m| super::link::current(&m.id).map(|l| (m.id.clone(), (l.transport(), l.network())))).collect();
         let (paired, ssh_only) = if self.demo.is_some() { Default::default() } else { (super::direct::paired_ids(), super::direct::ssh_only()) };
+        // An iPhone or iPad reaches machines at their own addresses only: where
+        // it is says why one doesn't answer.
+        let ways = if cfg!(target_os = "ios") && self.demo.is_none() { super::direct::ways() } else { HashMap::new() };
         // Droplets asked for and not heard of (a file that's there only while one is).
         let cloud_asked = if self.demo.is_none() && crate::cloud::pending::any(&self.paths.dir) { crate::cloud::pending::read(&self.paths.dir) } else { Vec::new() };
         let mut snapshot = build(&Inputs {
@@ -1717,6 +1720,7 @@ impl Engine {
             links: &links,
             paired: &paired,
             ssh_only: &ssh_only,
+            ways: &ways,
         });
         snapshot.version = st.version;
         snapshot.operations = st.operations.iter().cloned().collect();

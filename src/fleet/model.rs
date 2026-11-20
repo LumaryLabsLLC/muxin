@@ -432,6 +432,9 @@ pub struct Unreachable {
     /// "auth" | "key-locked" (the machine has the key, and it has a passphrase
     /// no agent here unlocks) | "unknown-host" | "host-key" | "tailscale-off" (this computer's
     /// Tailscale is off or signed out, and the machine is on the tailnet) |
+    /// "away" (an iPhone or iPad that isn't on the machine's network, and the
+    /// machine has no Tailscale address to reach it at) | "no-network" (that
+    /// iPhone or iPad has no network itself) |
     /// "powered-off" (a cloud machine) | "host-down" (the machine it runs on or
     /// is reached through is off) | "stopped" (its container there isn't
     /// running) | "installing" (a VM Muxin just made) | "error"

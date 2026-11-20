@@ -50,6 +50,10 @@ pub struct Inputs<'a> {
     pub paired: &'a HashSet<String>,
     /// Machines the user keeps on ssh (no suggestion to connect directly).
     pub ssh_only: &'a HashSet<String>,
+    /// Where this device stands to each paired machine, by machine id: on an
+    /// iPhone or iPad, which reaches machines at their own addresses only.
+    /// Empty elsewhere.
+    pub ways: &'a HashMap<String, super::direct::Way>,
 }
 
 pub fn build(input: &Inputs) -> Snapshot {
@@ -152,6 +156,8 @@ pub fn build(input: &Inputs) -> Snapshot {
             } else if let Some(u) = installing_reason(spec, p, input.now) {
                 u
             } else if let Some(u) = parent.as_ref().and_then(|h| parent_reason(spec, p, h, input)) {
+                u
+            } else if let Some(u) = input.ways.get(&spec.id).and_then(|w| away_reason(spec, p, w, input.settings.check_interval_minutes > 0)) {
                 u
             } else {
                 explain_unreachable(spec, p, input.settings.check_interval_minutes > 0, device, input.tailscale)
@@ -608,6 +614,51 @@ fn powered_off_reason(spec: &MachineSpec, p: &ProbeResult) -> Unreachable {
     }
 }
 
+/// Why a machine doesn't answer an iPhone or iPad, going by where the device
+/// is: it reaches a machine at the machine's own addresses only, so away from
+/// the machine's network it takes Tailscale at both ends. None when that
+/// doesn't explain it: the machine answered and said no, or there's no
+/// telling where it is.
+fn away_reason(spec: &MachineSpec, p: &ProbeResult, way: &super::direct::Way, retrying: bool) -> Option<Unreachable> {
+    let error = p.error.clone().unwrap_or_default();
+    // Nothing answered: the direct connection didn't, and then the app's own
+    // ssh found no machine by that name, got no answer, or never set out (a
+    // machine paired from a Mac, whose account there this app wasn't told).
+    let silent = matches!(unreachable_kind(&error), "offline" | "unknown-host") || error.starts_with("Say which account to use");
+    // Reached at an address of its own choosing (a forwarded port): no saying
+    // which network that's on.
+    if spec.is_local() || spec.direct_address.as_deref().is_some_and(|a| !a.trim().is_empty()) || !silent {
+        return None;
+    }
+    let (name, device) = (spec.name.as_str(), crate::config::this_device());
+    let again = if retrying { "Reconnects when it's back." } else { "Check again when it's back." };
+    let (kind, title, detail) = if !way.online {
+        ("no-network", format!("This {device} is offline"), format!("Connect it to Wi-Fi or cellular to reach {name}."))
+    } else {
+        match way.near? {
+            true => (
+                "offline",
+                format!("{name} isn't answering"),
+                format!("This {device} is on its network, so it's shut down or asleep. If it's on, pair this {device} with it again from your Mac."),
+            ),
+            false if way.on_tailnet && !way.tailscale => ("tailscale-off", format!("Tailscale is off on this {device}"), format!("Turn it on to reach {name} away from its network.")),
+            false if way.on_tailnet => ("offline", format!("{name} isn't answering on Tailscale"), format!("It's shut down or asleep, or Tailscale is off there. {again}")),
+            // What this device knows of the machine is from the last time it
+            // reached it, so a Tailscale put on it since isn't known yet.
+            false if way.home_only => (
+                "away",
+                format!("This {device} isn't on {name}'s network"),
+                format!(
+                    "{name} had no Tailscale address when this {device} last reached it, so it only answers on its own network. To reach it from anywhere, put Tailscale on {}, then open Muxin once on {name}'s network.",
+                    if way.tailscale { "it" } else { "both" }
+                ),
+            ),
+            false => return None,
+        }
+    };
+    Some(Unreachable { kind: kind.into(), title, detail, hint: None, last_seen_at: p.last_seen_at, error })
+}
+
 /// Why a machine can't be reached, in words for people: what probably
 /// happened, and what to do about it when there's something to do.
 pub fn explain_unreachable(spec: &MachineSpec, p: &ProbeResult, retrying: bool, device: Option<&TailnetDevice>, tailscale: Option<&TailscaleStatus>) -> Unreachable {
@@ -905,6 +956,8 @@ fn machine_diagnostics(out: &mut Vec<Diagnostic>, spec: &MachineSpec, probe: Opt
             let level = match u.kind.as_str() {
                 // Off on purpose, or asleep: worth knowing, nothing to fix.
                 "powered-off" | "asleep" => "info",
+                // This device is somewhere the machine isn't reached from: nothing's wrong there.
+                "away" | "no-network" => "warning",
                 k if comes_back_by_itself(k) => "warning",
                 _ => "error",
             };
@@ -1128,17 +1181,24 @@ fn attention(
             detail: m.unreachable.as_ref().map(|u| u.detail.clone()).unwrap_or_default(),
             action: action("View machine", "machine", Some(m.id.clone())),
         }),
-        many => out.push(Attention {
-            id: "unreachable".into(),
-            level: "warning".into(),
-            title: if many.iter().all(|m| m.unreachable.as_ref().is_some_and(|u| u.kind == "offline")) {
-                format!("{} machines are offline", many.len())
+        many => {
+            let all = |kinds: &[&str]| many.iter().all(|m| kinds.contains(&m.unreachable.as_ref().map_or("", |u| u.kind.as_str())));
+            let names = many.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ");
+            let first = many[0].unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_default();
+            let (title, detail) = if all(&["offline"]) {
+                (format!("{} machines are offline", many.len()), names)
+            // One thing on this side keeps all of them out of reach: that's what to say.
+            } else if all(&["no-network"]) {
+                (first, format!("Connect it to Wi-Fi or cellular to reach {names}."))
+            } else if all(&["tailscale-off"]) {
+                (first, format!("{names} can't be reached without it."))
+            } else if all(&["away", "tailscale-off"]) {
+                (format!("This {} isn't on your machines' network", crate::config::this_device()), format!("{names}: each one's page says what it takes to reach it from anywhere."))
             } else {
-                format!("{} machines can't be reached", many.len())
-            },
-            detail: many.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "),
-            action: action("Check again", "check", None),
-        }),
+                (format!("{} machines can't be reached", many.len()), names)
+            };
+            out.push(Attention { id: "unreachable".into(), level: "warning".into(), title, detail, action: action("Check again", "check", None) })
+        }
     }
 
     // Runners that should be up but aren't, on machines we could reach (unreachable ones are covered above).
@@ -1416,6 +1476,11 @@ mod tests {
     }
 
     fn run(inv: &Inventory, settings: &Settings, probes: &HashMap<String, ProbeResult>, gh: Option<&GitHubData>) -> Snapshot {
+        run_from(inv, settings, probes, gh, &HashMap::new())
+    }
+
+    /// As [`run`], on an iPhone or iPad that stands to its machines as `ways` says.
+    fn run_from(inv: &Inventory, settings: &Settings, probes: &HashMap<String, ProbeResult>, gh: Option<&GitHubData>, ways: &HashMap<String, crate::fleet::direct::Way>) -> Snapshot {
         build(&Inputs {
             now: Utc::now(),
             demo: false,
@@ -1436,6 +1501,7 @@ mod tests {
             links: &HashMap::new(),
             paired: &HashSet::new(),
             ssh_only: &HashSet::new(),
+            ways,
         })
     }
 
@@ -1785,6 +1851,100 @@ mod tests {
         assert!(snap.attention.iter().any(|a| a.id == "unreachable" && a.title == "Mini is offline"));
     }
 
+    /// An iPhone or iPad reaches a machine at the machine's own addresses
+    /// only. Away from its network that takes Tailscale at both ends, and
+    /// what's missing is what it says, not "can't find it".
+    #[test]
+    fn a_phone_away_from_a_machines_network_says_whats_missing() {
+        use crate::fleet::direct::Way;
+        let inv = inventory("[[machine]]\nname = \"Studio\"\nhost = \"studio.local\"\n\n[[machine]]\nname = \"VM\"\nhost = \"vm\"\ndirect_address = \"studio:47822\"\n");
+        let (spec, vm) = (&inv.machines[0], &inv.machines[1]);
+        let failed = |error: &str| ProbeResult { ok: false, error: Some(error.into()), ..Default::default() };
+        // What the app's own ssh client says off the machine's network, and on it with the machine off.
+        let no_name = failed("ssh: Could not resolve hostname studio.local: nodename nor servname provided, or not known");
+        let silent = failed("ssh: connect to host studio.local port 22: Operation timed out");
+        // A machine paired from a Mac that names no account: the app's ssh has nobody to sign in as.
+        let no_account = failed(&crate::fleet::ssh::route(spec).unwrap_err());
+        let away = Way { online: true, near: Some(false), tailscale: false, on_tailnet: false, home_only: true };
+        let said = |p: &ProbeResult, w: Way| away_reason(spec, p, &w, true).map(|u| (u.kind, u.title, u.detail));
+        let device = crate::config::this_device();
+
+        // The machine has no Tailscale address: it's only reached on its own network.
+        let (kind, title, detail) = said(&no_name, away).unwrap();
+        assert_eq!((kind.as_str(), title), ("away", format!("This {device} isn't on Studio's network")));
+        assert!(detail.contains("put Tailscale on both"), "{detail}");
+        let (_, _, detail) = said(&no_name, Way { tailscale: true, ..away }).unwrap();
+        assert!(detail.contains("put Tailscale on it,"), "{detail}");
+        assert_eq!(said(&no_account, away).unwrap().0, "away", "{:?}", no_account.error);
+
+        // It has one, and Tailscale is off here.
+        let (kind, title, detail) = said(&silent, Way { on_tailnet: true, ..away }).unwrap();
+        assert_eq!((kind.as_str(), title), ("tailscale-off", format!("Tailscale is off on this {device}")));
+        assert_eq!(detail, "Turn it on to reach Studio away from its network.");
+
+        // Tailscale is on at this end: the machine is what's off.
+        let (kind, title, detail) = said(&silent, Way { on_tailnet: true, tailscale: true, ..away }).unwrap();
+        assert_eq!((kind.as_str(), title.as_str()), ("offline", "Studio isn't answering on Tailscale"));
+        assert_eq!(detail, "It's shut down or asleep, or Tailscale is off there. Reconnects when it's back.");
+
+        // On the machine's own network: it's off, whatever its name did.
+        for p in [&no_name, &silent, &no_account] {
+            let (kind, title, detail) = said(p, Way { near: Some(true), ..away }).unwrap();
+            assert_eq!((kind.as_str(), title.as_str()), ("offline", "Studio isn't answering"));
+            assert!(detail.starts_with(&format!("This {device} is on its network")), "{detail}");
+        }
+
+        // The device has no network itself.
+        let (kind, title, _) = said(&no_name, Way { online: false, ..away }).unwrap();
+        assert_eq!((kind.as_str(), title), ("no-network", format!("This {device} is offline")));
+
+        // Not this: the machine answered and said no, or there's no telling where it is.
+        assert_eq!(said(&failed("ssh: connect to host studio.local port 22: Connection refused"), away), None);
+        assert_eq!(said(&failed("adib@studio.local: Permission denied (publickey)."), away), None);
+        for w in [away, Way { near: Some(true), ..away }] {
+            assert_eq!(said(&failed("timed out after 20 s"), w), None, "it answered, slowly");
+        }
+        assert_eq!(said(&no_name, Way { near: None, home_only: false, ..away }), None, "a cloud machine");
+        assert_eq!(said(&no_name, Way { home_only: false, ..away }), None, "a name that works anywhere");
+        assert_eq!(away_reason(vm, &silent, &away, true).map(|u| u.kind), None, "reached at a forwarded port");
+
+        // In the machine's state: a warning, not an error, and nothing to run.
+        let probes = HashMap::from([("studio".to_string(), no_name.clone())]);
+        let ways = HashMap::from([("studio".to_string(), away)]);
+        let snap = run_from(&inv, &Settings::default(), &probes, None, &ways);
+        let m = snap.machines.iter().find(|m| m.id == "studio").unwrap();
+        let u = m.unreachable.as_ref().unwrap();
+        assert_eq!((u.kind.as_str(), u.hint.as_deref()), ("away", None));
+        assert_eq!((m.diagnostics[0].code.as_str(), m.diagnostics[0].level.as_str()), ("unreachable", "warning"));
+        assert!(snap.attention.iter().any(|a| a.id == "unreachable" && a.title == format!("This {device} isn't on Studio's network")));
+
+        // Several machines out of reach for one reason on this side: said once.
+        let inv3 = inventory("[[machine]]\nname = \"Studio\"\nhost = \"studio.local\"\n\n[[machine]]\nname = \"Den\"\nhost = \"den.local\"\n\n[[machine]]\nname = \"Beelink\"\nhost = \"beelink\"\n");
+        let probes3: HashMap<String, ProbeResult> = ["studio", "den", "beelink"].iter().map(|id| (id.to_string(), no_name.clone())).collect();
+        let group = |ways: &[(&str, Way)]| {
+            let ways = ways.iter().map(|(id, w)| (id.to_string(), *w)).collect();
+            let a = run_from(&inv3, &Settings::default(), &probes3, None, &ways).attention.into_iter().find(|a| a.id == "unreachable").unwrap();
+            (a.title, a.detail)
+        };
+        let on_tailnet = Way { on_tailnet: true, ..away };
+        // No Tailscale address on two, Tailscale off here for the third: this device is away.
+        let (title, detail) = group(&[("studio", away), ("den", away), ("beelink", on_tailnet)]);
+        assert_eq!(title, format!("This {device} isn't on your machines' network"));
+        assert!(detail.starts_with("Studio, Den, Beelink: "), "{detail}");
+        let (title, detail) = group(&[("studio", on_tailnet), ("den", on_tailnet), ("beelink", on_tailnet)]);
+        assert_eq!((title, detail.as_str()), (format!("Tailscale is off on this {device}"), "Studio, Den, Beelink can't be reached without it."));
+        let offline = Way { online: false, ..away };
+        let (title, detail) = group(&[("studio", offline), ("den", offline), ("beelink", offline)]);
+        assert_eq!((title, detail.as_str()), (format!("This {device} is offline"), "Connect it to Wi-Fi or cellular to reach Studio, Den, Beelink."));
+        // One of them is just off: no one reason, so the count and the names.
+        let (title, detail) = group(&[("studio", away), ("den", away), ("beelink", Way { tailscale: true, ..on_tailnet })]);
+        assert_eq!((title.as_str(), detail.as_str()), ("3 machines can't be reached", "Studio, Den, Beelink"));
+
+        // Without a reading of this device's networks (a Mac): as before.
+        let before = run(&inv, &Settings::default(), &probes, None);
+        assert_eq!(before.machines.iter().find(|m| m.id == "studio").unwrap().unreachable.as_ref().unwrap().kind, "unknown-host");
+    }
+
     #[test]
     fn tailscale_explains_whats_out_of_reach() {
         let inv = inventory("[[machine]]\nname = \"Box\"\nhost = \"box\"\n");
@@ -2029,6 +2189,7 @@ mod tests {
                 links: &links,
                 paired: &paired,
                 ssh_only: &ssh_only,
+                ways: &HashMap::new(),
             });
             snap.attention.into_iter().find(|a| a.id.starts_with("direct-"))
         };

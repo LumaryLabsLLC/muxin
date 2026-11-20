@@ -15,7 +15,7 @@ Add `--json` to every command. stdout then carries JSON only, progress and logs 
 
 ## Ground rules
 
-1. **Start with `muxin status --json`** and read `attention` first. It lists what's wrong, most severe first, with the `machine_id` or `runner_id` each item is about.
+1. **Start with `muxin status --json`** and read `attention` first. It lists what's wrong, most severe first: each item has an `id` for what it's about (`unreachable`, `runners-offline`, `cloud-gone-<machine id>`) and the `machine_id` or `runner_id` it concerns.
 2. **The state may be stale.** `status` uses the last machine check: look at `last_check_at` and each machine's `checked_at`. `muxin status --refresh --json` checks every machine first. Checks are read-only.
 3. **Confirm before changing real things.** Reading is always fine. Typing into a session, answering its questions, starting or stopping anything, installing, deleting, pushing and anything that costs money need the user's go-ahead, unless they asked for exactly that. Then say what you did.
 4. **Pass hints on verbatim.** Errors have a `code`: `not_found`, `invalid`, `busy`, `github`, `unreachable`, `operation_failed` or `internal`. Many also have a `hint`, often a command such as `gh auth refresh -h github.com -s admin:org`. Give the user the hint as it is; don't improvise around permission problems.

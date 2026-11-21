@@ -3,6 +3,7 @@
 use gpui::{AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, Window, div, prelude::*, px, svg};
 
 use super::dialogs::DialogEvent;
+use crate::ui::i18n::{tr, trf, tr_msg};
 use super::kit::{Button, ButtonStyle, card};
 use super::root::{Modal, Root};
 use super::theme::{ActiveTheme, Theme};
@@ -14,7 +15,7 @@ const EMAIL: &str = "contact@lumarylabs.com";
 /// The version, and the build (set `MUXEN_BUILD` when building releases).
 fn version() -> String {
     let v = env!("CARGO_PKG_VERSION");
-    format!("Version {v} ({})", option_env!("MUXEN_BUILD").unwrap_or(v))
+    trf("Version {v} ({build})", &[("v", &v), ("build", &option_env!("MUXEN_BUILD").unwrap_or(v))])
 }
 
 /// What the last look at GitHub found: a newer version and how to get it, or
@@ -25,15 +26,15 @@ fn update_card(theme: &Theme, updates: &super::updates::Updates) -> Option<AnyEl
         (Some(u), _) => {
             let (page, download) = (u.page.clone(), u.download.clone());
             let how = match (&u.command, &u.download) {
-                (Some(_), _) => "Update it the way you installed it:",
-                (None, Some(_)) => "Download it, then install it over this one. Your settings stay.",
-                (None, None) => "Get it from its release page.",
+                (Some(_), _) => tr("Update it the way you installed it:"),
+                (None, Some(_)) => tr("Download it, then install it over this one. Your settings stay."),
+                (None, None) => tr("Get it from its release page."),
             };
             div()
                 .flex()
                 .flex_col()
                 .gap(px(10.))
-                .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(format!("Muxin {} is out", u.version)))
+                .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(trf("Muxin {version} is out", &[("version", &u.version)])))
                 .child(line(how.into(), theme.text_muted))
                 .children(u.command.clone().map(|command| {
                     let copy = command.clone();
@@ -42,19 +43,19 @@ fn update_card(theme: &Theme, updates: &super::updates::Updates) -> Option<AnyEl
                         .items_center()
                         .gap(px(8.))
                         .child(div().px(px(10.)).py(px(6.)).rounded(crate::ui::kit::corner(6.)).bg(theme.element).font_family(super::theme::mono_font()).text_size(px(12.5)).text_color(theme.text).child(command))
-                        .child(Button::new("update-copy", "Copy").icon("copy").on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))))
+                        .child(Button::new("update-copy", tr("Copy")).icon("copy").on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))))
                 }))
                 .child(
                     div()
                         .flex()
                         .gap(px(8.))
-                        .children(download.map(|url| Button::new("update-download", "Download").style(ButtonStyle::Primary).icon("arrow-down").on_click(move |_, _, cx| cx.open_url(&url))))
-                        .child(Button::new("update-notes", "What's new").on_click(move |_, _, cx| cx.open_url(&page))),
+                        .children(download.map(|url| Button::new("update-download", tr("Download")).style(ButtonStyle::Primary).icon("arrow-down").on_click(move |_, _, cx| cx.open_url(&url))))
+                        .child(Button::new("update-notes", tr("What's new")).on_click(move |_, _, cx| cx.open_url(&page))),
                 )
                 .into_any_element()
         }
-        (None, Some(e)) => line(e.clone(), theme.text_muted).into_any_element(),
-        (None, None) if updates.checked => line(format!("You have the latest version, {}.", env!("CARGO_PKG_VERSION")), theme.text_muted).into_any_element(),
+        (None, Some(e)) => line(tr_msg(e), theme.text_muted).into_any_element(),
+        (None, None) if updates.checked => line(trf("You have the latest version, {version}.", &[("version", &env!("CARGO_PKG_VERSION"))]), theme.text_muted).into_any_element(),
         (None, None) => return None,
     };
     Some(card(theme).px(px(24.)).py(px(18.)).child(body).into_any_element())
@@ -97,7 +98,7 @@ impl Root {
             )
             .child({
                 let engine = self.engine.clone();
-                Button::new("about-updates", "Check for Updates…")
+                Button::new("about-updates", tr("Check for Updates…"))
                     .loading(super::updates::get(cx).checking)
                     .on_click(move |_, _, cx| super::updates::check_now(engine.clone(), cx))
             });
@@ -124,19 +125,19 @@ impl Root {
                 .child(action)
         };
         let links = card(&theme)
-            .child(row(0, "Website", "muxin.dev", Button::new("about-web", "Open").on_click(|_, _, cx| cx.open_url(WEBSITE)).into_any_element()))
-            .child(row(1, "Lumary Labs", "lumarylabs.com", Button::new("about-company", "Open").on_click(|_, _, cx| cx.open_url(COMPANY)).into_any_element()))
+            .child(row(0, tr("Website"), "muxin.dev", Button::new("about-web", tr("Open")).on_click(|_, _, cx| cx.open_url(WEBSITE)).into_any_element()))
+            .child(row(1, "Lumary Labs", "lumarylabs.com", Button::new("about-company", tr("Open")).on_click(|_, _, cx| cx.open_url(COMPANY)).into_any_element()))
             .child(row(
                 2,
-                "Feedback",
+                tr("Feedback"),
                 EMAIL,
-                Button::new("about-mail", "Send Email").on_click(|_, _, cx| cx.open_url(&format!("mailto:{EMAIL}?subject=Muxin%20feedback"))).into_any_element(),
+                Button::new("about-mail", tr("Send Email")).on_click(|_, _, cx| cx.open_url(&format!("mailto:{EMAIL}?subject=Muxin%20feedback"))).into_any_element(),
             ))
             .child(row(
                 3,
-                "Licenses",
-                "Open-source software Muxin includes",
-                Button::new("about-licenses", "View")
+                tr("Licenses"),
+                tr("Open-source software Muxin includes"),
+                Button::new("about-licenses", tr("View"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         let dialog = cx.new(|cx| LicensesDialog { focus: cx.focus_handle() });
                         this.show_modal(Modal::Licenses(dialog.clone()), window, cx);
@@ -232,14 +233,15 @@ impl Render for LicensesDialog {
             .border_color(theme.border)
             .when(!crate::ui::kit::square(), |d| d.shadow_lg())
             .text_color(theme.text)
-            .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Licenses"))
+            .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(tr("Licenses")))
             .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(
-                "Muxin is open source under the Apache License 2.0, by Lumary Labs LLC. It includes these components under their own licenses; the full texts ship with the app.",
+                tr("Muxin is open source under the Apache License 2.0, by Lumary Labs LLC. It includes these components under their own licenses; the full texts ship with the app."),
+
             ))
             .child(card(&theme).children(rows))
             .child(
                 div().flex().justify_end().child(
-                    Button::new("licenses-close", "Close").style(ButtonStyle::Primary).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))),
+                    Button::new("licenses-close", tr("Close")).style(ButtonStyle::Primary).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))),
                 ),
             )
     }

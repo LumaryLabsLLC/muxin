@@ -16,6 +16,7 @@ use gpui::{
 use serde_json::json;
 
 use super::input::{InputEvent, TextInput};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use super::kit::{self, Button, ButtonStyle, icon, spinner};
 use super::theme::{ActiveTheme, mono_font};
 use crate::fleet::Engine;
@@ -146,9 +147,9 @@ impl LogsView {
     }
 
     fn make(engine: Arc<Engine>, machine: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let filter = cx.new(|cx| TextInput::new(cx, "Filter"));
-        let path = cx.new(|cx| TextInput::new(cx, "A file's path, then Return"));
-        let find = cx.new(|cx| TextInput::new(cx, "Find"));
+        let filter = cx.new(|cx| TextInput::new(cx, tr("Filter")));
+        let path = cx.new(|cx| TextInput::new(cx, tr("A file's path, then Return")));
+        let find = cx.new(|cx| TextInput::new(cx, tr("Find")));
         let subs = vec![
             cx.subscribe_in(&filter, window, |_, _, e: &InputEvent, _, cx| {
                 if *e == InputEvent::Changed {
@@ -269,7 +270,7 @@ impl LogsView {
         let (remote_tx, remote_rx) = std::sync::mpsc::channel::<Arc<Remote>>();
         engine.runtime().clone().spawn(async move {
             let Some((spec, probe)) = engine.machine(&machine) else {
-                let _ = tx.unbounded_send(Msg::Ended("That machine is gone.".into()));
+                let _ = tx.unbounded_send(Msg::Ended(tr("That machine is gone.").into()));
                 return;
             };
             if let Err(e) = crate::fleet::sessions::agent::ensure(&spec, probe.as_ref()).await {
@@ -277,7 +278,7 @@ impl LogsView {
                 return;
             }
             let Some(link) = crate::fleet::link::get(&spec).await else {
-                let _ = tx.unbounded_send(Msg::Ended(format!("Can't reach the agent on {}.", spec.name)));
+                let _ = tx.unbounded_send(Msg::Ended(trf("Can't reach the agent on {name}.", &[("name", &spec.name)])));
                 return;
             };
             let (channel, mut frames) = link.open_channel();
@@ -288,7 +289,7 @@ impl LogsView {
                     let _ = tx.unbounded_send(Msg::Live);
                 }
                 Ok(r) => {
-                    let _ = tx.unbounded_send(Msg::Ended(r["error"].as_str().unwrap_or("The machine couldn't open that log.").to_string()));
+                    let _ = tx.unbounded_send(Msg::Ended(r["error"].as_str().map(tr_msg).unwrap_or_else(|| tr("The machine couldn't open that log.").to_string())));
                     return;
                 }
                 Err(e) => {
@@ -304,7 +305,7 @@ impl LogsView {
                     return;
                 }
             }
-            let _ = tx.unbounded_send(Msg::Ended("The log stopped.".into()));
+            let _ = tx.unbounded_send(Msg::Ended(tr("The log stopped.").into()));
         });
         self.stream = Some(cx.spawn_in(window, async move |this, cx| {
             use futures::StreamExt;
@@ -549,7 +550,7 @@ impl Render for LogsView {
             Tab::Services => sources.services.len(),
         };
         let tabs = div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(
-            [(Tab::System, "System"), (Tab::Files, "Files"), (Tab::Docker, "Docker"), (Tab::Services, "Services")].into_iter().map(|(tab, label)| {
+            [(Tab::System, "System", tr("System")), (Tab::Files, "Files", tr("Files")), (Tab::Docker, "Docker", "Docker"), (Tab::Services, "Services", tr("Services"))].into_iter().map(|(tab, label, shown)| {
                 let on = self.tab == tab;
                 let n = count(tab);
                 div()
@@ -565,7 +566,7 @@ impl Render for LogsView {
                     .text_color(if on { theme.text } else { theme.text_placeholder })
                     .when(on, |d| d.bg(theme.element_selected))
                     .when(!on, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-                    .child(label)
+                    .child(shown)
                     .when(n > 0, |d| d.child(div().text_size(px(10.5)).text_color(theme.text_placeholder).child(n.to_string())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.tab = tab;
@@ -574,15 +575,15 @@ impl Render for LogsView {
             }),
         );
         let status = match &self.state {
-            State::Idle => "Pick a log".to_string(),
-            State::Connecting => "Opening…".to_string(),
-            State::Live if self.paused => format!("Paused · {} new", self.held.len()),
-            State::Live => "Live".to_string(),
-            State::Ended(why) => why.clone(),
+            State::Idle => tr("Pick a log").to_string(),
+            State::Connecting => tr("Opening…").to_string(),
+            State::Live if self.paused => trf("Paused · {n} new", &[("n", &self.held.len())]),
+            State::Live => tr("Live").to_string(),
+            State::Ended(why) => tr_msg(why),
         };
         // Embedded: a chip for each service (All, web, api, ...) and how it's going.
         let chips = self.embedded.then(|| {
-            let mut all: Vec<(Option<String>, String)> = vec![(None, "All".to_string())];
+            let mut all: Vec<(Option<String>, String)> = vec![(None, tr("All").to_string())];
             all.extend(self.services.iter().map(|s| (Some(s.clone()), s.clone())));
             let services = self.services.clone();
             // Many services: the chips wrap onto more lines, never past the edge.
@@ -610,9 +611,9 @@ impl Render for LogsView {
         // Narrow (a small window): Pause and Follow as icons and a shorter
         // filter, so the tabs and the controls share one line.
         let narrow = self.width.get() > 0. && self.width.get() < 800.;
-        let pause_word = if self.paused { "Resume" } else { "Pause" };
+        let pause_word = if self.paused { tr("Resume") } else { tr("Pause") };
         let pause = if narrow { Button::icon_only("logs-pause", if self.paused { "play" } else { "pause" }).tooltip(pause_word) } else { Button::new("logs-pause", pause_word).icon(if self.paused { "play" } else { "pause" }) };
-        let follow = if narrow { Button::icon_only("logs-follow", "arrow-down") } else { Button::new("logs-follow", "Follow").icon("arrow-down") };
+        let follow = if narrow { Button::icon_only("logs-follow", "arrow-down") } else { Button::new("logs-follow", tr("Follow")).icon("arrow-down") };
         // The controls are one group: when they don't fit beside the tabs, they
         // go to the next line together (copy and clear never alone).
         let controls = div()
@@ -626,7 +627,7 @@ impl Render for LogsView {
             .child(
                 follow
                     .style(if self.follow { ButtonStyle::Outlined } else { ButtonStyle::Ghost })
-                    .tooltip("Keep the newest line in view")
+                    .tooltip(tr("Keep the newest line in view"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.follow = !this.follow;
                         if this.follow && !this.shown.is_empty() {
@@ -635,9 +636,9 @@ impl Render for LogsView {
                         cx.notify();
                     })),
             )
-            .child(Button::icon_only("logs-copy", "copy").tooltip("Copy the selection (⌘C), or every line shown").on_click(cx.listener(|this, _, _, cx| this.copy(cx))))
+            .child(Button::icon_only("logs-copy", "copy").tooltip(tr("Copy the selection (⌘C), or every line shown")).on_click(cx.listener(|this, _, _, cx| this.copy(cx))))
             .child(
-                Button::icon_only("logs-clear", "trash-2").tooltip("Clear").on_click(cx.listener(|this, _, _, cx| {
+                Button::icon_only("logs-clear", "trash-2").tooltip(tr("Clear")).on_click(cx.listener(|this, _, _, cx| {
                     this.lines.clear();
                     this.shown.clear();
                     this.longest = None;
@@ -667,7 +668,7 @@ impl Render for LogsView {
         let (list, note): (Vec<LogSource>, Option<String>) = match self.tab {
             Tab::System => (sources.system.clone(), sources.system_note.clone()),
             Tab::Files => (sources.files.clone(), None),
-            Tab::Docker => (sources.docker.clone(), sources.docker_note.clone().or_else(|| sources.docker.is_empty().then(|| "No containers here.".to_string()))),
+            Tab::Docker => (sources.docker.clone(), sources.docker_note.clone().or_else(|| sources.docker.is_empty().then(|| tr("No containers here.").to_string()))),
             Tab::Services => (sources.services.clone(), sources.services_note.clone()),
         };
         let find = self.find.read(cx).text().trim().to_lowercase();
@@ -701,12 +702,12 @@ impl Render for LogsView {
             .child(div().flex_none().p(px(4.)).child(div().w(px(230.)).child(self.find.clone())))
             .when(self.tab == Tab::Files, |d| d.child(div().flex_none().px(px(4.)).pb(px(4.)).child(div().w(px(230.)).child(self.path.clone()))))
             .children(match &self.sources {
-                None => Some(div().flex().items_center().gap(px(8.)).p(px(10.)).text_size(px(12.)).text_color(theme.text_muted).child(spinner("logs-loading", 12., theme.text_muted)).child("Looking for logs…").into_any_element()),
+                None => Some(div().flex().items_center().gap(px(8.)).p(px(10.)).text_size(px(12.)).text_color(theme.text_muted).child(spinner("logs-loading", 12., theme.text_muted)).child(tr("Looking for logs…")).into_any_element()),
                 Some(Err(e)) => Some(div().p(px(10.)).text_size(px(12.)).text_color(theme.error).child(e.clone()).into_any_element()),
                 Some(Ok(_)) => None,
             })
             .children(note.map(|n| div().p(px(8.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(n)))
-            .when(list.is_empty() && !find.is_empty(), |d| d.child(div().p(px(8.)).text_size(px(11.5)).text_color(theme.text_placeholder).child("Nothing matches.")))
+            .when(list.is_empty() && !find.is_empty(), |d| d.child(div().p(px(8.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("Nothing matches."))))
             .children(list.into_iter().enumerate().map(|(i, (s, nested))| {
                 let on = current.as_ref().is_some_and(|c| c.kind == s.kind && c.target == s.target);
                 let locked = s.readable == Some(false);
@@ -758,7 +759,7 @@ impl Render for LogsView {
         let compose = self.source.as_ref().is_some_and(|s| s.kind == "compose");
         let services = self.services.clone();
         let body = if self.source.is_none() {
-            div().flex_1().flex().items_center().justify_center().child(kit::empty_state(&theme, "scroll-text", "Pick a log on the left.")).into_any_element()
+            div().flex_1().flex().items_center().justify_center().child(kit::empty_state(&theme, "scroll-text", tr("Pick a log on the left."))).into_any_element()
         } else {
             let selection = self.ordered();
             let selected_bg = theme.selection;
@@ -830,7 +831,7 @@ impl Render for LogsView {
                 .text_size(px(12.))
                 .child(div().min_w(px(0.)).truncate().font_weight(FontWeight::MEDIUM).text_color(theme.text).child(name))
                 .child(div().flex_1().min_w(px(120.)).text_color(theme.text_placeholder).child(status.clone()))
-                .child(div().flex_none().text_color(theme.text_placeholder).child(if self.shown.len() == self.lines.len() { format!("{} lines", self.lines.len()) } else { format!("{} of {} lines", self.shown.len(), self.lines.len()) }))
+                .child(div().flex_none().text_color(theme.text_placeholder).child(if self.shown.len() == self.lines.len() { trf("{n} lines", &[("n", &self.lines.len())]) } else { trf("{shown} of {n} lines", &[("shown", &self.shown.len()), ("n", &self.lines.len())]) }))
         });
         div()
             .id("logs-view")

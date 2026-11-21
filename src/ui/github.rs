@@ -9,6 +9,7 @@ use gpui::{AnyElement, ClipboardItem, Context, Entity, FontWeight, Hsla, MouseBu
 use super::box_dialog::BoxPrefill;
 use super::dialogs::{Prefill, WorkspacePlan};
 use super::format;
+use crate::ui::i18n::{tr, trf, trc, tr_msg};
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, card, icon, section_title, spinner};
 use super::menu::{self, MenuTarget};
@@ -244,8 +245,8 @@ impl Root {
                 store(&mut this.gh, match result {
                     Ok(v) => Load::Ready(v),
                     Err(e) => Load::Failed(match e.hint {
-                        Some(h) => format!("{} {h}", e.message),
-                        None => e.message,
+                        Some(h) => format!("{} {}", tr_msg(&e.message), tr_msg(&h)),
+                        None => tr_msg(&e.message),
                     }),
                 });
                 cx.notify();
@@ -312,7 +313,7 @@ impl Root {
                     this.gh.repos = None;
                     this.gh.repo.clear();
                     this.gh.items.clear();
-                    this.notify_user(format!("Now using @{login} on GitHub."), false, cx);
+                    this.notify_user(trf("Now using @{login} on GitHub.", &[("login", &login)]), false, cx);
                 }
                 Err(e) => this.notify_user(e.message, true, cx),
             });
@@ -377,10 +378,10 @@ impl Root {
                 this.gh.git_busy.remove(&key);
                 match result {
                     Ok(out) => {
-                        let line = out.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("Done").trim().to_string();
+                        let line = out.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or(tr("Done")).trim().to_string();
                         this.notify_user(format!("git {action}: {line}"), false, cx)
                     }
-                    Err(e) => this.notify_user(format!("git {action} failed: {e}"), true, cx),
+                    Err(e) => this.notify_user(trf("git {action} failed: {error}", &[("action", &action), ("error", &tr_msg(&e))]), true, cx),
                 }
             });
         });
@@ -515,7 +516,7 @@ impl Root {
         let theme = cx.theme();
         self.gh_ensure(cx);
         if self.gh.filter.is_none() {
-            let input = cx.new(|cx| TextInput::new(cx, "Filter repositories"));
+            let input = cx.new(|cx| TextInput::new(cx, tr("Filter repositories")));
             self._subscriptions.push(cx.subscribe_in(&input, window, |_, _, e: &InputEvent, _, cx| {
                 if let InputEvent::Changed = e {
                     cx.notify()
@@ -588,14 +589,14 @@ impl Root {
                     }
                 }
                 if !favs.is_empty() {
-                    body.push(list_heading(theme, "Favorites", None));
+                    body.push(list_heading(theme, tr("Favorites"), None));
                     body.extend(favs);
                 }
                 let rest: Vec<&RepoTree> = trees.iter().filter(|t| !t.names().any(is_favorite) && t.matches(&q)).take(300).collect();
-                body.push(list_heading(theme, "Repositories", Some(self.gh_view_toggle(theme, grouped, cx))));
+                body.push(list_heading(theme, tr("Repositories"), Some(self.gh_view_toggle(theme, grouped, cx))));
                 body.push(div().px(px(12.)).pb(px(8.)).children(self.gh.filter.clone()).into_any_element());
                 if rest.is_empty() {
-                    let text = if q.is_empty() { "No other repositories." } else { "No repositories match." };
+                    let text = if q.is_empty() { tr("No other repositories.") } else { tr("No repositories match.") };
                     body.push(div().px(px(18.)).py(px(6.)).text_size(px(12.)).text_color(theme.text_placeholder).child(text).into_any_element());
                 } else if grouped {
                     // You first, then your organizations A to Z, then what other
@@ -620,7 +621,7 @@ impl Root {
                         .collect();
                     let shared: Vec<&RepoTree> = rest.iter().copied().filter(|t| is_shared(t.anchor)).collect();
                     if !shared.is_empty() {
-                        groups.push((SHARED.to_string(), "Shared with you".to_string(), shared));
+                        groups.push((SHARED.to_string(), tr("Shared with you").to_string(), shared));
                     }
                     for (key, title, trees) in groups {
                         // A search shows every match, folded or not.
@@ -642,12 +643,12 @@ impl Root {
                 }
             }
             Some(Load::Failed(e)) => {
-                body.push(list_heading(theme, "Repositories", None));
-                body.push(div().px(px(18.)).text_size(px(12.)).text_color(theme.error).child(e.clone()).into_any_element());
+                body.push(list_heading(theme, tr("Repositories"), None));
+                body.push(div().px(px(18.)).text_size(px(12.)).text_color(theme.error).child(tr_msg(e)).into_any_element());
             }
             _ => {
-                body.push(list_heading(theme, "Repositories", None));
-                body.push(loading(theme, "Loading repositories…"));
+                body.push(list_heading(theme, tr("Repositories"), None));
+                body.push(loading(theme, tr("Loading repositories…")));
             }
         }
 
@@ -695,11 +696,11 @@ impl Root {
                                             .gap(px(4.))
                                             .text_size(px(11.5))
                                             .text_color(theme.text_placeholder)
-                                            .child(login.map(|l| format!("@{l}")).unwrap_or_else(|| "Connecting…".into()))
+                                            .child(login.map(|l| format!("@{l}")).unwrap_or_else(|| tr("Connecting…").into()))
                                             .child(icon("chevron-down", 11., theme.text_placeholder)),
                                     ),
                             )
-                            .tooltip(|window, cx| kit::Tooltip::view("Switch account".into(), window, cx))
+                            .tooltip(|window, cx| kit::Tooltip::view(tr("Switch account").into(), window, cx))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
@@ -709,7 +710,7 @@ impl Root {
                             ),
                     )
                     .child(div().flex_1())
-                    .child(Button::icon_only("gh-refresh", "refresh-cw").tooltip("Refresh").on_click(cx.listener(|this, _, _, cx| this.gh_refresh(cx)))),
+                    .child(Button::icon_only("gh-refresh", "refresh-cw").tooltip(tr("Refresh")).on_click(cx.listener(|this, _, _, cx| this.gh_refresh(cx)))),
             )
             .child(
                 div()
@@ -727,7 +728,7 @@ impl Root {
                     .when(inbox_active, |d| d.bg(theme.element_selected))
                     .when(!inbox_active, |d| d.hover(|st| st.bg(theme.ghost_hover)))
                     .child(kit::color_tile("inbox", 18.))
-                    .child("For you")
+                    .child(tr("For you"))
                     .child(div().flex_1())
                     .children(waiting.filter(|n| *n > 0).map(|n| kit::pill(n.to_string(), theme.accent)))
                     .on_click(cx.listener(|this, _, window, cx| this.navigate(Route::Github, window, cx))),
@@ -762,8 +763,8 @@ impl Root {
             .p(px(2.))
             .rounded(crate::ui::kit::corner(7.))
             .bg(theme.element)
-            .child(option("gh-view-list", "list", "One list", !grouped, false))
-            .child(option("gh-view-owner", "layers", "Group by owner", grouped, true))
+            .child(option("gh-view-list", "list", tr("One list"), !grouped, false))
+            .child(option("gh-view-owner", "layers", tr("Group by owner"), grouped, true))
             .into_any_element()
     }
 
@@ -785,7 +786,7 @@ impl Root {
             .hover(|st| st.bg(theme.ghost_hover))
             .child(icon(if open { "chevron-down" } else { "chevron-right" }, 12., theme.text_placeholder))
             .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme.text_muted).child(title.to_string()))
-            .when(you, |d| d.child(div().text_size(px(11.)).text_color(theme.text_placeholder).child("you")))
+            .when(you, |d| d.child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(tr("you"))))
             .child(div().flex_1())
             .child(div().text_size(px(11.)).font_family(mono_font()).text_color(theme.text_placeholder).child(count.to_string()))
             .on_click(cx.listener(move |_, _, _, cx| {
@@ -863,7 +864,7 @@ impl Root {
                     .hover(|st| st.bg(theme.ghost_hover))
                     .when(!favorite, |d| d.invisible().group_hover("gh-repo-row", |st| st.visible()))
                     .child(icon(if favorite { "star-filled" } else { "star" }, 12., if favorite { theme.warning } else { theme.text_placeholder }))
-                    .tooltip(move |window, cx| kit::Tooltip::view(if favorite { "Remove from favorites" } else { "Add to favorites" }.into(), window, cx))
+                    .tooltip(move |window, cx| kit::Tooltip::view(if favorite { tr("Remove from favorites") } else { tr("Add to favorites") }.into(), window, cx))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.gh_set_favorite(&star, !favorite, cx)
@@ -878,23 +879,23 @@ impl Root {
         let inbox = match &self.gh.inbox {
             Some(Load::Ready(i)) => i.clone(),
             Some(Load::Failed(e)) => return failed(theme, e),
-            _ => return loading(theme, "Loading what needs you…"),
+            _ => return loading(theme, tr("Loading what needs you…")),
         };
         let mut body = div().flex().flex_col().gap(px(26.)).child(
             div()
                 .flex()
                 .flex_col()
                 .gap(px(4.))
-                .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("For you"))
-                .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(format!(
-                    "Signed in as @{}. Pick an issue and hand it to an agent, or review what's waiting.",
-                    inbox.viewer.login
+                .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(tr("For you")))
+                .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(trf(
+                    "Signed in as @{login}. Pick an issue and hand it to an agent, or review what's waiting.",
+                    &[("login", &inbox.viewer.login)],
                 ))),
         );
         for (title, items, empty) in [
-            ("Waiting for your review", &inbox.review_requests, "No pull requests are waiting for your review."),
-            ("Assigned to you", &inbox.assigned, "Nothing is assigned to you."),
-            ("Your pull requests", &inbox.authored, "You have no open pull requests."),
+            (tr("Waiting for your review"), &inbox.review_requests, tr("No pull requests are waiting for your review.")),
+            (tr("Assigned to you"), &inbox.assigned, tr("Nothing is assigned to you.")),
+            (tr("Your pull requests"), &inbox.authored, tr("You have no open pull requests.")),
         ] {
             let rows: Vec<AnyElement> = items.iter().enumerate().map(|(i, it)| self.gh_item_row(theme, it, true, i, cx)).collect();
             body = body.child(
@@ -950,7 +951,7 @@ impl Root {
                             .text_size(px(11.5))
                             .text_color(theme.text_placeholder)
                             .child(div().font_family(mono_font()).child(reference))
-                            .child(format!("· {} · updated {}", it.author, format::ago(Some(it.updated_at))))
+                            .child(trf("· {author} · updated {ago}", &[("author", &it.author), ("ago", &format::ago(Some(it.updated_at)))]))
                             .children(it.labels.iter().take(4).map(|l| label(theme, l))),
                     ),
             )
@@ -969,7 +970,7 @@ impl Root {
         let data = match self.gh.repo.get(name) {
             Some(Load::Ready(d)) => d,
             Some(Load::Failed(e)) => return failed(theme, e),
-            _ => return loading(theme, "Loading the repository…"),
+            _ => return loading(theme, tr("Loading the repository…")),
         };
         let r = data.repo.clone();
         let issues = data.issues.clone();
@@ -988,11 +989,11 @@ impl Root {
         checkouts.sort_by_key(|c| !c.repo.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(name)));
 
         let meta: Vec<String> = [
-            Some(if r.private { "Private".to_string() } else { "Public".into() }),
+            Some(if r.private { tr("Private").to_string() } else { tr("Public").into() }),
             Some(r.default_branch.clone()),
             r.language.clone(),
             (r.stars > 0).then(|| format!("★ {}", r.stars)),
-            r.pushed_at.map(|t| format!("pushed {}", format::ago(Some(t)))),
+            r.pushed_at.map(|t| trf("pushed {ago}", &[("ago", &format::ago(Some(t)))])),
         ]
         .into_iter()
         .flatten()
@@ -1004,11 +1005,11 @@ impl Root {
         // What it's tied to: what it was forked from, or the forks you have of it.
         let mut family: Vec<AnyElement> = Vec::new();
         match &r.parent {
-            Some(p) => family.push(self.gh_repo_link(theme, "Fork of", &p.full_name, cx)),
-            None if r.fork => family.push(div().text_size(px(12.)).text_color(theme.text_placeholder).child("Fork of a repository GitHub doesn't name to this login.").into_any_element()),
+            Some(p) => family.push(self.gh_repo_link(theme, tr("Fork of"), &p.full_name, cx)),
+            None if r.fork => family.push(div().text_size(px(12.)).text_color(theme.text_placeholder).child(tr("Fork of a repository GitHub doesn't name to this login.")).into_any_element()),
             None => {}
         }
-        family.extend(forks.iter().map(|f| self.gh_repo_link(theme, "Your fork", f, cx)));
+        family.extend(forks.iter().map(|f| self.gh_repo_link(theme, tr("Your fork"), f, cx)));
         // The buttons go beside the name when there's room, else under it: the
         // page beside the list is ~360 wide at the smallest window, and three
         // labelled buttons take ~420.
@@ -1019,13 +1020,13 @@ impl Root {
             .when(wide, |d| d.flex_none().gap(px(14.)))
             .when(!wide, |d| d.flex_wrap().gap(px(8.)).pt(px(6.)))
             .child(
-                Button::new("gh-repo-fav", if favorite { "Favorite" } else { "Add to favorites" })
+                Button::new("gh-repo-fav", if favorite { tr("Favorite") } else { tr("Add to favorites") })
                     .icon(if favorite { "star-filled" } else { "star" })
-                    .tooltip(if favorite { "Remove from favorites" } else { "Show it first in the list" })
+                    .tooltip(if favorite { tr("Remove from favorites") } else { tr("Show it first in the list") })
                     .on_click(cx.listener(move |this, _, _, cx| this.gh_set_favorite(&fav_name, !favorite, cx))),
             )
             .children(first.map(|c| {
-                Button::new("gh-repo-session", "New session")
+                Button::new("gh-repo-session", tr("New session"))
                     .icon("square-terminal")
                     .style(ButtonStyle::Primary)
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1033,7 +1034,7 @@ impl Root {
                         this.show_new_session_prefilled(Some(c.machine_id.clone()), Some(c.path.clone()), prefill, window, cx)
                     }))
             }))
-            .child(Button::new("gh-repo-open", "Open on GitHub").icon("external-link").on_click(move |_, _, cx| cx.open_url(&url)));
+            .child(Button::new("gh-repo-open", tr("Open on GitHub")).icon("external-link").on_click(move |_, _, cx| cx.open_url(&url)));
         let info = div()
             .flex()
             .flex_col()
@@ -1090,24 +1091,24 @@ impl Root {
             .border_color(theme.border_variant)
             .max_w_full()
             .overflow_hidden()
-            .child(tab_button(RepoTab::Issues, format!("Issues  {}", issues.len()), cx))
-            .child(tab_button(RepoTab::Pulls, format!("{}  {}", if short_tabs { "PRs" } else { "Pull requests" }, pulls.len()), cx))
+            .child(tab_button(RepoTab::Issues, trf("Issues  {n}", &[("n", &issues.len())]), cx))
+            .child(tab_button(RepoTab::Pulls, format!("{}  {}", if short_tabs { "PRs" } else { tr("Pull requests") }, pulls.len()), cx))
             .child(tab_button(RepoTab::Actions, "Actions".into(), cx))
-            .child(tab_button(RepoTab::Checkouts, format!("{}  {}", if short_tabs { "Machines" } else { "On your machines" }, checkouts.len()), cx));
+            .child(tab_button(RepoTab::Checkouts, format!("{}  {}", if short_tabs { tr("Machines") } else { tr("On your machines") }, checkouts.len()), cx));
 
         let content = match tab {
             RepoTab::Issues | RepoTab::Pulls => {
                 let list = if tab == RepoTab::Issues { &issues } else { &pulls };
                 let rows: Vec<AnyElement> = list.iter().enumerate().map(|(i, it)| self.gh_item_row(theme, it, false, i, cx)).collect();
                 if rows.is_empty() {
-                    let none = if tab == RepoTab::Issues { "No open issues." } else { "No open pull requests." };
+                    let none = if tab == RepoTab::Issues { tr("No open issues.") } else { tr("No open pull requests.") };
                     match &r.parent {
                         // Forks usually have none: the work is on what they came from.
                         Some(p) => {
                             let upstream = p.full_name.clone();
                             card(theme)
-                                .child(kit::empty_state(theme, "circle-check", format!("{none} This is a fork. Its work is usually on {upstream}.")))
-                                .child(div().px(px(12.)).pb(px(12.)).child(Button::new("gh-go-upstream", format!("Go to {upstream}")).icon("arrow-right").on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::GithubRepo(upstream.clone()), window, cx)))))
+                                .child(kit::empty_state(theme, "circle-check", trf("{none} This is a fork. Its work is usually on {upstream}.", &[("none", &none), ("upstream", &upstream)])))
+                                .child(div().px(px(12.)).pb(px(12.)).child(Button::new("gh-go-upstream", trf("Go to {upstream}", &[("upstream", &upstream)])).icon("arrow-right").on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::GithubRepo(upstream.clone()), window, cx)))))
                                 .into_any_element()
                         }
                         None => card(theme).child(kit::empty_state(theme, "circle-check", none)).into_any_element(),
@@ -1146,7 +1147,7 @@ impl Root {
                 .child(kit::empty_state(
                     theme,
                     "laptop",
-                    format!("{repo} isn't checked out in your code folders on any machine. Agents you start from an issue can clone it."),
+                    trf("{repo} isn't checked out in your code folders on any machine. Agents you start from an issue can clone it.", &[("repo", &repo)]),
                 ))
                 .into_any_element();
         }
@@ -1161,10 +1162,10 @@ impl Root {
                 let (from, to) = machine.map(format::machine_tile).unwrap_or(kit::tiles::OTHER);
                 let icon_name = machine.map(format::machine_icon).unwrap_or("server");
                 let sync = match (c.upstream.is_some(), c.ahead, c.behind) {
-                    (false, _, _) => "no upstream".to_string(),
-                    (true, 0, 0) => "up to date".into(),
-                    (true, a, 0) => format!("↑ {a} to push"),
-                    (true, 0, b) => format!("↓ {b} to pull"),
+                    (false, _, _) => tr("no upstream").to_string(),
+                    (true, 0, 0) => tr("up to date").into(),
+                    (true, a, 0) => trf("↑ {n} to push", &[("n", &a)]),
+                    (true, 0, b) => trf("↓ {n} to pull", &[("n", &b)]),
                     (true, a, b) => format!("↑ {a}  ↓ {b}"),
                 };
                 let busy = self.gh.git_busy.contains(&format!("{}:{}", c.machine_id, c.path));
@@ -1206,32 +1207,32 @@ impl Root {
                                     // A long branch gives way first; the sync state stays.
                                     .child(div().min_w(px(0.)).truncate().font_family(mono_font()).child(c.branch.clone()))
                                     .child(format!("· {sync}"))
-                                    .child(if c.dirty == 0 { "· clean".to_string() } else { format!("· {} changed", c.dirty) })
+                                    .child(if c.dirty == 0 { tr("· clean").to_string() } else { trf("· {n} changed", &[("n", &c.dirty)]) })
                                     // Your fork's, on its upstream's page.
                                     .children(c.repo.as_deref().filter(|r| !r.eq_ignore_ascii_case(repo)).map(|r| format!("· {r}"))),
                             ),
                     )
                     .when(busy, |d| d.child(spinner(SharedString::from(format!("gh-git-{i}")), 13., theme.accent)))
                     .child(
-                        (if compact { Button::icon_only(("gh-fetch", i), "refresh-cw").tooltip("Fetch") } else { Button::new(("gh-fetch", i), "Fetch") })
+                        (if compact { Button::icon_only(("gh-fetch", i), "refresh-cw").tooltip(tr("Fetch")) } else { Button::new(("gh-fetch", i), tr("Fetch")) })
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, _, cx| this.gh_git(&fetch, "fetch", cx))),
                     )
                     .child(
-                        (if compact { Button::icon_only(("gh-pull", i), "arrow-down").tooltip("Pull") } else { Button::new(("gh-pull", i), "Pull").icon("arrow-down") })
+                        (if compact { Button::icon_only(("gh-pull", i), "arrow-down").tooltip(tr("Pull")) } else { Button::new(("gh-pull", i), tr("Pull")).icon("arrow-down") })
                             .disabled(busy || c.behind == 0)
                             .on_click(cx.listener(move |this, _, _, cx| this.gh_git(&pull, "pull", cx))),
                     )
                     .child(
-                        (if compact { Button::icon_only(("gh-push", i), "arrow-up").tooltip("Push") } else { Button::new(("gh-push", i), "Push").icon("arrow-up") })
+                        (if compact { Button::icon_only(("gh-push", i), "arrow-up").tooltip(tr("Push")) } else { Button::new(("gh-push", i), tr("Push")).icon("arrow-up") })
                             .disabled(busy || c.ahead == 0)
                             .on_click(cx.listener(move |this, _, _, cx| this.gh_git(&push, "push", cx))),
                     )
                     .child({
                         let (mid, path) = (c.machine_id.clone(), c.path.clone());
-                        Button::icon_only(("gh-editor", i), "code").tooltip("Open in an editor").on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.pick_editor(&mid, &path, e.position(), cx)))
+                        Button::icon_only(("gh-editor", i), "code").tooltip(tr("Open in an editor")).on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.pick_editor(&mid, &path, e.position(), cx)))
                     })
-                    .child(Button::icon_only(("gh-term", i), "square-terminal").tooltip("New session here").on_click(cx.listener(move |this, _, window, cx| {
+                    .child(Button::icon_only(("gh-term", i), "square-terminal").tooltip(tr("New session here")).on_click(cx.listener(move |this, _, window, cx| {
                         let prefill = Prefill { repo: term.repo.clone(), ..Default::default() };
                         this.show_new_session_prefilled(Some(term.machine_id.clone()), Some(term.path.clone()), prefill, window, cx)
                     })))
@@ -1245,14 +1246,14 @@ impl Root {
         let d = match self.gh.items.get(&(repo.to_string(), number)) {
             Some(Load::Ready(d)) => d.clone(),
             Some(Load::Failed(e)) => return failed(theme, e),
-            _ => return loading(theme, "Loading…"),
+            _ => return loading(theme, tr("Loading…")),
         };
         let it = d.item.clone();
         let width = (self.content_width + 56. - LIST_WIDTH - 56. - 34.).max(320.);
         let (state_label, state_color) = match (it.state.as_str(), it.pull_request, it.draft) {
-            ("open", true, true) => ("Draft", theme.text_placeholder),
-            ("open", _, _) => ("Open", theme.success),
-            _ => ("Closed", theme.text_placeholder),
+            ("open", true, true) => (tr("Draft"), theme.text_placeholder),
+            ("open", _, _) => (trc("Open|state"), theme.success),
+            _ => (tr("Closed"), theme.text_placeholder),
         };
         let repo_name = it.repo.clone();
         let (url, url2) = (it.html_url.clone(), it.html_url.clone());
@@ -1262,24 +1263,24 @@ impl Root {
             .flex_wrap()
             .gap(px(8.))
             .child(
-                Button::new("gh-agent", if it.pull_request { "Review with agent" } else { "Work on it with an agent" })
+                Button::new("gh-agent", if it.pull_request { tr("Review with agent") } else { tr("Work on it with an agent") })
                     .icon("bot")
                     .style(ButtonStyle::Primary)
-                    .tooltip("A session with an agent in a checkout of the repository, to work on it together")
+                    .tooltip(tr("A session with an agent in a checkout of the repository, to work on it together"))
                     .on_click(cx.listener(move |this, _, window, cx| this.gh_to_agent(&detail, Handoff::Session, window, cx))),
             )
             .when(!it.pull_request, |d| {
                 d.child(
-                    Button::new("gh-box", "Hand off in a box")
+                    Button::new("gh-box", tr("Hand off in a box"))
                         .icon("box")
-                        .tooltip("An agent works on it by itself, in a container on one of your machines, and opens a pull request")
+                        .tooltip(tr("An agent works on it by itself, in a container on one of your machines, and opens a pull request"))
                         .on_click(cx.listener(move |this, _, window, cx| this.gh_to_agent(&detail2, Handoff::Box, window, cx))),
                 )
             })
-            .child(Button::new("gh-open", "Open on GitHub").icon("external-link").on_click(move |_, _, cx| cx.open_url(&url)))
-            .child(Button::new("gh-copy", "Copy link").icon("copy").style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, _, cx| {
+            .child(Button::new("gh-open", tr("Open on GitHub")).icon("external-link").on_click(move |_, _, cx| cx.open_url(&url)))
+            .child(Button::new("gh-copy", tr("Copy link")).icon("copy").style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(url2.clone()));
-                this.notify_user("Copied the link.", false, cx);
+                this.notify_user(tr("Copied the link."), false, cx);
             })));
 
         let mut body = div()
@@ -1315,7 +1316,7 @@ impl Root {
                             .text_size(px(12.))
                             .text_color(theme.text_placeholder)
                             .child(kit::pill(state_label, state_color))
-                            .child(format!("{} opened {} · {} comments", it.author, format::ago(Some(it.created_at)), it.comments))
+                            .child(trf("{author} opened {ago} · {n} comments", &[("author", &it.author), ("ago", &format::ago(Some(it.created_at))), ("n", &it.comments)]))
                             .children(it.labels.iter().map(|l| label(theme, l))),
                     ),
             )
@@ -1323,12 +1324,12 @@ impl Root {
 
         if let Some(p) = &d.pull {
             let checks = if p.checks.total == 0 {
-                "No checks".to_string()
+                tr("No checks").to_string()
             } else {
-                format!("{} passed · {} failed · {} pending", p.checks.passed, p.checks.failed, p.checks.pending)
+                trf("{passed} passed · {failed} failed · {pending} pending", &[("passed", &p.checks.passed), ("failed", &p.checks.failed), ("pending", &p.checks.pending)])
             };
             let reviews = if p.reviews.is_empty() {
-                "No reviews yet".to_string()
+                tr("No reviews yet").to_string()
             } else {
                 p.reviews.iter().map(|r| format!("{} {}", r.author, r.state.to_lowercase().replace('_', " "))).collect::<Vec<_>>().join(" · ")
             };
@@ -1336,22 +1337,23 @@ impl Root {
                 card(theme)
                     .px(px(16.))
                     .py(px(8.))
-                    .child(kit::kv(theme, "Branches", div().font_family(mono_font()).child(format!("{} → {}", p.head, p.base))))
-                    .child(kit::kv(theme, "Size", div().child(format!("+{} −{} in {} files", p.additions, p.deletions, p.changed_files))))
+                    .child(kit::kv(theme, tr("Branches"), div().font_family(mono_font()).child(format!("{} → {}", p.head, p.base))))
+                    .child(kit::kv(theme, tr("Size"), div().child(trf("+{added} −{deleted} in {n} files", &[("added", &p.additions), ("deleted", &p.deletions), ("n", &p.changed_files)]))))
                     .child(kit::kv(
                         theme,
-                        "Checks",
+                        tr("Checks"),
                         div()
                             .flex()
                             .flex_col()
                             .child(div().text_color(if p.checks.failed > 0 { theme.error } else { theme.text }).child(checks))
-                            .children((!p.checks.failing.is_empty()).then(|| div().text_size(px(11.5)).text_color(theme.text_muted).child(format!("Failing: {}", p.checks.failing.join(", "))))),
+                            .children((!p.checks.failing.is_empty()).then(|| div().text_size(px(11.5)).text_color(theme.text_muted).child(trf("Failing: {checks}", &[("checks", &p.checks.failing.join(", "))])))),
                     ))
-                    .child(kit::kv(theme, "Reviews", div().child(reviews)))
-                    .child(kit::kv(theme, "Mergeable", div().child(match p.mergeable {
-                        Some(true) => "Yes",
-                        Some(false) => "No (conflicts)",
-                        None => "Checking…",
+                    .child(kit::kv(theme, tr("Reviews"), div().child(reviews)))
+                    .child(kit::kv(theme, tr("Mergeable"), div().child(match p.mergeable {
+                        Some(true) => tr("Yes"),
+                        Some(false) => tr("No (conflicts)"),
+                        None => tr("Checking…"),
+
                     }))),
             );
         }
@@ -1381,7 +1383,7 @@ impl Root {
 
 fn runs_list(theme: &Theme, runs: &[Run]) -> AnyElement {
     if runs.is_empty() {
-        return card(theme).child(kit::empty_state(theme, "play", "No GitHub Actions runs.")).into_any_element();
+        return card(theme).child(kit::empty_state(theme, "play", tr("No GitHub Actions runs."))).into_any_element();
     }
     let rows: Vec<AnyElement> = runs
         .iter()
@@ -1584,7 +1586,7 @@ fn markdown(theme: &Theme, text: &str, width: f32) -> AnyElement {
     }
     flush(&mut paragraph, &mut blocks);
     if blocks.is_empty() {
-        blocks.push(div().text_size(px(12.5)).text_color(theme.text_placeholder).child("No description.").into_any_element());
+        blocks.push(div().text_size(px(12.5)).text_color(theme.text_placeholder).child(tr("No description.")).into_any_element());
     }
     div().flex().flex_col().gap(px(8.)).children(blocks).into_any_element()
 }

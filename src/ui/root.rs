@@ -13,6 +13,7 @@ use gpui::{
 use super::dialogs::{AddDisplayDialog, MonitorPasswordDialog, PowerDialog, AddMachineDialog, ConfirmDialog, DialogEvent, InstallDialog, NewSessionDialog, NewWorkspaceDialog, RenameDialog, RenameTarget};
 use super::terminal::TerminalView;
 use super::format;
+use super::i18n::{tr, trf, tr_msg};
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, icon, spinner};
 use super::settings::SettingsPage;
@@ -134,98 +135,98 @@ pub fn bind_keys(cx: &mut App) {
 
 pub fn menus() -> Vec<Menu> {
     use super::input;
-    let mut window_items = vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom)];
+    let mut window_items = vec![MenuItem::action(tr("Minimize"), Minimize), MenuItem::action(tr("Zoom"), Zoom)];
     // A closed window comes back from the Dock, but not while an app's window
     // of ours still shows: the Dock has nothing to do then.
     if cfg!(target_os = "macos") {
-        window_items.extend([MenuItem::separator(), MenuItem::action("Show Muxin", ShowMainWindow)]);
+        window_items.extend([MenuItem::separator(), MenuItem::action(tr("Show Muxin"), ShowMainWindow)]);
     }
     vec![
         Menu {
             name: "Muxin".into(),
             items: vec![
-                MenuItem::action("About Muxin", ShowAbout),
-                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::action(tr("About Muxin"), ShowAbout),
+                MenuItem::action(tr("Check for Updates…"), CheckForUpdates),
                 MenuItem::separator(),
-                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::action(tr("Settings…"), OpenSettings),
                 MenuItem::separator(),
-                MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::os_submenu(tr("Services"), SystemMenuType::Services),
                 MenuItem::separator(),
-                MenuItem::action("Hide Muxin", HideApp),
-                MenuItem::action("Hide Others", HideOthers),
-                MenuItem::action("Show All", ShowAll),
+                MenuItem::action(tr("Hide Muxin"), HideApp),
+                MenuItem::action(tr("Hide Others"), HideOthers),
+                MenuItem::action(tr("Show All"), ShowAll),
                 MenuItem::separator(),
-                MenuItem::action("Quit Muxin", Quit),
+                MenuItem::action(tr("Quit Muxin"), Quit),
             ],
         },
         // Text fields' editing; a terminal copies and pastes by itself.
         Menu {
-            name: "Edit".into(),
+            name: tr("Edit").into(),
             items: vec![
-                MenuItem::action("Cut", input::Cut),
-                MenuItem::action("Copy", input::Copy),
-                MenuItem::action("Paste", input::Paste),
+                MenuItem::action(tr("Cut"), input::Cut),
+                MenuItem::action(tr("Copy"), input::Copy),
+                MenuItem::action(tr("Paste"), input::Paste),
                 MenuItem::separator(),
-                MenuItem::action("Select All", input::SelectAll),
+                MenuItem::action(tr("Select All"), input::SelectAll),
             ],
         },
         Menu {
-            name: "Machines".into(),
+            name: tr("Machines").into(),
             items: vec![
-                MenuItem::action("Check Machines", CheckNow),
-                MenuItem::action("Sync GitHub", SyncGitHub),
+                MenuItem::action(tr("Check Machines"), CheckNow),
+                MenuItem::action(tr("Sync GitHub"), SyncGitHub),
                 MenuItem::separator(),
-                MenuItem::action("Add Machine…", AddMachine),
-                MenuItem::action("New Session…", NewSession),
+                MenuItem::action(tr("Add Machine…"), AddMachine),
+                MenuItem::action(tr("New Session…"), NewSession),
                 MenuItem::separator(),
-                MenuItem::action("Next Session", NextSession),
-                MenuItem::action("Previous Session", PreviousSession),
-                MenuItem::action("Next Agent", NextAgent),
-                MenuItem::action("Previous Agent", PreviousAgent),
+                MenuItem::action(tr("Next Session"), NextSession),
+                MenuItem::action(tr("Previous Session"), PreviousSession),
+                MenuItem::action(tr("Next Agent"), NextAgent),
+                MenuItem::action(tr("Previous Agent"), PreviousAgent),
                 MenuItem::separator(),
-                MenuItem::action("Zoom Pane", ZoomPane),
-                MenuItem::action("Close Pane", ClosePane),
+                MenuItem::action(tr("Zoom Pane"), ZoomPane),
+                MenuItem::action(tr("Close Pane"), ClosePane),
                 MenuItem::separator(),
-                MenuItem::action("Rename…", RenameShown),
-                MenuItem::action("End Session…", EndSession),
+                MenuItem::action(tr("Rename…"), RenameShown),
+                MenuItem::action(tr("End Session…"), EndSession),
                 MenuItem::separator(),
-                MenuItem::action("Join a Share…", JoinShare),
+                MenuItem::action(tr("Join a Share…"), JoinShare),
             ],
         },
         Menu {
-            name: "View".into(),
+            name: tr("View").into(),
             items: vec![
-                MenuItem::action("Go to…", QuickOpen),
-                MenuItem::action("Command Palette…", CommandPalette),
+                MenuItem::action(tr("Go to…"), QuickOpen),
+                MenuItem::action(tr("Command Palette…"), CommandPalette),
                 MenuItem::separator(),
-                MenuItem::action("Overview", ShowOverview),
-                MenuItem::action("Jobs", ShowJobs),
-                MenuItem::action("Boxes", ShowBoxes),
-                MenuItem::action("Workspaces", ShowWorkspaces),
+                MenuItem::action(tr("Overview"), ShowOverview),
+                MenuItem::action(tr("Jobs"), ShowJobs),
+                MenuItem::action(tr("Boxes"), ShowBoxes),
+                MenuItem::action(tr("Workspaces"), ShowWorkspaces),
                 MenuItem::action("GitHub", ShowGithub),
-                MenuItem::action("Usage", ShowUsage),
-                MenuItem::action("Run on Machines", ShowRun),
-                MenuItem::action("Schedules", ShowSchedules),
-                MenuItem::action("Activity", ToggleActivity),
+                MenuItem::action(tr("Usage"), ShowUsage),
+                MenuItem::action(tr("Run on Machines"), ShowRun),
+                MenuItem::action(tr("Schedules"), ShowSchedules),
+                MenuItem::action(tr("Activity"), ToggleActivity),
                 MenuItem::separator(),
-                MenuItem::action("Back", GoBack),
-                MenuItem::action("Forward", GoForward),
+                MenuItem::action(tr("Back"), GoBack),
+                MenuItem::action(tr("Forward"), GoForward),
                 MenuItem::separator(),
-                MenuItem::action("Show or Hide Sidebar", ToggleSidebar),
+                MenuItem::action(tr("Show or Hide Sidebar"), ToggleSidebar),
             ],
         },
-        Menu { name: "Window".into(), items: window_items },
+        Menu { name: tr("Window").into(), items: window_items },
         Menu {
-            name: "Help".into(),
+            name: tr("Help").into(),
             items: vec![
-                MenuItem::action("Muxin Docs", OpenDocs),
-                MenuItem::action("Keyboard Shortcuts", ShowShortcuts),
+                MenuItem::action(tr("Muxin Docs"), OpenDocs),
+                MenuItem::action(tr("Keyboard Shortcuts"), ShowShortcuts),
                 MenuItem::separator(),
-                MenuItem::action("What’s New", ShowReleaseNotes),
-                MenuItem::action("Report a Problem…", ReportProblem),
-                MenuItem::action("Ask a Question…", AskQuestion),
+                MenuItem::action(tr("What’s New"), ShowReleaseNotes),
+                MenuItem::action(tr("Report a Problem…"), ReportProblem),
+                MenuItem::action(tr("Ask a Question…"), AskQuestion),
                 MenuItem::separator(),
-                MenuItem::action("Muxin on GitHub", OpenGitHub),
+                MenuItem::action(tr("Muxin on GitHub"), OpenGitHub),
             ],
         },
     ]
@@ -562,7 +563,7 @@ pub struct Root {
 
 impl Root {
     pub fn new(engine: Arc<Engine>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let filter = cx.new(|cx| TextInput::new(cx, "Search"));
+        let filter = cx.new(|cx| TextInput::new(cx, tr("Search")));
         let mut subscriptions = vec![cx.subscribe_in(&filter, window, |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::Changed => cx.notify(),
             InputEvent::Cancel => {
@@ -642,7 +643,7 @@ impl Root {
         }));
 
         // The machine page's "Open a port": a number, then Return.
-        let port_input = cx.new(|cx| TextInput::new(cx, "Port, e.g. 3000"));
+        let port_input = cx.new(|cx| TextInput::new(cx, tr("Port, e.g. 3000")));
         subscriptions.push(cx.subscribe_in(&port_input, window, |this, input, e: &InputEvent, _, cx| {
             if *e != InputEvent::Submit {
                 return;
@@ -654,13 +655,13 @@ impl Root {
                     input.update(cx, |i, cx| i.set_text("", cx));
                     this.open_port(&machine, port, None, true, cx);
                 }
-                _ => this.notify_user(format!("\"{text}\" isn't a port number."), true, cx),
+                _ => this.notify_user(trf("\"{text}\" isn't a port number.", &[("text", &text)]), true, cx),
             }
         }));
         // The editors' own icons, for the menu of editors (made once, off the main thread).
         std::thread::spawn(crate::fleet::editor::warm_icons);
         // The Run page's command: Return runs it.
-        let run_input = cx.new(|cx| TextInput::new(cx, "A command, e.g. df -h /").mono());
+        let run_input = cx.new(|cx| TextInput::new(cx, tr("A command, e.g. df -h /")).mono());
         subscriptions.push(cx.subscribe_in(&run_input, window, |this, _, e: &InputEvent, _, cx| {
             if *e == InputEvent::Submit {
                 this.start_run(cx);
@@ -854,7 +855,7 @@ impl Root {
                         Some(b) if b.state == "paused" => {
                             let name = b.name.clone();
                             self.show(Route::Boxes, cx);
-                            self.notify_user(format!("{name} paused. Resume it to pick up where it left off."), false, cx);
+                            self.notify_user(trf("{name} paused. Resume it to pick up where it left off.", &[("name", &name)]), false, cx);
                         }
                         _ => self.show(Route::Boxes, cx),
                     },
@@ -945,7 +946,7 @@ impl Root {
         if super::format::has_desktop(&m) {
             self.show(Route::Desktop(m.id.clone()), cx);
         } else {
-            self.notify_user(format!("Opened it in Claude on {}.", m.name), false, cx);
+            self.notify_user(trf("Opened it in Claude on {name}.", &[("name", &m.name)]), false, cx);
         }
     }
 
@@ -1391,7 +1392,7 @@ impl Root {
     }
 
     pub(super) fn notify_user(&mut self, text: impl Into<SharedString>, error: bool, cx: &mut Context<Self>) {
-        self.notice = Some(Notice { text: text.into(), error, at: Instant::now() });
+        self.notice = Some(Notice { text: tr_msg(&text.into()).into(), error, at: Instant::now() });
         cx.notify();
     }
 
@@ -1402,7 +1403,7 @@ impl Root {
         }
         match self.gh_login_machine() {
             Some(id) => self.gh_cli_run(&id, args, "GitHub access", window, cx),
-            None => self.notify_user(format!("Run `gh {args}` in a terminal."), true, cx),
+            None => self.notify_user(trf("Run `gh {args}` in a terminal.", &[("args", &args)]), true, cx),
         }
     }
 
@@ -1505,7 +1506,7 @@ impl Root {
             Some(super::files::CopyStart { from, from_dir: "~".into(), selected: Vec::new(), to, to_dir: "~".into() })
         });
         let Some(start) = start else {
-            self.notify_user("Add a machine first.", true, cx);
+            self.notify_user(tr("Add a machine first."), true, cx);
             return;
         };
         let engine = self.engine.clone();
@@ -1517,7 +1518,7 @@ impl Root {
     /// Files dropped from the Finder on a machine: copy them there.
     pub(super) fn copy_dropped(&mut self, machine_id: &str, paths: &[std::path::PathBuf], window: &mut Window, cx: &mut Context<Self>) {
         let Some(local) = self.snapshot.machines.iter().find(|m| m.local).map(|m| m.id.clone()) else {
-            self.notify_user("Add this computer to Muxin (host \"local\") to copy files from it.", true, cx);
+            self.notify_user(tr("Add this computer to Muxin (host \"local\") to copy files from it."), true, cx);
             return;
         };
         let Some(dir) = paths.first().and_then(|p| p.parent()).map(|p| p.display().to_string()) else { return };
@@ -1650,7 +1651,7 @@ impl Root {
         let task = cx.spawn(async move |this, cx| {
             let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update(cx, |this, cx| match result {
-                Ok(name) => this.notify_user(format!("Opening it in {name}…"), false, cx),
+                Ok(name) => this.notify_user(trf("Opening it in {name}…", &[("name", &name)]), false, cx),
                 Err(e) => this.notify_user(e, true, cx),
             });
         });
@@ -1815,7 +1816,7 @@ impl Root {
             Ok(()) if ignored => {
                 let name = self.snapshot.machines.iter().find(|m| m.id == machine).map_or(machine.to_string(), |m| m.name.clone());
                 let what = crate::fleet::build::warning_name(code).to_lowercase();
-                self.notify_user(format!("{name} won't warn about {what} anymore. Its page can turn it back on."), false, cx);
+                self.notify_user(trf("{name} won't warn about {what} anymore. Its page can turn it back on.", &[("name", &name), ("what", &what)]), false, cx);
             }
             Ok(()) => {}
             Err(e) => self.notify_user(e, true, cx),
@@ -1865,19 +1866,16 @@ impl Root {
     pub(super) fn confirm_remove_runner(&mut self, runner: &Runner, window: &mut Window, cx: &mut Context<Self>) {
         let on_machine = runner.local.is_some();
         let detail = match (&runner.machine_id, on_machine) {
-            (Some(_), true) => format!(
-                "{} will be stopped, its service uninstalled, and it will be deregistered from GitHub and removed from config.toml.",
-                runner.name
-            ),
-            _ => format!("{} will be deregistered from GitHub.", runner.name),
+            (Some(_), true) => trf("{name} will be stopped, its service uninstalled, and it will be deregistered from GitHub and removed from config.toml.", &[("name", &runner.name)]),
+            _ => trf("{name} will be deregistered from GitHub.", &[("name", &runner.name)]),
         };
         let runner_id = runner.id.clone();
         let dialog = cx.new(|cx| {
             ConfirmDialog::new(
-                format!("Remove {}?", runner.name),
+                trf("Remove {name}?", &[("name", &runner.name)]),
                 detail,
-                "Remove runner",
-                on_machine.then_some("Also delete the runner folder"),
+                tr("Remove runner"),
+                on_machine.then_some(tr("Also delete the runner folder")),
                 move |delete_files, engine| engine.runner_action(&runner_id, RunnerAction::Remove { delete_files }).map(Some),
                 self.engine.clone(),
                 window,
@@ -1893,23 +1891,20 @@ impl Root {
         // A VM Muxin made goes with its container and disk.
         if let Some(vm) = &machine.vm {
             let host = machine.parent.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| vm.host.clone());
-            let detail = format!("Its container {} and its disk on {host} are deleted, and it leaves Muxin. Copy out anything you want to keep first.", vm.container);
-            let dialog = cx.new(|cx| ConfirmDialog::new(format!("Destroy {}?", machine.name), detail, "Destroy", None, move |_, engine| engine.vm_destroy(&machine_id).map(Some), self.engine.clone(), window, cx));
+            let detail = trf("Its container {container} and its disk on {host} are deleted, and it leaves Muxin. Copy out anything you want to keep first.", &[("container", &vm.container), ("host", &host)]);
+            let dialog = cx.new(|cx| ConfirmDialog::new(trf("Destroy {name}?", &[("name", &machine.name)]), detail, tr("Destroy"), None, move |_, engine| engine.vm_destroy(&machine_id).map(Some), self.engine.clone(), window, cx));
             self.show_modal(Modal::Confirm(dialog.clone()), window, cx);
             self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::on_dialog_event));
             return;
         }
         // A cloud machine goes with its droplet.
         if let Some(c) = &machine.cloud {
-            let detail = format!(
-                "Its droplet and everything on it are deleted, and it leaves Muxin. Push your work first. It has cost about ${:.2} so far.",
-                c.cost_so_far
-            );
+            let detail = trf("Its droplet and everything on it are deleted, and it leaves Muxin. Push your work first. It has cost about ${cost} so far.", &[("cost", &format!("{:.2}", c.cost_so_far))]);
             let dialog = cx.new(|cx| {
                 ConfirmDialog::new(
-                    format!("Destroy {}?", machine.name),
+                    trf("Destroy {name}?", &[("name", &machine.name)]),
                     detail,
-                    "Destroy",
+                    tr("Destroy"),
                     None,
                     move |_, engine| engine.cloud_destroy(&machine_id).map(Some),
                     self.engine.clone(),
@@ -1923,15 +1918,15 @@ impl Root {
         }
         // A paired machine's agent forgets this app (see Engine::remove_machine).
         let detail = if crate::fleet::direct::paired(&machine.id).is_some() {
-            "It's taken out of config.toml and stops taking direct connections from this app. Its runners stay registered."
+            tr("It's taken out of config.toml and stops taking direct connections from this app. Its runners stay registered.")
         } else {
-            "It's taken out of config.toml. Nothing on the machine changes, and its runners stay registered."
+            tr("It's taken out of config.toml. Nothing on the machine changes, and its runners stay registered.")
         };
         let dialog = cx.new(|cx| {
             ConfirmDialog::new(
-                format!("Remove {} from Muxin?", machine.name),
+                trf("Remove {name} from Muxin?", &[("name", &machine.name)]),
                 detail.into(),
-                "Remove machine",
+                tr("Remove machine"),
                 None,
                 move |_, engine| engine.remove_machine(&machine_id).map(|_| None),
                 self.engine.clone(),
@@ -1978,7 +1973,7 @@ impl Root {
         self.activity_selected = None;
         self.show(Route::Activity, cx);
         let machine = self.snapshot.machines.iter().find(|m| m.id == session.machine_id).map(|m| m.name.clone()).unwrap_or_default();
-        self.notify_user(format!("Setting up a workspace on {machine}; the session starts when it's ready."), false, cx);
+        self.notify_user(trf("Setting up a workspace on {machine}; the session starts when it's ready.", &[("machine", &machine)]), false, cx);
         let engine = self.engine.clone();
         let job = engine.runtime().spawn({
             let engine = engine.clone();
@@ -1988,7 +1983,7 @@ impl Root {
             let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(ws) => this.start_session(StartSession { cwd: ws.path, ..session }, window, cx),
-                Err(e) => this.notify_user(format!("Couldn't set up the workspace: {e}"), true, cx),
+                Err(e) => this.notify_user(trf("Couldn't set up the workspace: {error}", &[("error", &tr_msg(&e))]), true, cx),
             });
         });
         self.track(task);
@@ -2003,7 +1998,7 @@ impl Root {
         };
         self.show_operation(op, cx);
         let host = self.snapshot.machines.iter().find(|m| m.id == host).map(|m| m.name.clone()).unwrap_or(host);
-        self.notify_user(format!("Making {name} on {host}; the session starts when it's ready."), false, cx);
+        self.notify_user(trf("Making {name} on {host}; the session starts when it's ready.", &[("name", &name), ("host", &host)]), false, cx);
         let task = cx.spawn_in(window, async move |this, cx| {
             // Until the operation is done, one way or the other.
             let status = loop {
@@ -2012,7 +2007,7 @@ impl Root {
                 match s {
                     Some((st, _)) if st == "running" => continue,
                     Some((st, e)) => break (st, e),
-                    None => break ("failed".to_string(), Some("The operation went missing.".into())),
+                    None => break ("failed".to_string(), Some(tr("The operation went missing.").into())),
                 }
             };
             let _ = this.update_in(cx, |this, window, cx| match status {
@@ -2020,7 +2015,7 @@ impl Root {
                     Some(ws) => this.start_in_workspace(ws, session, window, cx),
                     None => this.start_session(session, window, cx),
                 },
-                (_, e) => this.notify_user(format!("Couldn't make {name}: {}", e.unwrap_or_default()), true, cx),
+                (_, e) => this.notify_user(trf("Couldn't make {name}: {error}", &[("name", &name), ("error", &tr_msg(&e.unwrap_or_default()))]), true, cx),
             });
         });
         self.track(task);
@@ -2040,21 +2035,21 @@ impl Root {
             None => Vec::new(),
         };
         let mut text = match sessions.len() {
-            0 => "Background commands it started are stopped and its folder is deleted from the machine.".to_string(),
-            1 => "The session working in it ends, background commands it started are stopped, and its folder is deleted from the machine.".to_string(),
-            n => format!("The {n} sessions working in it end, background commands it started are stopped, and its folder is deleted from the machine."),
+            0 => tr("Background commands it started are stopped and its folder is deleted from the machine.").to_string(),
+            1 => tr("The session working in it ends, background commands it started are stopped, and its folder is deleted from the machine.").to_string(),
+            n => trf("The {n} sessions working in it end, background commands it started are stopped, and its folder is deleted from the machine.", &[("n", &n)]),
         };
         // A worktree: its branch, and the commits on it, stay in the checkout.
         if let Some(w) = self.snapshot.workspaces.iter().find(|w| w.id == id && w.worktree_of.is_some()) {
-            let branch = w.branch.clone().or_else(|| w.git.as_ref().map(|g| g.branch.clone())).unwrap_or_else(|| "its branch".into());
-            text.push_str(&format!(" It's a worktree: its branch ({branch}) stays in {}, with any commits on it.", w.worktree_of.clone().unwrap_or_default()));
+            let branch = w.branch.clone().or_else(|| w.git.as_ref().map(|g| g.branch.clone())).unwrap_or_else(|| tr("its branch").into());
+            text.push_str(&trf(" It's a worktree: its branch ({branch}) stays in {checkout}, with any commits on it.", &[("branch", &branch), ("checkout", &w.worktree_of.clone().unwrap_or_default())]));
         }
         let dialog = cx.new(|cx| {
             ConfirmDialog::new(
-                format!("Delete {name}?"),
+                trf("Delete {name}?", &[("name", &name)]),
                 text,
-                "Delete workspace",
-                Some("Keep the files on the machine"),
+                tr("Delete workspace"),
+                Some(tr("Keep the files on the machine")),
                 move |keep_files, engine| {
                     let engine = engine.clone();
                     let (wid, sessions) = (wid.clone(), sessions.clone());
@@ -2084,9 +2079,9 @@ impl Root {
         let Some(job) = s.jobs.queued.iter().chain(s.jobs.running.iter()).find(|j| j.id == job_id).cloned() else { return };
         let dialog = cx.new(|cx| {
             ConfirmDialog::new(
-                format!("Cancel this {} run?", job.workflow),
-                format!("Every unfinished job in it stops, not just “{}”. You can re-run it on GitHub.", job.name),
-                "Cancel run",
+                trf("Cancel this {workflow} run?", &[("workflow", &job.workflow)]),
+                trf("Every unfinished job in it stops, not just “{job}”. You can re-run it on GitHub.", &[("job", &job.name)]),
+                tr("Cancel run"),
                 None,
                 move |_, engine| engine.cancel_run(job_id).map(Some),
                 self.engine.clone(),
@@ -2148,7 +2143,7 @@ impl Root {
             }
             DialogEvent::NewVm => self.show_vm_dialog(None, window, cx),
             DialogEvent::ScheduleSaved => {
-                self.notify_user("Scheduled".to_string(), false, cx);
+                self.notify_user(tr("Scheduled").to_string(), false, cx);
                 self.navigate(Route::Schedules, window, cx);
             }
             DialogEvent::BoxStarted(op) => {
@@ -2420,7 +2415,7 @@ impl Root {
         let runner_machines: Vec<&Machine> = Self::machine_order(&s, cx);
         let unassigned: Vec<&Runner> = s.runners.iter().filter(|r| r.machine_id.is_none() && matches_runner(r)).collect();
 
-        rows.push(self.section_header("Machines", Some(runner_machines.len()), Some(SectionAdd::Machine), cx).into_any_element());
+        rows.push(self.section_header(tr("Machines"), Some(runner_machines.len()), Some(SectionAdd::Machine), cx).into_any_element());
         let pinned_desktops = cx.global::<super::theme::Appearance>().desktops.clone();
         let forwards = self.engine.forwards();
         // The tree: where each machine sits (not while searching, which lists them flat).
@@ -2515,10 +2510,10 @@ impl Root {
                 }
                 if self.logs.contains_key(&m.id) && (open || self.route == Route::Logs(m.id.clone())) {
                     let shown = self.logs.get(&m.id).and_then(|v| v.read(cx).source_name().map(str::to_string));
-                    rows.push(self.tool_row(&theme, m, Route::Logs(m.id.clone()), "scroll-text", "Logs", shown, cx).into_any_element());
+                    rows.push(self.tool_row(&theme, m, Route::Logs(m.id.clone()), "scroll-text", tr("Logs"), shown, cx).into_any_element());
                 }
                 if self.service_pages.contains_key(&m.id) && (open || self.route == Route::Services(m.id.clone())) {
-                    rows.push(self.tool_row(&theme, m, Route::Services(m.id.clone()), "layers", "Services", None, cx).into_any_element());
+                    rows.push(self.tool_row(&theme, m, Route::Services(m.id.clone()), "layers", tr("Services"), None, cx).into_any_element());
                 }
                 // Its ports open on this computer.
                 for f in forwards.iter().filter(|f| open && f.machine_id == m.id) {
@@ -2585,11 +2580,11 @@ impl Root {
         // Always there (but in the demo), so joining a share is easy to find.
         if !self.engine.is_demo() {
             let count = (!self.joined.is_empty()).then_some(self.joined.len());
-            rows.push(self.section_header("Shared with you", count, Some(SectionAdd::Share), cx).into_any_element());
+            rows.push(self.section_header(tr("Shared with you"), count, Some(SectionAdd::Share), cx).into_any_element());
             rows.extend(self.joined_rows(&theme, cx));
         }
         if !unassigned.is_empty() {
-            rows.push(self.section_header("On GitHub only", Some(unassigned.len()), None, cx).into_any_element());
+            rows.push(self.section_header(tr("On GitHub only"), Some(unassigned.len()), None, cx).into_any_element());
             // Indented like a machine's rows: row_width() counts it.
             self.sidebar_indent.set(22. - CHILD_PAD);
             for r in unassigned {
@@ -2605,7 +2600,7 @@ impl Root {
                     .my(px(8.))
                     .text_size(px(12.5))
                     .text_color(theme.text_placeholder)
-                    .child("No machines yet. Add one to start watching its runners.")
+                    .child(tr("No machines yet. Add one to start watching its runners."))
                     .into_any_element(),
             );
         }
@@ -2637,13 +2632,13 @@ impl Root {
                     .gap(px(2.))
                     .px(px(10.))
                     .pt(px(6.))
-                    .child(self.nav_item("nav-overview", "gauge", kit::tiles::OVERVIEW, "Overview", None, Route::Overview, "overview", cx))
-                    .child(self.nav_item("nav-jobs", "workflow", kit::tiles::JOBS, "Jobs", Some(s.counts.queued + s.counts.running), Route::Jobs, "jobs", cx))
-                    .child(self.nav_item("nav-boxes", "box", super::boxes::TILE, "Boxes", Some(s.boxes.iter().filter(|b| b.state != "paused").count()), Route::Boxes, "boxes", cx))
+                    .child(self.nav_item("nav-overview", "gauge", kit::tiles::OVERVIEW, tr("Overview"), None, Route::Overview, "overview", cx))
+                    .child(self.nav_item("nav-jobs", "workflow", kit::tiles::JOBS, tr("Jobs"), Some(s.counts.queued + s.counts.running), Route::Jobs, "jobs", cx))
+                    .child(self.nav_item("nav-boxes", "box", super::boxes::TILE, tr("Boxes"), Some(s.boxes.iter().filter(|b| b.state != "paused").count()), Route::Boxes, "boxes", cx))
                     .child(self.nav_item("nav-github", "agent-github", super::github::TILE, "GitHub", self.gh.waiting(), Route::Github, "github", cx))
-                    .child(self.nav_item("nav-usage", "gauge", kit::tiles::USAGE, "Usage", None, Route::Usage, "usage", cx))
-                    .child(self.nav_item("nav-run", "zap", kit::tiles::RUN, "Run", None, Route::Run, "run", cx))
-                    .child(self.nav_item("nav-schedules", "clock", super::schedules::TILE, "Schedules", None, Route::Schedules, "schedules", cx))
+                    .child(self.nav_item("nav-usage", "gauge", kit::tiles::USAGE, tr("Usage"), None, Route::Usage, "usage", cx))
+                    .child(self.nav_item("nav-run", "zap", kit::tiles::RUN, tr("Run"), None, Route::Run, "run", cx))
+                    .child(self.nav_item("nav-schedules", "clock", super::schedules::TILE, tr("Schedules"), None, Route::Schedules, "schedules", cx))
                     .child(self.activity_nav(&theme, running_ops, cx)),
             )
             .child(
@@ -2707,7 +2702,7 @@ impl Root {
                     .min_w(px(0.))
                     .child(div().w(px(text_w)).truncate().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Muxin")),
             )
-            .when(s.demo && self.demo_badge, |d| d.child(div().flex_1()).child(kit::pill("demo", theme.warning)))
+            .when(s.demo && self.demo_badge, |d| d.child(div().flex_1()).child(kit::pill(tr("demo"), theme.warning)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2780,7 +2775,7 @@ impl Root {
             .when(open, |d| d.bg(theme.element_selected))
             .when(!open, |d| d.hover(|st| st.bg(theme.ghost_hover)))
             .child(kit::tile("activity", kit::tiles::ACTIVITY.0, kit::tiles::ACTIVITY.1, 22.))
-            .child("Activity")
+            .child(tr("Activity"))
             .child(div().flex_1())
             .when(running > 0, |d| d.child(spinner("nav-activity-spin", 13., theme.accent)))
             .when(running == 0 && self.show_keys, |d| {
@@ -2810,9 +2805,9 @@ impl Root {
             .child(div().flex_1().when(kit::square(), |d| d.h(px(1.)).mx(px(4.)).bg(theme.border)))
             .children(add.map(|add| match add {
                 SectionAdd::Machine => Button::icon_only("sidebar-add-machine", "plus")
-                    .tooltip(tip("Add machine", &super::shortcuts::label_for(cx, "add-machine")))
+                    .tooltip(tip(tr("Add machine"), &super::shortcuts::label_for(cx, "add-machine")))
                     .on_click(cx.listener(|this, _, window, cx| this.show_add_machine(window, cx))),
-                SectionAdd::Share => Button::icon_only("sidebar-join-share", "plus").tooltip("Join a share (paste a link someone sent you)").on_click(cx.listener(|this, _, window, cx| {
+                SectionAdd::Share => Button::icon_only("sidebar-join-share", "plus").tooltip(tr("Join a share (paste a link someone sent you)")).on_click(cx.listener(|this, _, window, cx| {
                     let _ = this.show_join(None, window, cx);
                 })),
             }))
@@ -3006,7 +3001,7 @@ impl Root {
         } else {
             match m.parent.as_ref().map(|p| p.relation.as_str()) {
                 Some("vm") => "VM".to_string(),
-                Some("container") => "Container".to_string(),
+                Some("container") => tr("Container").to_string(),
                 _ => String::new(),
             }
         };
@@ -3090,7 +3085,7 @@ impl Root {
     /// (or fewer again).
     fn more_sessions_row(&self, theme: &Theme, m: &Machine, more: usize, cx: &mut Context<Self>) -> AnyElement {
         let id = m.id.clone();
-        let label = if more > 0 { format!("{more} more") } else { "Show fewer".to_string() };
+        let label = if more > 0 { trf("{n} more", &[("n", &more)]) } else { tr("Show fewer").to_string() };
         div()
             .id(SharedString::from(format!("side-more-{}", m.id)))
             .flex()
@@ -3119,7 +3114,7 @@ impl Root {
         let only = (runners.len() == 1).then(|| runners[0].id.clone());
         let open = runners.len() > 1 && self.runners_open.contains(&m.id);
         let sum = &m.summary;
-        let label = if sum.total == 1 { "1 runner".to_string() } else { format!("{} runners", sum.total) };
+        let label = if sum.total == 1 { tr("1 runner").to_string() } else { trf("{n} runners", &[("n", &sum.total)]) };
         let (state, color) = if sum.working > 0 {
             (format!("{} busy", sum.working), theme.text_accent)
         } else if sum.offline > 0 {
@@ -3305,7 +3300,7 @@ impl Root {
             Check,
         }
         let machine_name = |id: &str| s.machines.iter().find(|m| m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.to_string());
-        let who = |x: &crate::fleet::sessions::SessionInfo| if x.agent_name.is_empty() { "A session".to_string() } else { x.agent_name.clone() };
+        let who = |x: &crate::fleet::sessions::SessionInfo| if x.agent_name.is_empty() { tr("A session").to_string() } else { x.agent_name.clone() };
         let running: Vec<&crate::fleet::model::Operation> = s.operations.iter().filter(|o| o.status == "running" && o.kind != "logs").collect();
         let needs_you = s.sessions.iter().find(|x| x.mark() == crate::fleet::sessions::Mark::NeedsYou);
         let working: Vec<&crate::fleet::sessions::SessionInfo> = s.sessions.iter().filter(|x| x.busy && x.status == "running").collect();
@@ -3315,22 +3310,22 @@ impl Root {
             progress = op.progress.clone();
             let detail = match (&op.progress, running.len()) {
                 (Some(p), 1) => super::activity::progress_text(p),
-                (Some(p), n) => format!("{} · {} more", super::activity::progress_text(p), n - 1),
-                (None, 1) => "Running…".to_string(),
-                (None, n) => format!("{} more running", n - 1),
+                (Some(p), n) => trf("{progress} · {n} more", &[("progress", &super::activity::progress_text(p)), ("n", &(n - 1))]),
+                (None, 1) => tr("Running…").to_string(),
+                (None, n) => trf("{n} more running", &[("n", &(n - 1))]),
             };
             (theme.accent, op.title.clone(), detail, Click::Op(op.id))
         } else if let Some(x) = needs_you {
-            (theme.warning, format!("{} on {} needs you", who(x), machine_name(&x.machine_id)), x.title.clone(), Click::Session(x.id.clone()))
+            (theme.warning, trf("{who} on {machine} needs you", &[("who", &who(x)), ("machine", &machine_name(&x.machine_id))]), x.title.clone(), Click::Session(x.id.clone()))
         } else if let Some(x) = working.first() {
             let title = match working.len() {
-                1 => format!("{} is working on {}", who(x), machine_name(&x.machine_id)),
-                n => format!("{n} agents are working"),
+                1 => trf("{who} is working on {machine}", &[("who", &who(x)), ("machine", &machine_name(&x.machine_id))]),
+                n => trf("{n} agents are working", &[("n", &n)]),
             };
             (theme.accent, title, x.title.clone(), Click::Session(x.id.clone()))
         } else if github_trouble {
             let (color, title) = github_status(theme, s);
-            (color, title, "Runner status from GitHub".to_string(), Click::Settings)
+            (color, title, tr("Runner status from GitHub").to_string(), Click::Settings)
         } else {
             let total = s.machines.iter().filter(|m| !m.host.is_empty()).count();
             let offline = s.machines.iter().filter(|m| m.status == "offline").count();
@@ -3340,29 +3335,29 @@ impl Root {
             let off = s.machines.iter().filter(|m| format::is_just_offline(m)).count();
             let stuck = offline - off;
             let title = match (total, offline + asleep) {
-                (0, _) => "No machines yet".to_string(),
-                (1, 0) => "Your machine is online".to_string(),
-                (n, 0) => format!("All {n} machines online"),
+                (0, _) => tr("No machines yet").to_string(),
+                (1, 0) => tr("Your machine is online").to_string(),
+                (n, 0) => trf("All {n} machines online", &[("n", &n)]),
                 (n, _) => {
-                    let mut parts = vec![format!("{} online", n.saturating_sub(offline + asleep))];
+                    let mut parts = vec![trf("{n} online", &[("n", &n.saturating_sub(offline + asleep))])];
                     if asleep > 0 {
-                        parts.push(format!("{asleep} asleep"));
+                        parts.push(trf("{n} asleep", &[("n", &asleep)]));
                     }
                     if off > 0 {
-                        parts.push(format!("{off} offline"));
+                        parts.push(trf("{n} offline", &[("n", &off)]));
                     }
                     if stuck > 0 {
-                        parts.push(format!("{stuck} can't connect"));
+                        parts.push(trf("{n} can't connect", &[("n", &stuck)]));
                     }
                     parts.join(" · ")
                 }
             };
             let detail = if s.check.running {
-                "Refreshing…".to_string()
+                tr("Refreshing…").to_string()
             } else {
                 match s.check.finished_at {
-                    Some(t) => format!("Updated {}", format::ago(Some(t))),
-                    None => "Not updated yet".to_string(),
+                    Some(t) => trf("Updated {ago}", &[("ago", &format::ago(Some(t)))]),
+                    None => tr("Not updated yet").to_string(),
                 }
             };
             let color = if offline > 0 { theme.warning } else if total > 0 { theme.success } else { theme.text_placeholder };
@@ -3431,8 +3426,8 @@ impl Root {
             .items_center()
             .gap(px(2.))
             .pt(px(8.))
-            .child(footer_button("footer-settings", "settings", "Settings", Route::Settings, cx))
-            .child(footer_button("footer-about", "info", "About", Route::About, cx))
+            .child(footer_button("footer-settings", "settings", tr("Settings"), Route::Settings, cx))
+            .child(footer_button("footer-about", "info", tr("About"), Route::About, cx))
             .child(div().flex_1())
             .child(match super::updates::get(cx).latest {
                 // A newer version: says so, and About says how to get it.
@@ -3449,8 +3444,8 @@ impl Root {
                     .text_color(theme.text_accent)
                     .hover(|st| st.bg(theme.ghost_hover))
                     .child(kit::dot(theme.accent, 6.))
-                    .child(format!("{} is out", update.version))
-                    .tooltip(move |window, cx| kit::Tooltip::view(format!("Muxin {} is out. See how to update.", update.version).into(), window, cx))
+                    .child(trf("{version} is out", &[("version", &update.version)]))
+                    .tooltip(move |window, cx| kit::Tooltip::view(trf("Muxin {version} is out. See how to update.", &[("version", &update.version)]).into(), window, cx))
                     .on_click(cx.listener(|this, _, window, cx| this.navigate(Route::About, window, cx)))
                     .into_any_element(),
                 None => div().pr(px(6.)).font_family(mono_font()).text_size(px(11.)).text_color(theme.text_placeholder).child(format!("v{}", env!("CARGO_PKG_VERSION"))).into_any_element(),
@@ -3497,7 +3492,7 @@ impl Root {
             .on_mouse_down(gpui::MouseButton::Right, |e: &gpui::MouseDownEvent, window, _| super::frame::title_bar_menu(e, window))
             .child(
                 Button::icon_only("toggle-sidebar", "panel-left")
-                    .tooltip(tip(if self.sidebar_hidden { "Show sidebar" } else { "Hide sidebar" }, &super::shortcuts::label_for(cx, "sidebar")))
+                    .tooltip(tip(if self.sidebar_hidden { tr("Show sidebar") } else { tr("Hide sidebar") }, &super::shortcuts::label_for(cx, "sidebar")))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             )
             .child(
@@ -3506,13 +3501,13 @@ impl Root {
                     .gap(px(2.))
                     .child(
                         Button::icon_only("back", "arrow-left")
-                            .tooltip(tip("Back", &super::shortcuts::label_for(cx, "back")))
+                            .tooltip(tip(tr("Back"), &super::shortcuts::label_for(cx, "back")))
                             .disabled(self.back.is_empty())
                             .on_click(cx.listener(|this, _, window, cx| this.go_back(&GoBack, window, cx))),
                     )
                     .child(
                         Button::icon_only("forward", "arrow-right")
-                            .tooltip(tip("Forward", &super::shortcuts::label_for(cx, "forward")))
+                            .tooltip(tip(tr("Forward"), &super::shortcuts::label_for(cx, "forward")))
                             .disabled(self.forward.is_empty())
                             .on_click(cx.listener(|this, _, window, cx| this.go_forward(&GoForward, window, cx))),
                     ),
@@ -3532,7 +3527,7 @@ impl Root {
             .child(div().flex_1())
             // GitHub and the machine checks run by themselves; ⇧⌘R, ⌘R and the menu still force them.
             .child(
-                Button::new("toolbar-add-machine", "Add machine")
+                Button::new("toolbar-add-machine", tr("Add machine"))
                     .style(ButtonStyle::Primary)
                     .icon("plus")
                     .map(|b| match super::shortcuts::label_for(cx, "add-machine") {
@@ -3596,14 +3591,14 @@ impl Root {
         if let Some(display) = virtual_shown {
             let mid = id.to_string();
             extra.push(
-                button("desktop-remove-monitor", "Remove monitor", "trash-2")
+                button("desktop-remove-monitor", tr("Remove monitor"), "trash-2")
                     .on_click(cx.listener(move |this, _, window, cx| this.remove_display(mid.clone(), display.clone(), window, cx)))
                     .into_any_element(),
             );
         } else if can_add {
             let mid = id.to_string();
             extra.push(
-                button("desktop-add-monitor", "Add monitor", "plus")
+                button("desktop-add-monitor", tr("Add monitor"), "plus")
                     .on_click(cx.listener(move |this, _, window, cx| this.show_add_display(mid.clone(), window, cx)))
                     .into_any_element(),
             );
@@ -3612,17 +3607,17 @@ impl Root {
         if machine.is_some() && !self.snapshot.demo {
             let mid = id.to_string();
             extra.push(
-                button("desktop-apps", "Apps", "layout-grid")
-                    .tooltip("Open one of its apps in a window of its own")
+                button("desktop-apps", tr("Apps"), "layout-grid")
+                    .tooltip(tr("Open one of its apps in a window of its own"))
                     .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| this.show_apps(&mid, e.position(), cx)))
                     .into_any_element(),
             );
         }
         extra.extend(vec![
-            button("desktop-window", "Open in window", "external-link")
+            button("desktop-window", tr("Open in window"), "external-link")
                 .on_click(cx.listener(move |this, _, window, cx| this.pop_out_desktop(&pop, window, cx)))
                 .into_any_element(),
-            button("desktop-close", "Close", "x")
+            button("desktop-close", tr("Close"), "x")
                 .on_click(cx.listener(move |this, _, window, cx| this.close_desktop(&close, window, cx)))
                 .into_any_element(),
         ]);
@@ -3698,7 +3693,7 @@ impl Root {
             .when(selected, |d| d.bg(theme.element_selected))
             .when(!selected, |d| d.hover(|st| st.bg(theme.ghost_hover)))
             .child(kit::tile("monitor", from, to, 16.))
-            .child(div().flex_1().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child("Desktop"))
+            .child(div().flex_1().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child(tr("Desktop")))
             // The size lines up with the monitors' below; the close button
             // takes its place on hover.
             .children(size.map(|s| div().flex_none().font_family(mono_font()).text_size(px(10.5)).text_color(theme.text_placeholder).group_hover("desktop-row", |st| st.invisible()).child(s)))
@@ -3709,7 +3704,7 @@ impl Root {
                     .right(px(8.))
                     .invisible()
                     .group_hover("desktop-row", |st| st.visible())
-                    .tooltip(|window, cx| kit::Tooltip::view("Close the desktop".into(), window, cx))
+                    .tooltip(|window, cx| kit::Tooltip::view(tr("Close the desktop").into(), window, cx))
                     .child(icon("x", 12., theme.text_placeholder))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
@@ -3760,7 +3755,7 @@ impl Root {
                     .right(px(8.))
                     .invisible()
                     .group_hover(group, |st| st.visible())
-                    .tooltip(move |window, cx| kit::Tooltip::view(format!("Close {}", label.to_lowercase()).into(), window, cx))
+                    .tooltip(move |window, cx| kit::Tooltip::view(trf("Close {what}", &[("what", &label.to_lowercase())]).into(), window, cx))
                     .child(icon("x", 12., theme.text_placeholder))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
@@ -3821,7 +3816,7 @@ impl Root {
             .child(div().w(px((self.row_width() - 20. - 30. - 16. - 16. - 74. - 52.).max(40.))).truncate().text_size(px(12.5)).text_color(if selected { theme.text } else { theme.text_muted }).child(d.name.clone()))
             .child(div().flex_1())
             // Which ones Muxin added (and the × takes away).
-            .child(kit::pill("virtual", theme.accent))
+            .child(kit::pill(tr("virtual"), theme.accent))
             .child(div().flex_none().font_family(mono_font()).text_size(px(10.5)).text_color(theme.text_placeholder).group_hover("monitor-row", |st| st.invisible()).child(format!("{}×{}", d.width as u32, d.height as u32)))
             // On hover, in place of the size: unplug it.
             .child(
@@ -3831,7 +3826,7 @@ impl Root {
                     .right(px(8.))
                     .invisible()
                     .group_hover("monitor-row", |st| st.visible())
-                    .tooltip(|window, cx| kit::Tooltip::view("Remove this virtual monitor".into(), window, cx))
+                    .tooltip(|window, cx| kit::Tooltip::view(tr("Remove this virtual monitor").into(), window, cx))
                     .child(icon("x", 12., theme.text_placeholder))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
@@ -4081,7 +4076,7 @@ impl Render for Root {
                 // GitHub CLI's browser sign-in, in a terminal on this computer.
                 match this.snapshot.machines.iter().find(|m| m.host == "local").map(|m| m.id.clone()) {
                     Some(id) => this.gh_cli_sign_in(&id, window, cx),
-                    None => this.notify_user("Add this computer as a machine first (host \"local\"), or run `gh auth login` in a terminal.", true, cx),
+                    None => this.notify_user(tr("Add this computer as a machine first (host \"local\"), or run `gh auth login` in a terminal."), true, cx),
                 }
             }))
             .on_action(cx.listener(|this, _: &GrantGitHubAccess, window, cx| this.run_gh_fix("auth refresh -h github.com -s admin:org", window, cx)))
@@ -4158,49 +4153,49 @@ pub(super) enum SectionAdd {
 pub(super) fn github_status(theme: &Theme, s: &Snapshot) -> (gpui::Hsla, String) {
     let g = &s.github;
     if g.token_source.is_empty() && !s.demo {
-        (theme.warning, "GitHub not connected".into())
+        (theme.warning, tr("GitHub not connected").into())
     } else if !g.configured {
-        (theme.warning, "No GitHub org · using last check".into())
+        (theme.warning, tr("No GitHub org · using last check").into())
     } else if g.scopes.iter().all(|sc| sc.error.is_some()) && !g.scopes.is_empty() {
-        (theme.error, g.error.clone().unwrap_or_else(|| "GitHub error".into()))
+        (theme.error, g.error.clone().unwrap_or_else(|| tr("GitHub error").into()))
     } else if g.live {
-        (theme.success, format!("Live · synced {}", format::ago(g.last_sync_at)))
+        (theme.success, trf("Live · synced {ago}", &[("ago", &format::ago(g.last_sync_at))]))
     } else {
-        (theme.text_placeholder, "Connecting to GitHub…".into())
+        (theme.text_placeholder, tr("Connecting to GitHub…").into())
     }
 }
 
 /// (section, title) for the toolbar.
 fn route_title(s: &Snapshot, route: &Route) -> (Option<&'static str>, String) {
     match route {
-        Route::Overview => (None, "Overview".into()),
-        Route::Jobs => (None, "Jobs".into()),
-        Route::Workspaces => (Some("Boxes"), "Agents' workspaces".into()),
-        Route::Boxes => (None, "Boxes".into()),
-        Route::Activity => (None, "Activity".into()),
-        Route::Usage => (None, "Usage".into()),
-        Route::Run => (None, "Run".into()),
-        Route::Schedules => (None, "Schedules".into()),
-        Route::Workspace(id) => (Some("Agents' workspaces"), s.workspaces.iter().find(|w| &w.id == id).map(|w| w.name.clone()).unwrap_or_else(|| id.clone())),
-        Route::Settings => (None, "Settings".into()),
-        Route::About => (None, "About".into()),
-        Route::Shared(_) => (Some("Shared with you"), "Session".into()),
+        Route::Overview => (None, tr("Overview").into()),
+        Route::Jobs => (None, tr("Jobs").into()),
+        Route::Workspaces => (Some(tr("Boxes")), tr("Agents' workspaces").into()),
+        Route::Boxes => (None, tr("Boxes").into()),
+        Route::Activity => (None, tr("Activity").into()),
+        Route::Usage => (None, tr("Usage").into()),
+        Route::Run => (None, tr("Run").into()),
+        Route::Schedules => (None, tr("Schedules").into()),
+        Route::Workspace(id) => (Some(tr("Agents' workspaces")), s.workspaces.iter().find(|w| &w.id == id).map(|w| w.name.clone()).unwrap_or_else(|| id.clone())),
+        Route::Settings => (None, tr("Settings").into()),
+        Route::About => (None, tr("About").into()),
+        Route::Shared(_) => (Some(tr("Shared with you")), tr("Session").into()),
         Route::Github => (None, "GitHub".into()),
         Route::GithubRepo(name) => (Some("GitHub"), name.clone()),
         Route::GithubItem(repo, n) => (Some("GitHub"), format!("{repo} #{n}")),
-        Route::Machine(id) => (Some("Machines"), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
+        Route::Machine(id) => (Some(tr("Machines")), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
         Route::Session(id) => {
             let x = s.sessions.iter().find(|x| &x.id == id);
-            let section = if x.is_some_and(|x| x.box_id.is_some()) { "Boxes" } else { "Sessions" };
+            let section = if x.is_some_and(|x| x.box_id.is_some()) { tr("Boxes") } else { tr("Sessions") };
             (Some(section), x.map(|x| x.title.clone()).unwrap_or_else(|| id.clone()))
         }
-        Route::Desktop(id) => (Some("Desktop"), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
-        Route::Logs(id) => (Some("Logs"), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
-        Route::Services(id) => (Some("Services"), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
+        Route::Desktop(id) => (Some(tr("Desktop")), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
+        Route::Logs(id) => (Some(tr("Logs")), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
+        Route::Services(id) => (Some(tr("Services")), s.machines.iter().find(|m| &m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| id.clone())),
         Route::Runner(id) => {
             let r = s.runners.iter().find(|r| &r.id == id);
             let machine = r.and_then(|r| r.machine_id.as_deref()).and_then(|mid| s.machines.iter().find(|m| m.id == mid));
-            (Some(if machine.is_some() { "Runners" } else { "GitHub" }), r.map(|r| r.name.clone()).unwrap_or_else(|| id.clone()))
+            (Some(if machine.is_some() { tr("Runners") } else { "GitHub" }), r.map(|r| r.name.clone()).unwrap_or_else(|| id.clone()))
         }
     }
 }

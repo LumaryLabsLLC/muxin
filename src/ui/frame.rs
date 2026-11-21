@@ -8,6 +8,7 @@
 use gpui::{AnyElement, App, CursorStyle, Decorations, ElementId, MouseButton, MouseDownEvent, ResizeEdge, Tiling, Window, WindowDecorations, div, prelude::*, px};
 
 use super::kit::Button;
+use crate::ui::i18n::tr;
 
 /// How far in from a side the window resizes, and how big a corner is.
 const EDGE: f32 = 5.;
@@ -46,16 +47,16 @@ pub fn window_buttons(window: &Window, _cx: &App) -> Option<AnyElement> {
             .gap(px(2.))
             .ml(px(4.))
             .when(controls.minimize, |d| {
-                d.child(Button::icon_only("window-minimize", "minus").tooltip("Minimize").on_click(|_, window, _| window.minimize_window()))
+                d.child(Button::icon_only("window-minimize", "minus").tooltip(tr("Minimize")).on_click(|_, window, _| window.minimize_window()))
             })
             .when(controls.maximize, |d| {
                 d.child(
                     Button::icon_only("window-maximize", if maximized { "copy" } else { "square" })
-                        .tooltip(if maximized { "Restore" } else { "Maximize" })
+                        .tooltip(if maximized { tr("Restore") } else { tr("Maximize") })
                         .on_click(|_, window, _| window.zoom_window()),
                 )
             })
-            .child(Button::icon_only("window-close", "x").tooltip("Close").on_click(|_, window, _| window.remove_window()))
+            .child(Button::icon_only("window-close", "x").tooltip(tr("Close")).on_click(|_, window, _| window.remove_window()))
             .into_any_element(),
     )
 }

@@ -4,6 +4,7 @@
 //! A preset sets them all at once: herdr's keys, for people coming from it.
 
 use gpui::{App, KeyBinding, Keystroke};
+use crate::ui::i18n::{tr, trf};
 
 use super::root::{
     AddMachine, CheckNow, ClosePane, CommandPalette, EndSession, FocusFilter, GoBack, GoForward, GoToMachine1, GoToMachine2, GoToMachine3, GoToMachine4, GoToMachine5,
@@ -17,6 +18,7 @@ use super::theme::Appearance;
 /// One shortcut the user can change.
 pub struct Shortcut {
     pub id: &'static str,
+    /// In English: `label()` gives it in the window's language.
     pub label: &'static str,
     /// GPUI key syntax ("secondary-r": ⌘R on a Mac, Ctrl+R elsewhere).
     pub default: &'static str,
@@ -24,7 +26,7 @@ pub struct Shortcut {
 }
 
 macro_rules! shortcut {
-    ($id:literal, $label:literal, $default:expr, $action:expr) => {
+    ($id:literal, tr($label:literal), $default:expr, $action:expr) => {
         Shortcut { id: $id, label: $label, default: $default, bind: |keys| KeyBinding::new(keys, $action, None) }
     };
 }
@@ -37,38 +39,38 @@ const fn page(mac: &'static str, other: &'static str) -> &'static str {
 
 /// In the order Settings lists them.
 pub const ALL: &[Shortcut] = &[
-    shortcut!("quick-open", "Go to a machine, session or desktop", "secondary-p", QuickOpen),
-    shortcut!("commands", "Command palette", "secondary-shift-p", CommandPalette),
-    shortcut!("overview", "Overview", page("ctrl-1", "alt-1"), ShowOverview),
-    shortcut!("jobs", "Jobs", page("ctrl-2", "alt-2"), ShowJobs),
-    shortcut!("boxes", "Boxes", page("ctrl-3", "alt-3"), ShowBoxes),
-    shortcut!("github", "GitHub", page("ctrl-4", "alt-4"), ShowGithub),
-    shortcut!("usage", "Usage", page("ctrl-5", "alt-5"), ShowUsage),
-    shortcut!("run", "Run on machines", page("ctrl-6", "alt-6"), ShowRun),
-    shortcut!("schedules", "Schedules", page("ctrl-7", "alt-7"), ShowSchedules),
-    shortcut!("workspaces", "Agents' workspaces", "", ShowWorkspaces),
-    shortcut!("activity", "Activity", "secondary-j", ToggleActivity),
-    shortcut!("settings", "Settings", "secondary-,", OpenSettings),
-    shortcut!("check", "Refresh all machines", "secondary-r", CheckNow),
-    shortcut!("sync", "Sync GitHub", "secondary-shift-r", SyncGitHub),
-    shortcut!("add-machine", "Add machine", "secondary-n", AddMachine),
-    shortcut!("new-session", "New session", "secondary-t", NewSession),
-    shortcut!("split-right", "Split the terminal right", "secondary-d", SplitRight),
-    shortcut!("split-down", "Split the terminal down", "secondary-shift-d", SplitDown),
-    shortcut!("next-pane", "Next pane", "secondary-alt-right", NextPane),
-    shortcut!("previous-pane", "Previous pane", "secondary-alt-left", PreviousPane),
-    shortcut!("zoom-pane", "Show the pane alone, or the whole split", "secondary-shift-enter", ZoomPane),
-    shortcut!("close-pane", "Close the pane (the session goes on)", "secondary-shift-w", ClosePane),
-    shortcut!("next-session", "Next session", "secondary-shift-]", NextSession),
-    shortcut!("previous-session", "Previous session", "secondary-shift-[", PreviousSession),
-    shortcut!("next-agent", "Next agent (not shells)", "", NextAgent),
-    shortcut!("previous-agent", "Previous agent", "", PreviousAgent),
-    shortcut!("rename", "Rename the machine or session on screen", "", RenameShown),
-    shortcut!("end-session", "End the session on screen", "", EndSession),
-    shortcut!("filter", "Search machines and sessions", "secondary-f", FocusFilter),
-    shortcut!("sidebar", "Hide or show the sidebar", "secondary-b", ToggleSidebar),
-    shortcut!("back", "Back", "secondary-[", GoBack),
-    shortcut!("forward", "Forward", "secondary-]", GoForward),
+    shortcut!("quick-open", tr("Go to a machine, session or desktop"), "secondary-p", QuickOpen),
+    shortcut!("commands", tr("Command palette"), "secondary-shift-p", CommandPalette),
+    shortcut!("overview", tr("Overview"), page("ctrl-1", "alt-1"), ShowOverview),
+    shortcut!("jobs", tr("Jobs"), page("ctrl-2", "alt-2"), ShowJobs),
+    shortcut!("boxes", tr("Boxes"), page("ctrl-3", "alt-3"), ShowBoxes),
+    shortcut!("github", tr("GitHub"), page("ctrl-4", "alt-4"), ShowGithub),
+    shortcut!("usage", tr("Usage"), page("ctrl-5", "alt-5"), ShowUsage),
+    shortcut!("run", tr("Run on machines"), page("ctrl-6", "alt-6"), ShowRun),
+    shortcut!("schedules", tr("Schedules"), page("ctrl-7", "alt-7"), ShowSchedules),
+    shortcut!("workspaces", tr("Agents' workspaces"), "", ShowWorkspaces),
+    shortcut!("activity", tr("Activity"), "secondary-j", ToggleActivity),
+    shortcut!("settings", tr("Settings"), "secondary-,", OpenSettings),
+    shortcut!("check", tr("Refresh all machines"), "secondary-r", CheckNow),
+    shortcut!("sync", tr("Sync GitHub"), "secondary-shift-r", SyncGitHub),
+    shortcut!("add-machine", tr("Add machine"), "secondary-n", AddMachine),
+    shortcut!("new-session", tr("New session"), "secondary-t", NewSession),
+    shortcut!("split-right", tr("Split the terminal right"), "secondary-d", SplitRight),
+    shortcut!("split-down", tr("Split the terminal down"), "secondary-shift-d", SplitDown),
+    shortcut!("next-pane", tr("Next pane"), "secondary-alt-right", NextPane),
+    shortcut!("previous-pane", tr("Previous pane"), "secondary-alt-left", PreviousPane),
+    shortcut!("zoom-pane", tr("Show the pane alone, or the whole split"), "secondary-shift-enter", ZoomPane),
+    shortcut!("close-pane", tr("Close the pane (the session goes on)"), "secondary-shift-w", ClosePane),
+    shortcut!("next-session", tr("Next session"), "secondary-shift-]", NextSession),
+    shortcut!("previous-session", tr("Previous session"), "secondary-shift-[", PreviousSession),
+    shortcut!("next-agent", tr("Next agent (not shells)"), "", NextAgent),
+    shortcut!("previous-agent", tr("Previous agent"), "", PreviousAgent),
+    shortcut!("rename", tr("Rename the machine or session on screen"), "", RenameShown),
+    shortcut!("end-session", tr("End the session on screen"), "", EndSession),
+    shortcut!("filter", tr("Search machines and sessions"), "secondary-f", FocusFilter),
+    shortcut!("sidebar", tr("Hide or show the sidebar"), "secondary-b", ToggleSidebar),
+    shortcut!("back", tr("Back"), "secondary-[", GoBack),
+    shortcut!("forward", tr("Forward"), "secondary-]", GoForward),
 ];
 
 /// The machines' shortcuts: this modifier with 1…9 (in Appearance under this id).
@@ -89,7 +91,7 @@ pub fn is_group(id: &str) -> bool {
 
 /// "Machine 3" or "Session 3".
 fn group_item(group: &str, n: usize) -> String {
-    format!("{} {n}", if group == MACHINES { "Machine" } else { "Session" })
+    if group == MACHINES { trf("Machine {n}", &[("n", &n)]) } else { trf("Session {n}", &[("n", &n)]) }
 }
 
 /// Choices for a group's modifier: (keys, how Settings shows them).
@@ -144,7 +146,7 @@ pub fn used_by(cx: &App, keys_: &str, except: &str) -> Option<(&'static str, Str
             return Some((group, group_item(group, n)));
         }
     }
-    ALL.iter().filter(|s| s.id != except).find(|s| normalize(&keys(cx, s.id)).as_deref() == Some(k.as_str())).map(|s| (s.id, s.label.to_string()))
+    ALL.iter().filter(|s| s.id != except).find(|s| normalize(&keys(cx, s.id)).as_deref() == Some(k.as_str())).map(|s| (s.id, tr(s.label).to_string()))
 }
 
 /// Sets a shortcut's keys ("" for none), keeping only what differs from the default.

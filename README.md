@@ -54,6 +54,8 @@ brew install --cask lumarylabsllc/tap/muxin
 
 `SHA256SUMS.txt` in each release has the files' checksums.
 
+The window is in English or Brazilian Portuguese: **Settings › General › Language** picks one, or follows the system. The command line and the MCP server stay in English.
+
 Muxin tells you when a new version is out: the sidebar says so, and About shows how to update the copy you have (with Homebrew or the AUR, or the new file to download). It asks GitHub for the latest release when it opens and twice a day; turn that off in **Settings › General › Updates**. `muxin updates` checks from a terminal.
 
 Muxin was called Muxen before 0.5.1. Updating keeps your settings, machines and sessions, and the `muxen` command still works. On a Mac, the old Muxen app goes to the Trash the first time Muxin opens.

@@ -2,6 +2,7 @@
 //! machines at set times.
 
 use std::sync::Arc;
+use crate::ui::i18n::{tr};
 
 use gpui::{AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, SharedString, Subscription, Window, div, prelude::*, px};
 
@@ -13,7 +14,9 @@ use crate::fleet::Engine;
 use crate::fleet::schedules::{ScheduleInput, When};
 use crate::fleet::sessions::AGENTS;
 
-const DAYS: [(&str, &str); 7] = [("mon", "Mon"), ("tue", "Tue"), ("wed", "Wed"), ("thu", "Thu"), ("fri", "Fri"), ("sat", "Sat"), ("sun", "Sun")];
+fn days() -> [(&'static str, &'static str); 7] {
+    [("mon", tr("Mon")), ("tue", tr("Tue")), ("wed", tr("Wed")), ("thu", tr("Thu")), ("fri", tr("Fri")), ("sat", tr("Sat")), ("sun", tr("Sun"))]
+}
 
 pub struct ScheduleDialog {
     engine: Arc<Engine>,
@@ -40,9 +43,9 @@ impl EventEmitter<DialogEvent> for ScheduleDialog {}
 impl ScheduleDialog {
     pub fn new(engine: Arc<Engine>, machine: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = |placeholder: &str, text: &str, cx: &mut Context<Self>| cx.new(|cx| TextInput::new(cx, placeholder.to_string()).with_text(text.to_string()));
-        let name = input("Nightly tests", "", cx);
+        let name = input(tr("Nightly tests"), "", cx);
         let command = input("cd ~/code/api && make test", "", cx);
-        let prompt = input("Go through new issues in acme/api and label them", "", cx);
+        let prompt = input(tr("Go through new issues in acme/api and label them"), "", cx);
         let folder = input("~", "", cx);
         let at = input("09:00", "09:00", cx);
         let n = input("15", "15", cx);
@@ -85,15 +88,15 @@ impl ScheduleDialog {
         let valid_at = at.split_once(':').is_some_and(|(h, m)| h.parse::<u32>().is_ok_and(|h| h < 24) && m.len() == 2 && m.parse::<u32>().is_ok_and(|m| m < 60));
         let n = self.n.read(cx).text().trim().parse::<u32>().ok();
         Ok(match self.every {
-            "minutes" => When { every: "minutes".into(), n: Some(n.filter(|n| (1..60).contains(n)).ok_or("Every 1 to 59 minutes.")?), ..Default::default() },
+            "minutes" => When { every: "minutes".into(), n: Some(n.filter(|n| (1..60).contains(n)).ok_or(tr("Every 1 to 59 minutes."))?), ..Default::default() },
             "hours" => When { every: "hours".into(), n: Some(1), at: Some("00:00".into()), ..Default::default() },
             every => {
                 if !valid_at {
-                    return Err("A time like 09:00.".into());
+                    return Err(tr("A time like 09:00.").into());
                 }
                 let days = if every == "week" { self.days.iter().map(|d| d.to_string()).collect() } else { Vec::new() };
                 if every == "week" && days.is_empty() {
-                    return Err("Pick a day.".into());
+                    return Err(tr("Pick a day.").into());
                 }
                 When { every: every.into(), at: Some(format!("{:0>5}", at)), days, ..Default::default() }
             }
@@ -105,7 +108,7 @@ impl ScheduleDialog {
             return;
         }
         let Some(machine) = self.machine.clone() else {
-            self.error = Some("Pick a machine.".into());
+            self.error = Some(tr("Pick a machine.").into());
             cx.notify();
             return;
         };
@@ -219,11 +222,11 @@ impl Render for ScheduleDialog {
         let kinds = div()
             .flex()
             .gap(px(6.))
-            .child(chip("sd-k-command".into(), "A command".into(), self.kind == "command").on_click(cx.listener(|this, _, _, cx| {
+            .child(chip("sd-k-command".into(), tr("A command").into(), self.kind == "command").on_click(cx.listener(|this, _, _, cx| {
                 this.kind = "command";
                 cx.notify()
             })))
-            .child(chip("sd-k-agent".into(), "An agent session".into(), self.kind == "agent").on_click(cx.listener(|this, _, _, cx| {
+            .child(chip("sd-k-agent".into(), tr("An agent session").into(), self.kind == "agent").on_click(cx.listener(|this, _, _, cx| {
                 this.kind = "agent";
                 cx.notify()
             })));
@@ -233,7 +236,7 @@ impl Render for ScheduleDialog {
                 .flex_col()
                 .gap(px(6.))
                 .child(self.command.clone())
-                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Runs in your login shell there. For an agent that works on its own and finishes, try claude -p \"…\"."))
+                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("Runs in your login shell there. For an agent that works on its own and finishes, try claude -p \"…\".")))
                 .into_any_element()
         } else {
             div()
@@ -242,10 +245,10 @@ impl Render for ScheduleDialog {
                 .gap(px(8.))
                 .child(div().flex().flex_wrap().gap(px(6.)).children(agents))
                 .child(self.prompt.clone())
-                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Starts a session with this prompt, like New session does. It shows up under the machine, waiting for you when it's done."))
+                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("Starts a session with this prompt, like New session does. It shows up under the machine, waiting for you when it's done.")))
                 .into_any_element()
         };
-        let everies: [(&'static str, &str); 5] = [("minutes", "Every few minutes"), ("hours", "Every hour"), ("day", "Every day"), ("weekdays", "Weekdays"), ("week", "Some days")];
+        let everies: [(&'static str, &str); 5] = [("minutes", tr("Every few minutes")), ("hours", tr("Every hour")), ("day", tr("Every day")), ("weekdays", tr("Weekdays")), ("week", tr("Some days"))];
         let every_chips: Vec<AnyElement> = everies
             .iter()
             .map(|(id, label)| {
@@ -259,10 +262,10 @@ impl Render for ScheduleDialog {
             })
             .collect();
         let detail: AnyElement = match self.every {
-            "minutes" => div().flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child("Every").child(div().w(px(56.)).child(self.n.clone())).child("minutes").into_any_element(),
-            "hours" => div().text_size(px(12.)).text_color(theme.text_placeholder).child("On the hour.").into_any_element(),
+            "minutes" => div().flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(tr("Every")).child(div().w(px(56.)).child(self.n.clone())).child(tr("minutes")).into_any_element(),
+            "hours" => div().text_size(px(12.)).text_color(theme.text_placeholder).child(tr("On the hour.")).into_any_element(),
             every => {
-                let days: Vec<AnyElement> = DAYS
+                let days: Vec<AnyElement> = days()
                     .iter()
                     .map(|(id, label)| {
                         let id: &'static str = id;
@@ -283,7 +286,7 @@ impl Render for ScheduleDialog {
                     .flex_col()
                     .gap(px(8.))
                     .when(every == "week", |d| d.child(div().flex().flex_wrap().gap(px(6.)).children(days)))
-                    .child(div().flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child("At").child(div().w(px(72.)).child(self.at.clone())).child("in the machine's own time"))
+                    .child(div().flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(tr("At")).child(div().w(px(72.)).child(self.at.clone())).child(tr("in the machine's own time")))
                     .into_any_element()
             }
         };
@@ -293,17 +296,17 @@ impl Render for ScheduleDialog {
             .flex()
             .flex_col()
             .gap(px(14.))
-            .child(field(&theme, "Name", self.name.clone(), None))
-            .child(field(&theme, "On", div().flex().flex_wrap().gap(px(6.)).children(machines), None))
-            .child(field(&theme, "Runs", div().flex().flex_col().gap(px(8.)).child(kinds).child(what), None))
-            .child(field(&theme, "Folder", self.folder.clone(), None))
-            .child(field(&theme, "When", when, None));
-        frame(&theme, "New schedule", Some("It's kept and run on the machine itself, so it runs even when Muxin isn't open.".into()))
+            .child(field(&theme, tr("Name"), self.name.clone(), None))
+            .child(field(&theme, tr("On"), div().flex().flex_wrap().gap(px(6.)).children(machines), None))
+            .child(field(&theme, tr("Runs"), div().flex().flex_col().gap(px(8.)).child(kinds).child(what), None))
+            .child(field(&theme, tr("Folder"), self.folder.clone(), None))
+            .child(field(&theme, tr("When"), when, None));
+        frame(&theme, tr("New schedule"), Some(tr("It's kept and run on the machine itself, so it runs even when Muxin isn't open.").into()))
             .child(div().id("sd-body").max_h(px(body_max)).overflow_y_scroll().child(fields))
             .children(error_line(&theme, &self.error))
             .child(footer(vec![
-                Button::new("sd-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
-                Button::new("sd-save", "Create").style(ButtonStyle::Primary).icon("clock").loading(self.saving).disabled(self.machine.is_none()).on_click(cx.listener(|this, _, _, cx| this.submit(cx))).into_any_element(),
+                Button::new("sd-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                Button::new("sd-save", tr("Create")).style(ButtonStyle::Primary).icon("clock").loading(self.saving).disabled(self.machine.is_none()).on_click(cx.listener(|this, _, _, cx| this.submit(cx))).into_any_element(),
             ]))
             .font_weight(FontWeight::NORMAL)
     }

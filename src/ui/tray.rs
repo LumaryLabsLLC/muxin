@@ -17,6 +17,7 @@ use gpui::App;
 use tokio::sync::watch;
 
 use super::{AppCommand, command};
+use crate::ui::i18n::{tr, trf};
 use crate::fleet::Engine;
 use crate::fleet::model::Snapshot;
 
@@ -79,25 +80,25 @@ fn status_line(snapshot: &Snapshot) -> String {
     let machines: Vec<_> = snapshot.machines.iter().filter(|m| !matches!(m.status.as_str(), "disconnected" | "manual")).collect();
     let online = machines.iter().filter(|m| m.status == "online").count();
     let mut parts = vec![match machines.len() {
-        0 if snapshot.machines.is_empty() => "No machines yet".to_string(),
-        0 => "No machines connected".to_string(),
-        _ if online == 0 && machines.iter().any(|m| m.status == "unchecked") => "Checking machines…".to_string(),
-        1 if online == 1 => "1 machine online".to_string(),
-        1 if machines[0].is_asleep() => "1 machine asleep".to_string(),
-        1 => "1 machine offline".to_string(),
-        n if online == n => format!("{n} machines online"),
-        _ if online == 0 => "No machines online".to_string(),
-        n => format!("{online} of {n} machines online"),
+        0 if snapshot.machines.is_empty() => tr("No machines yet").to_string(),
+        0 => tr("No machines connected").to_string(),
+        _ if online == 0 && machines.iter().any(|m| m.status == "unchecked") => tr("Checking machines…").to_string(),
+        1 if online == 1 => tr("1 machine online").to_string(),
+        1 if machines[0].is_asleep() => tr("1 machine asleep").to_string(),
+        1 => tr("1 machine offline").to_string(),
+        n if online == n => trf("{n} machines online", &[("n", &n)]),
+        _ if online == 0 => tr("No machines online").to_string(),
+        n => trf("{online} of {n} machines online", &[("online", &online), ("n", &n)]),
     }];
     let marks: Vec<Mark> = snapshot.sessions.iter().map(|s| s.mark()).collect();
     let working = marks.iter().filter(|m| **m == Mark::Working).count();
     // As in the list below: an exit with an error waits for you too.
     let needs_you = marks.iter().filter(|m| matches!(m, Mark::NeedsYou | Mark::Failed)).count();
     if working > 0 {
-        parts.push(format!("{working} working"));
+        parts.push(trf("{n} working", &[("n", &working)]));
     }
     if needs_you > 0 {
-        parts.push(format!("{needs_you} need{} you", if needs_you == 1 { "s" } else { "" }));
+        parts.push(if needs_you == 1 { tr("1 needs you").to_string() } else { trf("{n} need you", &[("n", &needs_you)]) });
     }
     parts.join(" · ")
 }
@@ -187,12 +188,12 @@ fn menu_entries(state: &MenuState) -> Vec<Entry> {
         for w in waiting.iter().take(MOST_LISTED) {
             if heading != Some(w.needs_you) {
                 heading = Some(w.needs_you);
-                entries.push(Entry::Note(if w.needs_you { "Needs you" } else { "Done" }.into()));
+                entries.push(Entry::Note(if w.needs_you { tr("Needs you") } else { tr("Done") }.into()));
             }
             entries.push(Entry::Session(w.clone()));
         }
         if waiting.len() > MOST_LISTED {
-            entries.push(Entry::Note(format!("and {} more", waiting.len() - MOST_LISTED)));
+            entries.push(Entry::Note(trf("and {n} more", &[("n", &(waiting.len() - MOST_LISTED))])));
         }
         entries.push(Entry::Separator);
     }
@@ -310,16 +311,24 @@ fn logo_rgba(size: u32) -> Option<Vec<u8>> {
     Some(image::imageops::resize(&image, size, size, image::imageops::FilterType::Lanczos3).into_raw())
 }
 
-const SHOW_LABEL: &str = "Show Muxin";
-const SETTINGS_LABEL: &str = "Settings…";
-const COPY_LABEL: &str = "Copy Versions";
+fn show_label() -> &'static str {
+    tr("Show Muxin")
+}
+fn settings_label() -> &'static str {
+    tr("Settings…")
+}
+fn copy_label() -> &'static str {
+    tr("Copy Versions")
+}
 /// Agent sessions live on their machines, held by Muxin's agent there.
-const QUIT_LABEL: &str = "Quit Muxin (sessions keep running)";
+fn quit_label() -> &'static str {
+    tr("Quit Muxin (sessions keep running)")
+}
 
 fn updates_label(newer: Option<&str>) -> String {
     match newer {
-        Some(version) => format!("Update to Muxin {version}…"),
-        None => "Check for Updates…".into(),
+        Some(version) => trf("Update to Muxin {version}…", &[("version", &version)]),
+        None => tr("Check for Updates…").into(),
     }
 }
 
@@ -640,12 +649,12 @@ mod imp {
                 Entry::Note(text) => menu.append(&note(text)),
                 Entry::Session(w) => menu.append(&icon_item(format!("session:{}", w.id), &w.label, &entry, None)),
                 Entry::Separator => menu.append(&PredefinedMenuItem::separator()),
-                Entry::Show => menu.append(&icon_item("show".into(), SHOW_LABEL, &entry, None)),
-                Entry::Settings => menu.append(&icon_item("settings".into(), SETTINGS_LABEL, &entry, Some(settings_shortcut()))),
+                Entry::Show => menu.append(&icon_item("show".into(), show_label(), &entry, None)),
+                Entry::Settings => menu.append(&icon_item("settings".into(), settings_label(), &entry, Some(settings_shortcut()))),
                 Entry::Updates(newer) => menu.append(updates.insert(icon_item("updates".into(), &updates_label(newer.as_deref()), &entry, None))),
                 Entry::Versions(text) => menu.append(versions.insert(note(text))),
-                Entry::CopyVersions => menu.append(&icon_item("copy".into(), COPY_LABEL, &entry, None)),
-                Entry::Quit => menu.append(&icon_item("quit".into(), QUIT_LABEL, &entry, None)),
+                Entry::CopyVersions => menu.append(&icon_item("copy".into(), copy_label(), &entry, None)),
+                Entry::Quit => menu.append(&icon_item("quit".into(), quit_label(), &entry, None)),
             };
         }
         // (Each is in every menu: see `menu_entries`.)
@@ -903,11 +912,11 @@ mod imp {
                         item(&w.label, Box::new(move |_| command(AppCommand::OpenSession(id.clone()))))
                     }
                     Entry::Separator => MenuItem::Separator,
-                    Entry::Show => item(SHOW_LABEL, Box::new(|_| command(AppCommand::Show))),
-                    Entry::Settings => item(SETTINGS_LABEL, Box::new(|_| command(AppCommand::Settings))),
+                    Entry::Show => item(show_label(), Box::new(|_| command(AppCommand::Show))),
+                    Entry::Settings => item(settings_label(), Box::new(|_| command(AppCommand::Settings))),
                     Entry::Updates(newer) => item(&updates_label(newer.as_deref()), Box::new(|_| command(AppCommand::CheckForUpdates))),
-                    Entry::CopyVersions => item(COPY_LABEL, Box::new(|tray: &mut Self| copy(versions_report(tray.state.agent.as_deref())))),
-                    Entry::Quit => item(QUIT_LABEL, Box::new(|_| command(AppCommand::Quit))),
+                    Entry::CopyVersions => item(copy_label(), Box::new(|tray: &mut Self| copy(versions_report(tray.state.agent.as_deref())))),
+                    Entry::Quit => item(quit_label(), Box::new(|_| command(AppCommand::Quit))),
                 })
                 .collect()
         }
@@ -1003,10 +1012,11 @@ mod tests {
 
     #[test]
     fn the_labels_say_what_they_do() {
-        assert_eq!(SETTINGS_LABEL, "Settings…");
+        assert_eq!(settings_label(), "Settings…");
         assert_eq!(updates_label(None), "Check for Updates…");
         assert_eq!(updates_label(Some("0.9.1")), "Update to Muxin 0.9.1…", "once a look found a newer one");
-        assert!(QUIT_LABEL.starts_with("Quit Muxin") && QUIT_LABEL.contains("sessions keep running"));
+        assert!(quit_label().starts_with("Quit Muxin") && quit_label().contains("sessions keep running"));
+
         let entries = menu_entries(&MenuState { newer: Some("0.9.1".into()), ..state(Vec::new()) });
         assert!(entries.contains(&Entry::Updates(Some("0.9.1".into()))));
     }

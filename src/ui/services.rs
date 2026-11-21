@@ -14,6 +14,7 @@ use std::time::Duration;
 use gpui::{AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list};
 
 use super::input::{InputEvent, TextInput};
+use crate::ui::i18n::{tr, trf, tr_msg};
 use super::kit::{self, Button, ButtonStyle, icon, spinner};
 use super::theme::{ActiveTheme, Theme};
 use crate::fleet::Engine;
@@ -151,9 +152,9 @@ fn parts(text: &str) -> Vec<String> {
 
 impl ServicesView {
     pub fn new(engine: Arc<Engine>, machine: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let find = cx.new(|cx| TextInput::new(cx, "Find"));
-        let password = cx.new(|cx| TextInput::new(cx, "Password").secret());
-        let pull = cx.new(|cx| TextInput::new(cx, "Image to pull, e.g. postgres:17"));
+        let find = cx.new(|cx| TextInput::new(cx, tr("Find")));
+        let password = cx.new(|cx| TextInput::new(cx, tr("Password")).secret());
+        let pull = cx.new(|cx| TextInput::new(cx, tr("Image to pull, e.g. postgres:17")));
         let notify = |_: &mut Self, _: &Entity<TextInput>, e: &InputEvent, _: &mut Window, cx: &mut Context<Self>| {
             if *e == InputEvent::Changed {
                 cx.notify();
@@ -413,7 +414,7 @@ impl ServicesView {
         }
         self.pull.update(cx, |i, cx| i.set_text("", cx));
         let result = self.engine.docker_pull(&self.machine, &image);
-        self.watch(result, format!("Pulling {image}"), cx);
+        self.watch(result, trf("Pulling {image}", &[("image", &image)]), cx);
     }
 
     /// Opens "Run a container", with an image already in it.
@@ -427,12 +428,12 @@ impl ServicesView {
             })
         };
         let form = RunForm {
-            image: input(cx, "Image, e.g. nginx:alpine", image),
-            name: input(cx, "Name (optional)", ""),
-            ports: input(cx, "Ports: 8080:80, 5432:5432", ""),
-            env: input(cx, "Env: KEY=value, OTHER=x", ""),
-            volumes: input(cx, "Volumes: /srv/data:/data", ""),
-            command: input(cx, "Command (optional)", ""),
+            image: input(cx, tr("Image, e.g. nginx:alpine"), image),
+            name: input(cx, tr("Name (optional)"), ""),
+            ports: input(cx, tr("Ports: 8080:80, 5432:5432"), ""),
+            env: input(cx, tr("Env: KEY=value, OTHER=x"), ""),
+            volumes: input(cx, tr("Volumes: /srv/data:/data"), ""),
+            command: input(cx, tr("Command (optional)"), ""),
             restart: "unless-stopped",
         };
         window.focus(&form.image.focus_handle(cx));
@@ -453,7 +454,7 @@ impl ServicesView {
             restart: form.restart.to_string(),
             command: text(&form.command),
         };
-        let what = format!("Running {}", run.image);
+        let what = trf("Running {image}", &[("image", &run.image)]);
         let result = self.engine.docker_run(&self.machine, run);
         if result.is_ok() {
             self.run = None;
@@ -643,7 +644,7 @@ fn confirm_row(theme: &Theme, n: usize, text: String, risky: bool, yes: &'static
                 .child(text),
         )
         .child(Button::new(SharedString::from(format!("svc-yes-{n}")), yes).icon(yes_icon).style(ButtonStyle::Danger).on_click(move |_, window, cx| on_yes(window, cx)))
-        .child(Button::new(SharedString::from(format!("svc-no-{n}")), "Cancel").style(ButtonStyle::Ghost).on_click(move |_, _, cx| on_no(cx)))
+        .child(Button::new(SharedString::from(format!("svc-no-{n}")), tr("Cancel")).style(ButtonStyle::Ghost).on_click(move |_, _, cx| on_no(cx)))
         .into_any_element()
 }
 
@@ -661,11 +662,11 @@ impl Render for ServicesView {
         let theme = cx.theme();
         let machine_name = self.engine.current().machines.iter().find(|m| m.id == self.machine).map(|m| m.name.clone()).unwrap_or_else(|| self.machine.clone());
         let data = self.list.as_ref().and_then(|l| l.as_ref().ok()).cloned().unwrap_or_default();
-        let mut tab_list = vec![(Tab::Services, "Services", data.services.len()), (Tab::Containers, "Containers", data.containers.len())];
+        let mut tab_list = vec![(Tab::Services, tr("Services"), data.services.len()), (Tab::Containers, tr("Containers"), data.containers.len())];
         if data.docker {
-            tab_list.extend([(Tab::Compose, "Compose", data.compose.len()), (Tab::Images, "Images", data.images.len())]);
+            tab_list.extend([(Tab::Compose, "Compose", data.compose.len()), (Tab::Images, tr("Images"), data.images.len())]);
         }
-        tab_list.push((Tab::Processes, "Processes", self.procs.as_ref().and_then(|p| p.as_ref().ok()).map(|p| p.total).unwrap_or(0)));
+        tab_list.push((Tab::Processes, tr("Processes"), self.procs.as_ref().and_then(|p| p.as_ref().ok()).map(|p| p.total).unwrap_or(0)));
         let tabs = div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(tab_list.into_iter().map(|(tab, label, n)| {
             chip(&theme, format!("svc-tab-{label}"), label, self.tab == tab)
                 .when(n > 0, |d| d.child(div().text_size(px(10.5)).text_color(theme.text_placeholder).child(n.to_string())))
@@ -683,7 +684,7 @@ impl Render for ServicesView {
         // What each tab adds to the toolbar.
         let extra: Vec<AnyElement> = match self.tab {
             Tab::Containers if data.docker => vec![
-                Button::new("svc-run", "Run a container")
+                Button::new("svc-run", tr("Run a container"))
                     .icon("plus")
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.run.is_some() {
@@ -697,8 +698,8 @@ impl Render for ServicesView {
             ],
             Tab::Images => vec![
                 div().flex_none().w(px(220.)).child(self.pull.clone()).into_any_element(),
-                Button::new("svc-pull", "Pull").icon("arrow-down").on_click(cx.listener(|this, _, window, cx| this.pull_image(window, cx))).into_any_element(),
-                Button::new("svc-prune", "Remove unused")
+                Button::new("svc-pull", tr("Pull")).icon("arrow-down").on_click(cx.listener(|this, _, window, cx| this.pull_image(window, cx))).into_any_element(),
+                Button::new("svc-prune", tr("Remove unused"))
                     .icon("trash-2")
                     .style(ButtonStyle::Ghost)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -708,13 +709,13 @@ impl Render for ServicesView {
                     .into_any_element(),
             ],
             Tab::Compose if self.project.is_none() => vec![
-                Button::new("svc-compose-new", "New project")
+                Button::new("svc-compose-new", tr("New project"))
                     .icon("plus")
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.new_compose.is_some() {
                             this.new_compose = None;
                         } else {
-                            let input = cx.new(|cx| TextInput::new(cx, "Project name, e.g. blog"));
+                            let input = cx.new(|cx| TextInput::new(cx, tr("Project name, e.g. blog")));
                             let sub = cx.subscribe_in(&input, window, |this, _, e: &InputEvent, window, cx| {
                                 if *e == InputEvent::Submit {
                                     this.create_compose(window, cx);
@@ -746,7 +747,7 @@ impl Render for ServicesView {
             .child(div().flex_1())
             .children(extra)
             .child(div().flex_none().w(px(180.)).child(self.find.clone()))
-            .child(Button::icon_only("svc-refresh", "refresh-cw").tooltip("Refresh").on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))));
+            .child(Button::icon_only("svc-refresh", "refresh-cw").tooltip(tr("Refresh")).on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))));
 
         // Bars under the toolbar: the password, operations under way, the last error.
         // Narrow: the field and its buttons go under the message, and long
@@ -770,7 +771,7 @@ impl Render for ServicesView {
                         .items_center()
                         .gap(px(10.))
                         .child(icon("lock", 14., theme.text_muted).flex_none())
-                        .child(div().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text).child(format!("To {action} {}, Muxin needs your password on {machine_name}.", s.name))),
+                        .child(div().min_w(px(0.)).text_size(px(12.5)).text_color(theme.text).child(trf("To {action} {name}, Muxin needs your password on {machine}.", &[("action", &action), ("name", &s.name), ("machine", &machine_name)]))),
                 )
                 .child(
                     div()
@@ -779,17 +780,17 @@ impl Render for ServicesView {
                         .items_center()
                         .gap(px(10.))
                         .child(div().w(px(200.)).child(self.password.clone()))
-                        .child(Button::new("svc-password-go", "Continue").style(ButtonStyle::Primary).on_click(cx.listener(|this, _, window, cx| this.give_password(window, cx))))
+                        .child(Button::new("svc-password-go", tr("Continue")).style(ButtonStyle::Primary).on_click(cx.listener(|this, _, window, cx| this.give_password(window, cx))))
                         .child(
-                            Button::new("svc-password-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, _, cx| {
+                            Button::new("svc-password-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, _, cx| {
                                 this.asking = None;
                                 this.password_error = None;
                                 cx.notify();
                             })),
                         ),
                 )
-                .children(self.password_error.clone().map(|e| div().min_w(px(0.)).text_size(px(12.)).text_color(theme.error).child(e)))
-                .child(div().flex_none().ml_auto().text_size(px(11.)).text_color(theme.text_placeholder).child("Kept in memory until you quit."))
+                .children(self.password_error.clone().map(|e| div().min_w(px(0.)).text_size(px(12.)).text_color(theme.error).child(tr_msg(&e))))
+                .child(div().flex_none().ml_auto().text_size(px(11.)).text_color(theme.text_placeholder).child(tr("Kept in memory until you quit.")))
         });
         let ops = (!self.ops.is_empty()).then(|| {
             let snap = self.engine.current();
@@ -822,7 +823,7 @@ impl Render for ServicesView {
                 .text_size(px(12.5))
                 .text_color(theme.error)
                 .child(icon("circle-alert", 14., theme.error))
-                .child(div().flex_1().min_w(px(0.)).child(e))
+                .child(div().flex_1().min_w(px(0.)).child(tr_msg(&e)))
                 .child(Button::icon_only("svc-error-x", "x").on_click(cx.listener(|this, _, _, cx| {
                     this.error = None;
                     cx.notify();
@@ -834,13 +835,13 @@ impl Render for ServicesView {
             div().flex_none().flex().justify_end().px(px(14.)).py(px(6.)).border_b_1().border_color(theme.border_variant).child(confirm_row(
                 &theme,
                 9999,
-                "Remove every image no container uses?".into(),
+                tr("Remove every image no container uses?").into(),
                 false,
-                "Remove",
+                tr("Remove"),
                 "trash-2",
                 move |window, cx| {
                     let _ = yes.update(cx, |v, cx| {
-                        let s = Service { kind: "image".into(), target: "unused".into(), name: "unused images".into(), ..Default::default() };
+                        let s = Service { kind: "image".into(), target: "unused".into(), name: tr("unused images").into(), ..Default::default() };
                         v.act(s, "prune", true, window, cx);
                     });
                 },
@@ -855,8 +856,8 @@ impl Render for ServicesView {
         // Run a container.
         let run_form = self.run.as_ref().filter(|_| self.tab == Tab::Containers).map(|f| {
             let field = |label: &'static str, input: &Entity<TextInput>, w: f32| div().flex().flex_col().gap(px(4.)).child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(label)).child(div().w(px(w)).child(input.clone()));
-            let restarts = div().flex().flex_col().gap(px(4.)).child(div().text_size(px(11.)).text_color(theme.text_placeholder).child("Restart")).child(
-                div().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children([("no", "Never"), ("always", "Always"), ("unless-stopped", "Unless stopped"), ("on-failure", "On failure")].into_iter().map(|(value, label)| {
+            let restarts = div().flex().flex_col().gap(px(4.)).child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(tr("Restart"))).child(
+                div().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children([("no", tr("Never")), ("always", tr("Always")), ("unless-stopped", tr("Unless stopped")), ("on-failure", tr("On failure"))].into_iter().map(|(value, label)| {
                     chip(&theme, format!("svc-restart-{value}"), label, f.restart == value).on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(f) = &mut this.run {
                             f.restart = value;
@@ -874,21 +875,21 @@ impl Render for ServicesView {
                 .border_b_1()
                 .border_color(theme.border_variant)
                 .bg(theme.surface)
-                .child(div().text_size(px(13.)).text_color(theme.text).child("Run a container"))
-                .child(div().flex().flex_wrap().gap(px(12.)).child(field("Image", &f.image, 260.)).child(field("Name", &f.name, 180.)).child(restarts))
-                .child(div().flex().flex_wrap().gap(px(12.)).child(field("Ports", &f.ports, 220.)).child(field("Environment", &f.env, 260.)).child(field("Volumes", &f.volumes, 240.)))
+                .child(div().text_size(px(13.)).text_color(theme.text).child(tr("Run a container")))
+                .child(div().flex().flex_wrap().gap(px(12.)).child(field(tr("Image"), &f.image, 260.)).child(field(tr("Name"), &f.name, 180.)).child(restarts))
+                .child(div().flex().flex_wrap().gap(px(12.)).child(field(tr("Ports"), &f.ports, 220.)).child(field(tr("Environment"), &f.env, 260.)).child(field(tr("Volumes"), &f.volumes, 240.)))
                 .child(
                     div()
                         .flex()
                         .items_end()
                         .gap(px(12.))
-                        .child(field("Command", &f.command, 360.))
-                        .child(Button::new("svc-run-go", "Run").icon("play").style(ButtonStyle::Primary).on_click(cx.listener(|this, _, window, cx| this.start_run(window, cx))))
-                        .child(Button::new("svc-run-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, _, cx| {
+                        .child(field(tr("Command"), &f.command, 360.))
+                        .child(Button::new("svc-run-go", tr("Run")).icon("play").style(ButtonStyle::Primary).on_click(cx.listener(|this, _, window, cx| this.start_run(window, cx))))
+                        .child(Button::new("svc-run-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|this, _, _, cx| {
                             this.run = None;
                             cx.notify();
                         })))
-                        .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child("Pulls the image if it's not here. Commas separate several ports, variables or volumes.")),
+                        .child(div().text_size(px(11.)).text_color(theme.text_placeholder).child(tr("Pulls the image if it's not here. Commas separate several ports, variables or volumes."))),
                 )
         });
         let new_compose = self.new_compose.as_ref().filter(|_| self.tab == Tab::Compose && self.project.is_none()).map(|input| {
@@ -903,8 +904,8 @@ impl Render for ServicesView {
                 .border_color(theme.border_variant)
                 .bg(theme.surface)
                 .child(div().w(px(240.)).child(input.clone()))
-                .child(Button::new("svc-compose-create", "Create").style(ButtonStyle::Primary).on_click(cx.listener(|this, _, window, cx| this.create_compose(window, cx))))
-                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child("Makes ~/compose/<name>/compose.yaml on the machine and opens it to edit; then Up."))
+                .child(Button::new("svc-compose-create", tr("Create")).style(ButtonStyle::Primary).on_click(cx.listener(|this, _, window, cx| this.create_compose(window, cx))))
+                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr("Makes ~/compose/<name>/compose.yaml on the machine and opens it to edit; then Up.")))
         });
 
         let find = self.find.read(cx).text().trim().to_lowercase();
@@ -924,15 +925,15 @@ impl Render for ServicesView {
                 .text_size(px(13.))
                 .text_color(theme.text_muted)
                 .child(spinner("svc-loading", 14., theme.text_muted))
-                .child(format!("Asking {machine_name}…"))
+                .child(trf("Asking {machine}…", &[("machine", &machine_name)]))
                 .into_any_element(),
-            Some(Err(e)) => div().flex_1().flex().items_center().justify_center().text_size(px(13.)).text_color(theme.error).child(e.clone()).into_any_element(),
+            Some(Err(e)) => div().flex_1().flex().items_center().justify_center().text_size(px(13.)).text_color(theme.error).child(tr_msg(e)).into_any_element(),
             Some(Ok(_)) => match self.tab {
                 Tab::Services | Tab::Containers => {
                     let (items, note) = if self.tab == Tab::Services {
                         (data.services.clone(), data.services_note.clone())
                     } else {
-                        (data.containers.clone(), data.containers_note.clone().or_else(|| (!data.docker).then(|| "Docker isn't installed on this machine.".into())))
+                        (data.containers.clone(), data.containers_note.clone().or_else(|| (!data.docker).then(|| tr("Docker isn't installed on this machine.").into())))
                     };
                     let mut items: Vec<Service> = items.into_iter().filter(|s| matches(&s.name, &s.detail)).collect();
                     match self.sort {
@@ -941,7 +942,7 @@ impl Render for ServicesView {
                         Sort::Memory => items.sort_by_key(|s| std::cmp::Reverse(s.memory.unwrap_or(0))),
                     }
                     if items.is_empty() {
-                        empty(&theme, if find.is_empty() { note.unwrap_or_else(|| "Nothing here yet.".into()) } else { "Nothing matches.".into() })
+                        empty(&theme, if find.is_empty() { note.unwrap_or_else(|| tr("Nothing here yet.").into()) } else { tr("Nothing matches.").into() })
                     } else {
                         rows = true;
                         self.service_rows(items, view, machine_name.clone(), &theme)
@@ -951,15 +952,15 @@ impl Render for ServicesView {
                 Tab::Compose => {
                     let items: Vec<ComposeProject> = data.compose.iter().filter(|p| matches(&p.name, &p.files)).cloned().collect();
                     if items.is_empty() {
-                        empty(&theme, if find.is_empty() { "No Compose projects yet: New project makes one.".into() } else { "Nothing matches.".into() })
+                        empty(&theme, if find.is_empty() { tr("No Compose projects yet: New project makes one.").into() } else { tr("Nothing matches.").into() })
                     } else {
                         rows = true;
                         self.compose_rows(items, view, &theme)
                     }
                 }
                 Tab::Processes => match &self.procs {
-                    None => div().flex_1().flex().items_center().justify_center().gap(px(8.)).text_size(px(13.)).text_color(theme.text_muted).child(spinner("procs-loading", 14., theme.text_muted)).child(format!("Asking {machine_name}…")).into_any_element(),
-                    Some(Err(e)) => div().flex_1().flex().items_center().justify_center().text_size(px(13.)).text_color(theme.error).child(e.clone()).into_any_element(),
+                    None => div().flex_1().flex().items_center().justify_center().gap(px(8.)).text_size(px(13.)).text_color(theme.text_muted).child(spinner("procs-loading", 14., theme.text_muted)).child(trf("Asking {machine}…", &[("machine", &machine_name)])).into_any_element(),
+                    Some(Err(e)) => div().flex_1().flex().items_center().justify_center().text_size(px(13.)).text_color(theme.error).child(tr_msg(e)).into_any_element(),
                     Some(Ok(list)) => {
                         let mut items: Vec<Process> = list.processes.iter().filter(|p| matches(&p.name, &format!("{} {} {}", p.command, p.user, p.pid))).cloned().collect();
                         if self.sort == Sort::Memory {
@@ -967,7 +968,7 @@ impl Render for ServicesView {
                         }
                         gpus_el = (!list.gpus.is_empty()).then(|| gpu_strip(&list.gpus, &theme));
                         if items.is_empty() {
-                            empty(&theme, "Nothing matches.".into())
+                            empty(&theme, tr("Nothing matches.").into())
                         } else {
                             rows = true;
                             self.process_rows(items, view, &theme)
@@ -977,7 +978,7 @@ impl Render for ServicesView {
                 Tab::Images => {
                     let items: Vec<Image> = data.images.iter().filter(|i| matches(&i.name, &i.id)).cloned().collect();
                     if items.is_empty() {
-                        empty(&theme, if find.is_empty() { "No images yet: pull one.".into() } else { "Nothing matches.".into() })
+                        empty(&theme, if find.is_empty() { tr("No images yet: pull one.").into() } else { tr("Nothing matches.").into() })
                     } else {
                         rows = true;
                         self.image_rows(items, view, &theme)
@@ -1158,10 +1159,10 @@ impl ServicesView {
                 .when(!on, |d| d.hover(|st| st.text_color(theme.text_muted)))
                 .tooltip(move |window, cx| {
                     let tip = match (sort, on) {
-                        (Sort::State, _) => "Failed first, then running, then stopped",
-                        (Sort::Cpu, false) => "Sort by CPU, highest first",
-                        (Sort::Memory, false) => "Sort by memory, highest first",
-                        _ => "Highest first: click for the usual order",
+                        (Sort::State, _) => tr("Failed first, then running, then stopped"),
+                        (Sort::Cpu, false) => tr("Sort by CPU, highest first"),
+                        (Sort::Memory, false) => tr("Sort by memory, highest first"),
+                        _ => tr("Highest first: click for the usual order"),
                     };
                     kit::Tooltip::view(tip.into(), window, cx)
                 })
@@ -1188,34 +1189,34 @@ impl ServicesView {
         match self.tab {
             Tab::Services | Tab::Containers => frame
                 .child(div().flex_none().w(px(7.)))
-                .child(div().flex_1().min_w(px(0.)).child(label(if self.tab == Tab::Services { "Name" } else { "Name · image" })))
-                .when(c.usage, |d| d.child(sortable("svc-h-cpu", "CPU", Sort::Cpu, W_CPU, true, cx)).child(sortable("svc-h-mem", "Memory", Sort::Memory, W_MEM, true, cx)))
-                .child(sortable("svc-h-state", if self.tab == Tab::Services { "State" } else { "Status" }, Sort::State, c.state, false, cx))
-                .when(c.boot, |d| d.child(div().flex_none().w(px(W_BOOT)).child(label("At boot"))))
+                .child(div().flex_1().min_w(px(0.)).child(label(if self.tab == Tab::Services { tr("Name") } else { tr("Name · image") })))
+                .when(c.usage, |d| d.child(sortable("svc-h-cpu", "CPU", Sort::Cpu, W_CPU, true, cx)).child(sortable("svc-h-mem", tr("Memory"), Sort::Memory, W_MEM, true, cx)))
+                .child(sortable("svc-h-state", if self.tab == Tab::Services { tr("State") } else { tr("Status") }, Sort::State, c.state, false, cx))
+                .when(c.boot, |d| d.child(div().flex_none().w(px(W_BOOT)).child(label(tr("At boot")))))
                 .child(div().flex_none().w(px(c.actions)))
                 .into_any_element(),
             Tab::Compose => frame
                 .child(div().flex_none().w(px(7.)))
-                .child(div().flex_1().min_w(px(0.)).child(label("Project · files")))
-                .child(div().flex_none().w(px(c.state)).pl(px(12.)).child(label("Status")))
+                .child(div().flex_1().min_w(px(0.)).child(label(tr("Project · files"))))
+                .child(div().flex_none().w(px(c.state)).pl(px(12.)).child(label(tr("Status"))))
                 .child(div().flex_none().w(px(c.actions)))
                 .into_any_element(),
             Tab::Processes => frame
                 .child(div().flex_none().w(px(7.)))
-                .child(div().flex_1().min_w(px(0.)).child(label("Process · command")))
+                .child(div().flex_1().min_w(px(0.)).child(label(tr("Process · command"))))
                 .child(div().flex_none().w(px(W_PID)).flex().justify_end().child(label("PID")))
-                .when(c.usage, |d| d.child(div().flex_none().w(px(W_USER)).pl(px(12.)).child(label("User"))))
+                .when(c.usage, |d| d.child(div().flex_none().w(px(W_USER)).pl(px(12.)).child(label(tr("User")))))
                 .child(sortable("proc-h-cpu", "CPU", Sort::Cpu, W_CPU, true, cx))
-                .child(sortable("proc-h-mem", "Memory", Sort::Memory, W_MEM, true, cx))
-                .when(c.created, |d| d.child(div().flex_none().w(px(W_UP)).flex().justify_end().child(label("Up for"))))
+                .child(sortable("proc-h-mem", tr("Memory"), Sort::Memory, W_MEM, true, cx))
+                .when(c.created, |d| d.child(div().flex_none().w(px(W_UP)).flex().justify_end().child(label(tr("Up for")))))
                 .child(div().flex_none().w(px(c.actions)))
                 .into_any_element(),
             Tab::Images => frame
                 .child(div().flex_none().w(px(14.)))
-                .child(div().flex_1().min_w(px(0.)).child(label("Image · id")))
-                .child(div().flex_none().w(px(W_SIZE)).flex().justify_end().child(label("Size")))
-                .when(c.created, |d| d.child(div().flex_none().w(px(W_CREATED)).pl(px(12.)).child(label("Created"))))
-                .when(c.used, |d| d.child(div().flex_none().w(px(W_USED)).child(label("Used by"))))
+                .child(div().flex_1().min_w(px(0.)).child(label(tr("Image · id"))))
+                .child(div().flex_none().w(px(W_SIZE)).flex().justify_end().child(label(tr("Size"))))
+                .when(c.created, |d| d.child(div().flex_none().w(px(W_CREATED)).pl(px(12.)).child(label(tr("Created")))))
+                .when(c.used, |d| d.child(div().flex_none().w(px(W_USED)).child(label(tr("Used by")))))
                 .child(div().flex_none().w(px(c.actions)))
                 .into_any_element(),
         }
@@ -1244,9 +1245,10 @@ impl ServicesView {
                     };
                     let container = s.kind == "docker";
                     let state = if container { s.status.clone() } else { s.state.clone() };
+                    // Icons, named on hover: each sits in a slot as wide as one (see ACTION_SLOT).
                     let act = |id: &str, label: &'static str, icon_name: &'static str, action: &'static str| {
                         let (view, s) = (view.clone(), s.clone());
-                        word_or_icon(SharedString::from(format!("svc-{id}-{n}")), label, icon_name, c.compact).on_click(move |_, window, cx| {
+                        word_or_icon(SharedString::from(format!("svc-{id}-{n}")), label, icon_name, true).on_click(move |_, window, cx| {
                             let _ = view.update(cx, |v, cx| v.act(s.clone(), action, false, window, cx));
                         })
                     };
@@ -1255,16 +1257,16 @@ impl ServicesView {
                         Some((ck, action)) if *ck == k => {
                             let risky = s.keeps_muxen_connected() && *action != "restart";
                             let (verb, glyph) = match *action {
-                                "stop" => ("Stop", "circle-stop"),
-                                "remove" => ("Remove", "trash-2"),
-                                _ => ("Restart", "rotate-ccw"),
+                                "stop" => (tr("Stop"), "circle-stop"),
+                                "remove" => (tr("Remove"), "trash-2"),
+                                _ => (tr("Restart"), "rotate-ccw"),
                             };
                             let text = if risky {
-                                format!("{verb} {}? It can cut Muxin off from {machine_name}.", s.name)
+                                trf("{verb} {name}? It can cut Muxin off from {machine}.", &[("verb", &verb), ("name", &s.name), ("machine", &machine_name)])
                             } else if *action == "remove" {
-                                format!("Remove {} for good?", s.name)
+                                trf("Remove {name} for good?", &[("name", &s.name)])
                             } else {
-                                format!("{verb} {}?", s.name)
+                                trf("{verb} {name}?", &[("verb", &verb), ("name", &s.name)])
                             };
                             let (yes, no, s2, action) = (view.clone(), view.clone(), s.clone(), *action);
                             confirm_row(
@@ -1285,11 +1287,11 @@ impl ServicesView {
                                 },
                             )
                         }
-                        _ if busy.contains(&k) => div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child(spinner(SharedString::from(format!("svc-busy-{n}")), 12., theme.text_muted)).child("Working…").into_any_element(),
+                        _ if busy.contains(&k) => div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child(spinner(SharedString::from(format!("svc-busy-{n}")), 12., theme.text_muted)).child(tr("Working…")).into_any_element(),
                         _ => {
                             let logs = {
                                 let (view, source) = (view.clone(), s.log_source());
-                                Button::icon_only(SharedString::from(format!("svc-logs-{n}")), "scroll-text").tooltip("Its logs").on_click(move |_, _, cx| {
+                                Button::icon_only(SharedString::from(format!("svc-logs-{n}")), "scroll-text").tooltip(tr("Its logs")).on_click(move |_, _, cx| {
                                     let _ = view.update(cx, |_, cx| cx.emit(ServicesEvent::Logs(source.clone())));
                                 })
                             };
@@ -1300,16 +1302,16 @@ impl ServicesView {
                             // row of their table has those slots).
                             let shell = (container && running).then(|| {
                                 let (view, name) = (view.clone(), s.name.clone());
-                                Button::icon_only(SharedString::from(format!("svc-shell-{n}")), "square-terminal").tooltip("A shell inside it").on_click(move |_, _, cx| {
+                                Button::icon_only(SharedString::from(format!("svc-shell-{n}")), "square-terminal").tooltip(tr("A shell inside it")).on_click(move |_, _, cx| {
                                     let command = format!("docker exec -it {name} sh -c 'command -v bash >/dev/null && exec bash || exec sh'");
                                     let _ = view.update(cx, |_, cx| cx.emit(ServicesEvent::Terminal { cwd: "~".into(), command, title: format!("{name} · shell") }));
                                 })
                             });
-                            let restart = running.then(|| act("restart", "Restart", "rotate-ccw", "restart"));
-                            let stop_start = if running { act("stop", "Stop", "circle-stop", "stop") } else { act("start", "Start", "play", "start") };
+                            let restart = running.then(|| act("restart", tr("Restart"), "rotate-ccw", "restart"));
+                            let stop_start = if running { act("stop", tr("Stop"), "circle-stop", "stop") } else { act("start", tr("Start"), "play", "start") };
                             let remove = container.then(|| {
                                 let (view, s2) = (view.clone(), s.clone());
-                                Button::icon_only(SharedString::from(format!("svc-rm-{n}")), "trash-2").tooltip("Remove").on_click(move |_, window, cx| {
+                                Button::icon_only(SharedString::from(format!("svc-rm-{n}")), "trash-2").tooltip(tr("Remove")).on_click(move |_, window, cx| {
                                     let _ = view.update(cx, |v, cx| v.act(s2.clone(), "remove", false, window, cx));
                                 })
                             });
@@ -1345,8 +1347,8 @@ impl ServicesView {
                             .border_color(theme.border_variant)
                             .text_color(if on { theme.text_muted } else { theme.text_placeholder })
                             .hover(|st| st.bg(theme.ghost_hover))
-                            .tooltip(move |window, cx| kit::Tooltip::view(if on { "Starts at boot: click to stop that" } else { "Doesn't start at boot: click to make it" }.into(), window, cx))
-                            .child(if on { "At boot" } else { "Not at boot" })
+                            .tooltip(move |window, cx| kit::Tooltip::view(if on { tr("Starts at boot: click to stop that") } else { tr("Doesn't start at boot: click to make it") }.into(), window, cx))
+                            .child(if on { tr("At boot") } else { tr("Not at boot") })
                             .on_click(move |_, window, cx| {
                                 let _ = view.update(cx, |v, cx| v.act(s2.clone(), if on { "disable" } else { "enable" }, true, window, cx));
                             })
@@ -1378,7 +1380,7 @@ impl ServicesView {
                                         .gap(px(6.))
                                         .min_w(px(0.))
                                         .when(!yours, |d| d.child(clipped(format!("svc-name-{n}"), s.name.clone(), 13., theme.text, text_w)))
-                                        .when(yours, |d| d.child(clipped(format!("svc-name-{n}"), s.name.clone(), 13., theme.text, about(&s.name, 13.).min(text_w - 60.))).child(kit::pill("yours", theme.text_placeholder))),
+                                        .when(yours, |d| d.child(clipped(format!("svc-name-{n}"), s.name.clone(), 13., theme.text, about(&s.name, 13.).min(text_w - 60.))).child(kit::pill(tr("yours"), theme.text_placeholder))),
                                 )
                                 .child(clipped(format!("svc-detail-{n}"), detail, 11.5, theme.text_placeholder, text_w)),
                         )
@@ -1425,9 +1427,9 @@ impl ServicesView {
             confirm_row(
                 &theme,
                 9999,
-                format!("Take {name} down? Its containers stop and go."),
+                trf("Take {name} down? Its containers stop and go.", &[("name", &name)]),
                 false,
-                "Down",
+                tr("Down"),
                 "circle-stop",
                 move |_, cx| {
                     let _ = yes.update(cx, |v, cx| v.compose(p2.clone(), "down", true, cx));
@@ -1446,24 +1448,24 @@ impl ServicesView {
             };
             let logs = {
                 let source = project.log_source();
-                Button::icon_only("cmp-p-logs", "external-link").tooltip("Its log on the Logs page").on_click(cx.listener(move |_, _, _, cx| cx.emit(ServicesEvent::Logs(source.clone()))))
+                Button::icon_only("cmp-p-logs", "external-link").tooltip(tr("Its log on the Logs page")).on_click(cx.listener(move |_, _, _, cx| cx.emit(ServicesEvent::Logs(source.clone()))))
             };
             let edit = {
                 let (folder, file, name) = (project.folder().to_string(), project.first_file().to_string(), name.clone());
-                Button::icon_only("cmp-p-edit", "pencil").tooltip("Edit its compose file").on_click(cx.listener(move |_, _, _, cx| {
+                Button::icon_only("cmp-p-edit", "pencil").tooltip(tr("Edit its compose file")).on_click(cx.listener(move |_, _, _, cx| {
                     let command = format!("${{EDITOR:-nano}} '{}'; exec \"$SHELL\" -l", file.replace('\'', "'\\''"));
                     cx.emit(ServicesEvent::Terminal { cwd: folder.clone(), command, title: format!("{name} · compose") });
                 }))
             };
             let folder = {
                 let folder = project.folder().to_string();
-                Button::icon_only("cmp-p-folder", "code").tooltip("Open its folder in an editor").on_click(cx.listener(move |_, e: &gpui::ClickEvent, _, cx| cx.emit(ServicesEvent::Editor(folder.clone(), e.position()))))
+                Button::icon_only("cmp-p-folder", "code").tooltip(tr("Open its folder in an editor")).on_click(cx.listener(move |_, e: &gpui::ClickEvent, _, cx| cx.emit(ServicesEvent::Editor(folder.clone(), e.position()))))
             };
-            let mut row = div().flex().items_center().gap(px(4.)).child(logs).child(folder).child(edit).child(act("cmp-p-pull", "Pull", "arrow-down", "pull", cx));
+            let mut row = div().flex().items_center().gap(px(4.)).child(logs).child(folder).child(edit).child(act("cmp-p-pull", tr("Pull"), "arrow-down", "pull", cx));
             if running {
-                row = row.child(act("cmp-p-restart", "Restart", "rotate-ccw", "restart", cx)).child(act("cmp-p-down", "Down", "circle-stop", "down", cx));
+                row = row.child(act("cmp-p-restart", tr("Restart"), "rotate-ccw", "restart", cx)).child(act("cmp-p-down", tr("Down"), "circle-stop", "down", cx));
             } else {
-                row = row.child(act("cmp-p-up", "Up", "play", "up", cx));
+                row = row.child(act("cmp-p-up", tr("Up"), "play", "up", cx));
             }
             row.into_any_element()
         };
@@ -1484,7 +1486,7 @@ impl ServicesView {
             .child(div().flex_none().text_size(px(14.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme.text).child(name.clone()))
             .child(div().flex_none().text_size(px(12.)).text_color(theme.text_muted).child(project.status.clone()))
             .child(div().flex_none().ml(px(6.)).flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(
-                [(ProjectMode::Picture, "Picture", "workflow"), (ProjectMode::List, "List", "list"), (ProjectMode::Logs, "Logs", "scroll-text")].into_iter().map(|(mode, label, glyph)| {
+                [(ProjectMode::Picture, tr("Picture"), "workflow"), (ProjectMode::List, tr("List"), "list"), (ProjectMode::Logs, tr("Logs"), "scroll-text")].into_iter().map(|(mode, label, glyph)| {
                     let on = self.project_mode == mode;
                     div()
                         .id(SharedString::from(format!("cmp-mode-{label}")))
@@ -1516,11 +1518,11 @@ impl ServicesView {
                 .text_size(px(13.))
                 .text_color(theme.text_muted)
                 .child(spinner("cmp-loading", 14., theme.text_muted))
-                .child(format!("Reading {name}'s compose file…"))
+                .child(trf("Reading {name}'s compose file…", &[("name", &name)]))
                 .into_any_element(),
-            Some(Err(e)) => div().flex_1().flex().items_center().justify_center().px(px(40.)).text_size(px(13.)).text_color(theme.error).child(e.clone()).into_any_element(),
+            Some(Err(e)) => div().flex_1().flex().items_center().justify_center().px(px(40.)).text_size(px(13.)).text_color(theme.error).child(tr_msg(e)).into_any_element(),
             _ if self.project_mode == ProjectMode::Logs && self.project_logs.is_some() => div().flex_1().min_h(px(0.)).flex().flex_col().children(self.project_logs.clone()).into_any_element(),
-            Some(Ok(g)) if g.services.is_empty() => empty(&theme, "It has no services yet: Edit adds them.".into()),
+            Some(Ok(g)) if g.services.is_empty() => empty(&theme, tr("It has no services yet: Edit adds them.").into()),
             Some(Ok(g)) if self.project_mode == ProjectMode::List => self.project_list(g, data, &project, cx),
             Some(Ok(g)) => {
                 let usage: picture::Usage = data.containers.iter().map(|c| (c.name.clone(), (c.cpu, c.memory))).collect();
@@ -1573,13 +1575,13 @@ impl ServicesView {
         let label = |text: &'static str| div().text_size(px(11.)).text_color(theme.text_placeholder).child(text);
         let head = |left: &'static str| div().flex_none().w_full().flex().items_center().gap(px(10.)).h(px(28.)).px(px(14.)).border_b_1().border_color(theme.border_variant).bg(theme.surface).child(div().flex_none().w(px(8.))).child(div().flex_1().child(label(left)));
         let section = |title: String| div().flex_none().pt(px(18.)).pb(px(6.)).px(px(14.)).text_size(px(12.)).font_weight(gpui::FontWeight::MEDIUM).text_color(theme.text_muted).child(title);
-        let services_head = head("Service · image")
+        let services_head = head(tr("Service · image"))
             .child(div().flex_none().w(px(C_CPU)).flex().justify_end().child(label("CPU")))
-            .child(div().flex_none().w(px(C_MEM)).flex().justify_end().child(label("Memory")))
-            .child(div().flex_none().w(px(C_STATE)).pl(px(12.)).child(label("State")))
-            .when(show_ports, |d| d.child(div().flex_none().w(px(C_PORTS)).child(label("Ports"))))
-            .when(show_waits, |d| d.child(div().flex_none().w(px(C_WAITS)).child(label("Waits for"))))
-            .when(show_nets, |d| d.child(div().flex_none().w(px(C_NETS)).child(label("Networks"))))
+            .child(div().flex_none().w(px(C_MEM)).flex().justify_end().child(label(tr("Memory"))))
+            .child(div().flex_none().w(px(C_STATE)).pl(px(12.)).child(label(tr("State"))))
+            .when(show_ports, |d| d.child(div().flex_none().w(px(C_PORTS)).child(label(tr("Ports")))))
+            .when(show_waits, |d| d.child(div().flex_none().w(px(C_WAITS)).child(label(tr("Waits for")))))
+            .when(show_nets, |d| d.child(div().flex_none().w(px(C_NETS)).child(label(tr("Networks")))))
             .child(div().flex_none().w(px(C_ACTIONS)));
         let rows = g.services.iter().enumerate().map(|(n, s)| {
             let running = s.running();
@@ -1604,7 +1606,7 @@ impl ServicesView {
                 }
             }
             let state = if running { s.state() } else { s.containers.first().map(|c| c.status.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| s.state()) };
-            let what = if s.build.is_empty() { s.image.clone() } else { format!("Built from {}", s.build) };
+            let what = if s.build.is_empty() { s.image.clone() } else { trf("Built from {build}", &[("build", &s.build)]) };
             let ports = s.ports.iter().map(|p| if p.published.is_empty() { p.target.clone() } else { format!(":{} → {}", p.published, p.target) }).collect::<Vec<_>>().join(", ");
             let waits = s
                 .depends_on
@@ -1623,9 +1625,9 @@ impl ServicesView {
                     confirm_row(
                         &theme,
                         5000 + n,
-                        format!("Stop {}?", s.name),
+                        trf("Stop {name}?", &[("name", &s.name)]),
                         false,
-                        "Stop",
+                        tr("Stop"),
                         "circle-stop",
                         move |_, cx| {
                             let _ = yes.update(cx, |v, cx| v.compose_service(p2.clone(), svc.clone(), "stop", true, cx));
@@ -1640,12 +1642,12 @@ impl ServicesView {
                 }
                 _ => {
                     let svc = s.name.clone();
-                    let mut row = div().flex().items_center().gap(px(4.)).child(Button::icon_only(SharedString::from(format!("cmp-l-logs-{n}")), "scroll-text").tooltip("Its logs").on_click(cx.listener({
+                    let mut row = div().flex().items_center().gap(px(4.)).child(Button::icon_only(SharedString::from(format!("cmp-l-logs-{n}")), "scroll-text").tooltip(tr("Its logs")).on_click(cx.listener({
                         let svc = svc.clone();
                         move |this, _, window, cx| this.set_mode(ProjectMode::Logs, Some(svc.clone()), window, cx)
                     })));
                     if running && let Some(container) = s.containers.iter().find(|c| c.state == "running").map(|c| c.name.clone()) {
-                        row = row.child(Button::icon_only(SharedString::from(format!("cmp-l-shell-{n}")), "square-terminal").tooltip("A shell inside it").on_click(cx.listener(move |_, _, _, cx| {
+                        row = row.child(Button::icon_only(SharedString::from(format!("cmp-l-shell-{n}")), "square-terminal").tooltip(tr("A shell inside it")).on_click(cx.listener(move |_, _, _, cx| {
                             let command = format!("docker exec -it {container} sh -c 'command -v bash >/dev/null && exec bash || exec sh'");
                             cx.emit(ServicesEvent::Terminal { cwd: "~".into(), command, title: format!("{container} · shell") });
                         })));
@@ -1655,9 +1657,9 @@ impl ServicesView {
                         Button::new(SharedString::from(format!("cmp-l-{id}-{n}")), text).icon(glyph).style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, _, cx| this.compose_service(p.clone(), svc.clone(), action, false, cx)))
                     };
                     if running {
-                        row = row.child(act("restart", "Restart", "rotate-ccw", "restart", cx)).child(act("stop", "Stop", "circle-stop", "stop", cx));
+                        row = row.child(act("restart", tr("Restart"), "rotate-ccw", "restart", cx)).child(act("stop", tr("Stop"), "circle-stop", "stop", cx));
                     } else {
-                        row = row.child(act("start", "Start", "play", "start", cx));
+                        row = row.child(act("start", tr("Start"), "play", "start", cx));
                     }
                     row.into_any_element()
                 }
@@ -1735,8 +1737,8 @@ impl ServicesView {
                 line(vec![
                     icon("hard-drive", 13., theme.info).into_any_element(),
                     cell(v.name.clone(), 200., theme.text),
-                    cell(if v.external { "external volume".into() } else { "volume".into() }, 120., theme.text_placeholder),
-                    cell(if users.is_empty() { "Not used".into() } else { users.join(", ") }, wide - 360., theme.text_muted),
+                    cell(if v.external { tr("external volume").into() } else { tr("volume").into() }, 120., theme.text_placeholder),
+                    cell(if users.is_empty() { tr("Not used").into() } else { users.join(", ") }, wide - 360., theme.text_muted),
                 ])
                 .into_any_element()
             })
@@ -1752,8 +1754,8 @@ impl ServicesView {
                     icon(if file { "file" } else { "folder" }, 13., theme.text_placeholder).into_any_element(),
                     cell(m.source.clone(), (wide - 330.) / 2., theme.text),
                     cell(svc, 120., theme.text_muted),
-                    cell(format!("inside as {}", m.target), (wide - 330.) / 2., theme.text_muted),
-                    cell(if m.read_only { "read-only".into() } else { String::new() }, 80., theme.text_placeholder),
+                    cell(trf("inside as {target}", &[("target", &m.target)]), (wide - 330.) / 2., theme.text_muted),
+                    cell(if m.read_only { tr("read-only").into() } else { String::new() }, 80., theme.text_placeholder),
                 ])
                 .into_any_element()
             })
@@ -1767,7 +1769,7 @@ impl ServicesView {
                 line(vec![
                     kit::dot(color, 8.).into_any_element(),
                     cell(name.clone(), 200., theme.text),
-                    cell(if external { "external network".into() } else { "network".into() }, 120., theme.text_placeholder),
+                    cell(if external { tr("external network").into() } else { tr("network").into() }, 120., theme.text_placeholder),
                     cell(on.join(", "), wide - 360., theme.text_muted),
                 ])
                 .into_any_element()
@@ -1779,9 +1781,9 @@ impl ServicesView {
             .pb(px(24.))
             .child(services_head)
             .children(rows)
-            .when(!volumes.is_empty(), |d| d.child(section(format!("Volumes · {}", volumes.len()))).children(volumes))
-            .when(!files.is_empty(), |d| d.child(section(format!("From this machine · {}", files.len()))).children(files))
-            .when(!networks.is_empty(), |d| d.child(section(format!("Networks · {}", networks.len()))).children(networks));
+            .when(!volumes.is_empty(), |d| d.child(section(trf("Volumes · {n}", &[("n", &volumes.len())]))).children(volumes))
+            .when(!files.is_empty(), |d| d.child(section(trf("From this machine · {n}", &[("n", &files.len())]))).children(files))
+            .when(!networks.is_empty(), |d| d.child(section(trf("Networks · {n}", &[("n", &networks.len())]))).children(networks));
         div()
             .flex_1()
             .min_h(px(0.))
@@ -1813,9 +1815,9 @@ impl ServicesView {
                             confirm_row(
                                 &theme,
                                 n,
-                                format!("Take {} down? Its containers stop and go.", p.name),
+                                trf("Take {name} down? Its containers stop and go.", &[("name", &p.name)]),
                                 false,
-                                "Down",
+                                tr("Down"),
                                 "circle-stop",
                                 move |_, cx| {
                                     let _ = yes.update(cx, |v, cx| v.compose(p2.clone(), "down", true, cx));
@@ -1831,28 +1833,28 @@ impl ServicesView {
                         _ => {
                             let logs = {
                                 let (view, source) = (view.clone(), p.log_source());
-                                Button::icon_only(SharedString::from(format!("cmp-logs-{n}")), "scroll-text").tooltip("Its logs").on_click(move |_, _, cx| {
+                                Button::icon_only(SharedString::from(format!("cmp-logs-{n}")), "scroll-text").tooltip(tr("Its logs")).on_click(move |_, _, cx| {
                                     let _ = view.update(cx, |_, cx| cx.emit(ServicesEvent::Logs(source.clone())));
                                 })
                             };
                             let edit = {
                                 let (view, folder, file, name) = (view.clone(), p.folder().to_string(), p.first_file().to_string(), p.name.clone());
-                                Button::icon_only(SharedString::from(format!("cmp-edit-{n}")), "pencil").tooltip("Edit its compose file").on_click(move |_, _, cx| {
+                                Button::icon_only(SharedString::from(format!("cmp-edit-{n}")), "pencil").tooltip(tr("Edit its compose file")).on_click(move |_, _, cx| {
                                     let command = format!("${{EDITOR:-nano}} '{}'; exec \"$SHELL\" -l", file.replace('\'', "'\\''"));
                                     let _ = view.update(cx, |_, cx| cx.emit(ServicesEvent::Terminal { cwd: folder.clone(), command, title: format!("{name} · compose") }));
                                 })
                             };
                             let parts = {
                                 let (view, name) = (view.clone(), p.name.clone());
-                                Button::icon_only(SharedString::from(format!("cmp-parts-{n}")), "workflow").tooltip("Its parts, as a picture").on_click(move |_, _, cx| {
+                                Button::icon_only(SharedString::from(format!("cmp-parts-{n}")), "workflow").tooltip(tr("Its parts, as a picture")).on_click(move |_, _, cx| {
                                     let _ = view.update(cx, |v, cx| v.open_project(name.clone(), cx));
                                 })
                             };
-                            let mut row = div().flex().items_center().gap(px(4.)).child(parts).child(logs).child(edit).child(do_it("pull", "Pull", "arrow-down", "pull"));
+                            let mut row = div().flex().items_center().gap(px(4.)).child(parts).child(logs).child(edit).child(do_it("pull", tr("Pull"), "arrow-down", "pull"));
                             if running {
-                                row = row.child(do_it("restart", "Restart", "rotate-ccw", "restart")).child(do_it("down", "Down", "circle-stop", "down"));
+                                row = row.child(do_it("restart", tr("Restart"), "rotate-ccw", "restart")).child(do_it("down", tr("Down"), "circle-stop", "down"));
                             } else {
-                                row = row.child(do_it("up", "Up", "play", "up"));
+                                row = row.child(do_it("up", tr("Up"), "play", "up"));
                             }
                             row.into_any_element()
                         }
@@ -1907,9 +1909,9 @@ impl ServicesView {
                             confirm_row(
                                 &theme,
                                 n,
-                                if kill { format!("Kill {} ({})? It ends at once, without cleaning up.", p.name, p.pid) } else { format!("Stop {} ({})?", p.name, p.pid) },
+                                if kill { trf("Kill {name} ({pid})? It ends at once, without cleaning up.", &[("name", &p.name), ("pid", &p.pid)]) } else { trf("Stop {name} ({pid})?", &[("name", &p.name), ("pid", &p.pid)]) },
                                 kill,
-                                if kill { "Kill" } else { "Stop" },
+                                if kill { tr("Kill") } else { tr("Stop") },
                                 if kill { "x" } else { "circle-stop" },
                                 move |window, cx| {
                                     let _ = yes.update(cx, |v, cx| v.act(s2.clone(), action, true, window, cx));
@@ -1922,7 +1924,7 @@ impl ServicesView {
                                 },
                             )
                         }
-                        _ if busy.contains(&k) => div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child(spinner(SharedString::from(format!("proc-busy-{n}")), 12., theme.text_muted)).child("Working…").into_any_element(),
+                        _ if busy.contains(&k) => div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child(spinner(SharedString::from(format!("proc-busy-{n}")), 12., theme.text_muted)).child(tr("Working…")).into_any_element(),
                         _ => {
                             let (stop, kill) = (view.clone(), view.clone());
                             let (s1, s2) = (as_service.clone(), as_service.clone());
@@ -1930,10 +1932,10 @@ impl ServicesView {
                                 .flex()
                                 .items_center()
                                 .gap(px(4.))
-                                .child(word_or_icon(SharedString::from(format!("proc-stop-{n}")), "Stop", "circle-stop", c.compact).tooltip("Ask it to end (SIGTERM)").on_click(move |_, window, cx| {
+                                .child(word_or_icon(SharedString::from(format!("proc-stop-{n}")), tr("Stop"), "circle-stop", c.compact).tooltip(tr("Ask it to end (SIGTERM)")).on_click(move |_, window, cx| {
                                     let _ = stop.update(cx, |v, cx| v.act(s1.clone(), "stop", false, window, cx));
                                 }))
-                                .child(word_or_icon(SharedString::from(format!("proc-kill-{n}")), "Kill", "x", c.compact).tooltip("End it at once (SIGKILL)").on_click(move |_, window, cx| {
+                                .child(word_or_icon(SharedString::from(format!("proc-kill-{n}")), tr("Kill"), "x", c.compact).tooltip(tr("End it at once (SIGKILL)")).on_click(move |_, window, cx| {
                                     let _ = kill.update(cx, |v, cx| v.act(s2.clone(), "kill", false, window, cx));
                                 }))
                                 .into_any_element()
@@ -1997,9 +1999,9 @@ impl ServicesView {
                             confirm_row(
                                 &theme,
                                 n,
-                                format!("Remove {}?", i.name),
+                                trf("Remove {name}?", &[("name", &i.name)]),
                                 false,
-                                "Remove",
+                                tr("Remove"),
                                 "trash-2",
                                 move |window, cx| {
                                     let _ = yes.update(cx, |v, cx| v.act(s2.clone(), "remove", true, window, cx));
@@ -2012,7 +2014,7 @@ impl ServicesView {
                                 },
                             )
                         }
-                        _ if busy.contains(&k) => div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child(spinner(SharedString::from(format!("img-busy-{n}")), 12., theme.text_muted)).child("Working…").into_any_element(),
+                        _ if busy.contains(&k) => div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme.text_muted).child(spinner(SharedString::from(format!("img-busy-{n}")), 12., theme.text_muted)).child(tr("Working…")).into_any_element(),
                         _ => {
                             let (run_view, image) = (view.clone(), i.name.clone());
                             let (rm_view, s2) = (view.clone(), as_service.clone());
@@ -2020,14 +2022,14 @@ impl ServicesView {
                                 .flex()
                                 .items_center()
                                 .gap(px(4.))
-                                .child(word_or_icon(SharedString::from(format!("img-run-{n}")), "Run", "play", c.compact).on_click(move |_, window, cx| {
+                                .child(word_or_icon(SharedString::from(format!("img-run-{n}")), tr("Run"), "play", c.compact).on_click(move |_, window, cx| {
                                     let _ = run_view.update(cx, |v, cx| v.open_run(&image, window, cx));
                                 }))
                                 .child(
                                     Button::icon_only(SharedString::from(format!("img-rm-{n}")), "trash-2")
                                         // Docker won't remove an image a container is made from.
                                         .disabled(!i.used_by.is_empty())
-                                        .tooltip(if i.used_by.is_empty() { "Remove" } else { "In use: remove its containers first" })
+                                        .tooltip(if i.used_by.is_empty() { tr("Remove") } else { tr("In use: remove its containers first") })
                                         .on_click(move |_, window, cx| {
                                             let _ = rm_view.update(cx, |v, cx| v.act(s2.clone(), "remove", false, window, cx));
                                         }),
@@ -2037,7 +2039,7 @@ impl ServicesView {
                     };
                     // In use: green while a container made from it runs, a ring otherwise.
                     let running = i.running();
-                    let used = i.used_by.iter().map(|u| if u.running { u.name.clone() } else { format!("{} (stopped)", u.name) }).collect::<Vec<_>>().join(", ");
+                    let used = i.used_by.iter().map(|u| if u.running { u.name.clone() } else { trf("{name} (stopped)", &[("name", &u.name)]) }).collect::<Vec<_>>().join(", ");
                     let mark = div().flex_none().size(px(14.)).flex().items_center().justify_center().child(if running {
                         kit::dot(theme.success, 9.)
                     } else {
@@ -2055,7 +2057,7 @@ impl ServicesView {
                                 .gap(px(2.))
                                 .child(clipped(format!("img-name-{n}"), i.name.clone(), 13., theme.text, text_w))
                                 // No Used by column: who uses it goes under its name.
-                                .child(clipped(format!("img-id-{n}"), if c.used || used.is_empty() { i.id.clone() } else { format!("{} · used by {used}", i.id) }, 11.5, theme.text_placeholder, text_w)),
+                                .child(clipped(format!("img-id-{n}"), if c.used || used.is_empty() { i.id.clone() } else { trf("{id} · used by {used}", &[("id", &i.id), ("used", &used)]) }, 11.5, theme.text_placeholder, text_w)),
                         )
                         .child(div().flex_none().w(px(W_SIZE)).flex().justify_end().text_size(px(12.)).text_color(theme.text_muted).child(i.size.clone()))
                         .when(c.created, |d| d.child(div().flex_none().w(px(W_CREATED)).pl(px(12.)).text_size(px(12.)).text_color(theme.text_placeholder).child(i.created.clone())))
@@ -2084,8 +2086,8 @@ fn gpu_strip(gpus: &[Gpu], theme: &Theme) -> AnyElement {
         .children(gpus.iter().map(|g| {
             let busy = g.busy.unwrap_or(0.);
             let mem = match (g.memory_used, g.memory_total) {
-                (Some(u), Some(t)) => format!("{} of {}", memory(Some(u)), memory(Some(t))),
-                (Some(u), None) => format!("{} in use", memory(Some(u))),
+                (Some(u), Some(t)) => trf("{used} of {total}", &[("used", &memory(Some(u))), ("total", &memory(Some(t)))]),
+                (Some(u), None) => trf("{used} in use", &[("used", &memory(Some(u)))]),
                 _ => String::new(),
             };
             let extra = [g.temperature.map(|t| format!("{t:.0}°C")), g.power.map(|p| format!("{p:.0} W"))].into_iter().flatten().collect::<Vec<_>>().join(" · ");

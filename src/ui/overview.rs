@@ -4,6 +4,7 @@
 use gpui::{AnyElement, Context, Div, FontWeight, Hsla, ScrollHandle, SharedString, Stateful, Window, div, prelude::*, px, relative};
 
 use super::format;
+use super::i18n::{tr, trf, tr_msg};
 use super::kit::{self, Button, ButtonStyle, card, chip, icon, meter, section_title};
 use super::theme::{ActiveTheme, mono_font, Theme};
 use super::root::{Route, Root};
@@ -44,7 +45,7 @@ impl Root {
 
         let mut body = page("overview-page", &self.page_scroll).child(self.overview_header(&theme, &s, cx));
         if let Some(err) = &s.inventory.error {
-            body = body.child(callout(&theme, "error", "config.toml has an error", err.clone(), None));
+            body = body.child(callout(&theme, "error", tr("config.toml has an error"), tr_msg(err), None));
         }
         if s.attention.iter().any(|a| !on_cards(a)) {
             body = body.child(self.heads_up(&theme, &s, content_width, cx));
@@ -56,32 +57,33 @@ impl Root {
     fn overview_header(&self, theme: &Theme, s: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
         use chrono::Timelike;
         let greeting = match chrono::Local::now().hour() {
-            5..=11 => "Good morning",
-            12..=17 => "Good afternoon",
-            _ => "Good evening",
+            5..=11 => tr("Good morning"),
+            12..=17 => tr("Good afternoon"),
+            _ => tr("Good evening"),
         };
-        let plural = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
+        let plural = |n: usize, one: &str, many: String| if n == 1 { one.to_string() } else { many };
         let online = s.machines.iter().filter(|m| m.status == "online").count();
         let marks: Vec<Mark> = s.sessions.iter().map(SessionInfo::mark).collect();
         let count = |m: Mark| marks.iter().filter(|x| **x == m).count();
         let (working, needs_you, done) = (count(Mark::Working), count(Mark::NeedsYou) + count(Mark::Failed), count(Mark::Done));
-        let mut parts = vec![plural(s.machines.len(), "machine"), format!("{online} online")];
+        let n = s.machines.len();
+        let mut parts = vec![plural(n, tr("1 machine"), trf("{n} machines", &[("n", &n)])), trf("{n} online", &[("n", &online)])];
         if working > 0 {
-            parts.push(format!("{} working", plural(working, "agent")));
+            parts.push(plural(working, tr("1 agent working"), trf("{n} agents working", &[("n", &working)])));
         }
         if needs_you > 0 {
-            parts.push(format!("{needs_you} need{} you", if needs_you == 1 { "s" } else { "" }));
+            parts.push(plural(needs_you, tr("1 needs you"), trf("{n} need you", &[("n", &needs_you)])));
         }
         if done > 0 {
-            parts.push(format!("{done} done"));
+            parts.push(trf("{n} done", &[("n", &done)]));
         }
         if s.counts.runners > 0 {
-            parts.push(format!("{} of {} busy", s.counts.working, plural(s.counts.runners, "runner")));
+            parts.push(plural(s.counts.runners, &trf("{busy} of 1 runner busy", &[("busy", &s.counts.working)]), trf("{busy} of {n} runners busy", &[("busy", &s.counts.working), ("n", &s.counts.runners)])));
         }
         let checked = match (s.check.running, s.check.finished_at) {
-            (true, _) => "Checking your machines now…".to_string(),
-            (false, Some(_)) => format!("Updated {}", format::ago(s.check.finished_at)),
-            (false, None) => "Not updated yet".into(),
+            (true, _) => tr("Checking your machines now…").to_string(),
+            (false, Some(_)) => trf("Updated {ago}", &[("ago", &format::ago(s.check.finished_at))]),
+            (false, None) => tr("Not updated yet").into(),
         };
         div()
             .flex()
@@ -104,7 +106,7 @@ impl Root {
                     .flex_none()
                     .gap(px(8.))
                     .child(
-                        Button::new("ov-new-session", "New session")
+                        Button::new("ov-new-session", tr("New session"))
                             .style(ButtonStyle::Primary)
                             .icon("square-terminal")
                             .on_click(cx.listener(|this, _, window, cx| this.show_new_session(None, window, cx))),
@@ -137,9 +139,9 @@ impl Root {
                         .loading(changing)
                         .on_click(cx.listener(move |this, _, window, cx| this.run_attention_action(&action, window, cx)));
                     let keep = keep.clone().filter(|_| !changing).map(|id| {
-                        Button::new(SharedString::from(format!("att-keep-{}", a.id)), "Keep ssh")
+                        Button::new(SharedString::from(format!("att-keep-{}", a.id)), tr("Keep ssh"))
                             .style(ButtonStyle::Ghost)
-                            .tooltip("Don't ask again. Connect directly from its page any time.")
+                            .tooltip(tr("Don't ask again. Connect directly from its page any time."))
                             .on_click(cx.listener(move |this, _, _, cx| this.keep_ssh(&id, cx)))
                     });
                     div().flex().flex_none().items_center().gap(px(2.)).children(keep).child(main).into_any_element()
@@ -165,15 +167,15 @@ impl Root {
                             .flex_col()
                             .flex_1()
                             .min_w(px(0.))
-                            .child(div().w(px(text_w)).truncate().text_size(px(13.)).text_color(theme.text).child(a.title.clone()))
-                            .when(!a.detail.is_empty(), |d| d.child(div().w(px(text_w)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(a.detail.clone()))),
+                            .child(div().w(px(text_w)).truncate().text_size(px(13.)).text_color(theme.text).child(tr_msg(&a.title)))
+                            .when(!a.detail.is_empty(), |d| d.child(div().w(px(text_w)).truncate().text_size(px(11.5)).text_color(theme.text_placeholder).child(tr_msg(&a.detail)))),
                     )
                     .children(button)
                     .into_any_element()
             })
             .collect();
         if items.len() > SHOWN {
-            let label = if hidden > 0 { format!("Show {hidden} more") } else { "Show fewer".to_string() };
+            let label = if hidden > 0 { trf("Show {n} more", &[("n", &hidden)]) } else { tr("Show fewer").to_string() };
             rows.push(
                 div()
                     .id("heads-up-more")
@@ -214,7 +216,7 @@ impl Root {
             .gap(px(GAP))
             .children(rows)
             .when(machines.is_empty(), |d| {
-                d.child(card(theme).w_full().child(kit::empty_state(theme, "server", "No machines yet. Add one to run agents, see its desktop or host runners.")))
+                d.child(card(theme).w_full().child(kit::empty_state(theme, "server", tr("No machines yet. Add one to run agents, see its desktop or host runners."))))
             })
     }
 
@@ -239,28 +241,28 @@ impl Root {
             for x in sessions.iter().take(if extra > 0 { room - 1 } else { room }) {
                 let (glyph, (gf, gt)) = kit::agent_look(&x.agent);
                 let (state, color) = match x.mark() {
-                    _ if x.status == "exited" => ("Exited", theme.text_placeholder),
-                    Mark::Working => ("Working…", theme.text_accent),
+                    _ if x.status == "exited" => (tr("Exited"), theme.text_placeholder),
+                    Mark::Working => (tr("Working…"), theme.text_accent),
                     m @ (Mark::NeedsYou | Mark::Done) => (m.label(), super::sessions::mark_color(theme, m)),
-                    _ => ("Idle", theme.text_placeholder),
+                    _ => (tr("Idle"), theme.text_placeholder),
                 };
                 now.push(now_row(theme, kit::tile(glyph, gf, gt, 18.).into_any_element(), x.title.clone(), state, color, inner));
             }
             if extra > 0 {
-                now.push(now_row(theme, kit::color_tile("square-terminal", 18.).into_any_element(), format!("{} more sessions", extra + 1), "", theme.text_placeholder, inner));
+                now.push(now_row(theme, kit::color_tile("square-terminal", 18.).into_any_element(), trf("{n} more sessions", &[("n", &(extra + 1))]), "", theme.text_placeholder, inner));
             }
             if desktop {
-                now.push(now_row(theme, kit::tile("monitor", from, to, 18.).into_any_element(), "Desktop".into(), "Open", theme.text_placeholder, inner));
+                now.push(now_row(theme, kit::tile("monitor", from, to, 18.).into_any_element(), tr("Desktop").into(), tr("Open"), theme.text_placeholder, inner));
             }
             if !m.runner_ids.is_empty() {
                 let sum = &m.summary;
-                let label = if sum.total == 1 { "1 runner".to_string() } else { format!("{} runners", sum.total) };
+                let label = if sum.total == 1 { tr("1 runner").to_string() } else { trf("{n} runners", &[("n", &sum.total)]) };
                 let (state, color) = if sum.working > 0 {
-                    (format!("{} busy", sum.working), theme.text_accent)
+                    (trf("{n} busy", &[("n", &sum.working)]), theme.text_accent)
                 } else if sum.offline > 0 {
-                    (format!("{} stopped", sum.offline), theme.warning)
+                    (trf("{n} stopped", &[("n", &sum.offline)]), theme.warning)
                 } else {
-                    ("Idle".to_string(), theme.text_placeholder)
+                    (tr("Idle").to_string(), theme.text_placeholder)
                 };
                 let (rf, rt) = kit::tiles::JOBS;
                 now.push(now_row_owned(theme, kit::tile("workflow", rf, rt, 18.).into_any_element(), label, state, color, inner));
@@ -269,17 +271,17 @@ impl Root {
         // The subtitle already says it can't be reached: this line says why.
         let empty_line = if offline {
             Some(match &m.unreachable {
-                _ if m.is_disconnected() => "Connect to it from its page to see what's running.".into(),
+                _ if m.is_disconnected() => tr("Connect to it from its page to see what's running.").into(),
                 Some(u) if u.kind == "offline" => match u.last_seen_at {
-                    Some(t) => format!("Asleep or off the network. Last seen {}.", format::ago(Some(t))),
-                    None => "Asleep or off the network.".into(),
+                    Some(t) => trf("Asleep or off the network. Last seen {ago}.", &[("ago", &format::ago(Some(t)))]),
+                    None => tr("Asleep or off the network.").into(),
                 },
-                Some(u) if !u.detail.is_empty() => u.detail.clone(),
-                Some(u) => u.title.clone(),
-                None => "Can't connect.".into(),
+                Some(u) if !u.detail.is_empty() => tr_msg(&u.detail),
+                Some(u) => tr_msg(&u.title),
+                None => tr("Can't connect.").into(),
             })
         } else if now.is_empty() {
-            Some(if m.agents.is_empty() { "Nothing running.".to_string() } else { "Nothing running. Start an agent here.".to_string() })
+            Some(if m.agents.is_empty() { tr("Nothing running.").to_string() } else { tr("Nothing running. Start an agent here.").to_string() })
         } else {
             None
         };
@@ -298,15 +300,15 @@ impl Root {
                     .flex()
                     .gap(px(14.))
                     .child(mini_stat(theme, "CPU", cpu.map(|f| format!("{:.0}%", f * 100.)), cpu, theme.accent))
-                    .child(mini_stat(theme, "Memory", mem.map(|f| format!("{:.0}%", f * 100.)), mem, theme.accent))
+                    .child(mini_stat(theme, tr("Memory"), mem.map(|f| format!("{:.0}%", f * 100.)), mem, theme.accent))
                     // Wider than the other two: its figure is the longest ("1.6 TB").
-                    .child(div().flex_none().w(relative(0.4)).child(mini_stat(theme, "Disk free", disk_free, format::disk_used_fraction(m), if format::disk_low(m) { theme.error } else { theme.accent })))
+                    .child(div().flex_none().w(relative(0.4)).child(mini_stat(theme, tr("Disk free"), disk_free, format::disk_used_fraction(m), if format::disk_low(m) { theme.error } else { theme.accent })))
                     .into_any_element()
             }
             None => div()
                 .text_size(px(11.5))
                 .text_color(theme.text_placeholder)
-                .child(m.probe.as_ref().and_then(|p| p.uptime_sec).filter(|_| !offline).map(|u| format!("Up {}", format::uptime(u))).unwrap_or_default())
+                .child(m.probe.as_ref().and_then(|p| p.uptime_sec).filter(|_| !offline).map(|u| trf("Up {time}", &[("time", &format::uptime(u))])).unwrap_or_default())
                 .into_any_element(),
         };
 
@@ -394,7 +396,7 @@ impl Root {
         let mut sessions: Vec<&SessionInfo> = s.sessions.iter().collect();
         sessions.sort_by_key(|x| (std::cmp::Reverse(x.mark()), x.status == "exited", std::cmp::Reverse(x.created_at)));
         let content = if sessions.is_empty() {
-            card(theme).child(kit::empty_state(theme, "square-terminal", "No agents running. Start Claude Code, Codex or a shell on any machine.")).into_any_element()
+            card(theme).child(kit::empty_state(theme, "square-terminal", tr("No agents running. Start Claude Code, Codex or a shell on any machine."))).into_any_element()
         } else {
             let more = self.overview_agents_more;
             let kept = |i: usize, x: &SessionInfo| i < AGENTS_SHOWN || x.mark() >= Mark::Failed;
@@ -421,7 +423,7 @@ impl Root {
                     .text_color(theme.text_placeholder)
                     .hover(|st| st.text_color(theme.text_muted))
                     .child(icon(if more { "chevron-down" } else { "chevron-right" }, 11., theme.text_placeholder))
-                    .child(if more { "Show fewer".to_string() } else { format!("Show {folded} more") })
+                    .child(if more { tr("Show fewer").to_string() } else { trf("Show {n} more", &[("n", &folded)]) })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.overview_agents_more = !this.overview_agents_more;
                         cx.notify();
@@ -429,7 +431,7 @@ impl Root {
             });
             card(theme).children(rows).children(footer).into_any_element()
         };
-        div().flex().flex_col().gap(px(10.)).child(section_title(theme, "Agents", Some(sessions.len()))).child(content)
+        div().flex().flex_col().gap(px(10.)).child(section_title(theme, tr("Agents"), Some(sessions.len()))).child(content)
     }
 
     /// How busy the runners have been over the last few minutes.
@@ -464,12 +466,12 @@ impl Root {
                     .into_any_element()
             })
             .collect();
-        let busy = if c.runners == 0 { "No runners yet".to_string() } else { format!("{} of {} online runners busy", c.working, online) };
+        let busy = if c.runners == 0 { tr("No runners yet").to_string() } else { trf("{busy} of {n} online runners busy", &[("busy", &c.working), ("n", &online)]) };
         let stuck = s.jobs.queued.iter().filter(|j| j.matching_online == 0).count();
         let queue = match (c.queued, stuck) {
-            (0, _) => "Nothing queued".to_string(),
-            (q, 0) => format!("{q} queued"),
-            (q, n) => format!("{q} queued, {n} with no runner that fits"),
+            (0, _) => tr("Nothing queued").to_string(),
+            (q, 0) => trf("{n} queued", &[("n", &q)]),
+            (q, n) => trf("{q} queued, {n} with no runner that fits", &[("q", &q), ("n", &n)]),
         };
         card(theme)
             .flex_row()
@@ -490,7 +492,7 @@ impl Root {
                             .text_size(px(12.))
                             .text_color(theme.text_muted)
                             .child(kit::color_icon(theme, "gauge", 13., theme.text_accent))
-                            .child("Runners busy"),
+                            .child(tr("Runners busy")),
                     )
                     .child(
                         div()
@@ -511,7 +513,7 @@ impl Root {
                     .min_w(px(0.))
                     .gap(px(8.))
                     .child(div().flex().items_end().gap(px(3.)).h(px(76.)).children(bars))
-                    .child(div().flex().justify_between().text_size(px(11.)).text_color(theme.text_placeholder).child("the last few minutes").child("now")),
+                    .child(div().flex().justify_between().text_size(px(11.)).text_color(theme.text_placeholder).child(tr("the last few minutes")).child(tr("now"))),
             )
     }
 
@@ -519,15 +521,15 @@ impl Root {
     pub(super) fn render_queued(&self, theme: &Theme, s: &Snapshot, prefix: &str, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let rows: Vec<AnyElement> = s.jobs.queued.iter().enumerate().map(|(i, j)| queued_row(theme, j, i, prefix, width, j.waiting_reason(&s.runners), cx)).collect();
         let empty = if !s.github.configured && !s.demo {
-            kit::empty_state(theme, "inbox", "Waiting for job data from GitHub.")
+            kit::empty_state(theme, "inbox", tr("Waiting for job data from GitHub."))
         } else {
-            kit::empty_state(theme, "inbox", "No queued self-hosted jobs.")
+            kit::empty_state(theme, "inbox", tr("No queued self-hosted jobs."))
         };
         div()
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title(theme, "Queued", Some(s.jobs.queued.len())))
+            .child(section_title(theme, tr("Queued"), Some(s.jobs.queued.len())))
             .child(card(theme).when(rows.is_empty(), |d| d.child(empty)).children(rows))
     }
 
@@ -536,9 +538,9 @@ impl Root {
         let s = self.snapshot.clone();
         let running: Vec<AnyElement> = s.jobs.running.iter().enumerate().map(|(i, j)| self.running_job_row(&theme, j, i, cx)).collect();
         let scanned = if s.github.scanned_repos.is_empty() {
-            "No repositories scanned yet.".to_string()
+            tr("No repositories scanned yet.").to_string()
         } else {
-            format!("Scanning {} repos: {}", s.github.scanned_repos.len(), s.github.scanned_repos.join(", "))
+            trf("Scanning {n} repos: {repos}", &[("n", &s.github.scanned_repos.len()), ("repos", &s.github.scanned_repos.join(", "))])
         };
         page("jobs-page", &self.page_scroll)
             .child(self.pulse_card(&theme, &s))
@@ -547,10 +549,10 @@ impl Root {
                 d.child(callout(
                     &theme,
                     "warning",
-                    "Jobs come from GitHub",
-                    "Add your organization or repositories in Settings to see what's queued and running.".into(),
+                    tr("Jobs come from GitHub"),
+                    tr("Add your organization or repositories in Settings to see what's queued and running.").into(),
                     Some(
-                        Button::new("jobs-settings", "Open settings")
+                        Button::new("jobs-settings", tr("Open settings"))
                             .style(ButtonStyle::Primary)
                             .on_click(cx.listener(|this, _, window, cx| this.open_settings_tab(super::settings::SettingsTab::GitHub, window, cx)))
                             .into_any_element(),
@@ -563,8 +565,8 @@ impl Root {
                     .flex()
                     .flex_col()
                     .gap(px(10.))
-                    .child(section_title(&theme, "Running", Some(s.jobs.running.len())))
-                    .child(card(&theme).when(running.is_empty(), |d| d.child(kit::empty_state(&theme, "circle", "Nothing is running."))).children(running)),
+                    .child(section_title(&theme, tr("Running"), Some(s.jobs.running.len())))
+                    .child(card(&theme).when(running.is_empty(), |d| d.child(kit::empty_state(&theme, "circle", tr("Nothing is running.")))).children(running)),
             )
     }
 
@@ -608,8 +610,8 @@ impl Root {
                     .text_color(theme.text_muted)
                     .child(format::elapsed(j.started_at.unwrap_or(j.created_at))),
             )
-            .child(Button::icon_only(("running-job-open", i), "external-link").tooltip("Open on GitHub").on_click(move |_, _, cx| cx.open_url(&url)))
-            .child(Button::icon_only(("running-job-more", i), "ellipsis").tooltip("More").on_click(job_menu(job_id, cx)))
+            .child(Button::icon_only(("running-job-open", i), "external-link").tooltip(tr("Open on GitHub")).on_click(move |_, _, cx| cx.open_url(&url)))
+            .child(Button::icon_only(("running-job-more", i), "ellipsis").tooltip(tr("More")).on_click(job_menu(job_id, cx)))
             .on_mouse_down(gpui::MouseButton::Right, super::menu::on_right_click(move || super::menu::MenuTarget::Job(job_id), cx))
             .into_any_element()
     }
@@ -699,18 +701,18 @@ fn mini_stat(theme: &Theme, label: &'static str, value: Option<String>, fraction
 
 fn status_word(m: &Machine) -> &'static str {
     match m.status.as_str() {
-        "online" => "online",
-        "offline" if format::is_powered_off(m) => "powered off",
-        "offline" if format::is_stopped(m) => "stopped",
-        "offline" if m.unreachable.as_ref().is_some_and(|u| u.kind == "installing") => "installing",
-        "offline" if format::is_just_offline(m) => "offline",
-        "offline" => "can't connect",
-        "asleep" => "asleep",
-        "manual" if m.droplet_gone() => "gone",
-        "manual" if m.awaits_address() => "starting",
-        "manual" => "no host",
-        "disconnected" => "disconnected",
-        _ => "unchecked",
+        "online" => tr("online"),
+        "offline" if format::is_powered_off(m) => tr("powered off"),
+        "offline" if format::is_stopped(m) => tr("stopped"),
+        "offline" if m.unreachable.as_ref().is_some_and(|u| u.kind == "installing") => tr("installing"),
+        "offline" if format::is_just_offline(m) => tr("offline"),
+        "offline" => tr("can't connect"),
+        "asleep" => tr("asleep"),
+        "manual" if m.droplet_gone() => tr("gone"),
+        "manual" if m.awaits_address() => tr("starting"),
+        "manual" => tr("no host"),
+        "disconnected" => tr("disconnected"),
+        _ => tr("unchecked"),
     }
 }
 
@@ -747,19 +749,19 @@ fn queued_row(theme: &Theme, j: &Job, i: usize, prefix: &str, width: f32, reason
                 .flex()
                 .flex_col()
                 .items_end()
-                .child(div().font_family(mono_font()).text_size(px(12.)).text_color(theme.text_muted).child(format!("waiting {}", format::elapsed(j.created_at))))
+                .child(div().font_family(mono_font()).text_size(px(12.)).text_color(theme.text_muted).child(trf("waiting {time}", &[("time", &format::elapsed(j.created_at))])))
                 .child(div().text_size(px(11.)).text_color(if stuck { theme.warning } else { theme.text_placeholder }).child(reason)),
         )
         // Nothing can take it: the fix, one click away (pick the machine in the menu).
         .when(stuck, |d| {
-            d.child(Button::new(SharedString::from(format!("{prefix}-add-{i}")), "Add runner").icon("plus").on_click(job_menu(id, cx)))
+            d.child(Button::new(SharedString::from(format!("{prefix}-add-{i}")), tr("Add runner")).icon("plus").on_click(job_menu(id, cx)))
         })
         .child(
             Button::icon_only(SharedString::from(format!("{prefix}-open-{i}")), "external-link")
-                .tooltip("Open on GitHub")
+                .tooltip(tr("Open on GitHub"))
                 .on_click(move |_, _, cx| cx.open_url(&url)),
         )
-        .child(Button::icon_only(SharedString::from(format!("{prefix}-more-{i}")), "ellipsis").tooltip("More").on_click(job_menu(id, cx)))
+        .child(Button::icon_only(SharedString::from(format!("{prefix}-more-{i}")), "ellipsis").tooltip(tr("More")).on_click(job_menu(id, cx)))
         .into_any_element()
 }
 

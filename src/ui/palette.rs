@@ -3,6 +3,7 @@
 //! changed in Settings › Keyboard.
 
 use gpui::{AnyElement, App, Context, Entity, Focusable, FontWeight, KeyBinding, ScrollHandle, SharedString, Subscription, Window, actions, div, prelude::*, px};
+use crate::ui::i18n::{tr, trf};
 
 use super::format;
 use super::input::{InputEvent, TextInput};
@@ -186,7 +187,7 @@ impl Root {
                 return;
             }
         }
-        let input = cx.new(|cx| TextInput::new(cx, "Go to a machine, session or desktop   (> for commands)").bare().with_text(if commands { ">" } else { "" }));
+        let input = cx.new(|cx| TextInput::new(cx, tr("Go to a machine, session or desktop   (> for commands)")).bare().with_text(if commands { ">" } else { "" }));
         let changes = cx.subscribe_in(&input, window, |this, _, e: &InputEvent, window, cx| match e {
             InputEvent::Changed => {
                 let Some(p) = &this.palette else { return };
@@ -270,7 +271,7 @@ impl Root {
         p.themes = Some((before, showing.clone()));
         p.query = String::new();
         p.input.update(cx, |i, cx| {
-            i.set_placeholder("Pick a theme   (↑↓ to try one)", cx);
+            i.set_placeholder(tr("Pick a theme   (↑↓ to try one)"), cx);
             i.set_text("", cx);
         });
         let at = super::themes::PALETTES.iter().position(|t| t.id == showing).unwrap_or(0);
@@ -414,11 +415,11 @@ impl Root {
         let machines = Root::machine_order(s, cx);
         let session = |x: &crate::fleet::sessions::SessionInfo, machine: &str| {
             let folder = x.cwd.rsplit('/').find(|p| !p.is_empty()).unwrap_or(&x.cwd).to_string();
-            let who = if x.agent_name.is_empty() { "Session".to_string() } else { x.agent_name.clone() };
+            let who = if x.agent_name.is_empty() { tr("Session").to_string() } else { x.agent_name.clone() };
             let mut item = Item::new(
                 x.title.clone(),
                 [who, folder].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" · "),
-                if x.status == "exited" { "Session · ended" } else { "Session" },
+                if x.status == "exited" { tr("Session · ended") } else { tr("Session") },
                 Glyph::Agent(x.agent.clone()),
                 Run::Go(Route::Session(x.id.clone())),
             );
@@ -427,11 +428,11 @@ impl Root {
         };
         let mut out = Vec::new();
         for m in &machines {
-            let mut head = Item::new(m.name.clone(), format::machine_subtitle(m).0, "Machine", Glyph::Machine(format::machine_icon(m), format::machine_tile(m)), Run::Go(Route::Machine(m.id.clone())));
+            let mut head = Item::new(m.name.clone(), format::machine_subtitle(m).0, tr("Machine"), Glyph::Machine(format::machine_icon(m), format::machine_tile(m)), Run::Go(Route::Machine(m.id.clone())));
             head.group = Some(m.id.clone());
             out.push(head);
             if m.is_disconnected() {
-                let mut item = Item::new("Connect", "Muxin connects to it again", "Machine", Glyph::Icon("plug"), Run::Connect(m.id.clone()));
+                let mut item = Item::new(tr("Connect"), tr("Muxin connects to it again"), tr("Machine"), Glyph::Icon("plug"), Run::Connect(m.id.clone()));
                 item.indent = true;
                 item.group = Some(m.id.clone());
                 item.also = m.name.clone();
@@ -444,26 +445,26 @@ impl Root {
                 out.push(item);
             }
             if format::has_desktop(m) && !m.local && m.status == "online" {
-                let mut item = Item::new("Desktop", "See and use its screen", "Desktop", Glyph::Icon("monitor"), Run::Screen(m.id.clone(), None));
+                let mut item = Item::new(tr("Desktop"), tr("See and use its screen"), tr("Desktop"), Glyph::Icon("monitor"), Run::Screen(m.id.clone(), None));
                 item.indent = true;
                 item.group = Some(m.id.clone());
                 item.also = m.name.clone();
                 out.push(item);
-                let mut logs = Item::new("Logs", "Its system log, files, containers, services", "Logs", Glyph::Icon("scroll-text"), Run::Go(Route::Logs(m.id.clone())));
+                let mut logs = Item::new(tr("Logs"), tr("Its system log, files, containers, services"), tr("Logs"), Glyph::Icon("scroll-text"), Run::Go(Route::Logs(m.id.clone())));
                 logs.indent = true;
                 logs.group = Some(m.id.clone());
                 logs.also = m.name.clone();
                 out.push(logs);
-                let mut services = Item::new("Services", "Its services and containers: start, stop, restart", "Services", Glyph::Icon("layers"), Run::Go(Route::Services(m.id.clone())));
+                let mut services = Item::new(tr("Services"), tr("Its services and containers: start, stop, restart"), tr("Services"), Glyph::Icon("layers"), Run::Go(Route::Services(m.id.clone())));
                 services.indent = true;
                 services.group = Some(m.id.clone());
                 services.also = m.name.clone();
                 out.push(services);
                 // Its other monitors, virtual ones included.
                 for d in m.displays.iter().filter(|d| d.id != "all" && !d.main) {
-                    let kind = if d.is_virtual { "Virtual monitor" } else { "Monitor" };
+                    let kind = if d.is_virtual { tr("Virtual monitor") } else { tr("Monitor") };
                     let detail = format!("{kind} · {}×{}", d.width as u32, d.height as u32);
-                    let mut item = Item::new(d.name.clone(), detail, "Desktop", Glyph::Icon("monitor"), Run::Screen(m.id.clone(), Some(d.id.clone())));
+                    let mut item = Item::new(d.name.clone(), detail, tr("Desktop"), Glyph::Icon("monitor"), Run::Screen(m.id.clone(), Some(d.id.clone())));
                     item.indent = true;
                     item.group = Some(m.id.clone());
                     item.also = m.name.clone();
@@ -483,7 +484,7 @@ impl Root {
         super::themes::PALETTES
             .iter()
             .map(|t| {
-                let side = format!("{}{}", if t.dark { "Dark" } else { "Light" }, if t.id == showing { " · current" } else { "" });
+                let side = format!("{}{}", if t.dark { tr("Dark") } else { tr("Light") }, if t.id == showing { tr(" · current") } else { "" });
                 Item::new(t.name, "", side, Glyph::Swatch(t.canvas, t.accent), Run::Theme(t.id))
             })
             .collect()
@@ -509,48 +510,48 @@ impl Root {
             i
         };
         // The machine or session on screen comes first.
-        let rename = self.rename_target().map(|(_, name)| item(&format!("Rename {name}…"), "pencil", Some("rename"), Run::Do(Command::Rename)));
+        let rename = self.rename_target().map(|(_, name)| item(&trf("Rename {name}…", &[("name", &name)]), "pencil", Some("rename"), Run::Do(Command::Rename)));
         let share = match &self.route {
-            Route::Session(id) if !self.engine.is_demo() => self.snapshot.sessions.iter().find(|x| &x.id == id && x.persistent).map(|x| item(&format!("Share {}…", x.title), "link", None, Run::Do(Command::Share))),
-            Route::Machine(id) if !self.engine.is_demo() => self.snapshot.machines.iter().find(|m| &m.id == id && !m.is_down()).map(|m| item(&format!("Share {}…", m.name), "link", None, Run::Do(Command::Share))),
+            Route::Session(id) if !self.engine.is_demo() => self.snapshot.sessions.iter().find(|x| &x.id == id && x.persistent).map(|x| item(&trf("Share {name}…", &[("name", &x.title)]), "link", None, Run::Do(Command::Share))),
+            Route::Machine(id) if !self.engine.is_demo() => self.snapshot.machines.iter().find(|m| &m.id == id && !m.is_down()).map(|m| item(&trf("Share {name}…", &[("name", &m.name)]), "link", None, Run::Do(Command::Share))),
             _ => None,
         };
         let all = [
-            item("Add machine…", "plus", Some("add-machine"), Run::Do(Command::AddMachine)),
-            item("New cloud machine…", "cloud", None, Run::Do(Command::NewCloudMachine)),
-            item("New VM…", "box", None, Run::Do(Command::NewVm)),
-            item("New schedule…", "clock", None, Run::Do(Command::NewSchedule)),
-            item("Go to Schedules", "clock", Some("schedules"), Run::Go(Route::Schedules)),
-            item("New session…", "square-terminal", Some("new-session"), Run::Do(Command::NewSession)),
-            item("New workspace…", "layers", None, Run::Do(Command::NewWorkspace)),
-            item("Join a share…", "link", None, Run::Do(Command::JoinShare)),
-            item("Copy files between machines…", "folder", None, Run::Do(Command::CopyFiles)),
-            item("Go to Overview", "gauge", Some("overview"), Run::Go(Route::Overview)),
-            item("Go to Jobs", "workflow", Some("jobs"), Run::Go(Route::Jobs)),
-            item("Go to Workspaces", "layers", Some("workspaces"), Run::Go(Route::Workspaces)),
-            item("Go to Boxes", "box", Some("boxes"), Run::Go(Route::Boxes)),
-            item("Go to GitHub", "agent-github", Some("github"), Run::Go(Route::Github)),
-            item("Go to Usage", "gauge", Some("usage"), Run::Go(Route::Usage)),
-            item("Run a command on machines…", "zap", Some("run"), Run::Go(Route::Run)),
-            item("Go to Activity", "activity", Some("activity"), Run::Go(Route::Activity)),
-            item("Refresh all machines", "refresh-cw", Some("check"), Run::Do(Command::CheckMachines)),
-            item("Sync GitHub", "refresh-cw", Some("sync"), Run::Do(Command::SyncGitHub)),
-            item("Hide or show the sidebar", "panel-left", Some("sidebar"), Run::Do(Command::ToggleSidebar)),
-            item("Back", "arrow-left", Some("back"), Run::Do(Command::Back)),
-            item("Forward", "arrow-right", Some("forward"), Run::Do(Command::Forward)),
-            item("Settings", "settings", Some("settings"), Run::Do(Command::Settings(SettingsTab::General))),
-            item("Settings: Appearance", "palette", None, Run::Do(Command::Settings(SettingsTab::Appearance))),
-            item("Settings: Terminal", "terminal", None, Run::Do(Command::Settings(SettingsTab::Terminal))),
-            item("Settings: GitHub", "agent-github", None, Run::Do(Command::Settings(SettingsTab::GitHub))),
-            item("Settings: Cloud", "cloud", None, Run::Do(Command::Settings(SettingsTab::Cloud))),
-            item("Settings: Keyboard shortcuts", "keyboard", None, Run::Do(Command::Settings(SettingsTab::Keyboard))),
-            item("Cloud usage and cost", "cloud", None, Run::Do(Command::Settings(SettingsTab::Cloud))),
-            item("Install the muxin command", "terminal", None, Run::Do(Command::Settings(SettingsTab::General))),
-            item("Theme: Choose…", "palette", None, Run::Do(Command::ChooseTheme)),
-            item("Theme: Light mode", "palette", None, Run::Do(Command::Theme(Mode::Light))),
-            item("Theme: Dark mode", "palette", None, Run::Do(Command::Theme(Mode::Dark))),
-            item("Theme: Match the system", "palette", None, Run::Do(Command::Theme(Mode::System))),
-            item("About Muxin", "info", None, Run::Go(Route::About)),
+            item(tr("Add machine…"), "plus", Some("add-machine"), Run::Do(Command::AddMachine)),
+            item(tr("New cloud machine…"), "cloud", None, Run::Do(Command::NewCloudMachine)),
+            item(tr("New VM…"), "box", None, Run::Do(Command::NewVm)),
+            item(tr("New schedule…"), "clock", None, Run::Do(Command::NewSchedule)),
+            item(tr("Go to Schedules"), "clock", Some("schedules"), Run::Go(Route::Schedules)),
+            item(tr("New session…"), "square-terminal", Some("new-session"), Run::Do(Command::NewSession)),
+            item(tr("New workspace…"), "layers", None, Run::Do(Command::NewWorkspace)),
+            item(tr("Join a share…"), "link", None, Run::Do(Command::JoinShare)),
+            item(tr("Copy files between machines…"), "folder", None, Run::Do(Command::CopyFiles)),
+            item(tr("Go to Overview"), "gauge", Some("overview"), Run::Go(Route::Overview)),
+            item(tr("Go to Jobs"), "workflow", Some("jobs"), Run::Go(Route::Jobs)),
+            item(tr("Go to Workspaces"), "layers", Some("workspaces"), Run::Go(Route::Workspaces)),
+            item(tr("Go to Boxes"), "box", Some("boxes"), Run::Go(Route::Boxes)),
+            item(tr("Go to GitHub"), "agent-github", Some("github"), Run::Go(Route::Github)),
+            item(tr("Go to Usage"), "gauge", Some("usage"), Run::Go(Route::Usage)),
+            item(tr("Run a command on machines…"), "zap", Some("run"), Run::Go(Route::Run)),
+            item(tr("Go to Activity"), "activity", Some("activity"), Run::Go(Route::Activity)),
+            item(tr("Refresh all machines"), "refresh-cw", Some("check"), Run::Do(Command::CheckMachines)),
+            item(tr("Sync GitHub"), "refresh-cw", Some("sync"), Run::Do(Command::SyncGitHub)),
+            item(tr("Hide or show the sidebar"), "panel-left", Some("sidebar"), Run::Do(Command::ToggleSidebar)),
+            item(tr("Back"), "arrow-left", Some("back"), Run::Do(Command::Back)),
+            item(tr("Forward"), "arrow-right", Some("forward"), Run::Do(Command::Forward)),
+            item(tr("Settings"), "settings", Some("settings"), Run::Do(Command::Settings(SettingsTab::General))),
+            item(tr("Settings: Appearance"), "palette", None, Run::Do(Command::Settings(SettingsTab::Appearance))),
+            item(tr("Settings: Terminal"), "terminal", None, Run::Do(Command::Settings(SettingsTab::Terminal))),
+            item(tr("Settings: GitHub"), "agent-github", None, Run::Do(Command::Settings(SettingsTab::GitHub))),
+            item(tr("Settings: Cloud"), "cloud", None, Run::Do(Command::Settings(SettingsTab::Cloud))),
+            item(tr("Settings: Keyboard shortcuts"), "keyboard", None, Run::Do(Command::Settings(SettingsTab::Keyboard))),
+            item(tr("Cloud usage and cost"), "cloud", None, Run::Do(Command::Settings(SettingsTab::Cloud))),
+            item(tr("Install the muxin command"), "terminal", None, Run::Do(Command::Settings(SettingsTab::General))),
+            item(tr("Theme: Choose…"), "palette", None, Run::Do(Command::ChooseTheme)),
+            item(tr("Theme: Light mode"), "palette", None, Run::Do(Command::Theme(Mode::Light))),
+            item(tr("Theme: Dark mode"), "palette", None, Run::Do(Command::Theme(Mode::Dark))),
+            item(tr("Theme: Match the system"), "palette", None, Run::Do(Command::Theme(Mode::System))),
+            item(tr("About Muxin"), "info", None, Run::Go(Route::About)),
         ];
         let snippets = self.snippet_items();
         // Its Components card comes with the machine on screen; saved recipes after the snippets.
@@ -563,7 +564,7 @@ impl Root {
             .chain(rename)
             .chain(here)
             .chain(all)
-            .chain([item("New snippet…", "code", None, Run::Do(Command::NewSnippet))])
+            .chain([item(tr("New snippet…"), "code", None, Run::Do(Command::NewSnippet))])
             .chain(snippets)
             .chain(recipes)
             .collect()
@@ -573,9 +574,9 @@ impl Root {
     /// machine on screen, else the Run page (ready to run on the machines picked).
     fn snippet_items(&self) -> Vec<Item> {
         let side = match (&self.route, self.snippet_terminal()) {
-            (_, Some(_)) => "Into this terminal".to_string(),
-            (Route::Machine(id), _) => format!("Run on {}", self.snapshot.machines.iter().find(|m| &m.id == id).map(|m| m.name.as_str()).unwrap_or(id)),
-            _ => "Snippet".to_string(),
+            (_, Some(_)) => tr("Into this terminal").to_string(),
+            (Route::Machine(id), _) => trf("Run on {machine}", &[("machine", &self.snapshot.machines.iter().find(|m| &m.id == id).map(|m| m.name.as_str()).unwrap_or(id))]),
+            _ => tr("Snippet").to_string(),
         };
         self.engine
             .settings()
@@ -681,11 +682,11 @@ impl Root {
         let empty = rows.is_empty();
         // The search box's icon, the keys, and what an empty list says.
         let (glyph, hint, nothing) = if picking {
-            ("palette", "↑↓ try   ↵ keep   esc put back", "No theme like that.")
+            ("palette", tr("↑↓ try   ↵ keep   esc put back"), tr("No theme like that."))
         } else if commands {
-            ("zap", "↑↓ move   ↵ run   esc close", "No command like that.")
+            ("zap", tr("↑↓ move   ↵ run   esc close"), tr("No command like that."))
         } else {
-            ("search", "↑↓ move   ↵ open   >  commands   esc close", "Nothing like that. Type > for commands.")
+            ("search", tr("↑↓ move   ↵ open   >  commands   esc close"), tr("Nothing like that. Type > for commands."))
         };
         #[cfg(feature = "recipes")]
         let (glyph, hint, nothing) = p.recipes.words().unwrap_or((glyph, hint, nothing));

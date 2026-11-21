@@ -5,6 +5,7 @@
 //! The palette has them too (palette/recipes.rs).
 
 use std::collections::HashMap;
+use crate::ui::i18n::{tr, trf, tr_msg};
 use std::time::{Duration, Instant};
 
 use gpui::{App, AnyElement, Context, ScrollHandle, SharedString, Window, canvas, div, point, prelude::*, px};
@@ -107,9 +108,9 @@ impl Root {
         let title = div()
             .flex()
             .items_center()
-            .child(section_title(theme, "Components", None))
+            .child(section_title(theme, tr("Components"), None))
             .child(div().flex_1())
-            .child(Button::icon_only("m-rc-refresh", "refresh-cw").tooltip("Check again").on_click(cx.listener(move |this, _, _, cx| this.load_components(&mid, cx))));
+            .child(Button::icon_only("m-rc-refresh", "refresh-cw").tooltip(tr("Check again")).on_click(cx.listener(move |this, _, _, cx| this.load_components(&mid, cx))));
         let row = || div().flex().items_center().gap(px(10.)).px(px(14.)).py(px(10.)).text_size(px(12.5)).text_color(theme.text_muted);
         let busy = self.snapshot.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(&m.id) && o.kind != "logs");
         // Saved recipes, where Muxin has components for the system.
@@ -117,8 +118,8 @@ impl Root {
         let saved = if has_some { self.saved_recipe_rows(theme, m, busy, cx) } else { None };
         let body = match self.recipes.checks.get(&m.id) {
             Some(Load::Ready(found)) => self.components_found(theme, m, found, busy, cx),
-            Some(Load::Failed(e)) => row().child(icon("circle-alert", 13., theme.warning)).child(div().flex_1().min_w(px(0.)).child(e.clone())).into_any_element(),
-            _ => row().child(kit::spinner("m-rc-spin", 13., theme.text_muted)).child("Checking components…").into_any_element(),
+            Some(Load::Failed(e)) => row().child(icon("circle-alert", 13., theme.warning)).child(div().flex_1().min_w(px(0.)).child(tr_msg(e))).into_any_element(),
+            _ => row().child(kit::spinner("m-rc-spin", 13., theme.text_muted)).child(tr("Checking components…")).into_any_element(),
         };
         // Asked for in the palette: the page scrolls here for a moment.
         let reveal = match &self.recipes.reveal {
@@ -136,8 +137,7 @@ impl Root {
     fn components_found(&self, theme: &Theme, m: &Machine, found: &MachineCheck, busy: bool, cx: &mut Context<Self>) -> AnyElement {
         let shown: Vec<_> = found.components.iter().filter(|c| c.result != "unsupported").collect();
         if shown.is_empty() {
-            let system = if found.os == "windows" { "Windows" } else { "this system" };
-            return div().px(px(14.)).py(px(10.)).text_size(px(12.5)).text_color(theme.text_muted).child(format!("Muxin has no components for {system} yet.")).into_any_element();
+                        return div().px(px(14.)).py(px(10.)).text_size(px(12.5)).text_color(theme.text_muted).child(if found.os == "windows" { tr("Muxin has no components for Windows yet.") } else { tr("Muxin has no components for this system yet.") }).into_any_element();
         }
         let picked = self.recipes.picked.get(&m.id).cloned().unwrap_or_default();
         let this = cx.entity().downgrade();
@@ -174,13 +174,13 @@ impl Root {
             .collect();
         let updatable = found.updatable();
         let missing = shown.iter().any(|c| c.result == "missing");
-        let install = if picked.is_empty() { "Install".to_string() } else { format!("Install {}", picked.len()) };
+        let install = if picked.is_empty() { tr("Install").to_string() } else { trf("Install {n}", &[("n", &picked.len())]) };
         let applying = self.snapshot.operations.iter().find(|o| o.kind == "recipe" && o.status == "running" && o.machine_id.as_deref() == Some(&m.id));
         let note = match (missing, !updatable.is_empty()) {
-            (true, true) => "What they need is installed first. Update brings the agent CLIs here to their newest versions.",
-            (true, false) => "What they need is installed first.",
-            (false, true) => "Update brings the agent CLIs here to their newest versions.",
-            (false, false) => "Everything Muxin has for this system is here.",
+            (true, true) => tr("What they need is installed first. Update brings the agent CLIs here to their newest versions."),
+            (true, false) => tr("What they need is installed first."),
+            (false, true) => tr("Update brings the agent CLIs here to their newest versions."),
+            (false, false) => tr("Everything Muxin has for this system is here."),
         };
         let footer = div()
             .flex()
@@ -193,11 +193,11 @@ impl Root {
             .child(div().flex_1().min_w(px(0.)).text_size(px(11.5)).text_color(theme.text_placeholder).child(applying.map_or(note.to_string(), |o| format!("{}…", o.title))))
             .when(!picked.is_empty(), |d| {
                 let ids = picked.clone();
-                d.child(Button::new("m-rc-save", "Save as recipe…").style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, window, cx| this.show_recipe_dialog(None, ids.clone(), window, cx))))
+                d.child(Button::new("m-rc-save", tr("Save as recipe…")).style(ButtonStyle::Ghost).on_click(cx.listener(move |this, _, window, cx| this.show_recipe_dialog(None, ids.clone(), window, cx))))
             })
             .when(!updatable.is_empty(), |d| {
                 let mid = m.id.clone();
-                d.child(Button::new("m-rc-update", "Update").style(ButtonStyle::Outlined).disabled(busy).on_click(cx.listener(move |this, _, _, cx| this.apply_components(&mid, updatable.clone(), true, cx))))
+                d.child(Button::new("m-rc-update", tr("Update")).style(ButtonStyle::Outlined).disabled(busy).on_click(cx.listener(move |this, _, _, cx| this.apply_components(&mid, updatable.clone(), true, cx))))
             })
             .when(missing, |d| {
                 let mid = m.id.clone();

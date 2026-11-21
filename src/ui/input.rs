@@ -2,6 +2,7 @@
 //! built-in text field). Emits `InputEvent`s for changes, Enter and Escape.
 
 use std::ops::Range;
+use crate::ui::i18n::{tr};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use gpui::{
@@ -383,10 +384,10 @@ impl TextInput {
         let has_text = !self.content.is_empty();
         let key = |k: &str| if cfg!(target_os = "macos") { format!("⌘{k}") } else { format!("Ctrl+{k}") };
         let items: [(&str, String, bool, fn(&mut Self, &mut Window, &mut Context<Self>)); 4] = [
-            ("Cut", key("X"), selected, |this, window, cx| this.cut(&Cut, window, cx)),
-            ("Copy", key("C"), selected, |this, window, cx| this.copy(&Copy, window, cx)),
-            ("Paste", key("V"), true, |this, window, cx| this.paste(&Paste, window, cx)),
-            ("Select All", key("A"), has_text, |this, window, cx| this.select_all(&SelectAll, window, cx)),
+            (tr("Cut"), key("X"), selected, |this, window, cx| this.cut(&Cut, window, cx)),
+            (tr("Copy"), key("C"), selected, |this, window, cx| this.copy(&Copy, window, cx)),
+            (tr("Paste"), key("V"), true, |this, window, cx| this.paste(&Paste, window, cx)),
+            (tr("Select All"), key("A"), has_text, |this, window, cx| this.select_all(&SelectAll, window, cx)),
         ];
         let rows = items.into_iter().enumerate().map(|(i, (label, keys, on, run))| {
             div()

@@ -6,6 +6,7 @@
 //! is picked, as with the card's buttons.
 
 use gpui::{App, Context, Window};
+use crate::ui::i18n::{tr, trf};
 
 use super::{Glyph, Item, Run};
 use crate::fleet::Engine;
@@ -20,7 +21,9 @@ const COMPONENTS: &str = "layout-grid";
 const RECIPE: &str = "list";
 const UPDATE: &str = "arrow-up";
 /// What an empty machine list says.
-const NO_MACHINE: &str = "No online Linux or Mac machine like that.";
+fn no_machine() -> &'static str {
+    tr("No online Linux or Mac machine like that.")
+}
 
 /// What a recipe item does.
 #[derive(Clone, Debug, PartialEq)]
@@ -61,8 +64,8 @@ impl State {
     /// While a machine is picked: the search box's icon, the keys, and what an empty list says.
     pub(super) fn words(&self) -> Option<(&'static str, &'static str, &'static str)> {
         Some(match self.pick.as_ref()? {
-            Pick::Apply(_) => (RECIPE, "↑↓ move   ↵ apply   esc close", NO_MACHINE),
-            Pick::Components => (COMPONENTS, "↑↓ move   ↵ open   esc close", NO_MACHINE),
+            Pick::Apply(_) => (RECIPE, tr("↑↓ move   ↵ apply   esc close"), no_machine()),
+            Pick::Components => (COMPONENTS, tr("↑↓ move   ↵ open   esc close"), no_machine()),
         })
     }
 }
@@ -83,9 +86,9 @@ fn item(title: impl Into<String>, detail: impl Into<String>, side: impl Into<Str
 /// its card's check found agent CLIs to update (`updatable`).
 fn about_machine(here: Option<&Machine>, updatable: &[String]) -> Vec<Item> {
     let Some(m) = here else { return Vec::new() };
-    let mut out = vec![item(format!("Components on {}", m.name), "Install and update its tools", "", COMPONENTS, RecipeRun::Components(m.id.clone()), "recipe install tools update")];
+    let mut out = vec![item(trf("Components on {machine}", &[("machine", &m.name)]), tr("Install and update its tools"), "", COMPONENTS, RecipeRun::Components(m.id.clone()), "recipe install tools update")];
     if !updatable.is_empty() {
-        out.push(item(format!("Update agent CLIs on {}", m.name), names(updatable), "", UPDATE, RecipeRun::Update(m.id.clone(), updatable.to_vec()), "recipe upgrade tools components"));
+        out.push(item(trf("Update agent CLIs on {machine}", &[("machine", &m.name)]), names(updatable), "", UPDATE, RecipeRun::Update(m.id.clone(), updatable.to_vec()), "recipe upgrade tools components"));
     }
     out
 }
@@ -100,7 +103,7 @@ fn saved_items(here: Option<&Machine>, any: bool, saved: &[SavedRecipe], catalog
     }
     let mut out = Vec::new();
     if here.is_none() {
-        out.push(item("Components on a machine…", "Install and update a machine's tools", "", COMPONENTS, RecipeRun::Pick(Pick::Components), "recipe install tools update"));
+        out.push(item(tr("Components on a machine…"), tr("Install and update a machine's tools"), "", COMPONENTS, RecipeRun::Pick(Pick::Components), "recipe install tools update"));
     }
     for r in saved {
         let (known, _) = r.split(catalog);
@@ -109,8 +112,8 @@ fn saved_items(here: Option<&Machine>, any: bool, saved: &[SavedRecipe], catalog
         }
         let also = format!("recipe install {}", known.join(" "));
         out.push(match here {
-            Some(m) => item(format!("Apply recipe: {}", r.name), names(&known), format!("On {}", m.name), RECIPE, RecipeRun::Apply(r.clone(), m.id.clone()), also),
-            None => item(format!("Apply recipe: {}…", r.name), names(&known), "Recipe", RECIPE, RecipeRun::Pick(Pick::Apply(r.clone())), also),
+            Some(m) => item(trf("Apply recipe: {name}", &[("name", &r.name)]), names(&known), trf("On {machine}", &[("machine", &m.name)]), RECIPE, RecipeRun::Apply(r.clone(), m.id.clone()), also),
+            None => item(trf("Apply recipe: {name}…", &[("name", &r.name)]), names(&known), tr("Recipe"), RECIPE, RecipeRun::Pick(Pick::Apply(r.clone())), also),
         });
     }
     out
@@ -178,8 +181,8 @@ impl Root {
     /// The palette lists machines for `pick`, as Theme: Choose… lists themes.
     fn pick_recipe_machine(&mut self, pick: Pick, cx: &mut Context<Self>) {
         let placeholder = match &pick {
-            Pick::Apply(r) => format!("Apply {} to which machine?", r.name),
-            Pick::Components => "Which machine's components?".to_string(),
+            Pick::Apply(r) => trf("Apply {name} to which machine?", &[("name", &r.name)]),
+            Pick::Components => tr("Which machine's components?").to_string(),
         };
         let Some(p) = &mut self.palette else { return };
         p.recipes.pick = Some(pick);

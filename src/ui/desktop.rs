@@ -20,6 +20,7 @@ use super::desktop_keys::{self, Mods, Os, ReleaseKey};
 use super::kit::{self, Button, ButtonStyle, spinner};
 use super::terminal::{ime::Composition, keys};
 use super::theme::ActiveTheme;
+use crate::ui::i18n::{tr, trf, tr_msg};
 use crate::fleet::Engine;
 use crate::fleet::desktop::{FRAME, INPUT, META, TILES, keysym};
 use crate::fleet::model::DisplayInfo;
@@ -398,9 +399,9 @@ impl DesktopView {
                     let snap = rx.borrow_and_update();
                     snap.machines.iter().find(|m| m.id == id).and_then(|m| {
                         if m.is_disconnected() {
-                            Some(format!("Disconnected from {}: connect to it to see its desktop", m.name))
+                            Some(trf("Disconnected from {name}: connect to it to see its desktop", &[("name", &m.name)]))
                         } else {
-                            (m.status == "offline" || m.is_asleep()).then(|| m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("Can't reach {}", m.name)))
+                            (m.status == "offline" || m.is_asleep()).then(|| m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| trf("Can't reach {name}", &[("name", &m.name)])))
                         }
                     })
                 };
@@ -707,7 +708,7 @@ impl DesktopView {
                     }
                 };
                 let (w, h) = (reply["width"].as_u64().unwrap_or(0) as u32, reply["height"].as_u64().unwrap_or(0) as u32);
-                let _ = tx.unbounded_send(Msg::Ready(Arc::new(Remote::Shared(joined, channel)), w, h, "Shared".into(), None, reply));
+                let _ = tx.unbounded_send(Msg::Ready(Arc::new(Remote::Shared(joined, channel)), w, h, tr("Shared").into(), None, reply));
                 while let Some((kind, bytes)) = frames.recv().await {
                     if kind != TILES && kind != FRAME {
                         continue;
@@ -718,16 +719,16 @@ impl DesktopView {
                         return;
                     }
                 }
-                let _ = tx.unbounded_send(Msg::Ended("They stopped sharing the desktop.".into(), false));
+                let _ = tx.unbounded_send(Msg::Ended(tr("They stopped sharing the desktop.").into(), false));
             });
         } else {
             rt.spawn(async move {
                 let Some((spec, _)) = engine.machine(&machine_id) else {
-                    let _ = tx.unbounded_send(Msg::Ended("That machine is gone.".into(), false));
+                    let _ = tx.unbounded_send(Msg::Ended(tr("That machine is gone.").into(), false));
                     return;
                 };
                 if engine.is_demo() {
-                    let _ = tx.unbounded_send(Msg::Ended("The demo has no desktops to show.".into(), false));
+                    let _ = tx.unbounded_send(Msg::Ended(tr("The demo has no desktops to show.").into(), false));
                     return;
                 }
                 // Its monitors as they are now (one may have been added, removed
@@ -752,7 +753,7 @@ impl DesktopView {
                     }
                 }
                 let Some(link) = crate::fleet::link::get(&spec).await else {
-                    let _ = tx.unbounded_send(Msg::Ended(format!("Can't reach the agent on {}.", spec.name), true));
+                    let _ = tx.unbounded_send(Msg::Ended(trf("Can't reach the agent on {name}.", &[("name", &spec.name)]), true));
                     return;
                 };
                 let network = link.network();
@@ -760,7 +761,7 @@ impl DesktopView {
                 // window: up to 4K wide, as a big one on a Retina Mac is).
                 let far = if display.starts_with("window:") { 3840 } else { 1920 };
                 let width = wanted.unwrap_or(if matches!(network, Some("Local network" | "This computer")) { NATIVE } else { far });
-                let via = [Some(if link.transport() == "direct" { "Direct" } else { "Over ssh" }), network].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                let via = [Some(if link.transport() == "direct" { tr("Direct") } else { tr("Over ssh") }), network].into_iter().flatten().collect::<Vec<_>>().join(" · ");
                 let (channel, mut frames) = link.open_channel();
                 let request = json!({ "op": "desktop", "channel": channel, "fps": 30, "quality": 78, "max_width": width, "tiles": true, "display": display });
                 let (asked, what) = (Instant::now(), format!("{} {} (channel {channel}, {via})", spec.name, if display.is_empty() { "desktop" } else { display.as_str() }));
@@ -780,7 +781,7 @@ impl DesktopView {
                     }
                     Ok(r) => {
                         link.close_channel(channel);
-                        let why = r["error"].as_str().unwrap_or("The machine can't show its desktop.").to_string();
+                        let why = r["error"].as_str().map(tr_msg).unwrap_or_else(|| tr("The machine can't show its desktop.").to_string());
                         let _ = tx.unbounded_send(match (r["no_session"].as_bool(), r["gone"].as_bool()) {
                             (Some(true), _) => Msg::NoScreen(why),
                             (_, Some(true)) => Msg::Closed(why),
@@ -823,7 +824,7 @@ impl DesktopView {
                     }
                 }
                 tracing::info!("desktop {what}: the machine ended it after {:?}", asked.elapsed());
-                let _ = tx.unbounded_send(Msg::Ended("The desktop stream stopped.".into(), true));
+                let _ = tx.unbounded_send(Msg::Ended(tr("The desktop stream stopped.").into(), true));
             });
         }
 
@@ -983,18 +984,18 @@ impl DesktopView {
             return why.clone();
         }
         if self.changing {
-            return "Changing the monitor…".into();
+            return tr("Changing the monitor…").into();
         }
         if let Some(e) = &self.change_error {
             return e.clone();
         }
         match &self.state {
-            State::Connecting if self.resuming => "Reconnecting…".into(),
-            State::Connecting => "Connecting…".into(),
-            State::Live if self.frame.is_none() => "Waiting for the first frame…".into(),
+            State::Connecting if self.resuming => tr("Reconnecting…").into(),
+            State::Connecting => tr("Connecting…").into(),
+            State::Live if self.frame.is_none() => tr("Waiting for the first frame…").into(),
             State::Live => match &self.note {
-                Some(n) => format!("Live · {}×{} · {n}", self.size.0, self.size.1),
-                None => format!("Live · {}×{}", self.size.0, self.size.1),
+                Some(n) => format!("{} · {}×{} · {n}", tr("Live"), self.size.0, self.size.1),
+                None => format!("{} · {}×{}", tr("Live"), self.size.0, self.size.1),
             },
             State::Ended(why) => why.clone(),
         }
@@ -1428,8 +1429,8 @@ impl DesktopView {
                 .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .children(rows)
                 .when(windows, |d| {
-                    d.child(div().px(px(10.)).pt(px(6.)).pb(px(4.)).text_size(px(11.)).text_color(theme.text_placeholder).child("Not Ctrl+Alt+Del or Win+L:"))
-                        .child(div().px(px(10.)).pb(px(4.)).text_size(px(11.)).text_color(theme.text_placeholder).child("Windows takes those from its own keyboard only."))
+                    d.child(div().px(px(10.)).pt(px(6.)).pb(px(4.)).text_size(px(11.)).text_color(theme.text_placeholder).child(tr("Not Ctrl+Alt+Del or Win+L:")))
+                        .child(div().px(px(10.)).pb(px(4.)).text_size(px(11.)).text_color(theme.text_placeholder).child(tr("Windows takes those from its own keyboard only.")))
                 })
                 .into_any_element(),
         )
@@ -1708,7 +1709,7 @@ impl Render for DesktopView {
                     .gap(px(10.))
                     .child(kit::color_tile("power", 44.))
                     .child(div().text_size(px(14.)).text_color(theme.text).child(why))
-                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child("Comes back when it does.")),
+                    .child(div().text_size(px(12.5)).text_color(theme.text_muted).child(tr("Comes back when it does."))),
             ),
             (State::Ended(why), None) => Some(
                 div()
@@ -1732,13 +1733,13 @@ impl Render for DesktopView {
                                         .on_click(cx.listener(|this, _, _, cx| this.open_remote(cx))),
                                 )
                             })
-                            .child(Button::new("desktop-retry", "Try again").icon("refresh-cw").on_click(cx.listener(|this, _, window, cx| {
+                            .child(Button::new("desktop-retry", tr("Try again")).icon("refresh-cw").on_click(cx.listener(|this, _, window, cx| {
                                 this.retries = 0;
                                 this.start(window, cx);
                                 cx.notify();
                             })))
                             // An app's window has no title bar of its own until it shows.
-                            .when(self.shows_window(), |d| d.child(Button::new("desktop-close-app", "Close").icon("x").on_click(|_, window, _| window.remove_window()))),
+                            .when(self.shows_window(), |d| d.child(Button::new("desktop-close-app", tr("Close")).icon("x").on_click(|_, window, _| window.remove_window()))),
                     )
                     .children(self.opened.clone().map(|(text, failed)| {
                         div().max_w(px(460.)).text_center().text_size(px(12.5)).text_color(if failed { theme.error } else { theme.text_muted }).child(text)
@@ -1746,7 +1747,7 @@ impl Render for DesktopView {
             ),
             (State::Connecting, None) if self.resuming && self.frame.is_some() => Some(
                 div().flex().items_center().gap(px(10.)).child(spinner("desktop-resume", 16., theme.text_muted)).child(
-                    div().text_size(px(13.)).text_color(theme.text_muted).child("Reconnecting…"),
+                    div().text_size(px(13.)).text_color(theme.text_muted).child(tr("Reconnecting…")),
                 ),
             ),
             _ if self.frame.is_none() => Some(
@@ -1775,7 +1776,7 @@ impl Render for DesktopView {
                     .text_size(px(12.5))
                     .text_color(gpui::white())
                     .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(keys))
-                    .child(div().text_color(gpui::white().opacity(0.8)).child("closes this window")),
+                    .child(div().text_color(gpui::white().opacity(0.8)).child(tr("closes this window"))),
             )
         });
         div()
@@ -2005,7 +2006,7 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
                 .text_color(if on { theme.text } else { theme.text_placeholder })
                 .when(on, |d| d.bg(theme.element_selected))
                 .when(!on, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-                .when(d.is_virtual, |el| el.child(kit::dot(theme.accent, 5.)).tooltip(|window, cx| kit::Tooltip::view("Virtual monitor".into(), window, cx)))
+                .when(d.is_virtual, |el| el.child(kit::dot(theme.accent, 5.)).tooltip(|window, cx| kit::Tooltip::view(tr("Virtual monitor").into(), window, cx)))
                 .child(name)
                 .when_some(right_click, |el, f| el.on_mouse_down(MouseButton::Right, f))
                 .on_click(move |_, window, cx| view.update(cx, |v, cx| v.set_display(Some(id.clone()), window, cx)))
@@ -2043,7 +2044,7 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
                     .into_iter()
                     .map(|(size, label)| {
                         let (view, id) = (view.clone(), d.id.clone());
-                        chip(format!("size-{}x{}", size.0, size.1), label, size == current, "The monitor's resolution")
+                        chip(format!("size-{}x{}", size.0, size.1), label, size == current, tr("The monitor's resolution"))
                             .on_click(move |_, window, cx| view.update(cx, |v, cx| v.change_display(id.clone(), Some(size), None, window, cx)))
                     })
                     .collect(),
@@ -2057,7 +2058,7 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
                 .into_iter()
                 .map(|(scale, label)| {
                     let (view, id) = (view.clone(), d.id.clone());
-                    chip(format!("scale-{label}"), label.to_string(), (d.scale - scale).abs() < 0.01, "How big things are (200%: twice as big, just as sharp)")
+                    chip(format!("scale-{label}"), label.to_string(), (d.scale - scale).abs() < 0.01, tr("How big things are (200%: twice as big, just as sharp)"))
                         .on_click(move |_, window, cx| view.update(cx, |v, cx| v.change_display(id.clone(), None, Some(scale), window, cx)))
                 })
                 .collect(),
@@ -2093,11 +2094,11 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
     let status = fit(&status, status_room, 12.5);
     let keyboard = switch.map(|label| {
         let (examples, release) = (desktop_keys::examples(), desktop_keys::release_key_label());
-        let to = if name.is_empty() { "the machine" } else { name.as_str() };
+        let to = if name.is_empty() { tr("the machine") } else { name.as_str() };
         let tip = match shortcuts {
-            Shortcuts::There => format!("{examples} go to {to}. Click, or press {release} by themselves, to get them back."),
-            Shortcuts::NeedsPermission => format!("{examples} act on this computer. Click to send them to {to}: macOS asks to allow Muxin under Accessibility first."),
-            _ => format!("{examples} act on this computer. Click, or press {release} by themselves, to send them to {to}."),
+            Shortcuts::There => trf("{examples} go to {to}. Click, or press {release} by themselves, to get them back.", &[("examples", &examples), ("to", &to), ("release", &release)]),
+            Shortcuts::NeedsPermission => trf("{examples} act on this computer. Click to send them to {to}: macOS asks to allow Muxin under Accessibility first.", &[("examples", &examples), ("to", &to)]),
+            _ => trf("{examples} act on this computer. Click, or press {release} by themselves, to send them to {to}.", &[("examples", &examples), ("to", &to), ("release", &release)]),
         };
         let label = fit(&label, chip_room.map(|r| r - chip_chrome), 11.5);
         let view = view.clone();
@@ -2126,9 +2127,9 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
     // Combinations to send by a click: a Mac's Spaces, the Windows key.
     let keys = (shortcuts != Shortcuts::NotOffered).then(|| {
         let view = view.clone();
-        (if narrow { Button::icon_only("desktop-keys", "keyboard") } else { Button::new("desktop-keys", "Keys").icon("keyboard") })
+        (if narrow { Button::icon_only("desktop-keys", "keyboard") } else { Button::new("desktop-keys", tr("Keys")).icon("keyboard") })
             .style(if keys_open { ButtonStyle::Outlined } else { ButtonStyle::Ghost })
-            .tooltip("Send a key combination to the machine")
+            .tooltip(tr("Send a key combination to the machine"))
             .on_click(move |e: &gpui::ClickEvent, _, cx| view.update(cx, |v, cx| v.toggle_keys_menu(e.position(), cx)))
     });
     div()
@@ -2198,7 +2199,7 @@ impl Render for DesktopWindow {
             return div().relative().size_full().bg(gpui::black()).child(self.view.clone()).children(super::frame::resize_edges(window)).into_any_element();
         }
         let full = window.is_fullscreen();
-        let button = Button::new("desktop-fullscreen", if full { "Exit full screen" } else { "Full screen" })
+        let button = Button::new("desktop-fullscreen", if full { tr("Exit full screen") } else { tr("Full screen") })
             .style(ButtonStyle::Ghost)
             .icon(if full { "minimize" } else { "maximize" })
             .on_click(|_, window, _| window.toggle_fullscreen())

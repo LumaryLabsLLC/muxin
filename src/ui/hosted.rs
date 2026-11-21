@@ -5,6 +5,7 @@ use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 use super::format;
 use super::kit::{self, Button, ButtonStyle, card, section_title};
+use crate::ui::i18n::{tr, trf};
 use super::root::{Route, Root};
 use super::theme::{Theme, mono_font};
 use crate::fleet::model::{Machine, ParentMachine, Snapshot};
@@ -17,30 +18,30 @@ impl Root {
         let host_down = host.is_none_or(|h| h.is_down());
         let powering = powering(s, &m.id);
         let title = match parent.relation.as_str() {
-            "vm" => format!("Virtual machine on {}", parent.name),
-            "container" => format!("Container on {}", parent.name),
-            "through" => format!("Reached through {}", parent.name),
-            _ => format!("Runs on {}", parent.name),
+            "vm" => trf("Virtual machine on {name}", &[("name", &parent.name)]),
+            "container" => trf("Container on {name}", &[("name", &parent.name)]),
+            "through" => trf("Reached through {name}", &[("name", &parent.name)]),
+            _ => trf("Runs on {name}", &[("name", &parent.name)]),
         };
         let installing = m.unreachable.as_ref().is_some_and(|u| u.kind == "installing");
         let (state, color) = match (powering, &parent.container) {
             _ if installing => (m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_default(), theme.text_muted),
-            (Some(true), _) => ("Starting…".to_string(), theme.text_muted),
-            (Some(false), _) => ("Shutting down…".to_string(), theme.text_muted),
-            _ if host_down => (format!("{} is {}", parent.name, host.map(format::unreachable_word).unwrap_or("gone").to_lowercase()), theme.warning),
-            (None, Some(c)) if parent.container_state.as_deref() == Some("running") => (format!("In its container {c} · running"), theme.text_placeholder),
-            (None, Some(c)) => (format!("Its container {c} is {}", container_word(parent.container_state.as_deref())), theme.warning),
-            (None, None) if parent.inside() => (format!("ssh reaches it through a port {} forwards to it.", parent.name), theme.text_placeholder),
-            (None, None) => (format!("ssh goes through {} to reach it.", parent.name), theme.text_placeholder),
+            (Some(true), _) => (tr("Starting…").to_string(), theme.text_muted),
+            (Some(false), _) => (tr("Shutting down…").to_string(), theme.text_muted),
+            _ if host_down => (trf("{name} is {state}", &[("name", &parent.name), ("state", &host.map(format::unreachable_word).unwrap_or("gone").to_lowercase())]), theme.warning),
+            (None, Some(c)) if parent.container_state.as_deref() == Some("running") => (trf("In its container {container} · running", &[("container", c)]), theme.text_placeholder),
+            (None, Some(c)) => (trf("Its container {container} is {state}", &[("container", c), ("state", &container_word(parent.container_state.as_deref()))]), theme.warning),
+            (None, None) if parent.inside() => (trf("ssh reaches it through a port {name} forwards to it.", &[("name", &parent.name)]), theme.text_placeholder),
+            (None, None) => (trf("ssh goes through {name} to reach it.", &[("name", &parent.name)]), theme.text_placeholder),
         };
         let power = if installing { None } else { power_button(s, m, parent, host_down, "m-vm-power", cx) };
         // A VM Muxin made: its install's screen, its password, destroying it.
         let made = m.vm.as_ref();
         let watch = made.and_then(|v| v.web_port).filter(|_| installing && !host_down).map(|port| {
             let pid = parent.machine_id.clone();
-            Button::new("m-vm-watch", "Watch the install")
+            Button::new("m-vm-watch", tr("Watch the install"))
                 .icon("monitor")
-                .tooltip("Its screen in your browser, while Windows installs")
+                .tooltip(tr("Its screen in your browser, while Windows installs"))
                 .on_click(cx.listener(move |this, _, _, cx| this.open_port(&pid, port, None, true, cx)))
                 .into_any_element()
         });
@@ -48,23 +49,23 @@ impl Root {
         let narrow = self.content_width < 760.;
         let password = made.filter(|v| v.os == "windows").map(|_| {
             let mid = m.id.clone();
-            if narrow { Button::icon_only("m-vm-password", "lock") } else { Button::new("m-vm-password", "Copy password").icon("copy") }
+            if narrow { Button::icon_only("m-vm-password", "lock") } else { Button::new("m-vm-password", tr("Copy password")).icon("copy") }
                 .style(ButtonStyle::Ghost)
-                .tooltip("Its Windows account's password (Muxin made it; it's kept in your Keychain)")
+                .tooltip(tr("Its Windows account's password (Muxin made it; it's kept in your Keychain)"))
                 .on_click(cx.listener(move |this, _, _, cx| match this.engine.vm_password(&mid) {
                     Some(p) => {
                         // It stays on this computer: the shared clipboard doesn't pass it on.
                         crate::fleet::clipboard::keep_here(&p);
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(p));
-                        this.notify_user("Copied its password".to_string(), false, cx);
+                        this.notify_user(tr("Copied its password").to_string(), false, cx);
                     }
-                    None => this.notify_user("Muxin doesn't have its password.".to_string(), true, cx),
+                    None => this.notify_user(tr("Muxin doesn't have its password.").to_string(), true, cx),
                 }))
                 .into_any_element()
         });
         let destroy = made.map(|_| {
             let machine = m.clone();
-            Button::new("m-vm-destroy", "Destroy…")
+            Button::new("m-vm-destroy", tr("Destroy…"))
                 .style(ButtonStyle::Danger)
                 .on_click(cx.listener(move |this, _, window, cx| this.confirm_remove_machine(&machine, window, cx)))
                 .into_any_element()
@@ -96,7 +97,7 @@ impl Root {
                     .children(power)
                     .children(password)
                     .child(
-                        if narrow { Button::icon_only("m-vm-host", "external-link").tooltip(format!("Open {}", parent.name)) } else { Button::new("m-vm-host", format!("Open {}", parent.name)).icon("external-link") }
+                        if narrow { Button::icon_only("m-vm-host", "external-link").tooltip(trf("Open {name}", &[("name", &parent.name)])) } else { Button::new("m-vm-host", trf("Open {name}", &[("name", &parent.name)])).icon("external-link") }
                             .style(ButtonStyle::Ghost)
                             .on_click(cx.listener(move |this, _, window, cx| this.navigate(Route::Machine(pid.clone()), window, cx))),
                     )
@@ -162,7 +163,7 @@ impl Root {
                     .into_any_element()
             })
             .collect();
-        Some(div().flex().flex_col().gap(px(10.)).child(section_title(theme, "Runs here", Some(guests.len()))).child(card(theme).children(rows)).into_any_element())
+        Some(div().flex().flex_col().gap(px(10.)).child(section_title(theme, tr("Runs here"), Some(guests.len()))).child(card(theme).children(rows)).into_any_element())
     }
 
     pub(super) fn machine_power(&mut self, machine_id: &str, on: bool, cx: &mut Context<Self>) {
@@ -183,16 +184,16 @@ fn power_button(s: &Snapshot, m: &Machine, parent: &ParentMachine, host_down: bo
     let busy = s.operations.iter().any(|o| o.status == "running" && o.machine_id.as_deref() == Some(&m.id) && o.kind != "logs");
     let running = parent.container_state.as_deref() == Some("running");
     let label = match powering(s, &m.id) {
-        Some(true) => "Starting…",
-        Some(false) => "Stopping…",
-        None if running => "Stop",
-        None => "Start",
+        Some(true) => tr("Starting…"),
+        Some(false) => tr("Stopping…"),
+        None if running => tr("Stop"),
+        None => tr("Start"),
     };
     let mid = m.id.clone();
     Some(
         Button::new(SharedString::from(id.to_string()), label)
             .icon("power")
-            .tooltip(if running { "Shut it down: stops its container (it gets two minutes to shut down cleanly)" } else { "Start its container" })
+            .tooltip(if running { tr("Shut it down: stops its container (it gets two minutes to shut down cleanly)") } else { tr("Start its container") })
             .disabled(busy)
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
@@ -214,9 +215,10 @@ fn powering(s: &Snapshot, machine_id: &str) -> Option<bool> {
 /// Docker's word for a container that isn't running, in everyday words.
 fn container_word(state: Option<&str>) -> &'static str {
     match state {
-        Some("paused") => "paused",
-        Some("restarting") => "restarting",
-        Some("removing") => "being removed",
-        _ => "stopped",
+        Some("paused") => tr("paused"),
+        Some("restarting") => tr("restarting"),
+        Some("removing") => tr("being removed"),
+        _ => tr("stopped"),
+
     }
 }

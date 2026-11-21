@@ -11,6 +11,7 @@ use gpui::{
 
 use super::dialogs::DialogEvent;
 use super::format;
+use crate::ui::i18n::{tr, trf, tr_msg};
 use super::github::Load;
 use super::input::{InputEvent, TextInput};
 use super::kit::{self, Button, ButtonStyle, icon};
@@ -216,7 +217,7 @@ impl CopyDialog {
 
     fn submit(&mut self, cx: &mut Context<Self>) {
         let (Some(dir), Some(to_dir)) = (self.current_path(Side::From), self.current_path(Side::To)) else {
-            self.error = Some("Wait for both folders to open.".into());
+            self.error = Some(tr("Wait for both folders to open.").into());
             cx.notify();
             return;
         };
@@ -261,12 +262,12 @@ impl CopyDialog {
                 .into_any_element()
         }).collect();
         let body: AnyElement = match &pane.listing {
-            Load::Loading => div().p(px(14.)).flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(kit::spinner(SharedString::from(format!("cp-{tag}-spin")), 12., theme.text_muted)).child("Opening…").into_any_element(),
-            Load::Failed(e) => div().p(px(14.)).flex().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(icon("circle-alert", 14., theme.warning)).child(div().flex_1().min_w(px(0.)).child(e.clone())).into_any_element(),
+            Load::Loading => div().p(px(14.)).flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(kit::spinner(SharedString::from(format!("cp-{tag}-spin")), 12., theme.text_muted)).child(tr("Opening…")).into_any_element(),
+            Load::Failed(e) => div().p(px(14.)).flex().gap(px(8.)).text_size(px(12.5)).text_color(theme.text_muted).child(icon("circle-alert", 14., theme.warning)).child(div().flex_1().min_w(px(0.)).child(tr_msg(e))).into_any_element(),
             Load::Ready(l) => {
                 let shown: Vec<&crate::fleet::files::FileEntry> = l.entries.iter().filter(|e| self.show_hidden || !e.name.starts_with('.')).collect();
                 if shown.is_empty() {
-                    div().p(px(14.)).text_size(px(12.5)).text_color(theme.text_placeholder).child("Nothing here.").into_any_element()
+                    div().p(px(14.)).text_size(px(12.5)).text_color(theme.text_placeholder).child(tr("Nothing here.")).into_any_element()
                 } else {
                     let rows: Vec<AnyElement> = shown.into_iter().enumerate().map(|(i, e)| self.row(theme, side, e, i, cx)).collect();
                     div().flex().flex_col().children(rows).into_any_element()
@@ -280,14 +281,14 @@ impl CopyDialog {
             .flex_1()
             .min_w(px(0.))
             .gap(px(8.))
-            .child(div().text_size(px(12.)).text_color(theme.text_muted).child(if side == Side::From { "From" } else { "To" }))
+            .child(div().text_size(px(12.)).text_color(theme.text_muted).child(if side == Side::From { tr("From") } else { tr("To") }))
             .child(div().flex().flex_wrap().gap(px(5.)).children(chips))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .child(Button::icon_only(up_id, "arrow-up").tooltip("Up a folder").on_click(cx.listener(move |this, _, _, cx| this.up(side, cx))))
+                    .child(Button::icon_only(up_id, "arrow-up").tooltip(tr("Up a folder")).on_click(cx.listener(move |this, _, _, cx| this.up(side, cx))))
                     .child(div().flex_1().min_w(px(0.)).child(pane.path.clone())),
             )
             .child(
@@ -394,13 +395,14 @@ impl Render for CopyDialog {
         let same_place = self.from.machine == self.to.machine && self.current_path(Side::From).is_some() && self.current_path(Side::From) == self.current_path(Side::To);
         let ready = !self.selected.is_empty() && to_shown.is_some() && self.current_path(Side::From).is_some() && !same_place;
         let summary = match self.selected.len() {
-            0 => "Pick files or folders on the left.".to_string(),
-            n => format!("{n} selected{}", if sizes > 0 { format!(" · {} in files", format::bytes(sizes)) } else { String::new() }),
+            0 => tr("Pick files or folders on the left.").to_string(),
+            n if sizes > 0 => trf("{n} selected · {size} in files", &[("n", &n), ("size", &format::bytes(sizes))]),
+            n => trf("{n} selected", &[("n", &n)]),
         };
         let copy_label = match &to_shown {
             // A button never shrinks: a long folder is cut in the middle.
-            Some(p) => format!("Copy to {to_name} {}", format::short_folder(p)),
-            None => "Copy".into(),
+            Some(p) => trf("Copy to {machine} {folder}", &[("machine", &to_name), ("folder", &format::short_folder(p))]),
+            None => tr("Copy").into(),
         };
         let hidden = self.show_hidden;
         div()
@@ -422,7 +424,7 @@ impl Render for CopyDialog {
                     cx.emit(DialogEvent::Dismissed)
                 }
             }))
-            .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Copy files"))
+            .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(tr("Copy files")))
             .child(
                 div()
                     .flex()
@@ -430,28 +432,25 @@ impl Render for CopyDialog {
                     .child(self.pane_view(&theme, Side::From, cx))
                     .child(
                         div().flex().flex_col().justify_center().child(
-                            Button::icon_only("cp-swap", "arrow-right").tooltip("Swap: copy the other way").on_click(cx.listener(|this, _, _, cx| this.swap(cx))),
+                            Button::icon_only("cp-swap", "arrow-right").tooltip(tr("Swap: copy the other way")).on_click(cx.listener(|this, _, _, cx| this.swap(cx))),
                         ),
                     )
                     .child(self.pane_view(&theme, Side::To, cx)),
             )
             .children((!replaces.is_empty()).then(|| {
-                div().flex().items_center().gap(px(8.)).text_size(px(12.)).text_color(theme.warning).child(icon("triangle-alert", 13., theme.warning)).child(div().flex_1().min_w(px(0.)).child(format!(
-                    "Replaces {} already there.",
-                    match replaces.as_slice() {
-                        [one] => one.clone(),
-                        many => format!("{} items", many.len()),
-                    }
-                )))
+                div().flex().items_center().gap(px(8.)).text_size(px(12.)).text_color(theme.warning).child(icon("triangle-alert", 13., theme.warning)).child(div().flex_1().min_w(px(0.)).child(match replaces.as_slice() {
+                    [one] => trf("Replaces {what} already there.", &[("what", one)]),
+                    many => trf("Replaces {n} items already there.", &[("n", &many.len())]),
+                }))
             }))
-            .children(same_place.then(|| div().text_size(px(12.)).text_color(theme.text_muted).child("That's the same folder; pick another one to copy into.")))
-            .children(self.error.clone().map(|e| div().flex().gap(px(8.)).text_size(px(12.5)).text_color(theme.error).child(icon("circle-x", 13., theme.error)).child(div().flex_1().min_w(px(0.)).child(e))))
+            .children(same_place.then(|| div().text_size(px(12.)).text_color(theme.text_muted).child(tr("That's the same folder; pick another one to copy into."))))
+            .children(self.error.clone().map(|e| div().flex().gap(px(8.)).text_size(px(12.5)).text_color(theme.error).child(icon("circle-x", 13., theme.error)).child(div().flex_1().min_w(px(0.)).child(tr_msg(&e)))))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(kit::checkbox(&theme, "cp-hidden", hidden, "Hidden files", {
+                    .child(kit::checkbox(&theme, "cp-hidden", hidden, tr("Hidden files"), {
                         let this = cx.entity().downgrade();
                         move |on, _, cx| {
                             let on = *on;
@@ -462,7 +461,7 @@ impl Render for CopyDialog {
                         }
                     }))
                     .child(div().flex_1().min_w(px(0.)).text_size(px(12.)).text_color(theme.text_placeholder).child(summary))
-                    .child(Button::new("cp-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))))
+                    .child(Button::new("cp-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))))
                     .child(Button::new("cp-go", copy_label).style(ButtonStyle::Primary).disabled(!ready).on_click(cx.listener(|this, _, _, cx| this.submit(cx)))),
             )
     }

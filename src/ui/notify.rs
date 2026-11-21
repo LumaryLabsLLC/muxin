@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use crate::fleet::Engine;
 use crate::fleet::model::Snapshot;
 use crate::fleet::sessions::Mark;
+use crate::ui::i18n::{tr, trf};
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(true);
@@ -111,17 +112,15 @@ fn changes(seen: &mut HashMap<String, Mark>, snapshot: &Snapshot) -> (Vec<Notice
 
 fn notice(id: &str, title: &str, agent: &str, machine: &str, mark: Mark) -> Notice {
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
-    let what = match mark {
-        Mark::NeedsYou => "needs you",
-        Mark::Failed => "stopped with an error",
-        _ => "is done",
+    let name = if agent.is_empty() { tr("The session").to_string() } else { agent.to_string() };
+    let a: &[(&str, &dyn std::fmt::Display)] = &[("name", &name), ("machine", &machine)];
+    let (short, body) = match mark {
+        Mark::NeedsYou => (trf("{name} needs you", a), trf("{name} on {machine} needs you.", a)),
+        Mark::Failed => (trf("{name} stopped with an error", a), trf("{name} on {machine} stopped with an error.", a)),
+        _ => (trf("{name} is done", a), trf("{name} on {machine} is done.", a)),
     };
-    let name = if agent.is_empty() { "The session".to_string() } else { agent.to_string() };
-    Notice {
-        session_id: id.to_string(),
-        title: if title.is_empty() { format!("{name} {what}") } else { title },
-        body: format!("{name} on {machine} {what}."),
-    }
+    Notice { session_id: id.to_string(), title: if title.is_empty() { short } else { title }, body }
+
 }
 
 /// Opens the session a notification was for.

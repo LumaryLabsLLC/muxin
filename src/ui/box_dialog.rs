@@ -4,6 +4,7 @@
 //! both: your repositories, and the machine's folders as you type a path.
 
 use std::sync::Arc;
+use crate::ui::i18n::{tr, trf};
 
 use gpui::{AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding, SharedString, Subscription, Window, actions, div, prelude::*, px};
 
@@ -115,8 +116,12 @@ fn folder_name(path: &str) -> &str {
     path.trim_end_matches('/').rsplit('/').next().unwrap_or(path)
 }
 
-const GITHUB_HINT: &str = "Search your repositories, or owner/name or a git URL";
-const FOLDER_HINT: &str = "A folder, like ~/code/app (Tab completes)";
+fn github_hint() -> &'static str {
+    tr("Search your repositories, or owner/name or a git URL")
+}
+fn folder_hint() -> &'static str {
+    tr("A folder, like ~/code/app (Tab completes)")
+}
 
 /// What's typed as a folder and the name being completed in it: "~/Dev" is
 /// ("~", "Dev"), "~/code/" is ("~/code", "").
@@ -141,9 +146,9 @@ impl BoxDialog {
     /// `prefill`: what something opened it with (an issue to fix).
     pub fn new(engine: Arc<Engine>, prefill: BoxPrefill, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let BoxPrefill { repo, task, details, name, branch } = prefill;
-        let repo = cx.new(|cx| TextInput::new(cx, GITHUB_HINT).mono().with_text(repo.unwrap_or_default()));
+        let repo = cx.new(|cx| TextInput::new(cx, github_hint()).mono().with_text(repo.unwrap_or_default()));
         // A task filled in (an issue's) shows from its start.
-        let task = cx.new(|cx| TextInput::new(cx, "Fix the login redirect loop, add a test, and open a pull request").with_text(task.unwrap_or_default()).at_start());
+        let task = cx.new(|cx| TextInput::new(cx, tr("Fix the login redirect loop, add a test, and open a pull request")).with_text(task.unwrap_or_default()).at_start());
         let subs = vec![
             cx.subscribe_in(&repo, window, |this: &mut Self, _, e: &InputEvent, _, cx| match e {
                 // Enter on a result picks it; on what's picked, starts the box.
@@ -255,7 +260,7 @@ impl BoxDialog {
             let runs: Vec<&Machine> = s.machines.iter().filter(|m| can_run(m)).collect();
             self.folder_machine = runs.iter().find(|m| s.checkouts.iter().any(|c| c.machine_id == m.id)).or(runs.first()).map(|m| m.id.clone());
         }
-        let hint = if source == Source::GitHub { GITHUB_HINT } else { FOLDER_HINT };
+        let hint = if source == Source::GitHub { github_hint() } else { folder_hint() };
         self.repo.update(cx, |i, cx| {
             i.set_text("", cx);
             i.set_placeholder(hint, cx)
@@ -384,14 +389,14 @@ impl BoxDialog {
         let task = self.task.read(cx).text().trim().to_string();
         if repo.is_empty() {
             self.error = Some(match self.source {
-                Source::GitHub => "Which repository? Search for one, or type owner/name or a git URL.".into(),
-                Source::Folder => "Which folder? Pick a checkout, or type its folder.".into(),
+                Source::GitHub => tr("Which repository? Search for one, or type owner/name or a git URL.").into(),
+                Source::Folder => tr("Which folder? Pick a checkout, or type its folder.").into(),
             });
             cx.notify();
             return;
         }
         if task.is_empty() {
-            self.error = Some("What should the agent do?".into());
+            self.error = Some(tr("What should the agent do?").into());
             cx.notify();
             return;
         }
@@ -400,7 +405,7 @@ impl BoxDialog {
             Source::Folder => self.folder_machine.clone(),
         };
         if self.source == Source::Folder && machine.is_none() {
-            self.error = Some("Which machine is the folder on?".into());
+            self.error = Some(tr("Which machine is the folder on?").into());
             cx.notify();
             return;
         }
@@ -513,7 +518,7 @@ impl Render for BoxDialog {
             .child(chip("bx-src-gh".into(), self.source == Source::GitHub, true).pl(px(6.)).child(kit::icon("agent-github", 13., theme.text_muted)).child("GitHub").on_click(cx.listener(
                 |this, _, window, cx| this.set_source(Source::GitHub, window, cx),
             )))
-            .child(chip("bx-src-folder".into(), self.source == Source::Folder, true).pl(px(6.)).child(kit::icon("folder", 13., theme.text_muted)).child("A folder on a machine").on_click(
+            .child(chip("bx-src-folder".into(), self.source == Source::Folder, true).pl(px(6.)).child(kit::icon("folder", 13., theme.text_muted)).child(tr("A folder on a machine")).on_click(
                 cx.listener(|this, _, window, cx| this.set_source(Source::Folder, window, cx)),
             ));
 
@@ -524,9 +529,9 @@ impl Render for BoxDialog {
         let code: AnyElement = match self.source {
             Source::GitHub => {
                 let status = match &self.repos {
-                    None => Some(quiet("Reading your repositories…".into())),
+                    None => Some(quiet(tr("Reading your repositories…").into())),
                     Some(_) if !typed.is_empty() && found.is_empty() && !self.repos.iter().flatten().any(|r| r.full_name.eq_ignore_ascii_case(&typed)) => {
-                        Some(quiet("None of your repositories match; it's used as typed (owner/name or a git URL).".into()))
+                        Some(quiet(tr("None of your repositories match; it's used as typed (owner/name or a git URL).").into()))
                     }
                     _ => None,
                 };
@@ -552,7 +557,7 @@ impl Render for BoxDialog {
                             .pl(px(4.))
                             .child(kit::tile(super::format::machine_icon(m), from, to, 18.))
                             .child(m.name.clone())
-                            .when(!ok, |d| d.child(div().text_size(px(11.)).child("no Docker")))
+                            .when(!ok, |d| d.child(div().text_size(px(11.)).child(tr("no Docker"))))
                             .when(ok, |d| {
                                 d.on_click(cx.listener(move |this, _, _, cx| {
                                     this.folder_machine = Some(id.clone());
@@ -567,16 +572,17 @@ impl Render for BoxDialog {
                 let bare = typed.trim_end_matches('/');
                 let picked = self.folder_machine.as_ref().and_then(|m| s.checkouts.iter().find(|c| &c.machine_id == m && crate::fleet::workspaces::same_folder(&c.path, bare)));
                 let note = match (picked, &self.folder_machine) {
-                    (Some(c), _) => Some(format!(
-                        "The box starts from this checkout as it is now{}, on a branch of its own. Your checkout isn't touched.",
-                        if c.dirty > 0 { format!(", with its {} uncommitted files", c.dirty) } else { String::new() }
-                    )),
-                    _ if self.listing() => Some("Looking…".to_string()),
+                    (Some(c), _) => Some(if c.dirty > 0 {
+                        trf("The box starts from this checkout as it is now, with its {n} uncommitted files, on a branch of its own. Your checkout isn't touched.", &[("n", &c.dirty)])
+                    } else {
+                        tr("The box starts from this checkout as it is now, on a branch of its own. Your checkout isn't touched.").to_string()
+                    }),
+                    _ if self.listing() => Some(tr("Looking…").to_string()),
                     _ if self.listing_failed().is_some() => self.listing_failed(),
                     (None, Some(m)) if !bare.is_empty() => {
-                        Some(format!("The box starts from {} on {} as it is now (a git checkout, with its uncommitted changes). Tab or a click goes into a folder.", tilde(bare), machine_name(m)))
+                        Some(trf("The box starts from {folder} on {machine} as it is now (a git checkout, with its uncommitted changes). Tab or a click goes into a folder.", &[("folder", &tilde(bare)), ("machine", &machine_name(m))]))
                     }
-                    _ => Some("Its checkouts, then the folders in your home. Type a path; Tab or a click goes into a folder.".to_string()),
+                    _ => Some(tr("Its checkouts, then the folders in your home. Type a path; Tab or a click goes into a folder.").to_string()),
                 };
                 div()
                     .flex()
@@ -607,19 +613,19 @@ impl Render for BoxDialog {
                     .into_any_element()
             })
             .collect();
-        let name = crate::fleet::sessions::agent(&self.agent).map(|k| k.name).unwrap_or("The agent");
+        let name = crate::fleet::sessions::agent(&self.agent).map(|k| k.name).unwrap_or(tr("The agent"));
         let agent = div()
             .flex()
             .flex_col()
             .gap(px(8.))
             .child(div().flex().flex_wrap().gap(px(6.)).children(agents))
-            .child(quiet(format!("{name} is signed in as it is on that machine. If it isn't signed in there, sign it in once from the box's terminal.")));
+            .child(quiet(trf("{name} is signed in as it is on that machine. If it isn't signed in there, sign it in once from the box's terminal.", &[("name", &name)])));
 
         // Where a GitHub box runs (a folder's box runs on the folder's machine).
         let any = s.machines.iter().any(can_run);
         let place = (self.source == Source::GitHub).then(|| {
             let mut machines: Vec<AnyElement> = vec![chip("bx-m-auto".into(), self.machine.is_none(), true)
-                .child("Best one")
+                .child(tr("Best one"))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.machine = None;
                     cx.notify()
@@ -633,7 +639,7 @@ impl Render for BoxDialog {
                     .pl(px(4.))
                     .child(kit::tile(super::format::machine_icon(m), from, to, 18.))
                     .child(m.name.clone())
-                    .when(!ok, |d| d.child(div().text_size(px(11.)).child("no Docker")))
+                    .when(!ok, |d| d.child(div().text_size(px(11.)).child(tr("no Docker"))))
                     .when(ok, |d| {
                         d.on_click(cx.listener(move |this, _, _, cx| {
                             this.machine = Some(id.clone());
@@ -644,9 +650,9 @@ impl Render for BoxDialog {
             }));
             div().flex().flex_col().gap(px(8.)).child(div().flex().flex_wrap().gap(px(6.)).children(machines)).child(
                 div().text_size(px(11.5)).text_color(if any { theme.text_placeholder } else { theme.warning }).child(if any {
-                    "In a Docker container there, on a new branch of a fresh clone. The first box on a machine builds Muxin's image (a few minutes)."
+                    tr("In a Docker container there, on a new branch of a fresh clone. The first box on a machine builds Muxin's image (a few minutes).")
                 } else {
-                    "Boxes run in Docker: install it on a Linux machine or a Mac (Docker Desktop, OrbStack or Colima)."
+                    tr("Boxes run in Docker: install it on a Linux machine or a Mac (Docker Desktop, OrbStack or Colima).")
                 }),
             )
         });
@@ -656,20 +662,20 @@ impl Render for BoxDialog {
             .flex()
             .flex_col()
             .gap(px(14.))
-            .child(field(&theme, "Code", div().flex().flex_col().gap(px(10.)).child(sources).child(code), None))
+            .child(field(&theme, tr("Code"), div().flex().flex_col().gap(px(10.)).child(sources).child(code), None))
             .child(field(
                 &theme,
-                "Task",
+                tr("Task"),
                 self.task.clone(),
                 Some(if self.details.is_some() {
-                    "The issue's title and description go along. It works on a branch named for the issue, and can push it and open a pull request."
+                    tr("The issue's title and description go along. It works on a branch named for the issue, and can push it and open a pull request.")
                 } else {
-                    "What the agent works on. It can push its branch and open a pull request."
+                    tr("What the agent works on. It can push its branch and open a pull request.")
                 }),
             ))
-            .child(field(&theme, "Agent", agent, None))
-            .children(place.map(|p| field(&theme, "On", p, None)));
-        frame(&theme, "New box", Some("An agent works on the task by itself, in a container of its own with its permission prompts off. The box pauses when it's been quiet a while and picks up again when you ask it more.".into()))
+            .child(field(&theme, tr("Agent"), agent, None))
+            .children(place.map(|p| field(&theme, tr("On"), p, None)));
+        frame(&theme, tr("New box"), Some(tr("An agent works on the task by itself, in a container of its own with its permission prompts off. The box pauses when it's been quiet a while and picks up again when you ask it more.").into()))
             .key_context(CONTEXT)
             .on_action(cx.listener(|this, _: &PickUp, window, cx| this.move_highlight(-1, window, cx)))
             .on_action(cx.listener(|this, _: &PickDown, window, cx| this.move_highlight(1, window, cx)))
@@ -677,8 +683,8 @@ impl Render for BoxDialog {
             .child(div().id("bx-body").max_h(px(body_max)).overflow_y_scroll().child(fields))
             .children(error_line(&theme, &self.error))
             .child(footer(vec![
-                Button::new("bx-cancel", "Cancel").style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
-                Button::new("bx-start", "Start").style(ButtonStyle::Primary).icon("box").disabled(!any).on_click(cx.listener(|this, _, _, cx| this.submit(cx))).into_any_element(),
+                Button::new("bx-cancel", tr("Cancel")).style(ButtonStyle::Ghost).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Dismissed))).into_any_element(),
+                Button::new("bx-start", tr("Start")).style(ButtonStyle::Primary).icon("box").disabled(!any).on_click(cx.listener(|this, _, _, cx| this.submit(cx))).into_any_element(),
             ]))
             .font_weight(FontWeight::NORMAL)
     }

@@ -2,6 +2,7 @@
 //! borders, ghost buttons, monospace numbers.
 
 use std::time::Duration;
+use crate::ui::i18n::{tr};
 
 use gpui::{
     Animation, AnimationExt, AnyView, App, ClickEvent, Div, ElementId, FontWeight, Hsla, IntoElement,
@@ -63,12 +64,12 @@ impl IconStyle {
 
     pub fn label(self) -> &'static str {
         match self {
-            IconStyle::Tiles => "Tiles",
-            IconStyle::Soft => "Soft",
-            IconStyle::Duotone => "Duotone",
-            IconStyle::Rounded => "Rounded",
-            IconStyle::Fluent => "Fluent",
-            IconStyle::Minimal => "Minimal",
+            IconStyle::Tiles => tr("Tiles"),
+            IconStyle::Soft => tr("Soft"),
+            IconStyle::Duotone => tr("Duotone"),
+            IconStyle::Rounded => tr("Rounded"),
+            IconStyle::Fluent => tr("Fluent"),
+            IconStyle::Minimal => tr("Minimal"),
         }
     }
 

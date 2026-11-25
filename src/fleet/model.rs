@@ -342,12 +342,25 @@ pub struct DisplayInfo {
     /// The scales it can be set to (empty: it can't be).
     #[serde(default)]
     pub scales: Vec<f64>,
+    /// A virtual monitor standing in for one of a Mac's screens while that
+    /// screen is fitted to a view (see Engine::fit_display): the screen
+    /// (`mirrors`, its id) shows what this one does, at this one's size.
+    #[serde(default)]
+    pub fit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirrors: Option<String>,
 }
 
 impl DisplayInfo {
     /// Its size now, in whole points.
     pub fn size(&self) -> (u32, u32) {
         (self.width.round() as u32, self.height.round() as u32)
+    }
+
+    /// A virtual monitor added as another screen (not one standing in for a
+    /// screen that's fitted, which is that screen to whoever looks at it).
+    pub fn is_added(&self) -> bool {
+        self.is_virtual && !self.fit
     }
 }
 

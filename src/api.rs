@@ -4198,6 +4198,35 @@ pub async fn desktop_add_display(engine: &Arc<Engine>, req: AddDisplayRequest) -
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct FitDisplayRequest {
+    pub machine_id: String,
+    /// The screen to fit (default: the main one).
+    #[serde(default)]
+    pub display: Option<String>,
+    /// The view's size, in points.
+    pub width: u32,
+    pub height: u32,
+    /// Twice the pixels each way, for a view on a Retina screen (default true).
+    #[serde(default)]
+    pub retina: Option<bool>,
+}
+
+/// Makes one of a Mac's screens the size of a view (see Engine::fit_display).
+pub async fn desktop_fit_display(engine: &Arc<Engine>, req: FitDisplayRequest) -> ApiResult<crate::fleet::model::DisplayInfo> {
+    let m = find_machine(&engine.current(), &req.machine_id)?.clone();
+    let display = match req.display {
+        Some(display) => display,
+        None => {
+            let known = if m.displays.is_empty() { engine.displays(&m.id).await.map_err(|e| ApiError::new("operation_failed", e))? } else { m.displays.clone() };
+            let screens: Vec<_> = known.iter().filter(|d| d.id != "all").collect();
+            screens.iter().find(|d| d.main).or(screens.first()).map(|d| d.id.clone()).ok_or_else(|| ApiError::new("not_found", format!("{} lists no screen to fit.", m.name)))?
+        }
+    };
+    engine.fit_display(&m.id, &display, req.width, req.height, req.retina.unwrap_or(true)).await.map_err(|e| ApiError::new("operation_failed", e))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetDisplayRequest {
     pub machine_id: String,
     pub display: String,

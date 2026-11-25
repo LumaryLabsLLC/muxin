@@ -425,6 +425,7 @@ async fn dispatch(engine: &Arc<Engine>, session: &Session, name: &str, a: Value)
         "desktop_add_display" => ok(api::desktop_add_display(engine, args(a)?).await?),
         "desktop_remove_display" => ok(api::desktop_remove_display(engine, args(a)?).await?),
         "desktop_set_display" => ok(api::desktop_set_display(engine, args(a)?).await?),
+        "desktop_fit_display" => ok(api::desktop_fit_display(engine, args(a)?).await?),
         "log_sources" => ok(api::log_sources(engine, args(a)?).await?),
         "logs_read" => ok(api::logs_read(engine, args(a)?).await?),
         "machine_services" => ok(api::machine_services(engine, args(a)?).await?),
@@ -1190,6 +1191,18 @@ pub fn tools() -> Vec<Value> {
             "annotations": annotations("Set monitor resolution or scale", false, false, true, false),
         }),
         json!({
+            "name": "desktop_fit_display",
+            "description": "Make one of a Mac's screens the size of a view: width×height points, Retina (twice the pixels each way) unless retina is false. The Mac gets a virtual monitor of that size that the screen mirrors, in its place, so its desktop is laid out for the view, as if it were plugged into the screen the view is on (2560×1440 Retina: a 5K display). Returns the monitor standing in for the screen (virtual: true, fit: true, mirrors: the screen's id): pass its id as `display` to see and use it. Call it again with another size to change it where it is. desktop_remove_display on it gives the screen its own size back, and the Mac does by itself once nobody has watched its desktop (one open in Muxin, a screenshot, of any of its screens) for a minute. Each screen is fitted on its own, so a Mac can have several fitted at once. It's what the Muxin app's Fit does for the desktop it shows. Changes the user's real desktop: only when asked.",
+            "inputSchema": schema(json!({
+                "machine_id": { "type": "string", "description": MACHINE_ID },
+                "display": { "type": "string", "description": "The screen to fit (an id from desktop_displays). Default: the main one." },
+                "width": { "type": "integer", "minimum": 640, "maximum": 7680, "description": "The view's width in points (3840 at most when Retina)." },
+                "height": { "type": "integer", "minimum": 480, "maximum": 4320, "description": "The view's height in points (2160 at most when Retina)." },
+                "retina": { "type": "boolean", "description": "Twice the pixels each way. Default true." }
+            }), &["machine_id", "width", "height"]),
+            "annotations": annotations("Fit a Mac's screen to a view", false, false, true, false),
+        }),
+        json!({
             "name": "log_sources",
             "description": "What a machine has in the way of logs: the system log (journal on Linux, unified log on a Mac; kind system, and kernel on Linux), log files (with readable: false for root-only ones), Docker containers and running services (systemd units; user: true for the user's own). Pass an entry's kind and target to logs_read.",
             "inputSchema": schema(json!({ "machine_id": { "type": "string", "description": MACHINE_ID } }), &["machine_id"]),
@@ -1455,7 +1468,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_well_formed() {
         let tools = tools();
-        assert_eq!(tools.len(), if cfg!(feature = "recipes") { 104 } else { 102 });
+        assert_eq!(tools.len(), if cfg!(feature = "recipes") { 105 } else { 103 });
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
         names.dedup();

@@ -669,7 +669,8 @@ impl Root {
                 // Every size it offers (from 1024 wide), and its scale.
                 let current = (d.width.round() as u32, d.height.round() as u32);
                 let sizes: Vec<(u32, u32)> = d.modes.iter().copied().filter(|(w, _)| *w >= 1024).collect();
-                if sizes.len() > 1 {
+                // (A fitted screen's size is its view's.)
+                if sizes.len() > 1 && !d.fit {
                     let value = sizes.contains(&current).then(|| format!("{} × {}", current.0, current.1));
                     let sizes = sizes
                         .into_iter()
@@ -691,7 +692,11 @@ impl Root {
                         items.push(Item::Action { label: label.into(), glyph, action, danger: false });
                     }
                 }
-                if d.is_virtual {
+                if d.fit {
+                    // The monitor standing in for it goes, and the screen is as it was.
+                    items.push(Item::Separator);
+                    items.push(Item::Action { label: "Its own size again".into(), glyph: Glyph::Icon("monitor"), action: Action::RemoveDisplay(machine.clone(), display.clone()), danger: false });
+                } else if d.is_virtual {
                     items.push(Item::Separator);
                     items.push(Item::Action { label: "Remove monitor".into(), glyph: Glyph::Icon("trash-2"), action: Action::RemoveDisplay(machine.clone(), display.clone()), danger: true });
                 }

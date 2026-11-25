@@ -157,6 +157,19 @@ pub struct Appearance {
     pub split_ratio: f32,
     /// Machines whose desktop is an item in the sidebar.
     pub desktops: Vec<String>,
+    /// Machines whose desktop opens in a window of its own: an item under
+    /// them in the sidebar all the same, which brings that window forward
+    /// (or opens it again, after Muxin was quit with it open).
+    pub desktop_windows: Vec<String>,
+    /// Machines folded in the sidebar (their rows put away).
+    pub folded_machines: Vec<String>,
+    /// Screens with Fit on, as "machine:screen's name": fitted again when
+    /// their desktop next shows (the Mac lets a fitted screen go once nobody
+    /// looks at it), until Fit is turned off.
+    pub fitted_screens: Vec<String>,
+    /// The sidebar lists machines and their desktops, not their sessions:
+    /// for when Muxin is the way to their screens.
+    pub sidebar_desktops_only: bool,
     /// Terminals split into panes, each layout as text (see panes.rs).
     pub panes: Vec<String>,
     /// Favorite machines, with a star: first in the sidebar (so ⌘1, ⌘2, …)
@@ -205,6 +218,10 @@ impl Default for Appearance {
             github_folded_owners: Vec::new(),
             split_ratio: 0.5,
             desktops: Vec::new(),
+            desktop_windows: Vec::new(),
+            folded_machines: Vec::new(),
+            fitted_screens: Vec::new(),
+            sidebar_desktops_only: false,
             panes: Vec::new(),
             favorite_machines: Vec::new(),
             machines_ordered: false,

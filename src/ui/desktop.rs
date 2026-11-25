@@ -78,6 +78,11 @@ enum Msg {
     NoScreen(String),
     /// The monitor asked for is gone: showing the default one instead.
     Gone,
+    /// The monitor this stream shows, as the machine has it now (None: it
+    /// didn't say).
+    Showing(Option<Place>),
+    /// The machine was just asked for its monitors.
+    Listed,
     /// The app's window shown was closed there: why.
     Closed(String),
     /// What changed about the app's window shown (see `apply_meta`).
@@ -116,6 +121,134 @@ fn size_choices(d: &DisplayInfo) -> Vec<((u32, u32), String)> {
     }
     choices.sort_by_key(|&((w, h), _)| (w as u64 * h as u64, w));
     choices
+}
+
+/// A size in a monitor's menu.
+#[derive(Debug, PartialEq)]
+struct SizeRow {
+    size: (u32, u32),
+    /// "1080p", or the size itself when it has no short name.
+    label: String,
+    /// Beside it: "Original" for the monitor's own size, else a named
+    /// size's numbers.
+    note: String,
+    /// The size it's at.
+    on: bool,
+}
+
+/// What a monitor's menu offers: its own size first (the one it had before
+/// Muxin changed it, so the way back is always the top line), then the
+/// others (see `size_choices`), smallest first.
+fn size_rows(d: &DisplayInfo) -> Vec<SizeRow> {
+    let (current, original) = (d.size(), d.before.unwrap_or(d.size()));
+    let mut choices = size_choices(d);
+    choices.sort_by_key(|(size, _)| *size != original);
+    choices
+        .into_iter()
+        .map(|(size, label)| {
+            let numbers = format!("{}×{}", size.0, size.1);
+            let note = if size == original { "Original".to_string() } else if label != numbers { numbers } else { String::new() };
+            SizeRow { size, label, note, on: size == current }
+        })
+        .collect()
+}
+
+/// Whether a monitor's desktop can be shown at 100% and at 200%.
+fn offers_scales(d: &DisplayInfo) -> bool {
+    [1., 2.].iter().all(|s| d.scales.iter().any(|x| (x - s).abs() < 0.01))
+}
+
+/// Whether a monitor has anything to pick in its menu: another size, or a scale.
+fn has_monitor_menu(d: &DisplayInfo) -> bool {
+    size_choices(d).len() > 1 || offers_scales(d)
+}
+
+/// How often a desktop that's showing asks its machine for its monitors.
+const MONITOR_CHECK: Duration = Duration::from_secs(3);
+
+/// How long the monitors a view last heard of are taken as they are: a
+/// stream that starts within it doesn't wait for them to be asked for again.
+const MONITORS_FRESH: Duration = Duration::from_secs(7);
+
+/// How many monitors a view keeps the last picture of, besides the one showing.
+const SEEN: usize = 2;
+
+/// A monitor's size and where it sits on its machine's desktop, as a stream
+/// of it began: the machine places the mouse by these, so a stream outlived
+/// by them puts it beside where it points.
+#[derive(Clone, Debug, PartialEq)]
+struct Place {
+    id: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    /// A Mac's pixels per point (the same size, sharper or not, is another
+    /// picture); elsewhere the size is in pixels already.
+    scale: f64,
+}
+
+impl Place {
+    fn of(d: &DisplayInfo, mac: bool) -> Place {
+        Place { id: d.id.clone(), x: d.x, y: d.y, width: d.width, height: d.height, scale: if mac { d.scale } else { 0. } }
+    }
+}
+
+/// The monitor a stream asked for as `display` shows, among the machine's:
+/// that one, or with none named the main one (a Mac's own choice; on Linux
+/// `start` asks for it by name).
+fn shown_monitor<'a>(displays: &'a [DisplayInfo], display: &str) -> Option<&'a DisplayInfo> {
+    if !display.is_empty() {
+        return displays.iter().find(|d| d.id == display);
+    }
+    displays.iter().find(|d| d.main && d.id != "all").or_else(|| displays.iter().find(|d| d.id == "all")).or(displays.first())
+}
+
+/// Whether a stream that began showing `was` has to start over: its monitor
+/// is another size or somewhere else on the desktop now, or it's gone. Not
+/// while nothing is known of the machine's monitors.
+fn moved(was: &Place, displays: &[DisplayInfo], display: &str, mac: bool) -> bool {
+    match shown_monitor(displays, display) {
+        Some(d) => Place::of(d, mac) != *was,
+        None => !displays.is_empty(),
+    }
+}
+
+/// What a screen with Fit on is remembered by (see Appearance's
+/// `fitted_screens`): its machine and its name. Not its number, which can
+/// be another when it's plugged in again; and the monitor standing in for a
+/// fitted screen has the screen's name.
+fn fit_key(machine: &str, screen: &str) -> String {
+    format!("{machine}:{screen}")
+}
+
+/// Fit is off for a screen (it was turned off, or its stand-in removed by
+/// hand): not fitted again by itself.
+pub fn forget_fit(machine: &str, screen: &str, cx: &mut App) {
+    let key = fit_key(machine, screen);
+    if cx.global::<super::theme::Appearance>().fitted_screens.contains(&key) {
+        super::theme::remember(cx, |a| a.fitted_screens.retain(|k| *k != key));
+    }
+}
+
+/// How long a view stays one size before the screen fitted to it is asked
+/// for that size (a window being resized passes through many).
+const FIT_SETTLE: Duration = Duration::from_millis(900);
+
+/// The size a screen fitted to a view drawn in `area` is, in points (even, so
+/// a Retina one's pixels divide), and whether it's Retina: when this screen
+/// is. None while the view is too small to be a desktop.
+fn fit_size(area: Bounds<Pixels>, scale: f32) -> Option<((u32, u32), bool)> {
+    let (w, h) = (f32::from(area.size.width).round() as u32 & !1, f32::from(area.size.height).round() as u32 & !1);
+    (w >= 640 && h >= 480).then_some(((w, h), scale >= 1.5))
+}
+
+/// Whether a fitted screen that's `shown` points is asked for the `wanted`
+/// size of its view: not when it's that size (or as near as makes no
+/// difference), and not a size already asked for (the Mac gave what it could).
+fn refit(shown: (u32, u32), wanted: (u32, u32), asked: Option<(u32, u32)>) -> bool {
+    let near = shown.0.abs_diff(wanted.0) <= 2 && shown.1.abs_diff(wanted.1) <= 2;
+    !near && asked != Some(wanted)
 }
 
 /// An app's window shown on its own (a `window:<id>` display), as its stream
@@ -181,6 +314,16 @@ pub struct DesktopView {
     /// One of the machine's displays (None: the whole desktop, or a Mac's
     /// main display), or an app's window (`window:<id>`).
     display: Option<String>,
+    /// The monitor the stream shows, as it was when the stream began (None
+    /// while one is starting, and for an app's window or a shared desktop).
+    place: Option<Place>,
+    /// When the machine was last asked for its monitors, by this view.
+    monitors_at: Option<Instant>,
+    /// The monitors shown before this one, as they last looked: (display,
+    /// picture, its size). One gone back to shows at once, as it was, for the
+    /// second or so its stream takes to start. The pictures alone, not
+    /// their textures.
+    seen: Vec<(String, Arc<RenderImage>, (u32, u32))>,
     /// That app's window, once its stream started; and the size last asked
     /// of it there (points), so a resize asks once.
     app: Option<AppShown>,
@@ -233,6 +376,8 @@ pub struct DesktopView {
     hook_super: bool,
     /// The Keys menu is open: where its button was clicked.
     keys_menu: Option<Point<Pixels>>,
+    /// The monitor's menu (its resolution and scale) is open: the same.
+    monitor_menu: Option<Point<Pixels>>,
     /// A dead key waiting for the next key, with the input method (see `DesktopInput`).
     composing: Composition,
     /// Other keys (keysyms) and mouse buttons it has been told are down, let
@@ -259,6 +404,21 @@ pub struct DesktopView {
     /// A monitor's size or scale being changed, and why the last change didn't happen.
     changing: bool,
     change_error: Option<String>,
+    /// That change is the screen being fitted to this view (see `toggle_fit`).
+    fitting: bool,
+    /// The size last asked for a fitted screen, and which one (so a size the
+    /// Mac can't give isn't asked again and again; another screen fitted
+    /// from this view is asked for itself), and the size the one shown is
+    /// about to be asked for, once the view has stayed that size a moment.
+    fit_asked: Option<(String, (u32, u32))>,
+    fit_due: Option<((u32, u32), Task<()>)>,
+    /// Screens this view fitted again by itself (see `fit_remembered`): each
+    /// once, so one that can't be fitted isn't tried over and over.
+    refitted: Vec<String>,
+    /// The stream ended while its monitor was being changed (the Mac ends a
+    /// stream whose display is another size): it starts again once the
+    /// change is over (see `after_change`), not before, on what was there.
+    held_back: bool,
     /// Picking a dropped stream back up: tries so far, and the next one.
     resuming: bool,
     retries: u32,
@@ -305,6 +465,9 @@ impl DesktopView {
             can_control,
             quality,
             display: None,
+            place: None,
+            monitors_at: None,
+            seen: Vec::new(),
             app: None,
             asked: None,
             closed: false,
@@ -333,6 +496,7 @@ impl DesktopView {
             given_back: false,
             hook_super: false,
             keys_menu: None,
+            monitor_menu: None,
             composing: Composition::default(),
             keys_down: Vec::new(),
             buttons: desktop_keys::Buttons::default(),
@@ -352,6 +516,11 @@ impl DesktopView {
             paused: false,
             changing: false,
             change_error: None,
+            fitting: false,
+            fit_asked: None,
+            fit_due: None,
+            refitted: Vec::new(),
+            held_back: false,
             _tasks: Vec::new(),
             _subscriptions: Vec::new(),
         };
@@ -393,20 +562,34 @@ impl DesktopView {
         let id = view.machine.clone();
         let follow = cx.spawn_in(window, async move |this, cx| {
             let mut last: Option<Option<String>> = None;
+            let mut monitors: Option<Vec<DisplayInfo>> = None;
             loop {
-                let offline = {
+                let (offline, displays, platform) = {
                     let snap = rx.borrow_and_update();
-                    snap.machines.iter().find(|m| m.id == id).and_then(|m| {
+                    let machine = snap.machines.iter().find(|m| m.id == id);
+                    let offline = machine.and_then(|m| {
                         if m.is_disconnected() {
                             Some(format!("Disconnected from {}: connect to it to see its desktop", m.name))
                         } else {
                             (m.status == "offline" || m.is_asleep()).then(|| m.unreachable.as_ref().map(|u| u.title.clone()).unwrap_or_else(|| format!("Can't reach {}", m.name)))
                         }
-                    })
+                    });
+                    (offline, machine.map(|m| m.displays.clone()).unwrap_or_default(), machine.map(|m| m.platform.clone()))
                 };
                 if last.as_ref() != Some(&offline) {
                     last = Some(offline.clone());
                     if this.update_in(cx, |this, window, cx| this.set_offline(offline, window, cx)).is_err() {
+                        break;
+                    }
+                }
+                // Opened before the machine was first checked: what it is, now.
+                if platform.as_ref().is_some_and(|p| !p.is_empty()) && this.update(cx, |this, _| this.learn_platform(platform.as_deref().unwrap_or_default())).is_err() {
+                    break;
+                }
+                // Its monitors changed: the one shown may be another size now.
+                if monitors.as_ref() != Some(&displays) {
+                    monitors = Some(displays);
+                    if this.update_in(cx, |this, window, cx| this.monitors_changed(window, cx)).is_err() {
                         break;
                     }
                 }
@@ -416,7 +599,79 @@ impl DesktopView {
             }
         });
         view._tasks.push(follow);
+        // A machine doesn't say when a monitor is plugged in or taken away,
+        // or set to another size there: while its desktop shows, ask now and
+        // then, so the bar offers the monitors it has and the stream follows
+        // the one shown (see `monitors_changed`).
+        let (engine, id) = (view.engine.clone(), view.machine.clone());
+        let watch = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(MONITOR_CHECK).await;
+                let Ok(showing) = this.update(cx, |this, _| this.watches_monitors()) else { break };
+                if showing {
+                    let (engine, id) = (engine.clone(), id.clone());
+                    let asked = engine.runtime().clone().spawn(async move { engine.displays(&id).await }).await;
+                    if matches!(asked, Ok(Ok(_))) && this.update(cx, |this, _| this.monitors_at = Some(Instant::now())).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        view._tasks.push(watch);
         view
+    }
+
+    /// The machine's system, when the view was made before anyone knew it (its
+    /// machine not checked yet): a Mac's keys and what's offered for a Mac go
+    /// by it.
+    fn learn_platform(&mut self, platform: &str) {
+        if self.platform.is_empty() && !platform.is_empty() {
+            self.platform = platform.to_string();
+            self.mac = self.platform.starts_with("darwin");
+            self.mods.set_there(if self.mac { Os::Mac } else { Os::Pc });
+            // (What the stream began with was read as another system's: the
+            // next stream's is compared, not this one's.)
+            self.place = None;
+        }
+    }
+
+    /// Whether to keep asking the machine for its monitors: while one of them
+    /// shows, live.
+    fn watches_monitors(&self) -> bool {
+        matches!(self.state, State::Live) && !self.paused && self.offline.is_none() && !self.shows_window() && !self.engine.is_demo()
+    }
+
+    /// A change to the machine's monitors asked from here is over, and it
+    /// didn't start the stream again itself: one that ended meanwhile starts
+    /// now, and one still going is looked at (`monitors_changed`).
+    fn after_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.held_back {
+            self.retries = 0;
+            self.start(window, cx);
+        } else {
+            self.monitors_changed(window, cx);
+        }
+    }
+
+    /// The machine's monitors aren't what they were: when the one shown is
+    /// another size or somewhere else on its desktop now (set there, or from
+    /// another Muxin; another monitor resized beside it), the stream starts
+    /// over, as the machine places the mouse by what the stream began with.
+    /// One that's gone goes back to the default one (see `start`).
+    fn monitors_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(was) = &self.place else { return };
+        // (`change_display` starts it over itself.)
+        if self.paused || self.changing || self.offline.is_some() || matches!(self.state, State::Ended(_)) {
+            return;
+        }
+        let displays = self.engine.current().machines.iter().find(|m| m.id == self.machine).map(|m| m.displays.clone()).unwrap_or_default();
+        if !moved(was, &displays, self.display.as_deref().unwrap_or(""), self.mac) {
+            return;
+        }
+        tracing::info!("desktop {}: its monitor changed ({was:?}), starting over", self.machine);
+        self.retries = 0;
+        self.start(window, cx);
+        cx.notify();
     }
 
     fn set_offline(&mut self, offline: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
@@ -603,16 +858,217 @@ impl DesktopView {
         self.send(json!({ "t": "resize", "w": want.0, "h": want.1 }));
     }
 
+    /// Whether this desktop's screen can be made the size of this view: a
+    /// Mac's (see `toggle_fit`), one of our own machines'.
+    pub fn can_fit(&self) -> bool {
+        self.mac && self.shared.is_none() && !self.shows_window() && !self.engine.is_demo()
+    }
+
+    /// The monitor shown, as the machine lists it now.
+    fn monitor(&self) -> Option<DisplayInfo> {
+        let snapshot = self.engine.current();
+        let displays = &snapshot.machines.iter().find(|m| m.id == self.machine)?.displays;
+        shown_monitor(displays, self.display.as_deref().unwrap_or("")).cloned()
+    }
+
+    /// The monitor shown when it's a fitted screen: its id and size.
+    fn fitted(&self) -> Option<(String, (u32, u32))> {
+        let snapshot = self.engine.current();
+        let displays = &snapshot.machines.iter().find(|m| m.id == self.machine)?.displays;
+        shown_monitor(displays, self.display.as_deref().unwrap_or("")).filter(|d| d.fit).map(|d| (d.id.clone(), d.size()))
+    }
+
+    /// The size a screen fitted to this view is: the room its picture has
+    /// here, in points, and whether this screen is Retina (the Mac's is then
+    /// too, so a point there is a point here, as sharp).
+    fn fit_wanted(&self, window: &Window) -> Option<((u32, u32), bool)> {
+        fit_size(self.area.get()?, window.scale_factor())
+    }
+
+    /// Fit, from the toolbar: the Mac's screen becomes the size of this view,
+    /// as if the Mac were plugged into the screen the view is on (full screen
+    /// on a 5K display: 2560×1440, Retina). The Mac gets a virtual monitor of
+    /// that size, which its screen mirrors (see Engine::fit_display); the
+    /// view shows that monitor, and it follows the view's size from then on
+    /// (`follow_fit`). Again: the screen has its own size back.
+    pub fn toggle_fit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.changing || !self.can_fit() {
+            return;
+        }
+        let Some(shown) = self.monitor() else { return };
+        if !shown.fit {
+            match self.fit_wanted(window) {
+                Some((size, retina)) => self.fit(shown.id, size, retina, window, cx),
+                None => {
+                    self.change_error = Some("This view is too small for a desktop: make it bigger, then Fit.".into());
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        (self.changing, self.fitting, self.change_error, self.fit_due, self.fit_asked) = (true, true, None, None, None);
+        // Off until it's turned on again (and not by itself, when its screen shows).
+        forget_fit(&self.machine, &shown.name, cx);
+        if let Some(screen) = &shown.mirrors {
+            self.refitted.push(screen.clone());
+        }
+        cx.notify();
+        let (engine, machine) = (self.engine.clone(), self.machine.clone());
+        let job = engine.runtime().spawn({
+            let (engine, id) = (engine.clone(), shown.id.clone());
+            async move { engine.remove_display(&machine, &id).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = job.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                (this.changing, this.fitting) = (false, false);
+                match result {
+                    // The screen it stood in for is back: that one shows.
+                    Ok(Ok(())) => {
+                        this.display = shown.mirrors.clone();
+                        this.retries = 0;
+                        this.monitors_at = Some(Instant::now());
+                        this.start(window, cx);
+                    }
+                    Ok(Err(crate::fleet::desktop::AddDisplayError::NeedsPassword(e) | crate::fleet::desktop::AddDisplayError::Failed(e))) => {
+                        this.change_error = Some(e);
+                        this.after_change(window, cx);
+                    }
+                    Err(e) => {
+                        this.change_error = Some(e.to_string());
+                        this.after_change(window, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Asks the Mac to make `display` (a screen, or the monitor standing in
+    /// for one already) `size` points, and shows what comes of it.
+    fn fit(&mut self, display: String, size: (u32, u32), retina: bool, window: &mut Window, cx: &mut Context<Self>) {
+        (self.changing, self.fitting, self.change_error, self.fit_due, self.fit_asked) = (true, true, None, None, Some((display.clone(), size)));
+        cx.notify();
+        let (engine, machine) = (self.engine.clone(), self.machine.clone());
+        let job = engine.runtime().spawn({
+            let engine = engine.clone();
+            async move { engine.fit_display(&machine, &display, size.0, size.1, retina).await }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update_in(cx, |this, window, cx| {
+                (this.changing, this.fitting) = (false, false);
+                match result {
+                    Ok(fitted) => {
+                        // On until it's turned off: kept, for the next time
+                        // its desktop shows (after a quit, say).
+                        let key = fit_key(&this.machine, &fitted.name);
+                        if !cx.global::<super::theme::Appearance>().fitted_screens.contains(&key) {
+                            super::theme::remember(cx, |a| a.fitted_screens.push(key));
+                        }
+                        // (Asked of the monitor standing in for the screen, from here on.)
+                        this.fit_asked = Some((fitted.id.clone(), size));
+                        this.display = Some(fitted.id);
+                        this.retries = 0;
+                        // Not the old shape stretched while the new one comes.
+                        if let Some(old) = this.frame.take() {
+                            cx.drop_image(old, Some(window));
+                        }
+                        this.monitors_at = Some(Instant::now());
+                        this.start(window, cx);
+                    }
+                    Err(e) => {
+                        this.change_error = Some(e);
+                        this.after_change(window, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Fit stays on until it's turned off: a screen it was on for when it was
+    /// last looked at (Muxin quit, its desktop closed: the Mac let it go a
+    /// minute later) is fitted again when it shows here, live. Each screen
+    /// once in a view's life.
+    fn fit_remembered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prefix = fit_key(&self.machine, "");
+        if !cx.global::<super::theme::Appearance>().fitted_screens.iter().any(|k| k.starts_with(&prefix)) {
+            return;
+        }
+        let Some((size, retina)) = self.fit_wanted(window) else { return };
+        let Some(shown) = self.monitor().filter(|d| !d.fit && !d.is_virtual && !self.refitted.contains(&d.id)) else { return };
+        if !cx.global::<super::theme::Appearance>().fitted_screens.contains(&fit_key(&self.machine, &shown.name)) {
+            return;
+        }
+        self.refitted.push(shown.id.clone());
+        self.fit(shown.id, size, retina, window, cx);
+    }
+
+    /// A fitted screen follows its view: when the view is another size (the
+    /// window went full screen, a pane was dragged), the Mac is asked for
+    /// that size once the view has stayed there a moment. Each size once.
+    fn follow_fit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.changing || self.paused || !self.can_fit() || !matches!(self.state, State::Live) {
+            return;
+        }
+        let Some(((id, shown), (size, retina))) = self.fitted().zip(self.fit_wanted(window)) else {
+            self.fit_due = None;
+            self.fit_remembered(window, cx);
+            return;
+        };
+        // (What was asked of another screen says nothing of this one.)
+        let asked = self.fit_asked.as_ref().filter(|(of, _)| *of == id).map(|(_, size)| *size);
+        if !refit(shown, size, asked) {
+            self.fit_due = None;
+            return;
+        }
+        if self.fit_due.as_ref().is_some_and(|(due, _)| *due == size) {
+            return;
+        }
+        let wait = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(FIT_SETTLE).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.fit_due = None;
+                // Still that size, and still fitted.
+                if let Some(((id, _), (still, _))) = this.fitted().zip(this.fit_wanted(window))
+                    && still == size
+                    && !this.changing
+                {
+                    this.fit(id, size, retina, window, cx);
+                }
+            });
+        });
+        self.fit_due = Some((size, wait));
+    }
+
     /// Shows another of the machine's displays: a new stream.
     pub fn set_display(&mut self, display: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         if display != self.display {
+            let (from, to) = (self.display.clone().unwrap_or_default(), display.clone().unwrap_or_default());
+            // Not the last monitor's picture while the new one comes: it's
+            // kept (without its texture) for coming back to that monitor...
+            if let Some(old) = self.frame.take() {
+                cx.drop_image(old.clone(), Some(window));
+                self.seen.retain(|(d, ..)| *d != from);
+                self.seen.push((from, old, self.size));
+                if self.seen.len() > SEEN {
+                    self.seen.remove(0);
+                }
+            }
             self.display = display;
+            // ...and the one gone to shows as it last looked, at once, until
+            // its stream starts (about a second, most of it the machine
+            // starting to capture).
+            if let Some(i) = self.seen.iter().position(|(d, ..)| *d == to) {
+                let (_, picture, size) = self.seen.remove(i);
+                (self.frame, self.size) = (Some(picture), size);
+            }
             (self.app, self.asked) = (None, None);
             self.retries = 0;
-            // Not the last monitor's picture while the new one comes.
-            if let Some(old) = self.frame.take() {
-                cx.drop_image(old, Some(window));
-            }
+            self.monitor_menu = None;
             self.start(window, cx);
             cx.notify();
         }
@@ -642,10 +1098,15 @@ impl DesktopView {
                         if let Some(old) = this.frame.take() {
                             cx.drop_image(old, Some(window));
                         }
+                        // (Setting it asked for the monitors again.)
+                        this.monitors_at = Some(Instant::now());
                         this.start(window, cx);
                     }
-                    Ok(()) => {}
-                    Err(e) => this.change_error = Some(e),
+                    Ok(()) => this.after_change(window, cx),
+                    Err(e) => {
+                        this.change_error = Some(e);
+                        this.after_change(window, cx);
+                    }
                 }
                 cx.notify();
             });
@@ -686,6 +1147,8 @@ impl DesktopView {
             return;
         }
         self.remote = None;
+        self.place = None;
+        self.held_back = false;
         self.state = State::Connecting;
         self.no_screen = false;
         self.opened = None;
@@ -694,6 +1157,8 @@ impl DesktopView {
         self.pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Msg>();
         let (engine, machine_id, wanted, mut display) = (self.engine.clone(), self.machine.clone(), self.width, self.display.clone().unwrap_or_default());
+        let mac = self.mac;
+        let listed = self.monitors_at.is_some_and(|at| at.elapsed() < MONITORS_FRESH);
         let (canvas, pending) = (self.canvas.clone(), self.pending.clone());
         let rt = engine.runtime().clone();
         if let Some(joined) = self.shared.clone() {
@@ -730,70 +1195,104 @@ impl DesktopView {
                     let _ = tx.unbounded_send(Msg::Ended("The demo has no desktops to show.".into(), false));
                     return;
                 }
-                // Its monitors as they are now (one may have been added, removed
-                // or resized since), for the picker; a gone one falls back to the default.
-                // (An app's window isn't one of them.)
-                let displays = match display.starts_with("window:") {
-                    true => None,
-                    false => engine.displays(&machine_id).await.ok(),
+                // Its monitors, for the picker and to tell what to show (a gone one
+                // falls back to the default; an app's window isn't one of them).
+                // As this view heard of them a moment ago, when it did (it asks
+                // every few seconds while it shows, and each change it makes
+                // asks): a monitor switched to starts at once, and they're asked
+                // for again meanwhile. Else asked for now.
+                let known = engine.current().machines.iter().find(|m| m.id == machine_id).map(|m| m.displays.clone()).filter(|d| listed && !d.is_empty());
+                let mut from_memory = known.is_some();
+                let mut displays = match (display.starts_with("window:"), known) {
+                    (true, _) => None,
+                    (false, Some(known)) => {
+                        let (engine, id) = (engine.clone(), machine_id.clone());
+                        tokio::spawn(async move { engine.displays(&id).await });
+                        Some(known)
+                    }
+                    (false, None) => {
+                        let now = engine.displays(&machine_id).await.ok();
+                        if now.is_some() {
+                            let _ = tx.unbounded_send(Msg::Listed);
+                        }
+                        now
+                    }
                 };
-                if let Some(displays) = displays {
-                    if !display.is_empty() && display != "all" && !displays.iter().any(|d| d.id == display) {
-                        display.clear();
-                        let _ = tx.unbounded_send(Msg::Gone);
+                let (mut frames, what, asked) = loop {
+                    if let Some(displays) = &displays {
+                        if !display.is_empty() && display != "all" && !displays.iter().any(|d| d.id == display) {
+                            display.clear();
+                            let _ = tx.unbounded_send(Msg::Gone);
+                        }
+                        // The default: the main monitor (the agent's own default on
+                        // Linux is the whole desktop).
+                        if display.is_empty()
+                            && displays.iter().any(|d| d.id == "all")
+                            && let Some(main) = displays.iter().find(|d| d.main && d.id != "all")
+                        {
+                            display = main.id.clone();
+                        }
+                        // What this stream begins with, to tell when it has changed.
+                        let place = shown_monitor(displays, &display).map(|d| Place::of(d, mac));
+                        let _ = tx.unbounded_send(Msg::Showing(place));
                     }
-                    // The default: the main monitor (the agent's own default on
-                    // Linux is the whole desktop).
-                    if display.is_empty()
-                        && displays.iter().any(|d| d.id == "all")
-                        && let Some(main) = displays.iter().find(|d| d.main && d.id != "all")
-                    {
-                        display = main.id.clone();
+                    let Some(link) = crate::fleet::link::get(&spec).await else {
+                        let _ = tx.unbounded_send(Msg::Ended(format!("Can't reach the agent on {}.", spec.name), true));
+                        return;
+                    };
+                    let network = link.network();
+                    // Full resolution on a local network; further away, 1080p (an app's
+                    // window: up to 4K wide, as a big one on a Retina Mac is).
+                    let far = if display.starts_with("window:") { 3840 } else { 1920 };
+                    let width = wanted.unwrap_or(if matches!(network, Some("Local network" | "This computer")) { NATIVE } else { far });
+                    let via = [Some(if link.transport() == "direct" { "Direct" } else { "Over ssh" }), network].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                    let (channel, frames) = link.open_channel();
+                    let request = json!({ "op": "desktop", "channel": channel, "fps": 30, "quality": 78, "max_width": width, "tiles": true, "display": display });
+                    let (asked, what) = (Instant::now(), format!("{} {} (channel {channel}, {via})", spec.name, if display.is_empty() { "desktop" } else { display.as_str() }));
+                    tracing::info!("desktop {what}: asking{}", if from_memory { " (its monitors as last heard)" } else { "" });
+                    // (A Mac's window may take a second try at starting: see mac_screen.m.)
+                    let reply = link.request(request, Duration::from_secs(30)).await;
+                    match &reply {
+                        Ok(r) if r["ok"].as_bool() == Some(true) => tracing::info!("desktop {what}: ready after {:?}", asked.elapsed()),
+                        Ok(r) => tracing::info!("desktop {what}: refused after {:?}: {}", asked.elapsed(), r["error"]),
+                        Err(e) => tracing::info!("desktop {what}: no answer after {:?}: {e}", asked.elapsed()),
                     }
-                }
-                let Some(link) = crate::fleet::link::get(&spec).await else {
-                    let _ = tx.unbounded_send(Msg::Ended(format!("Can't reach the agent on {}.", spec.name), true));
-                    return;
+                    match reply {
+                        Ok(r) if r["ok"].as_bool() == Some(true) => {
+                            let (w, h) = (r["width"].as_u64().unwrap_or(0) as u32, r["height"].as_u64().unwrap_or(0) as u32);
+                            let note = r["note"].as_str().map(str::to_string);
+                            let _ = tx.unbounded_send(Msg::Ready(Arc::new(Remote::Link(link.clone(), channel)), w, h, format!("{via}|{width}"), note, r));
+                            break (frames, what, asked);
+                        }
+                        Ok(r) => {
+                            link.close_channel(channel);
+                            // The monitors were as heard of a moment ago: this one
+                            // may have gone since (unplugged, a fitted screen let
+                            // go). Asked for now; the default one when it has.
+                            if std::mem::take(&mut from_memory)
+                                && !display.is_empty()
+                                && let Ok(now) = engine.displays(&machine_id).await
+                                && !now.iter().any(|d| d.id == display)
+                            {
+                                let _ = tx.unbounded_send(Msg::Listed);
+                                displays = Some(now);
+                                continue;
+                            }
+                            let why = r["error"].as_str().unwrap_or("The machine can't show its desktop.").to_string();
+                            let _ = tx.unbounded_send(match (r["no_session"].as_bool(), r["gone"].as_bool()) {
+                                (Some(true), _) => Msg::NoScreen(why),
+                                (_, Some(true)) => Msg::Closed(why),
+                                _ => Msg::Ended(why, false),
+                            });
+                            return;
+                        }
+                        Err(e) => {
+                            link.close_channel(channel);
+                            let _ = tx.unbounded_send(Msg::Ended(e, true));
+                            return;
+                        }
+                    }
                 };
-                let network = link.network();
-                // Full resolution on a local network; further away, 1080p (an app's
-                // window: up to 4K wide, as a big one on a Retina Mac is).
-                let far = if display.starts_with("window:") { 3840 } else { 1920 };
-                let width = wanted.unwrap_or(if matches!(network, Some("Local network" | "This computer")) { NATIVE } else { far });
-                let via = [Some(if link.transport() == "direct" { "Direct" } else { "Over ssh" }), network].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-                let (channel, mut frames) = link.open_channel();
-                let request = json!({ "op": "desktop", "channel": channel, "fps": 30, "quality": 78, "max_width": width, "tiles": true, "display": display });
-                let (asked, what) = (Instant::now(), format!("{} {} (channel {channel}, {via})", spec.name, if display.is_empty() { "desktop" } else { display.as_str() }));
-                tracing::info!("desktop {what}: asking");
-                // (A Mac's window may take a second try at starting: see mac_screen.m.)
-                let reply = link.request(request, Duration::from_secs(30)).await;
-                match &reply {
-                    Ok(r) if r["ok"].as_bool() == Some(true) => tracing::info!("desktop {what}: ready after {:?}", asked.elapsed()),
-                    Ok(r) => tracing::info!("desktop {what}: refused after {:?}: {}", asked.elapsed(), r["error"]),
-                    Err(e) => tracing::info!("desktop {what}: no answer after {:?}: {e}", asked.elapsed()),
-                }
-                match reply {
-                    Ok(r) if r["ok"].as_bool() == Some(true) => {
-                        let (w, h) = (r["width"].as_u64().unwrap_or(0) as u32, r["height"].as_u64().unwrap_or(0) as u32);
-                        let note = r["note"].as_str().map(str::to_string);
-                        let _ = tx.unbounded_send(Msg::Ready(Arc::new(Remote::Link(link.clone(), channel)), w, h, format!("{via}|{width}"), note, r));
-                    }
-                    Ok(r) => {
-                        link.close_channel(channel);
-                        let why = r["error"].as_str().unwrap_or("The machine can't show its desktop.").to_string();
-                        let _ = tx.unbounded_send(match (r["no_session"].as_bool(), r["gone"].as_bool()) {
-                            (Some(true), _) => Msg::NoScreen(why),
-                            (_, Some(true)) => Msg::Closed(why),
-                            _ => Msg::Ended(why, false),
-                        });
-                        return;
-                    }
-                    Err(e) => {
-                        link.close_channel(channel);
-                        let _ = tx.unbounded_send(Msg::Ended(e, true));
-                        return;
-                    }
-                }
                 let mut pictured = false;
                 while let Some((kind, bytes)) = frames.recv().await {
                     if kind == META {
@@ -875,6 +1374,8 @@ impl DesktopView {
                                 }
                             }
                             Msg::Gone => this.display = None,
+                            Msg::Showing(place) => this.place = place,
+                            Msg::Listed => this.monitors_at = Some(Instant::now()),
                             Msg::Meta(meta) => this.apply_meta(&meta, window),
                             Msg::Closed(why) => {
                                 this.remote = None;
@@ -890,9 +1391,15 @@ impl DesktopView {
                             }
                             Msg::Ended(why, may_return) => {
                                 this.remote = None;
-                                // The connection dropped (another network, a
-                                // moment's hiccup): pick the stream back up.
-                                if may_return && this.offline.is_none() && this.retries < RETRIES {
+                                if may_return && this.offline.is_none() && this.changing {
+                                    // Its monitor is being changed: what's doing
+                                    // that starts it again, on what comes of it.
+                                    this.resuming = true;
+                                    this.held_back = true;
+                                    this.state = State::Connecting;
+                                } else if may_return && this.offline.is_none() && this.retries < RETRIES {
+                                    // The connection dropped (another network, a
+                                    // moment's hiccup): pick the stream back up.
                                     this.retries += 1;
                                     this.resuming = true;
                                     this.state = State::Connecting;
@@ -965,7 +1472,7 @@ impl DesktopView {
                     .text_color(gpui::white())
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.accent))
-                    .when(d.is_virtual, |el| el.child(kit::dot(theme.accent, 6.)))
+                    .when(d.is_added(), |el| el.child(kit::dot(theme.accent, 6.)))
                     .child(d.name.clone())
                     .child(kit::icon("external-link", 11., gpui::white().opacity(0.8)))
                     // The click is for the label, not the machine.
@@ -983,7 +1490,7 @@ impl DesktopView {
             return why.clone();
         }
         if self.changing {
-            return "Changing the monitor…".into();
+            return if self.fitting { "Fitting the screen…" } else { "Changing the monitor…" }.into();
         }
         if let Some(e) = &self.change_error {
             return e.clone();
@@ -1046,7 +1553,7 @@ impl DesktopView {
             window.focus(&self.focus);
             cx.notify();
             self.release.other();
-            self.keys_menu = None;
+            (self.keys_menu, self.monitor_menu) = (None, None);
             // What's held now, as the click has it: a modifier let go where the
             // view didn't hear of it would stay held there, and turn the click
             // into another (⌃ held on a Mac makes every left click a right one).
@@ -1361,7 +1868,95 @@ impl DesktopView {
     /// Opens or closes the Keys menu, under where its button was clicked.
     pub fn toggle_keys_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         self.keys_menu = if self.keys_menu.is_some() { None } else { Some(at) };
+        self.monitor_menu = None;
         cx.notify();
+    }
+
+    /// Opens or closes the monitor's menu, under where its button was clicked.
+    pub fn toggle_monitor_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        self.monitor_menu = if self.monitor_menu.is_some() { None } else { Some(at) };
+        self.keys_menu = None;
+        cx.notify();
+    }
+
+    /// The monitor's menu: the sizes it can be set to, its own first, and on
+    /// desktops that offer it, how big things are. Kept out of the bar: most
+    /// of the time a monitor is left at its own size.
+    fn monitor_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let at = self.monitor_menu?;
+        let shown = self.monitor().filter(|d| !d.fit && has_monitor_menu(d))?;
+        let theme = cx.theme();
+        const WIDTH: f32 = 216.;
+        // Under its button, inside the picture.
+        let left = self.area.get().map_or(8., |area| (f32::from(at.x - area.origin.x) - WIDTH / 2.).min(f32::from(area.size.width) - WIDTH - 8.).max(8.));
+        let row = |id: SharedString, label: String, note: String, on: bool| {
+            div()
+                .id(id)
+                .h(px(28.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(12.))
+                .rounded(crate::ui::kit::corner(5.))
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .text_color(theme.text)
+                .when(on, |d| d.bg(theme.element_selected))
+                .when(!on, |d| d.hover(|st| st.bg(theme.ghost_hover)))
+                .child(label)
+                .child(div().text_size(px(11.5)).text_color(theme.text_placeholder).child(note))
+        };
+        let heading = |text: &'static str| div().px(px(10.)).pt(px(6.)).pb(px(4.)).text_size(px(11.)).text_color(theme.text_placeholder).child(text);
+        let rows = size_rows(&shown);
+        let sizes = (rows.len() > 1).then(|| {
+            let lines: Vec<_> = rows
+                .into_iter()
+                .map(|r| {
+                    let (id, size) = (shown.id.clone(), r.size);
+                    row(format!("monitor-size-{}x{}", size.0, size.1).into(), r.label, r.note, r.on).on_click(cx.listener(move |this, _, window, cx| {
+                        this.monitor_menu = None;
+                        this.change_display(id.clone(), Some(size), None, window, cx);
+                    }))
+                })
+                .collect();
+            div().flex().flex_col().child(heading("Resolution")).children(lines)
+        });
+        let scales = offers_scales(&shown).then(|| {
+            let lines: Vec<_> = [(1., "100%", ""), (2., "200%", "Twice as big, as sharp")]
+                .into_iter()
+                .map(|(scale, label, note)| {
+                    let id = shown.id.clone();
+                    row(format!("monitor-scale-{label}").into(), label.into(), note.into(), (shown.scale - scale).abs() < 0.01).on_click(cx.listener(move |this, _, window, cx| {
+                        this.monitor_menu = None;
+                        this.change_display(id.clone(), None, Some(scale), window, cx);
+                    }))
+                })
+                .collect();
+            div().flex().flex_col().child(heading("Scale")).children(lines)
+        });
+        Some(
+            div()
+                .absolute()
+                .top(px(6.))
+                .left(px(left))
+                .w(px(WIDTH))
+                .p(px(4.))
+                .flex()
+                .flex_col()
+                .rounded(crate::ui::kit::corner(8.))
+                .bg(theme.surface)
+                .border_1()
+                .border_color(theme.border)
+                .when(!crate::ui::kit::square(), |d| d.shadow_lg())
+                .occlude()
+                // A click in the menu isn't a click on the machine's screen.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .children(sizes)
+                .children(scales)
+                .into_any_element(),
+        )
     }
 
     /// Presses a combination on the machine ("ctrl+right"), as the Keys menu
@@ -1669,7 +2264,8 @@ fn paint_frame(canvas: &std::sync::Mutex<Canvas>, msg: &[u8]) -> bool {
 }
 
 impl Render for DesktopView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.follow_fit(window, cx);
         let theme = cx.theme();
         let frame = self.frame.clone();
         let size = self.size;
@@ -1679,7 +2275,11 @@ impl Render for DesktopView {
         let picture = canvas(
             |_, _, _| (),
             move |bounds, _, window, cx| {
-                area.set(Some(bounds));
+                // Another size: drawn once more, so what goes by it does
+                // (a fitted screen follows the view) though nothing else changes.
+                if area.replace(Some(bounds)).is_some_and(|was| was.size != bounds.size) {
+                    window.request_animation_frame();
+                }
                 if cfg!(target_os = "macos") {
                     window.handle_input(&focus, DesktopInput(view), cx);
                 }
@@ -1759,6 +2359,7 @@ impl Render for DesktopView {
         // Showing every screen: each monitor's name over its corner opens it.
         let labels = self.monitor_labels(cx);
         let keys_menu = self.keys_menu(cx);
+        let monitor_menu = self.monitor_menu(cx);
         let hint = self.hint.filter(|until| Instant::now() < *until && self.frame.is_some()).map(|_| {
             let keys = if cfg!(target_os = "macos") { "⌘W" } else { "Ctrl+Shift+W" };
             div().absolute().bottom(px(18.)).left_0().right_0().flex().justify_center().child(
@@ -1793,6 +2394,7 @@ impl Render for DesktopView {
             // Over the last picture, dimmed: it's no longer live.
             .children(waiting.map(|w| div().absolute().inset_0().flex().items_center().justify_center().when(self.frame.is_some(), |d| d.bg(gpui::black().opacity(0.72))).child(w)))
             .children(keys_menu)
+            .children(monitor_menu)
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_down(
                 MouseButton::Left,
@@ -1959,10 +2561,11 @@ pub fn toolbar(view: &Entity<DesktopView>, extra: Vec<AnyElement>, cx: &App) -> 
 /// The toolbar, with `menu` opening a monitor's menu on right-click.
 pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, menu: Option<DisplayMenu>, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let (status, via, machine, shown, engine, shortcuts, keys_open, width) = {
+    let (status, via, machine, shown, engine, shortcuts, keys_open, width, can_fit) = {
         let v = view.read(cx);
-        (v.status(), v.via().to_string(), v.machine.clone(), v.display.clone(), v.engine.clone(), v.shortcuts(), v.keys_menu.is_some(), v.width())
+        (v.status(), v.via().to_string(), v.machine.clone(), v.display.clone(), v.engine.clone(), v.shortcuts(), v.keys_menu.is_some(), v.width(), v.can_fit())
     };
+    let monitor_open = view.read(cx).monitor_menu.is_some();
     // Narrow (beside a terminal, a small window): Keys is just its icon, and
     // the status and the keyboard chip are cut to what's left, with "…".
     let narrow = width.is_some_and(|w| w < NARROW_BAR);
@@ -2005,7 +2608,7 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
                 .text_color(if on { theme.text } else { theme.text_placeholder })
                 .when(on, |d| d.bg(theme.element_selected))
                 .when(!on, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-                .when(d.is_virtual, |el| el.child(kit::dot(theme.accent, 5.)).tooltip(|window, cx| kit::Tooltip::view("Virtual monitor".into(), window, cx)))
+                .when(d.is_added(), |el| el.child(kit::dot(theme.accent, 5.)).tooltip(|window, cx| kit::Tooltip::view("Virtual monitor".into(), window, cx)))
                 .child(name)
                 .when_some(right_click, |el, f| el.on_mouse_down(MouseButton::Right, f))
                 .on_click(move |_, window, cx| view.update(cx, |v, cx| v.set_display(Some(id.clone()), window, cx)))
@@ -2014,7 +2617,7 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
     // The monitor shown: its size (720p · 1080p · 1440p · 4K, the ones it
     // has) and scale (100% · 200%), set on the machine.
     let screen = showing.as_deref().filter(|id| *id != "all").and_then(|id| displays.iter().find(|d| d.id == id));
-    let chip = |id: String, label: String, on: bool, tip: &'static str| {
+    let chip = |id: String, label: String, on: bool, tip: SharedString| {
         div()
             .id(SharedString::from(id))
             .px(px(8.))
@@ -2027,46 +2630,45 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
             .text_color(if on { theme.text } else { theme.text_placeholder })
             .when(on, |d| d.bg(theme.element_selected))
             .when(!on, |d| d.hover(|st| st.bg(theme.ghost_hover)))
-            .tooltip(move |window, cx| kit::Tooltip::view(tip.into(), window, cx))
+            .tooltip(move |window, cx| kit::Tooltip::view(tip.clone(), window, cx))
             .child(label)
     };
     let group = |chips: Vec<gpui::Stateful<gpui::Div>>| div().flex_none().flex().gap(px(2.)).p(px(2.)).rounded(crate::ui::kit::corner(7.)).bg(theme.element).children(chips);
-    let sizes = screen.and_then(|d| {
-        let current = d.size();
-        let choices = size_choices(d);
-        if choices.len() > 1 {
-            taken += 14. + choices.iter().map(|(_, label)| about(label, 11.5) + 18.).sum::<f32>();
-        }
-        (choices.len() > 1).then(|| {
-            group(
-                choices
-                    .into_iter()
-                    .map(|(size, label)| {
-                        let (view, id) = (view.clone(), d.id.clone());
-                        chip(format!("size-{}x{}", size.0, size.1), label, size == current, "The monitor's resolution")
-                            .on_click(move |_, window, cx| view.update(cx, |v, cx| v.change_display(id.clone(), Some(size), None, window, cx)))
-                    })
-                    .collect(),
-            )
-        })
+    // Fit: a Mac's screen made the size of this view, as if the Mac were
+    // plugged into this screen. Not a virtual monitor someone added: that's
+    // the size they gave it.
+    let machine_name = engine.current().machines.iter().find(|m| m.id == machine).map(|m| m.name.clone()).unwrap_or_default();
+    let fit_chip = screen.filter(|d| can_fit && (d.fit || !d.is_virtual)).map(|d| {
+        taken += 14. + about("Fit", 11.5) + 18.;
+        let to = if machine_name.is_empty() { "the Mac" } else { machine_name.as_str() };
+        let tip = if d.fit {
+            format!("This screen is the size of this view, and follows it. Click to give {to} its own size back.")
+        } else {
+            format!("Make this screen the size of this view, as if {to} were plugged into this screen. Its own screen shows the same.")
+        };
+        let view = view.clone();
+        group(vec![chip("desktop-fit".into(), "Fit".into(), d.fit, tip.into()).on_click(move |_, window, cx| view.update(cx, |v, cx| v.toggle_fit(window, cx)))])
     });
-    let scales = screen.filter(|d| [1., 2.].iter().all(|s| d.scales.iter().any(|x| (x - s).abs() < 0.01))).map(|d| {
-        taken += 14. + 2. * (about("100%", 11.5) + 18.);
-        group(
-            [(1., "100%"), (2., "200%")]
-                .into_iter()
-                .map(|(scale, label)| {
-                    let (view, id) = (view.clone(), d.id.clone());
-                    chip(format!("scale-{label}"), label.to_string(), (d.scale - scale).abs() < 0.01, "How big things are (200%: twice as big, just as sharp)")
-                        .on_click(move |_, window, cx| view.update(cx, |v, cx| v.change_display(id.clone(), None, Some(scale), window, cx)))
-                })
-                .collect(),
-        )
+    // The monitor's resolution and scale, in a menu under one button (a
+    // fitted screen's size is its view's): its own size is where it's left
+    // most of the time.
+    let monitor_button = screen.filter(|d| !d.fit && has_monitor_menu(d)).map(|d| {
+        taken += 36.;
+        let view = view.clone();
+        let (w, h) = d.size();
+        let tip = match d.before {
+            Some((ow, oh)) => format!("Resolution: {w}×{h} (its own: {ow}×{oh})"),
+            None => format!("Resolution: {w}×{h}"),
+        };
+        Button::icon_only("desktop-monitor", "sliders-horizontal")
+            .style(if monitor_open { ButtonStyle::Outlined } else { ButtonStyle::Ghost })
+            .tooltip(tip)
+            .on_click(move |e: &gpui::ClickEvent, _, cx| view.update(cx, |v, cx| v.toggle_monitor_menu(e.position(), cx)))
     });
     // Where this computer's own shortcuts go: a click changes it, as the
     // release key does. By the machine's name (a shared desktop has none here).
     let there = shortcuts == Shortcuts::There;
-    let name = engine.current().machines.iter().find(|m| m.id == machine).map(|m| m.name.clone()).unwrap_or_default();
+    let name = machine_name;
     let switch = (shortcuts != Shortcuts::NotOffered).then(|| desktop_keys::switch_label(there, &name));
     // What's left is for the status and the chip: all of both when they fit
     // (the network too, when it also does). Else the chip keeps its words (it's
@@ -2143,25 +2745,29 @@ pub fn toolbar_with_menu(view: &Entity<DesktopView>, extra: Vec<AnyElement>, men
         .border_b_1()
         .border_color(theme.border_variant)
         .bg(theme.surface)
-        // Status and network give way first when the bar is narrow. Its icon
-        // stays whole (not a sliver at the edge).
+        // Nothing moves under the mouse: the monitors and what's set on the
+        // one shown hold the left edge, whatever comes and goes after them (a
+        // monitor with sizes to pick has a button more); the keys and the
+        // page's own controls hold the right one. What changes length (the
+        // status, where the keyboard's shortcuts go) is between them, and
+        // gives way first when the bar is narrow.
+        .child(div().flex_none().child(kit::color_icon(&theme, "monitor", 14., theme.text_muted)))
+        .children(monitors.map(|m| m.flex_none()))
+        .children(fit_chip)
+        .children(monitor_button)
         .child(
             div()
                 .flex_1()
-                .min_w(px(14.))
+                .min_w(px(0.))
                 .overflow_hidden()
                 .flex()
                 .items_center()
                 .gap(px(10.))
-                .child(kit::color_icon(&theme, "monitor", 14., theme.text_muted))
                 .child(div().flex_none().whitespace_nowrap().text_size(px(12.5)).text_color(theme.text_muted).child(status))
                 .when(show_via && !via.is_empty(), |d| {
                     d.child(div().flex_none().flex().items_center().gap(px(5.)).text_size(px(12.)).text_color(theme.text_placeholder).child(kit::color_icon(&theme, "network", 12., theme.text_placeholder)).child(via))
                 }),
         )
-        .children(monitors.map(|m| m.flex_none()))
-        .children(sizes)
-        .children(scales)
         .children(keyboard)
         .children(keys)
         .children(extra)
@@ -2215,8 +2821,12 @@ impl Render for DesktopWindow {
             .flex_col()
             .bg(cx.theme().canvas)
             .when(super::frame::bordered(window), |d| d.border_1().border_color(cx.theme().border))
-            // Room for the traffic lights on macOS.
-            .when(cfg!(target_os = "macos") && !full, |d| d.pt(px(28.)))
+            // Room for the traffic lights on macOS: the window's title bar, as
+            // far as the mouse goes (it moves the window, and a double click
+            // zooms it, as on any window there).
+            .when(cfg!(target_os = "macos") && !full, |d| {
+                d.child(div().id("desktop-title").flex_none().h(px(28.)).on_mouse_down(MouseButton::Left, |e: &MouseDownEvent, window, _| super::title_bar_press(e, window)))
+            })
             .child(
                 div()
                     .when(title_bar, |d| {
@@ -2231,9 +2841,20 @@ impl Render for DesktopWindow {
     }
 }
 
-/// Opens a machine's desktop in its own window.
-pub fn open_window(engine: Arc<Engine>, machine_id: String, display: Option<String>, name: String, cx: &mut App) {
-    let bounds = Bounds::centered(None, gpui::size(px(1440.), px(900.)), cx);
+/// Opens a machine's desktop in its own window, on the screen `on` (the one
+/// the window it's opened from is on; None: the main one): the window, when
+/// it opened. `closed` is told when the user closes it (not when Muxin
+/// quits with it open).
+pub fn open_window(
+    engine: Arc<Engine>,
+    machine_id: String,
+    display: Option<String>,
+    name: String,
+    on: Option<gpui::DisplayId>,
+    closed: Option<Rc<dyn Fn(&mut App)>>,
+    cx: &mut App,
+) -> Option<gpui::WindowHandle<DesktopWindow>> {
+    let bounds = Bounds::centered(on, gpui::size(px(1440.), px(900.)), cx);
     let title = format!("{name} · Desktop");
     let options = gpui::WindowOptions {
         window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
@@ -2241,18 +2862,30 @@ pub fn open_window(engine: Arc<Engine>, machine_id: String, display: Option<Stri
         window_min_size: Some(gpui::size(px(480.), px(320.))),
         app_id: Some("muxin".into()),
         window_decorations: super::frame::requested(),
+        // (Its bounds are counted from that screen's corner.)
+        display_id: on,
         ..Default::default()
     };
     let opened = cx.open_window(options, |window, cx| {
         // (Wayland gets no title from the options.)
         window.set_window_title(&title);
         super::theme::apply(window, cx);
+        if let Some(closed) = closed {
+            window.on_window_should_close(cx, move |_, cx| {
+                closed(cx);
+                true
+            });
+        }
         let view = cx.new(|cx| DesktopView::showing(engine, machine_id, display, window, cx));
         window.focus(&view.focus_handle(cx));
         cx.new(|_| DesktopWindow { view, app: false, sized: false, shown: None, buttons_hidden: false, settling: None, last_size: None, fit: None, _subscriptions: Vec::new() })
     });
-    if let Err(e) = opened {
-        tracing::warn!("couldn't open the desktop window: {e:#}");
+    match opened {
+        Ok(window) => Some(window),
+        Err(e) => {
+            tracing::warn!("couldn't open the desktop window: {e:#}");
+            None
+        }
     }
 }
 
@@ -2385,6 +3018,133 @@ mod tests {
 
     fn labels(d: &DisplayInfo) -> Vec<String> {
         size_choices(d).into_iter().map(|(_, l)| l).collect()
+    }
+
+    /// A MacBook with a monitor above it, as its agent lists them.
+    fn macbook_and_monitor() -> Vec<DisplayInfo> {
+        serde_json::from_value(json!([
+            { "id": "1", "name": "Built-in Retina Display", "x": 0, "y": 0, "width": 1728, "height": 1117, "main": true, "scale": 2.0 },
+            { "id": "5", "name": "BenQ RD280UA", "x": -96, "y": -1707, "width": 2560, "height": 1707, "scale": 2.0 },
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_monitors_menu_has_its_own_size_first() {
+        let lines = |d: &DisplayInfo| size_rows(d).into_iter().map(|r| format!("{}{}{}", if r.on { "*" } else { "" }, r.label, if r.note.is_empty() { String::new() } else { format!(" ({})", r.note) })).collect::<Vec<_>>();
+        // As it came: its own size is the one it's at, on top.
+        let benq = monitor((2560, 1707), &[(3840, 2160), (2560, 1707), (1920, 1080), (1280, 720)], None);
+        assert_eq!(lines(&benq), ["*2560×1707 (Original)", "720p (1280×720)", "1080p (1920×1080)", "4K (3840×2160)"]);
+        // Set to 1080p from here: the way back stays the top line.
+        let changed = monitor((1920, 1080), &[(3840, 2160), (2560, 1707), (1920, 1080), (1280, 720)], Some((2560, 1707)));
+        assert_eq!(lines(&changed), ["2560×1707 (Original)", "720p (1280×720)", "*1080p (1920×1080)", "4K (3840×2160)"]);
+        // Its own size has a short name.
+        let studio = monitor((2560, 1440), &[(2560, 1440), (1920, 1080)], None);
+        assert_eq!(lines(&studio), ["*1440p (Original)", "1080p (1920×1080)"]);
+        // Nothing to pick: no menu (a laptop's screen, whose sizes have no short names).
+        let built_in = monitor((1728, 1117), &[(3456, 2234), (1728, 1117)], None);
+        assert!(!has_monitor_menu(&built_in));
+        assert!(has_monitor_menu(&benq));
+        // A scale to pick is a menu too.
+        let scaled: DisplayInfo = serde_json::from_value(json!({ "id": "HDMI-A-0", "name": "HDMI", "width": 3840, "height": 2160, "scale": 2.0, "scales": [1.0, 2.0] })).unwrap();
+        assert!(has_monitor_menu(&scaled));
+    }
+
+    #[test]
+    fn a_fitted_screen_is_remembered_by_its_machine_and_name() {
+        assert_eq!(fit_key("contractorhub", "BenQ RD280UA"), "contractorhub:BenQ RD280UA");
+        // (Another machine's screen of the same name is another.)
+        assert_ne!(fit_key("contractorhub", "Built-in Retina Display"), fit_key("adibs-macbook-pro", "Built-in Retina Display"));
+        // Every screen of a machine: what its key starts with.
+        assert!(fit_key("contractorhub", "BenQ RD280UA").starts_with(&fit_key("contractorhub", "")));
+        assert!(!fit_key("contractorhub-2", "BenQ").starts_with(&fit_key("contractorhub", "")));
+    }
+
+    #[test]
+    fn a_fitted_screen_is_the_size_of_its_view() {
+        let area = |w: f32, h: f32| Bounds::new(gpui::point(px(0.), px(36.)), gpui::size(px(w), px(h)));
+        // Full screen on a 5K display, under the toolbar: Retina, like it.
+        assert_eq!(fit_size(area(2560., 1404.), 2.), Some(((2560, 1404), true)));
+        // An odd size is the even one under it; a plain screen isn't Retina.
+        assert_eq!(fit_size(area(1441., 811.4), 1.), Some(((1440, 810), false)));
+        // Too small to be a desktop.
+        assert_eq!(fit_size(area(520., 800.), 2.), None);
+        assert_eq!(fit_size(area(900., 300.), 2.), None);
+    }
+
+    #[test]
+    fn a_fitted_screen_follows_its_view_once_per_size() {
+        // The size it is (a point or two off is nothing): left alone.
+        assert!(!refit((2560, 1404), (2560, 1404), None));
+        assert!(!refit((2560, 1404), (2558, 1404), Some((2560, 1404))));
+        // The window left full screen: asked for the new size.
+        assert!(refit((2560, 1404), (1440, 864), Some((2560, 1404))));
+        // A size the Mac couldn't give (it gave what it could): not asked again.
+        assert!(!refit((3840, 2160), (4200, 2300), Some((4200, 2300))));
+    }
+
+    #[test]
+    fn a_stream_shows_the_monitor_asked_for_or_the_main_one() {
+        let mac = macbook_and_monitor();
+        assert_eq!(shown_monitor(&mac, "").map(|d| d.id.as_str()), Some("1"));
+        assert_eq!(shown_monitor(&mac, "5").map(|d| d.id.as_str()), Some("5"));
+        assert_eq!(shown_monitor(&mac, "7").map(|d| d.id.as_str()), None);
+        // Linux: the main monitor by default (`start` asks for it by name),
+        // the whole desktop when it's asked for or no monitor is the main one.
+        let linux: Vec<DisplayInfo> = serde_json::from_value(json!([
+            { "id": "all", "name": "All screens", "width": 5760, "height": 2160 },
+            { "id": "HDMI-A-0", "name": "HDMI", "width": 3840, "height": 2160, "main": true },
+            { "id": "DisplayPort-0", "name": "DisplayPort", "x": 3840, "width": 1920, "height": 1080 },
+        ]))
+        .unwrap();
+        assert_eq!(shown_monitor(&linux, "").map(|d| d.id.as_str()), Some("HDMI-A-0"));
+        assert_eq!(shown_monitor(&linux, "all").map(|d| d.id.as_str()), Some("all"));
+        let no_main: Vec<DisplayInfo> = linux.iter().cloned().map(|d| DisplayInfo { main: false, ..d }).collect();
+        assert_eq!(shown_monitor(&no_main, "").map(|d| d.id.as_str()), Some("all"));
+        // One screen, listed by itself.
+        let one: Vec<DisplayInfo> = serde_json::from_value(json!([{ "id": "eDP-1", "name": "Laptop", "width": 1920, "height": 1080 }])).unwrap();
+        assert_eq!(shown_monitor(&one, "").map(|d| d.id.as_str()), Some("eDP-1"));
+        assert_eq!(shown_monitor(&[], ""), None);
+    }
+
+    #[test]
+    fn a_stream_starts_over_when_its_monitor_is_another_size_or_place() {
+        let before = macbook_and_monitor();
+        let (built_in, monitor) = (Place::of(&before[0], true), Place::of(&before[1], true));
+        // Nothing changed, or only what the picture doesn't go by.
+        assert!(!moved(&built_in, &before, "", true));
+        assert!(!moved(&monitor, &before, "5", true));
+        let renamed: Vec<DisplayInfo> = before.iter().cloned().map(|d| DisplayInfo { name: "Desk".into(), before: Some((1920, 1080)), ..d }).collect();
+        assert!(!moved(&monitor, &renamed, "5", true));
+        // The built-in screen set to "More Space" in System Settings there.
+        let mut more_space = before.clone();
+        (more_space[0].width, more_space[0].height) = (2056., 1329.);
+        assert!(moved(&built_in, &more_space, "", true));
+        assert!(moved(&built_in, &more_space, "1", true));
+        // The monitor made less tall: it sits elsewhere above the built-in
+        // screen, which is where it was.
+        let mut shorter = before.clone();
+        (shorter[1].height, shorter[1].y) = (1440., -1440.);
+        assert!(moved(&monitor, &shorter, "5", true));
+        assert!(!moved(&built_in, &shorter, "", true));
+        // The monitor made the main one: everything is placed from it now,
+        // and the default stream shows it.
+        let mut swapped = before.clone();
+        (swapped[0].main, swapped[0].y, swapped[1].main, swapped[1].x, swapped[1].y) = (false, 1707., true, 0., 0.);
+        swapped[0].x = 96.;
+        assert!(moved(&built_in, &swapped, "", true));
+        assert!(moved(&built_in, &swapped, "1", true));
+        // As big in points, not Retina anymore: another picture on a Mac.
+        let mut plain = before.clone();
+        plain[0].scale = 1.;
+        assert!(moved(&built_in, &plain, "", true));
+        // Elsewhere the scale isn't the picture's (it's in pixels already).
+        let linux = Place::of(&before[0], false);
+        assert!(!moved(&linux, &plain, "", false));
+        // Unplugged: the stream goes back to the default monitor.
+        assert!(moved(&monitor, &before[..1], "5", true));
+        // Nothing known of its monitors (the machine didn't answer): left alone.
+        assert!(!moved(&monitor, &[], "5", true));
     }
 
     #[test]

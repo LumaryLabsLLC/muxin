@@ -14,6 +14,12 @@
 //! can be told apart and removed. Ids: on Linux the RandR monitor's name
 //! ("HDMI-A-0", "DisplayPort-0"; "all" for the whole desktop), on a Mac the
 //! CGDirectDisplayID.
+//!
+//! A Mac's screen can be fitted to a view (`fit`): a virtual display the size
+//! of the view, Retina when the view's screen is, that the screen mirrors. The
+//! Mac then lays its desktop out for the view, as if it were plugged into
+//! that screen. Each screen can have one, and they last while someone
+//! watches the Mac's desktop (see `watched`).
 
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -78,12 +84,15 @@ fn alive(entry: &Value) -> bool {
 /// the names the user gave them.
 pub fn list() -> Value {
     match query() {
-        Ok(mut displays) => {
+        Ok(displays) => {
             let mut reg = registry();
             // Forget virtual monitors that are really gone (the machine restarted, one was unplugged).
             let (live, gone): (Vec<Value>, Vec<Value>) = reg.drain(..).partition(alive);
             reg = live;
+            let mut displays = listed(displays, &reg);
             gone.iter().for_each(drop_panel);
+            #[cfg(target_os = "macos")]
+            gone.iter().for_each(tidy);
             if place_panels(&mut reg, &displays) || !gone.is_empty() {
                 save(&reg);
             }
@@ -110,6 +119,11 @@ pub fn list() -> Value {
                 if let Some(e) = reg.iter().find(|e| e["id"] == d["id"]) {
                     d["virtual"] = json!(true);
                     d["name"] = e["label"].clone();
+                    // Standing in for a screen fitted to a view: which one.
+                    if e["fit"] == true {
+                        d["fit"] = json!(true);
+                        d["mirrors"] = e["mirrors"].clone();
+                    }
                 }
                 if let Some(n) = d["id"].as_str().and_then(|id| names.get(id)) {
                     d["name"] = n.clone();
@@ -119,6 +133,25 @@ pub fn list() -> Value {
         }
         Err(e) => json!({ "ok": false, "error": e }),
     }
+}
+
+/// The displays to list, of the ones there are. Not one of Muxen's own
+/// virtual ones that isn't written down: it was made a moment ago and isn't
+/// yet what it's for (a fitted screen's is made, then the screen is set to
+/// mirror it, then it's written down), or what held it has just gone. To
+/// whoever looks, it isn't a monitor yet, or anymore: listed, it showed for a
+/// second under macOS's own name for it, beside the screen it's for.
+fn listed(displays: Vec<Value>, reg: &[Value]) -> Vec<Value> {
+    displays
+        .into_iter()
+        .filter(|d| d["ours"] != true || reg.iter().any(|e| e["id"] == d["id"]))
+        .map(|mut d| {
+            if let Some(d) = d.as_object_mut() {
+                d.remove("ours");
+            }
+            d
+        })
+        .collect()
 }
 
 /// `{"op": "display_rename", "display", "name"}`: what to call a display
@@ -1391,8 +1424,13 @@ fn set_display(id: &str, size: Option<(u32, u32)>, scale: Option<f64>) -> Result
     };
     let reply = in_session(&["display-mode".into(), id.into(), w.to_string(), h.to_string()])?;
     match reply["error"].as_str() {
-        Some(e) => Err(e.to_string()),
         None => Ok(()),
+        // One of Muxen's own takes a size it doesn't list, from the process
+        // that holds it.
+        Some(e) => match registry().iter().find(|x| x["id"].as_str() == Some(id)).and_then(|x| x["pid"].as_u64()) {
+            Some(pid) => ask_holder(pid as u32, &json!({ "resize": [w, h] })).map_err(|_| e.to_string()),
+            None => Err(e.to_string()),
+        },
     }
 }
 
@@ -1409,11 +1447,14 @@ unsafe extern "C" {
     fn muxen_display_list(ids: *mut u32, max: usize) -> usize;
     fn muxen_display(id: u32, pixels_w: *mut usize, pixels_h: *mut usize, points_w: *mut f64, points_h: *mut f64, x: *mut f64, y: *mut f64);
     fn muxen_display_builtin(id: u32) -> i32;
+    fn muxen_display_ours(id: u32) -> i32;
     fn muxen_display_name(id: u32, buf: *mut u8, len: usize) -> usize;
     fn muxen_display_main() -> u32;
     fn muxen_display_modes(id: u32, sizes: *mut u32, max: usize) -> usize;
     fn muxen_display_set_mode(id: u32, w: u32, h: u32, err: *mut u8, errlen: usize) -> i32;
-    fn muxen_vdisplay_create(w: u32, h: u32, name: *const std::ffi::c_char, err: *mut u8, errlen: usize) -> u32;
+    fn muxen_vdisplay_create(w: u32, h: u32, name: *const std::ffi::c_char, hidpi: i32, alone: i32, err: *mut u8, errlen: usize) -> u32;
+    fn muxen_vdisplay_resize(w: u32, h: u32) -> i32;
+    fn muxen_display_mirror(display: u32, onto: u32, err: *mut u8, errlen: usize) -> i32;
     fn muxen_vdisplay_run();
 }
 
@@ -1455,7 +1496,12 @@ fn monitors() -> Result<Vec<Value>, String> {
             let mut sizes: Vec<(u32, u32)> = modes[..count].to_vec();
             biggest_first(&mut sizes);
             let scale = if tw > 0. { (pw as f64 / tw * 100.).round() / 100. } else { 1. };
-            json!({ "id": id.to_string(), "name": name, "x": x, "y": y, "width": tw, "height": th, "pixel_width": pw, "pixel_height": ph, "main": id == main, "modes": sizes, "scale": scale })
+            let mut display = json!({ "id": id.to_string(), "name": name, "x": x, "y": y, "width": tw, "height": th, "pixel_width": pw, "pixel_height": ph, "main": id == main, "modes": sizes, "scale": scale });
+            // One of Muxen's own virtual ones (see `listed`).
+            if unsafe { muxen_display_ours(id) } == 1 {
+                display["ours"] = json!(true);
+            }
+            display
         })
         .collect())
 }
@@ -1481,7 +1527,14 @@ pub fn run_mode(args: &[String]) -> i32 {
 /// waits for its id.
 #[cfg(target_os = "macos")]
 fn add(w: u32, h: u32, label: &str, _password: Option<&str>) -> Result<Value, String> {
-    let args = vec!["vdisplay".to_string(), w.to_string(), h.to_string(), label.to_string()];
+    hold(w, h, label, &[])
+}
+
+/// The same, with what else the display is (see `run_holder`'s flags).
+#[cfg(target_os = "macos")]
+fn hold(w: u32, h: u32, label: &str, flags: &[String]) -> Result<Value, String> {
+    let mut args = vec!["vdisplay".to_string(), w.to_string(), h.to_string(), label.to_string()];
+    args.extend(flags.iter().cloned());
     let line = if crate::gui::needed() {
         let mut stream = crate::gui::connect(&args)?;
         let mut text = String::new();
@@ -1532,29 +1585,268 @@ fn take_down(entry: &Value, _password: Option<&str>) -> Result<(), String> {
     let pid = entry["pid"].as_u64().ok_or("No process holds it.")? as i32;
     // Only our own holder: it was started with this registry entry.
     unsafe { libc::kill(pid, libc::SIGTERM) };
+    tidy(entry);
     Ok(())
 }
 
-/// `muxen-agent vdisplay <width> <height> <label>`: makes a virtual display,
-/// says its id on stdout, and holds it until the process ends.
+/// Where the process holding a virtual display takes requests (see `serve_holder`).
+#[cfg(target_os = "macos")]
+fn holder_socket(pid: u32) -> std::path::PathBuf {
+    home_dir().join(format!("vdisplay-{pid}.sock"))
+}
+
+/// Where a fitted display's viewers say they're watching (see `watched`).
+#[cfg(target_os = "macos")]
+fn watch_file(id: &str) -> std::path::PathBuf {
+    home_dir().join(format!("vdisplay-{id}.watched"))
+}
+
+/// What a holder that's gone left in ~/.muxen.
+#[cfg(target_os = "macos")]
+fn tidy(entry: &Value) {
+    if let Some(pid) = entry["pid"].as_u64() {
+        let _ = std::fs::remove_file(holder_socket(pid as u32));
+    }
+    if let Some(id) = entry["id"].as_str() {
+        let _ = std::fs::remove_file(watch_file(id));
+    }
+}
+
+/// Asks the process holding a virtual display for something
+/// (`{"resize": [w, h]}`), and waits for it to be done.
+#[cfg(target_os = "macos")]
+fn ask_holder(pid: u32, request: &Value) -> Result<(), String> {
+    use std::io::Write;
+    let gone = |_| "The process holding that display doesn't answer.".to_string();
+    let mut conn = std::os::unix::net::UnixStream::connect(holder_socket(pid)).map_err(gone)?;
+    let _ = conn.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    writeln!(conn, "{request}").map_err(gone)?;
+    let reply = crate::proto::read_line(&mut conn).map_err(gone)?;
+    match reply["ok"].as_bool() {
+        Some(true) => Ok(()),
+        _ => Err(reply["error"].as_str().unwrap_or("macOS didn't accept that size.").to_string()),
+    }
+}
+
+/// In the process holding a virtual display: takes requests for another size
+/// while it's held (a fitted display follows its view; any of Muxen's can be
+/// given a size it doesn't list).
+#[cfg(target_os = "macos")]
+fn serve_holder() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let path = holder_socket(std::process::id());
+    let _ = std::fs::remove_file(&path);
+    let Ok(listener) = std::os::unix::net::UnixListener::bind(&path) else { return };
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    std::thread::spawn(move || {
+        for mut conn in listener.incoming().flatten() {
+            let Ok(req) = crate::proto::read_line(&mut conn) else { continue };
+            let reply = match (req["resize"][0].as_u64(), req["resize"][1].as_u64()) {
+                (Some(w), Some(h)) if unsafe { muxen_vdisplay_resize(w as u32, h as u32) } == 0 => json!({ "ok": true }),
+                (Some(_), Some(_)) => json!({ "ok": false, "error": "macOS didn't accept that size." }),
+                _ => json!({ "ok": false, "error": "What size?" }),
+            };
+            let _ = writeln!(conn, "{reply}");
+        }
+    });
+}
+
+/// How long a fitted display stays with nobody watching it: over a dropped
+/// connection, or the desktop going from a page to a window of its own.
+#[cfg(target_os = "macos")]
+fn fit_grace() -> i64 {
+    std::env::var("MUXEN_FIT_GRACE").ok().and_then(|s| s.parse().ok()).filter(|s| *s > 0).unwrap_or(60)
+}
+
+/// A stream of one of this Mac's displays is going. Said every couple of
+/// seconds; it counts for every fitted display here, whichever display the
+/// stream shows: a view goes from one of the Mac's screens to another, and
+/// the ones it isn't showing just now are still laid out for it. They go
+/// once nobody has watched the Mac's desktop for a while: without a view
+/// they're the Mac's own screens again (whoever closed the view, or however
+/// the app went).
+#[cfg(target_os = "macos")]
+pub fn watched() {
+    let Ok(entries) = std::fs::read_dir(home_dir()) else { return };
+    let now = now().to_string();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("vdisplay-") && name.ends_with(".watched") {
+            let _ = std::fs::write(entry.path(), &now);
+        }
+    }
+}
+
+/// In the process holding a fitted display: ends it (and so the mirroring)
+/// once nobody has watched the Mac's desktop for `fit_grace`.
+#[cfg(target_os = "macos")]
+fn go_when_unwatched(id: u32) {
+    let (path, grace) = (watch_file(&id.to_string()), fit_grace());
+    let _ = std::fs::write(&path, now().to_string());
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(grace.clamp(1, 5) as u64));
+            let last = std::fs::read_to_string(&path).ok().and_then(|t| t.trim().parse::<i64>().ok()).unwrap_or(0);
+            if now() - last > grace {
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(holder_socket(std::process::id()));
+                std::process::exit(0);
+            }
+        }
+    });
+}
+
+/// The size a screen is fitted at, in points: no smaller than a desktop is
+/// usable at, no bigger than a virtual display can be (twice the pixels each
+/// way when it's Retina), and even (the pixels divide evenly).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn fit_size(width: u64, height: u64, retina: bool) -> Option<(u32, u32)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let (max_w, max_h) = if retina { (3840, 2160) } else { (7680, 4320) };
+    Some(((width.clamp(640, max_w) as u32) & !1, (height.clamp(480, max_h) as u32) & !1))
+}
+
+/// `{"op": "display_fit", "display", "width", "height", "retina"?, "label"?}`:
+/// makes one of the Mac's screens the size of a view (points): a virtual
+/// display of that size, Retina when asked, that `display` then mirrors, in
+/// its place on the desktop. `display` already fitted (it, or the virtual one
+/// standing in for it): that one, at the new size, where it is. Each of the
+/// Mac's screens can be fitted, on its own. It's listed as a virtual display
+/// with "fit" and "mirrors"; `display_remove` ends it, and they all end by
+/// themselves once nobody watches the Mac's desktop.
+#[cfg(target_os = "macos")]
+pub fn fit(req: &Value) -> Value {
+    match fit_display(req) {
+        Ok(display) => json!({ "ok": true, "display": display }),
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn fit(_: &Value) -> Value {
+    json!({ "ok": false, "error": "Fitting a screen to a view works on Macs so far." })
+}
+
+#[cfg(target_os = "macos")]
+fn fit_display(req: &Value) -> Result<Value, String> {
+    let mut display = req["display"].as_str().unwrap_or("").to_string();
+    let retina = req["retina"].as_bool().unwrap_or(false);
+    let (w, h) = fit_size(req["width"].as_u64().unwrap_or(0), req["height"].as_u64().unwrap_or(0), retina).ok_or("What size?")?;
+    let described = |e: &Value| json!({ "id": e["id"], "name": e["label"], "width": e["width"], "height": e["height"], "virtual": true, "fit": true, "mirrors": e["mirrors"] });
+    // Listed at that size (or, with no size, just listed): what's asked of
+    // the displays takes a moment to show.
+    let settles = |id: &str, size: Option<(u32, u32)>| {
+        for _ in 0..30 {
+            let found = query().ok().and_then(|all| all.into_iter().find(|d| d["id"].as_str() == Some(id)));
+            if found.is_some_and(|d| size.is_none_or(|(w, h)| d["width"].as_f64() == Some(w as f64) && d["height"].as_f64() == Some(h as f64))) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    };
+    let (mut reg, gone): (Vec<Value>, Vec<Value>) = registry().into_iter().partition(alive);
+    gone.iter().for_each(tidy);
+    let mut replaced = None;
+    // Fitted already: another size, where it is.
+    if let Some(i) = reg.iter().position(|e| e["fit"] == true && (e["id"].as_str() == Some(&display) || e["mirrors"].as_str() == Some(&display))) {
+        if reg[i]["retina"].as_bool().unwrap_or(false) == retina {
+            if (reg[i]["width"].as_u64(), reg[i]["height"].as_u64()) != (Some(w as u64), Some(h as u64)) {
+                ask_holder(reg[i]["pid"].as_u64().unwrap_or(0) as u32, &json!({ "resize": [w, h] }))?;
+                (reg[i]["width"], reg[i]["height"]) = (json!(w), json!(h));
+                save(&reg);
+                settles(reg[i]["id"].as_str().unwrap_or_default(), Some((w, h)));
+            }
+            return Ok(described(&reg[i]));
+        }
+        // As sharp another way (the view is on another kind of screen now):
+        // this one goes, and a new one is made for the screen itself, below.
+        let old = reg.remove(i);
+        display = old["mirrors"].as_str().unwrap_or_default().to_string();
+        let _ = take_down(&old, None);
+        save(&reg);
+        replaced = Some(old);
+    } else if reg.iter().any(|e| e["id"].as_str() == Some(&display)) {
+        return Err("That's a virtual monitor already: give it the size you want instead.".into());
+    } else if !query()?.iter().any(|d| d["id"].as_str() == Some(&display)) {
+        return Err(format!("No display called {display} here."));
+    }
+    // (Another screen's stays as it is: each is fitted on its own. And the
+    // screen meant is listed again once what stood in for it is gone.)
+    let mut shown = None;
+    for _ in 0..50 {
+        let all = query()?;
+        if !replaced.as_ref().is_some_and(|old| all.iter().any(|d| d["id"] == old["id"])) {
+            shown = all.into_iter().find(|d| d["id"].as_str() == Some(&display));
+            if shown.is_some() {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let shown = shown.ok_or_else(|| format!("No display called {display} here."))?;
+    // Called what the screen it stands in for is called; macOS's own name
+    // for it says whose it is.
+    let label = req["label"].as_str().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).unwrap_or_else(|| shown["name"].as_str().unwrap_or("Display").to_string());
+    let mut flags = vec!["fit".to_string(), format!("mirror={display}")];
+    if retina {
+        flags.push("retina".into());
+    }
+    let mut entry = hold(w, h, "Muxin", &flags)?;
+    entry["label"] = json!(label);
+    entry["width"] = json!(w);
+    entry["height"] = json!(h);
+    entry["created"] = json!(now());
+    entry["fit"] = json!(true);
+    entry["mirrors"] = json!(display);
+    entry["retina"] = json!(retina);
+    reg.push(entry.clone());
+    save(&reg);
+    settles(entry["id"].as_str().unwrap_or_default(), None);
+    Ok(described(&entry))
+}
+
+/// `muxen-agent vdisplay <width> <height> <label> [retina] [fit] [mirror=<id>]`:
+/// makes a virtual display (of that many points; `retina`: twice the pixels
+/// each way), says its id on stdout, and holds it until the process ends.
+/// `mirror=<id>`: that display then shows what this one does, with this one
+/// in its place. `fit`: it offers that size alone, and goes once nobody
+/// watches it (see `fit`).
 #[cfg(target_os = "macos")]
 pub fn run_holder(args: &[String]) -> i32 {
     use std::io::Write;
     let num = |i: usize, d: u32| args.get(i).and_then(|a| a.parse::<u32>().ok()).unwrap_or(d);
     let (w, h) = (num(0, 1920), num(1, 1080));
     let label = args.get(2).cloned().unwrap_or_else(|| "Virtual".into());
+    let flags = args.get(3..).unwrap_or_default();
+    let (retina, fitted) = (flags.iter().any(|f| f == "retina"), flags.iter().any(|f| f == "fit"));
+    let mirror = flags.iter().find_map(|f| f.strip_prefix("mirror=")).map(|m| m.parse::<u32>().unwrap_or(0));
     // Named like a real one: it shows as this in System Settings › Displays.
     let name = std::ffi::CString::new(label).unwrap_or_default();
     let mut err = [0u8; 256];
-    let id = unsafe { muxen_vdisplay_create(w, h, name.as_ptr(), err.as_mut_ptr(), err.len()) };
+    let why = |err: &[u8]| String::from_utf8_lossy(&err[..err.iter().position(|b| *b == 0).unwrap_or(err.len())]).into_owned();
+    let id = unsafe { muxen_vdisplay_create(w, h, name.as_ptr(), retina as i32, fitted as i32, err.as_mut_ptr(), err.len()) };
     let mut out = std::io::stdout();
     if id == 0 {
-        let why = String::from_utf8_lossy(&err[..err.iter().position(|b| *b == 0).unwrap_or(err.len())]).into_owned();
-        let _ = writeln!(out, "{}", json!({ "error": format!("Couldn't make a virtual display: {why}") }));
+        let _ = writeln!(out, "{}", json!({ "error": format!("Couldn't make a virtual display: {}", why(&err)) }));
+        return 1;
+    }
+    // (Not mirrored: the display goes with this process, and nothing changed.)
+    if let Some(of) = mirror
+        && unsafe { muxen_display_mirror(of, id, err.as_mut_ptr(), err.len()) } != 0
+    {
+        let _ = writeln!(out, "{}", json!({ "error": why(&err) }));
         return 1;
     }
     let _ = writeln!(out, "{}", json!({ "display": id }));
     let _ = out.flush();
+    serve_holder();
+    if fitted {
+        go_when_unwatched(id);
+    }
     unsafe { muxen_vdisplay_run() };
     0
 }
@@ -1585,6 +1877,38 @@ fn take_down(_: &Value, _: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_virtual_display_is_listed_once_its_written_down() {
+        let screen = json!({ "id": "1", "name": "Built-in Retina Display" });
+        let other = json!({ "id": "5", "name": "BenQ RD280UA" });
+        let ours = json!({ "id": "23", "name": "Muxin", "ours": true });
+        let ids = |list: Vec<Value>| list.iter().map(|d| d["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        // Just made, for a screen about to mirror it: not a monitor yet.
+        assert_eq!(ids(listed(vec![screen.clone(), other.clone(), ours.clone()], &[])), ["1", "5"]);
+        // Written down: listed, like any other (and nobody is told whose it is).
+        let reg = [json!({ "id": "23", "pid": 71192, "label": "Built-in Retina Display", "fit": true, "mirrors": "1" })];
+        let now = listed(vec![other.clone(), ours.clone()], &reg);
+        assert_eq!(ids(now.clone()), ["5", "23"]);
+        assert!(now[1].get("ours").is_none());
+        // Another one's entry doesn't speak for it (what held it just went).
+        let stale = [json!({ "id": "19", "pid": 65590, "fit": true, "mirrors": "1" })];
+        assert_eq!(ids(listed(vec![screen, other, ours], &stale)), ["1", "5"]);
+    }
+
+    #[test]
+    fn a_fitted_screen_is_a_size_a_virtual_display_can_be() {
+        // A 5K view, Retina: as asked.
+        assert_eq!(fit_size(2560, 1440, true), Some((2560, 1440)));
+        // Even, so a Retina one's pixels divide.
+        assert_eq!(fit_size(1441, 811, false), Some((1440, 810)));
+        // No smaller than a desktop is usable at, no bigger than one can be
+        // (half as many points when each is two pixels across).
+        assert_eq!(fit_size(300, 200, true), Some((640, 480)));
+        assert_eq!(fit_size(5120, 2880, true), Some((3840, 2160)));
+        assert_eq!(fit_size(5120, 2880, false), Some((5120, 2880)));
+        assert_eq!(fit_size(0, 1440, true), None);
+    }
 
     #[test]
     fn sizes_come_biggest_first_and_once() {

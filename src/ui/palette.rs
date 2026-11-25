@@ -461,7 +461,7 @@ impl Root {
                 out.push(services);
                 // Its other monitors, virtual ones included.
                 for d in m.displays.iter().filter(|d| d.id != "all" && !d.main) {
-                    let kind = if d.is_virtual { "Virtual monitor" } else { "Monitor" };
+                    let kind = if d.is_added() { "Virtual monitor" } else { "Monitor" };
                     let detail = format!("{kind} · {}×{}", d.width as u32, d.height as u32);
                     let mut item = Item::new(d.name.clone(), detail, "Desktop", Glyph::Icon("monitor"), Run::Screen(m.id.clone(), Some(d.id.clone())));
                     item.indent = true;

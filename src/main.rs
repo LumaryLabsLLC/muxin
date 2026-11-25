@@ -732,6 +732,8 @@ enum DesktopCommand {
     Remove(DesktopRemoveArgs),
     /// Change a monitor's resolution or scale
     Set(DesktopSetArgs),
+    /// Make a Mac's screen the size of a view (e.g. 2560x1440, your own screen's)
+    Fit(DesktopFitArgs),
     /// Open the machine's own Remote Desktop (RDP) in your app for it, through Muxin, until Ctrl-C
     Rdp(MachineArgs),
     /// Open the machine's own VNC (a Mac's Screen Sharing) in your app for it, through Muxin, until Ctrl-C
@@ -935,6 +937,22 @@ struct DesktopSetArgs {
     /// How much the desktop scales things up: 1, 2, ...
     #[arg(long)]
     scale: Option<f64>,
+}
+
+#[derive(Args)]
+struct DesktopFitArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Machine id or name
+    machine: String,
+    /// The view's size in points, e.g. 2560x1440
+    size: String,
+    /// The screen to fit (see `muxin desktop displays`; default: the main one)
+    #[arg(long)]
+    display: Option<String>,
+    /// A point is a pixel (not Retina: twice the pixels each way)
+    #[arg(long)]
+    plain: bool,
 }
 
 #[derive(Args)]
@@ -2704,7 +2722,7 @@ fn desktop(cmd: DesktopCommand, runtime: &tokio::runtime::Runtime) -> u8 {
                 displays
                     .iter()
                     .map(|d| {
-                        let tags = [d.main.then_some("main"), d.is_virtual.then_some("virtual")].into_iter().flatten().collect::<Vec<_>>().join(", ");
+                        let tags = [d.main.then_some("main"), d.is_added().then_some("virtual"), d.fit.then_some("fitted")].into_iter().flatten().collect::<Vec<_>>().join(", ");
                         format!("{:<16} {:<20} {:>5}×{:<5} at {},{}{}\n", d.id, d.name, d.width, d.height, d.x, d.y, if tags.is_empty() { String::new() } else { format!("  ({tags})") })
                     })
                     .collect::<String>()
@@ -2746,6 +2764,18 @@ fn desktop(cmd: DesktopCommand, runtime: &tokio::runtime::Runtime) -> u8 {
             };
             let req = api::SetDisplayRequest { machine_id: a.machine, display: a.display, width: size.map(|s| s.0), height: size.map(|s| s.1), scale: a.scale };
             run(runtime, &a.agent, async move |e| api::desktop_set_display(&e, req).await, |d| format!("{} is now {}×{}.\n", d.name, d.width, d.height))
+        }
+        DesktopCommand::Fit(a) => {
+            let Some((width, height)) = parse_size(&a.size) else {
+                eprintln!("error: the size looks like 2560x1440");
+                return 2;
+            };
+            let machine = a.machine.clone();
+            let req = api::FitDisplayRequest { machine_id: a.machine, display: a.display, width, height, retina: Some(!a.plain) };
+            run(runtime, &a.agent, async move |e| api::desktop_fit_display(&e, req).await, move |d| {
+                let sharp = if d.scale >= 1.5 { ", Retina" } else { "" };
+                format!("{} is {}×{}{sharp} now, as display {}.\nIt's its own size again once nobody has watched it for a minute, or with: muxin desktop remove {machine} {}\n", d.name, d.width, d.height, d.id, d.id)
+            })
         }
         DesktopCommand::Remove(a) => {
             let req = api::RemoveDisplayRequest { machine_id: a.machine, display: a.display };

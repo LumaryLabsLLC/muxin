@@ -310,6 +310,29 @@ impl Engine {
         Ok(())
     }
 
+    /// Makes one of a Mac's screens the size of a view here: `width`×`height`
+    /// points, and with `retina` twice the pixels each way (the view is on a
+    /// Retina screen). The Mac gets a virtual monitor of that size, which the
+    /// screen then mirrors, in its place: its desktop is laid out for the
+    /// view, as if the Mac were plugged into the screen the view is on.
+    /// `display` already fitted (it, or the monitor standing in for it):
+    /// another size, where it is. Each of the Mac's screens is fitted on its
+    /// own. Returns the monitor standing in for it; `remove_display` on that
+    /// gives the screen its own size back, and the Mac does by itself once
+    /// nobody has watched its desktop for a minute.
+    pub async fn fit_display(self: &Arc<Self>, machine_id: &str, display: &str, width: u32, height: u32, retina: bool) -> Result<DisplayInfo, String> {
+        let (spec, probe) = self.machine(machine_id).ok_or_else(|| format!("No machine called {machine_id}."))?;
+        if self.demo_world().is_some() {
+            return Err("The demo doesn't fit screens.".into());
+        }
+        super::sessions::agent::ensure(&spec, probe.as_ref()).await?;
+        let request = json!({ "op": "display_fit", "display": display, "width": width, "height": height, "retina": retina });
+        let reply = super::sessions::agent::ctl(&spec, &request).await?;
+        let id = reply["display"]["id"].as_str().unwrap_or_default().to_string();
+        let all = self.displays(&spec.id).await.unwrap_or_default();
+        all.into_iter().find(|d| d.id == id).ok_or_else(|| format!("The fitted screen didn't show up on {}.", spec.name))
+    }
+
     /// The user's password on a machine, for adding and removing its virtual
     /// monitors (Linux asks sudo). Kept in memory while Muxin runs, nowhere else.
     pub fn remember_password(&self, machine_id: &str, password: String) {
@@ -399,6 +422,8 @@ fn demo_displays(machine_id: &str) -> Vec<DisplayInfo> {
         before: None,
         scale: 1.,
         scales: Vec::new(),
+        fit: false,
+        mirrors: None,
     };
     match machine_id {
         "forge" => vec![one("1", "Studio Display", 0., 2560., 1440., true), one("2", "Built-in display", 2560., 1512., 982., false)],

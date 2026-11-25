@@ -91,10 +91,12 @@ pub fn handle(req: &Value) -> Value {
         "display_rename" => crate::displays::rename(&req),
         #[cfg(unix)]
         "display_set" => crate::displays::set(&req),
+        #[cfg(unix)]
+        "display_fit" => crate::displays::fit(&req),
         #[cfg(windows)]
         "displays" => windows_displays(),
         #[cfg(windows)]
-        "display_create" | "display_remove" | "display_rename" | "display_set" => json!({ "ok": false, "error": "Muxen can't add or change monitors on Windows yet." }),
+        "display_create" | "display_remove" | "display_rename" | "display_set" | "display_fit" => json!({ "ok": false, "error": "Muxen can't add or change monitors on Windows yet." }),
         // Apps' windows, to show one on its own (`window:<id>` as a display).
         #[cfg(windows)]
         "windows" => match crate::win_screen::in_desktop_session() {

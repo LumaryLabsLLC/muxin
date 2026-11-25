@@ -1823,6 +1823,7 @@ mod mac {
 
     unsafe extern "C" {
         fn muxen_display(id: u32, pixels_w: *mut usize, pixels_h: *mut usize, points_w: *mut f64, points_h: *mut f64, x: *mut f64, y: *mut f64);
+        fn muxen_display_main() -> u32;
         fn muxen_capture_allowed(ask: i32) -> i32;
         fn muxen_input_allowed(ask: i32) -> i32;
         fn muxen_capture_start(id: u32, fps: i32, width: usize, height: usize, f: FrameFn, ctx: *mut std::ffi::c_void, err: *mut u8, errlen: usize) -> i32;
@@ -1911,6 +1912,34 @@ mod mac {
         l.fresh = true;
     }
 
+    /// A display as it is now: its size in pixels, its size in points (what
+    /// input goes by) and where it sits on the desktop.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Shape {
+        pixels: (usize, usize),
+        points: (f64, f64),
+        origin: (f64, f64),
+    }
+
+    fn shape(id: u32) -> Shape {
+        let (mut pw, mut ph, mut ptw, mut pth, mut ox, mut oy) = (0usize, 0usize, 0f64, 0f64, 0f64, 0f64);
+        unsafe { muxen_display(id, &mut pw, &mut ph, &mut ptw, &mut pth, &mut ox, &mut oy) };
+        Shape { pixels: (pw, ph), points: (ptw, pth), origin: (ox, oy) }
+    }
+
+    /// What a display's stream does about the display as it is `now`, having
+    /// begun at `pixels`. The same pixels: it goes on, with the points and
+    /// the place input goes by from here on (the display was moved, another
+    /// one beside it was resized, it's as sharp another way). Other pixels,
+    /// or none (it was set to another size, or it's gone): None, the stream
+    /// ends, and the app starts one at what's there now.
+    fn follow(pixels: (usize, usize), now: Shape) -> Option<((f64, f64), (f64, f64))> {
+        (now.pixels == pixels).then_some((now.points, now.origin))
+    }
+
+    /// How often a display's stream looks at its display.
+    const FOLLOW: std::time::Duration = std::time::Duration::from_millis(500);
+
     /// One of a Mac's displays: captured at the frame's size by ScreenCaptureKit,
     /// input through CoreGraphics events.
     pub struct Mac {
@@ -1920,6 +1949,13 @@ mod mac {
         /// The display in points (input coordinates), and where it sits on the desktop.
         points: (f64, f64),
         origin: (f64, f64),
+        /// The display shown (its own id, not 0 for the main one), its size
+        /// in pixels when the stream began, and when it was last looked at:
+        /// the stream follows it (see `follow`). Not for an app's window.
+        display: u32,
+        pixels: (usize, usize),
+        looked: Instant,
+        looks: u32,
         latest: Arc<Mutex<Latest>>,
         frame: Vec<u8>,
         input: bool,
@@ -1967,9 +2003,11 @@ mod mac {
         }
     }
 
-    /// Runs `start` once no other capture is starting on this Mac: of two
-    /// started at the same moment, ScreenCaptureKit can leave one never
-    /// starting (a desktop and an app's window opened together, say).
+    /// Runs `start` (or a capture's end) once no other capture is starting
+    /// or ending on this Mac: of two started at the same moment,
+    /// ScreenCaptureKit can leave one never starting (a desktop and an app's
+    /// window opened together, say), and it refuses one that starts while
+    /// another is ending (one monitor's stream closed for the next one's).
     fn one_start_at_a_time<T>(start: impl FnOnce() -> T) -> T {
         use std::os::fd::AsRawFd;
         let lock = std::fs::OpenOptions::new().create(true).append(true).open(crate::home_dir().join("capture.lock")).ok();
@@ -1989,8 +2027,9 @@ mod mac {
 
     impl Drop for Mac {
         fn drop(&mut self) {
-            // ScreenCaptureKit is told it's over, not left to find out.
-            unsafe { muxen_capture_stop() };
+            // ScreenCaptureKit is told it's over, not left to find out (in its
+            // turn: not while another capture here starts).
+            one_start_at_a_time(|| unsafe { muxen_capture_stop() });
             captures::forget();
             self.let_go();
         }
@@ -2034,8 +2073,9 @@ mod mac {
     impl Mac {
         /// Display `id` (0: the main one).
         pub fn open(fps: u32, max_width: u32, id: u32) -> Result<Mac, String> {
-            let (mut pw, mut ph, mut ptw, mut pth, mut ox, mut oy) = (0usize, 0usize, 0f64, 0f64, 0f64, 0f64);
-            unsafe { muxen_display(id, &mut pw, &mut ph, &mut ptw, &mut pth, &mut ox, &mut oy) };
+            // The main one by its own id: another may be the main one later.
+            let display = if id == 0 { unsafe { muxen_display_main() } } else { id };
+            let Shape { pixels: (pw, ph), points: (ptw, pth), origin: (ox, oy) } = shape(display);
             if pw == 0 || ph == 0 {
                 return Err("No display here.".into());
             }
@@ -2049,13 +2089,44 @@ mod mac {
             let mut err = [0u8; 512];
             // ScreenCaptureKit keeps calling with this pointer while the process lives.
             let ctx = Arc::into_raw(latest.clone()) as *mut std::ffi::c_void;
-            let started = one_start_at_a_time(|| unsafe { muxen_capture_start(id, fps as i32, fw, fh, on_frame, ctx, err.as_mut_ptr(), err.len()) });
+            // Marked as streaming before the next start or end has its turn
+            // (see `linger`). A start refused though the Mac allows capture
+            // (asked above) ran into something else's end: once more.
+            let started = one_start_at_a_time(|| {
+                let mut started = unsafe { muxen_capture_start(id, fps as i32, fw, fh, on_frame, ctx, err.as_mut_ptr(), err.len()) };
+                if started != 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    started = unsafe { muxen_capture_start(id, fps as i32, fw, fh, on_frame, ctx, err.as_mut_ptr(), err.len()) };
+                }
+                if started == 0 {
+                    captures::mark("on");
+                }
+                started
+            });
             if started != 0 {
                 let why = String::from_utf8_lossy(&err[..err.iter().position(|b| *b == 0).unwrap_or(err.len())]).into_owned();
                 return Err(format!("Can't capture the screen: {why}"));
             }
-            captures::mark("on");
-            Ok(Mac { fw, fh, points: (ptw, pth), origin: (ox, oy), latest, frame: Vec::new(), input, held: [false; 3], flags: 0, last_click: None, pressed: Vec::new(), at: (ox, oy), window: None, max_width: max_width as usize })
+            Ok(Mac {
+                fw,
+                fh,
+                points: (ptw, pth),
+                origin: (ox, oy),
+                display,
+                pixels: (pw, ph),
+                looked: Instant::now(),
+                looks: 0,
+                latest,
+                frame: Vec::new(),
+                input,
+                held: [false; 3],
+                flags: 0,
+                last_click: None,
+                pressed: Vec::new(),
+                at: (ox, oy),
+                window: None,
+                max_width: max_width as usize,
+            })
         }
 
         /// An app's window on its own (`id` from `windows`), captured even
@@ -2081,7 +2152,13 @@ mod mac {
             let ctx = Arc::into_raw(latest.clone()) as *mut std::ffi::c_void;
             let asked = Instant::now();
             eprintln!("screen: window {id} ({fw}x{fh}): starting");
-            let started = one_start_at_a_time(|| unsafe { muxen_capture_window_start(id, fps as i32, fw, fh, on_frame, ctx, err.as_mut_ptr(), err.len()) });
+            let started = one_start_at_a_time(|| {
+                let started = unsafe { muxen_capture_window_start(id, fps as i32, fw, fh, on_frame, ctx, err.as_mut_ptr(), err.len()) };
+                if started == 0 {
+                    captures::mark("on");
+                }
+                started
+            });
             eprintln!("screen: window {id}: start returned {started} after {:?}", asked.elapsed());
             match started {
                 0 => {}
@@ -2106,12 +2183,15 @@ mod mac {
             // Asking an app about each point takes a while: now and then.
             super::watch_drag_areas(size, areas, std::time::Duration::from_secs(10), drag.clone(), stop.clone());
             let window = MacWin { id, pid, scale, held_at: None, cursor: "", minimized: None, drag, stop, ticks: 0, restore: None };
-            captures::mark("on");
             Ok(Mac {
                 fw,
                 fh,
                 points: (w, h),
                 origin: (x, y),
+                display: 0,
+                pixels: (0, 0),
+                looked: Instant::now(),
+                looks: 0,
                 latest,
                 frame: Vec::new(),
                 input,
@@ -2183,6 +2263,24 @@ mod mac {
             if unsafe { muxen_capture_stopped() } == 1 {
                 return None;
             }
+            // Its display, now and then: moved or set to another size (in
+            // System Settings there, from another Muxin), input would land
+            // beside where it's pointed.
+            if self.window.is_none() && self.looked.elapsed() >= FOLLOW {
+                self.looked = Instant::now();
+                let now = shape(self.display);
+                let Some((points, origin)) = follow(self.pixels, now) else {
+                    eprintln!("screen: display {} is {}x{} pixels now (it was {}x{}): ending, for a stream at that", self.display, now.pixels.0, now.pixels.1, self.pixels.0, self.pixels.1);
+                    return None;
+                };
+                (self.points, self.origin) = (points, origin);
+                // Someone's watching this Mac's desktop: its fitted displays
+                // last while they do.
+                if self.looks % 4 == 0 {
+                    crate::displays::watched();
+                }
+                self.looks = self.looks.wrapping_add(1);
+            }
             let mut l = self.latest.lock().unwrap();
             // (After a resize, frames at the old size still arrive for a moment.)
             if !l.fresh || l.pixels.len() < self.fw * self.fh * 4 || (self.window.is_some() && l.size != (self.fw, self.fh)) {
@@ -2205,7 +2303,19 @@ mod mac {
                     unsafe { muxen_window_resize(win.id, win.pid, w, h) };
                 }
             }
-            if !captures::others_streaming() {
+            // It ends now unless another capture here streams: looked at, and
+            // ended, in its turn among the starts and ends, so one that's
+            // starting is either seen streaming (this one stays) or starts
+            // once this one has ended, never as it ends.
+            let ended = one_start_at_a_time(|| {
+                if captures::others_streaming() {
+                    return false;
+                }
+                captures::forget();
+                unsafe { muxen_capture_stop() };
+                true
+            });
+            if ended {
                 return;
             }
             captures::mark("idle");
@@ -2605,6 +2715,26 @@ mod mac {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn a_display_stream_follows_its_display_and_ends_at_another_size() {
+            let begun = Shape { pixels: (3456, 2234), points: (1728., 1117.), origin: (0., 0.) };
+            // Nothing changed.
+            assert_eq!(follow(begun.pixels, begun), Some(((1728., 1117.), (0., 0.))));
+            // The monitor above it was made smaller, so it sits elsewhere: the
+            // same picture, and input goes by where it is now.
+            let above = Shape { pixels: (5120, 3414), points: (2560., 1707.), origin: (-96., -1707.) };
+            let lower = Shape { origin: (-96., -1440.), ..above };
+            assert_eq!(follow(above.pixels, lower), Some(((2560., 1707.), (-96., -1440.))));
+            // As many pixels, each a point now (not Retina): input by the new points.
+            let plain = Shape { points: (3456., 2234.), ..begun };
+            assert_eq!(follow(begun.pixels, plain), Some(((3456., 2234.), (0., 0.))));
+            // Set to another size: the stream ends, for one at that size.
+            let more_space = Shape { pixels: (4112, 2658), points: (2056., 1329.), origin: (0., 0.) };
+            assert_eq!(follow(begun.pixels, more_space), None);
+            // Gone (unplugged, the lid closed).
+            assert_eq!(follow(begun.pixels, Shape { pixels: (0, 0), points: (0., 0.), origin: (0., 0.) }), None);
+        }
 
         #[test]
         fn permissions_name_the_app_the_agent_runs_from() {

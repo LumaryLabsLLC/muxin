@@ -128,7 +128,10 @@ fn run_app(engine: Arc<Engine>, initial_view: Option<String>) {
         desktop::bind_taken_keys(cx);
         cx.on_action(|_: &Quit, cx| quit(cx));
         // Quitting ends this app's shares: guests hear so if there's time.
+        // (Running again, on Linux, after the window closed: see SHUTTING_DOWN.)
+        SHUTTING_DOWN.store(false, std::sync::atomic::Ordering::Relaxed);
         cx.on_app_quit(|cx| {
+            SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Relaxed);
             crate::share::host::stop_all();
             #[cfg(windows)]
             tray::stop();
@@ -633,6 +636,11 @@ fn builtin_display(cx: &App) -> Option<gpui::DisplayId> {
 fn builtin_display(_: &App) -> Option<gpui::DisplayId> {
     None
 }
+
+/// The app is shutting its windows (it's quitting, or on Linux its last
+/// window closed): windows going now aren't ones the user closed, so what was
+/// open is remembered as open.
+pub(crate) static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// A press on our own title bar: a double click zooms (on macOS, whatever the
 /// system setting says); otherwise the window follows the mouse. On macOS GPUI

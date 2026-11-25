@@ -37,7 +37,8 @@ impl Root {
     /// The Agents section, or nothing when it's turned off or no machine has
     /// an agent session (or none matches the sidebar's search).
     pub(super) fn agents_section(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !cx.global::<Appearance>().sidebar_agents {
+        // (Not while the sidebar lists desktops only.)
+        if !cx.global::<Appearance>().sidebar_agents || cx.global::<Appearance>().sidebar_desktops_only {
             return None;
         }
         let theme = cx.theme();
@@ -219,6 +220,23 @@ fn with_lines(theme: &Theme, row: AnyElement, l: &Lines) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sidebar_is_kept_as_it_was_left() {
+        // New: nothing folded, no desktop in a window of its own, sessions listed.
+        let fresh = Appearance::default();
+        assert!(fresh.folded_machines.is_empty() && fresh.desktop_windows.is_empty() && !fresh.sidebar_desktops_only);
+        // A config from before these were kept reads the same.
+        let old: Appearance = toml::from_str("desktops = [\"stanbridge\"]\n").unwrap();
+        assert_eq!(old.desktops, ["stanbridge"]);
+        assert!(old.folded_machines.is_empty() && old.desktop_windows.is_empty() && !old.sidebar_desktops_only);
+        // What's written is what's read back.
+        let left = Appearance { folded_machines: vec!["adibs-macbook-pro".into(), "beelink".into()], desktop_windows: vec!["contractorhub".into()], sidebar_desktops_only: true, ..Default::default() };
+        let back: Appearance = toml::from_str(&toml::to_string(&left).unwrap()).unwrap();
+        assert_eq!(back.folded_machines, ["adibs-macbook-pro", "beelink"]);
+        assert_eq!(back.desktop_windows, ["contractorhub"]);
+        assert!(back.sidebar_desktops_only);
+    }
 
     #[test]
     fn the_section_is_on_unless_turned_off() {

@@ -100,6 +100,16 @@ int muxen_display_builtin(uint32_t id) {
     return CGDisplayIsBuiltin(id) ? 1 : 0;
 }
 
+// The maker and model Muxen's virtual displays say they are ("MX", 1): how
+// one is told from a real monitor (see `muxen_vdisplay_create`).
+#define MUXEN_VENDOR 0x4d58
+#define MUXEN_PRODUCT 0x0001
+
+/// Whether a display is one of Muxen's virtual ones.
+int muxen_display_ours(uint32_t id) {
+    return CGDisplayVendorNumber(id) == MUXEN_VENDOR && CGDisplayModelNumber(id) == MUXEN_PRODUCT ? 1 : 0;
+}
+
 /// The display's own name ("Studio Display", "DELL U2720Q") into `buf`; its
 /// length, or 0 when macOS doesn't say.
 size_t muxen_display_name(uint32_t id, char *buf, size_t len) {
@@ -267,10 +277,12 @@ static int start_stream(SCContentFilter *filter, CGRect source, int fps, size_t 
 /// going; otherwise 1 and why in `err`.
 int muxen_capture_start(uint32_t id, int fps, size_t width, size_t height, muxen_frame_fn fn, void *ctx, char *err, size_t errlen) {
     @autoreleasepool {
+        CFAbsoluteTime asked = CFAbsoluteTimeGetCurrent();
         SCShareableContent *content = shareable(YES, 10, err, errlen);
         if (!content) {
             return 1;
         }
+        CFAbsoluteTime listed = CFAbsoluteTimeGetCurrent();
         CGDirectDisplayID want = id ? id : CGMainDisplayID();
         SCDisplay *display = nil;
         for (SCDisplay *d in content.displays) {
@@ -286,7 +298,12 @@ int muxen_capture_start(uint32_t id, int fps, size_t width, size_t height, muxen
             return 1;
         }
         SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
-        return start_stream(filter, CGRectNull, fps, width, height, YES, 10, fn, ctx, err, errlen);
+        int started = start_stream(filter, CGRectNull, fps, width, height, YES, 10, fn, ctx, err, errlen);
+        // Where a slow start went: macOS listing what's on screen (longer the
+        // more windows are open), or the capture itself.
+        fprintf(stderr, "screen: display %u: listed in %.0f ms, capture %s in %.0f ms\n", display.displayID, (listed - asked) * 1000,
+                started == 0 ? "started" : "failed", (CFAbsoluteTimeGetCurrent() - listed) * 1000);
+        return started;
     }
 }
 
@@ -815,10 +832,36 @@ int muxen_key_layout(uint16_t (*keys)[4], size_t count) {
 @end
 
 static CGVirtualDisplay *muxen_virtual;
+// As it was made: Retina (each point two pixels across), and offering the
+// size asked for alone (a fitted one: it's whatever size its view is).
+static int muxen_virtual_hidpi;
+static int muxen_virtual_alone;
 
-/// Makes a virtual display of width×height (points = pixels) called `name`;
-/// its id, or 0 and why in `err`. Keep the process running to keep it.
-uint32_t muxen_vdisplay_create(uint32_t width, uint32_t height, const char *name, char *err, size_t errlen) {
+/// What a virtual display of width×height offers: that size first (what it's
+/// at), then, unless it's `alone`, the usual ones, so System Settings ›
+/// Displays can switch it like a real monitor.
+static CGVirtualDisplaySettings *muxen_vdisplay_settings(uint32_t width, uint32_t height, int hidpi, int alone) {
+    Class settingsClass = NSClassFromString(@"CGVirtualDisplaySettings");
+    Class modeClass = NSClassFromString(@"CGVirtualDisplayMode");
+    CGVirtualDisplaySettings *settings = [[settingsClass alloc] init];
+    settings.hiDPI = hidpi ? 1 : 0;
+    static const unsigned int sizes[][2] = {{3840, 2160}, {3200, 1800}, {2560, 1600}, {2560, 1440}, {2048, 1152}, {1920, 1200},
+                                           {1920, 1080}, {1680, 1050}, {1600, 900}, {1440, 900}, {1280, 800}, {1280, 720}, {1024, 768}};
+    NSMutableArray *modes = [NSMutableArray arrayWithObject:[[modeClass alloc] initWithWidth:width height:height refreshRate:60]];
+    for (size_t i = 0; !alone && i < sizeof sizes / sizeof sizes[0]; i++) {
+        if (sizes[i][0] != width || sizes[i][1] != height) {
+            [modes addObject:[[modeClass alloc] initWithWidth:sizes[i][0] height:sizes[i][1] refreshRate:60]];
+        }
+    }
+    settings.modes = modes;
+    return settings;
+}
+
+/// Makes a virtual display of width×height points called `name`: with
+/// `hidpi` a Retina one (twice as many pixels each way), else a point is a
+/// pixel. `alone`: it offers that size only. Its id, or 0 and why in `err`.
+/// Keep the process running to keep it.
+uint32_t muxen_vdisplay_create(uint32_t width, uint32_t height, const char *name, int hidpi, int alone, char *err, size_t errlen) {
     @autoreleasepool {
         Class descriptorClass = NSClassFromString(@"CGVirtualDisplayDescriptor");
         Class displayClass = NSClassFromString(@"CGVirtualDisplay");
@@ -831,13 +874,15 @@ uint32_t muxen_vdisplay_create(uint32_t width, uint32_t height, const char *name
         CGVirtualDisplayDescriptor *descriptor = [[descriptorClass alloc] init];
         [descriptor setDispatchQueue:dispatch_get_main_queue()];
         descriptor.name = [NSString stringWithUTF8String:name ? name : "Muxen"];
-        // Room for every size it offers (like a real monitor's list).
-        descriptor.maxPixelsWide = width > 3840 ? width : 3840;
-        descriptor.maxPixelsHigh = height > 2160 ? height : 2160;
+        // Room for every size it offers (like a real monitor's list), and
+        // for the ones it may be given later (see `muxen_vdisplay_resize`).
+        unsigned int across = hidpi ? 2 : 1;
+        descriptor.maxPixelsWide = width * across > 7680 ? width * across : (hidpi ? 7680 : (width > 3840 ? width : 3840));
+        descriptor.maxPixelsHigh = height * across > 4320 ? height * across : (hidpi ? 4320 : (height > 2160 ? height : 2160));
         // About 96 dpi.
         descriptor.sizeInMillimeters = CGSizeMake(width * 0.2646, height * 0.2646);
-        descriptor.vendorID = 0x4d58;  // "MX"
-        descriptor.productID = 0x0001;
+        descriptor.vendorID = MUXEN_VENDOR;
+        descriptor.productID = MUXEN_PRODUCT;
         descriptor.serialNum = (unsigned int)getpid();
         descriptor.terminationHandler = ^(id a, id b) {
             exit(0);
@@ -847,26 +892,59 @@ uint32_t muxen_vdisplay_create(uint32_t width, uint32_t height, const char *name
             say(err, errlen, @"macOS refused the virtual display");
             return 0;
         }
-        CGVirtualDisplaySettings *settings = [[settingsClass alloc] init];
-        settings.hiDPI = 0;
-        // The size asked for first (what it starts at), then the usual ones,
-        // so System Settings › Displays can switch it like a real monitor.
-        static const unsigned int sizes[][2] = {{3840, 2160}, {3200, 1800}, {2560, 1600}, {2560, 1440}, {2048, 1152}, {1920, 1200},
-                                               {1920, 1080}, {1680, 1050}, {1600, 900}, {1440, 900}, {1280, 800}, {1280, 720}, {1024, 768}};
-        NSMutableArray *modes = [NSMutableArray arrayWithObject:[[modeClass alloc] initWithWidth:width height:height refreshRate:60]];
-        for (size_t i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
-            if (sizes[i][0] != width || sizes[i][1] != height) {
-                [modes addObject:[[modeClass alloc] initWithWidth:sizes[i][0] height:sizes[i][1] refreshRate:60]];
-            }
-        }
-        settings.modes = modes;
-        if (![muxen_virtual applySettings:settings]) {
+        muxen_virtual_hidpi = hidpi;
+        muxen_virtual_alone = alone;
+        if (![muxen_virtual applySettings:muxen_vdisplay_settings(width, height, hidpi, alone)]) {
             say(err, errlen, @"macOS didn't accept the display's size");
             muxen_virtual = nil;
             return 0;
         }
         return muxen_virtual.displayID;
     }
+}
+
+/// Gives the virtual display this process holds another size (points), where
+/// it is: what mirrors it and the windows on it stay. 0 when macOS took it.
+/// (From any thread but the main one, once `muxen_vdisplay_run` runs that.)
+int muxen_vdisplay_resize(uint32_t width, uint32_t height) {
+    __block BOOL ok = NO;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            if (muxen_virtual) {
+                ok = [muxen_virtual applySettings:muxen_vdisplay_settings(width, height, muxen_virtual_hidpi, muxen_virtual_alone)];
+            }
+        }
+    });
+    return ok ? 0 : 1;
+}
+
+/// Makes `display` show what `onto` shows (mirror it), with `onto` where
+/// `display` was on the desktop: `onto` stands in for it, at its own size,
+/// and the windows that were on `display` are on it. For this login session
+/// only, and over once `onto` is gone. 0 when done; otherwise 1 and why.
+int muxen_display_mirror(uint32_t display, uint32_t onto, char *err, size_t errlen) {
+    if (!CGDisplayIsOnline(display)) {
+        snprintf(err, errlen, "That display isn't on.");
+        return 1;
+    }
+    // A display just made takes a moment to join the desktop.
+    for (int i = 0; i < 30 && !CGDisplayIsActive(onto); i++) {
+        usleep(100 * 1000);
+    }
+    usleep(600 * 1000);
+    CGRect was = CGDisplayBounds(display);
+    CGDisplayConfigRef config;
+    if (CGBeginDisplayConfiguration(&config) != kCGErrorSuccess) {
+        snprintf(err, errlen, "macOS didn't let the displays be changed.");
+        return 1;
+    }
+    CGConfigureDisplayMirrorOfDisplay(config, display, onto);
+    CGConfigureDisplayOrigin(config, onto, (int32_t)was.origin.x, (int32_t)was.origin.y);
+    if (CGCompleteDisplayConfiguration(config, kCGConfigureForSession) != kCGErrorSuccess) {
+        snprintf(err, errlen, "macOS didn't mirror the display.");
+        return 1;
+    }
+    return 0;
 }
 
 /// Holds the virtual display until the process is told to stop.
